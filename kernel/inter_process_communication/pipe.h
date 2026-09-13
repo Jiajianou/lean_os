@@ -23,8 +23,8 @@ pipe_t *pipe_create(void);
 pipe_t *pipe_named(const char *name);
 void pipe_close_write(pipe_t *p);
 
-void pipe_ref_read(pipe_t *p);
-void pipe_ref_write(pipe_t *p);
+void pipe_reference_read(pipe_t *p);
+void pipe_reference_write(pipe_t *p);
 void pipe_unref_read(pipe_t *p);
 void pipe_unref_write(pipe_t *p);
 

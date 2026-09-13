@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
         say("set_hostname", ret);
         goto out;
     }
-    mbedtls_ssl_set_bio(&ssl, &net, mbedtls_net_send, mbedtls_net_recv, NULL);
+    mbedtls_ssl_set_bio(&ssl, &net, mbedtls_net_send, mbedtls_net_receive, NULL);
 
     while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
         if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {

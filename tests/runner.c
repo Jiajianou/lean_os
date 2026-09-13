@@ -18,7 +18,7 @@ static int abandon_armed;
 
 jmp_buf test_panic_jmp;
 int test_panic_armed;
-char test_panic_msg[256];
+char test_panic_message[256];
 
 void test_register(test_case_t *tc) {
     tc->next = NULL;

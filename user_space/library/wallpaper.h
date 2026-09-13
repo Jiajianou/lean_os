@@ -12,4 +12,4 @@
 
 const char *wallpaper_name(int id);
 
-void wallpaper_fill(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h, int id, uint32_t base);
+void wallpaper_fill(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h, int id, uint32_t base);

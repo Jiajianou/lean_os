@@ -9,7 +9,7 @@
 
 static unsigned long total_bytes;
 static unsigned long file_count;
-static unsigned long dir_count;
+static unsigned long directory_count;
 
 static void join(char *out, const char *dir, const char *name) {
     size_t n = strlen(dir);
@@ -54,7 +54,7 @@ static void walk(const char *path, int depth) {
             if (e->d_type != DT_DIR) {
                 printf("!! %s is a directory but d_type said %d\n", child, (int)e->d_type);
             }
-            dir_count++;
+            directory_count++;
             printf("d %8ld %s\n", (long)st.st_size, child);
         } else {
             if (e->d_type != DT_REG) {
@@ -95,6 +95,6 @@ int main(int argc, char **argv) {
 
     walk(root, 0);
     printf("total %lu byte(s) in %lu file(s), %lu director(ies)\n",
-            total_bytes, file_count, dir_count);
+            total_bytes, file_count, directory_count);
     return 0;
 }

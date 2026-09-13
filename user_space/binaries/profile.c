@@ -14,8 +14,8 @@ static prof_sample_t samples[MAX_SAMPLES];
 #define MAX_SYMS 2048
 #define SYMS_TEXT_MAX (64 * 1024)
 static char syms_text[SYMS_TEXT_MAX];
-static symtab_entry_t syms_storage[MAX_SYMS];
-static symtab_t syms;
+static symbol_table_entry_t syms_storage[MAX_SYMS];
+static symbol_table_t syms;
 static int syms_loaded;
 
 static void load_symbols(void) {
@@ -47,7 +47,7 @@ static void load_symbols(void) {
                SYMS_PATH, SYMS_TEXT_MAX);
         return;
     }
-    int n = symtab_parse(&syms, syms_storage, MAX_SYMS, syms_text, total);
+    int n = symbol_table_parse(&syms, syms_storage, MAX_SYMS, syms_text, total);
     if (n <= 0) {
         return;
     }
@@ -56,7 +56,7 @@ static void load_symbols(void) {
                SYMS_PATH, MAX_SYMS);
         return;
     }
-    if (!symtab_is_sorted(&syms)) {
+    if (!symbol_table_is_sorted(&syms)) {
         printf("profile: %s is not in ascending order - not using it\n", SYMS_PATH);
         return;
     }
@@ -69,7 +69,7 @@ static void print_name(uint64_t rip, int pid) {
         return;
     }
     if (syms_loaded) {
-        const symtab_entry_t *e = symtab_lookup(&syms, rip);
+        const symbol_table_entry_t *e = symbol_table_lookup(&syms, rip);
         if (e) {
             printf("  %.*s+0x%llx", (int)e->name_len, e->name,
                    (unsigned long long)(rip - e->addr));
@@ -79,7 +79,7 @@ static void print_name(uint64_t rip, int pid) {
     printf("  0x%llx", (unsigned long long)rip);
 }
 
-static void sort_desc(prof_sample_t *a, int n) {
+static void sort_descriptor(prof_sample_t *a, int n) {
     for (int i = 1; i < n; i++) {
         prof_sample_t key = a[i];
         int j = i - 1;
@@ -128,7 +128,7 @@ static int report(int top) {
         printf("(no %s - addresses are unresolved. `make syms`.)\n", SYMS_PATH);
     }
 
-    sort_desc(samples, (int)n);
+    sort_descriptor(samples, (int)n);
     uint64_t busy = st.kernel + st.user;
     printf("%8s %5s  %s\n", "samples", "pct", "where");
     for (int i = 0; i < n && i < top; i++) {

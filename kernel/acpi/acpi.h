@@ -34,9 +34,9 @@ void acpi_set_rsdp(uint64_t phys);
 int acpi_find_madt(acpi_madt_info_t *out);
 
 typedef struct {
-    uint32_t pm1a_cnt;
-    uint32_t pm1b_cnt;
-    uint32_t smi_cmd;
+    uint32_t pm1a_count;
+    uint32_t pm1b_count;
+    uint32_t smi_command;
     uint8_t acpi_enable;
     uint32_t reset_port;
     uint8_t reset_value;

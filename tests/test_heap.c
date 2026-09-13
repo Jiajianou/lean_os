@@ -9,9 +9,9 @@
 #define PAGE_SIZE 4096u
 
 static void heap_fixture(void) {
-    fake_pmm_reset();
-    fake_vmm_reset();
-    klog_capture_reset();
+    fake_physical_memory_reset();
+    fake_virtual_memory_reset();
+    kernel_log_capture_reset();
     heap_init();
 }
 
@@ -36,11 +36,11 @@ TEST(heap, a_freed_block_is_reused_rather_than_growing_the_heap) {
     heap_fixture();
     void *a = kmalloc(128);
     REQUIRE(a != NULL);
-    uint64_t pages_after_first = fake_vmm_mapped_pages();
+    uint64_t pages_after_first = fake_virtual_memory_mapped_pages();
     kfree(a);
     void *b = kmalloc(128);
     CHECK(b == a);
-    CHECK_EQ(fake_vmm_mapped_pages(), pages_after_first);
+    CHECK_EQ(fake_virtual_memory_mapped_pages(), pages_after_first);
     kfree(b);
 }
 
@@ -50,12 +50,12 @@ TEST(heap, a_large_block_splits_and_the_remainder_is_usable) {
     REQUIRE(big != NULL);
     kfree(big);
 
-    uint64_t pages_before = fake_vmm_mapped_pages();
+    uint64_t pages_before = fake_virtual_memory_mapped_pages();
     void *small = kmalloc(64);
     REQUIRE(small != NULL);
     void *second = kmalloc(64);
     REQUIRE(second != NULL);
-    CHECK_EQ(fake_vmm_mapped_pages(), pages_before);
+    CHECK_EQ(fake_virtual_memory_mapped_pages(), pages_before);
     CHECK(small != second);
 
     memset(small, 1, 64);
@@ -90,11 +90,11 @@ TEST(heap, adjacent_frees_coalesce_into_one_usable_block) {
     kfree(b);
     kfree(a);
 
-    uint64_t pages_before = fake_vmm_mapped_pages();
+    uint64_t pages_before = fake_virtual_memory_mapped_pages();
     void *big = kmalloc(700);
     REQUIRE(big != NULL);
     CHECK(big == a);
-    CHECK_EQ(fake_vmm_mapped_pages(), pages_before);
+    CHECK_EQ(fake_virtual_memory_mapped_pages(), pages_before);
     kfree(big);
     kfree(guard);
 }
@@ -124,7 +124,7 @@ TEST(heap, an_allocation_larger_than_a_page_grows_by_enough_pages) {
     void *p = kmalloc(size);
     REQUIRE(p != NULL);
     memset(p, 0x5A, size);
-    CHECK(fake_vmm_mapped_pages() >= 4);
+    CHECK(fake_virtual_memory_mapped_pages() >= 4);
     kfree(p);
 }
 
@@ -136,18 +136,18 @@ TEST(heap, a_double_free_panics_rather_than_corrupting_the_list) {
     CHECK_PANIC(kfree(p), "kfree: double free");
 }
 
-TEST(heap, every_allocation_is_backed_by_a_frame_that_came_from_the_pmm) {
+TEST(heap, every_allocation_is_backed_by_a_frame_that_came_from_the_physical_memory) {
     heap_fixture();
-    CHECK_EQ(fake_pmm_outstanding(), 0);
+    CHECK_EQ(fake_physical_memory_outstanding(), 0);
     void *p = kmalloc(4096 * 2);
     REQUIRE(p != NULL);
-    CHECK_EQ(fake_pmm_outstanding(), fake_vmm_mapped_pages());
+    CHECK_EQ(fake_physical_memory_outstanding(), fake_virtual_memory_mapped_pages());
     kfree(p);
 }
 
 TEST(heap, running_out_of_physical_memory_returns_null_rather_than_halting) {
     heap_fixture();
-    fake_pmm_fail_after(0);
+    fake_physical_memory_fail_after(0);
     void *p = kmalloc(64);
     CHECK(p == NULL);
 }
@@ -155,23 +155,23 @@ TEST(heap, running_out_of_physical_memory_returns_null_rather_than_halting) {
 TEST(heap, a_failed_growth_gives_back_every_frame_it_took) {
     heap_fixture();
 
-    fake_pmm_fail_after(3);
+    fake_physical_memory_fail_after(3);
     void *p = kmalloc(PAGE_SIZE * 8);
     CHECK(p == NULL);
-    CHECK_EQ(fake_pmm_outstanding(), 0);
-    CHECK_EQ(fake_vmm_mapped_pages(), 0);
+    CHECK_EQ(fake_physical_memory_outstanding(), 0);
+    CHECK_EQ(fake_virtual_memory_mapped_pages(), 0);
 }
 
 TEST(heap, a_growth_that_cannot_map_gives_back_the_frame_it_had_taken) {
     heap_fixture();
 
-    fake_vmm_fail_map_after(3);
+    fake_virtual_memory_fail_map_after(3);
     void *p = kmalloc(PAGE_SIZE * 8);
     CHECK(p == NULL);
-    CHECK_EQ(fake_pmm_outstanding(), 0);
-    CHECK_EQ(fake_vmm_mapped_pages(), 0);
+    CHECK_EQ(fake_physical_memory_outstanding(), 0);
+    CHECK_EQ(fake_virtual_memory_mapped_pages(), 0);
 
-    fake_vmm_fail_map_after(-1);
+    fake_virtual_memory_fail_map_after(-1);
     void *ok = kmalloc(64);
     REQUIRE(ok != NULL);
     for (int i = 0; i < 64; i++) {
@@ -186,11 +186,11 @@ TEST(heap, a_growth_that_cannot_map_gives_back_the_frame_it_had_taken) {
 TEST(heap, the_heap_still_works_after_an_allocation_fails) {
     heap_fixture();
 
-    fake_pmm_fail_after(2);
+    fake_physical_memory_fail_after(2);
     CHECK(kmalloc(PAGE_SIZE * 8) == NULL);
-    CHECK_EQ(fake_pmm_outstanding(), 0);
+    CHECK_EQ(fake_physical_memory_outstanding(), 0);
 
-    fake_pmm_fail_after(-1);
+    fake_physical_memory_fail_after(-1);
 
     void *ok = kmalloc(64);
     REQUIRE(ok != NULL);
@@ -208,7 +208,7 @@ TEST(heap, an_allocation_that_fits_an_existing_block_succeeds_with_no_frames_lef
     REQUIRE(big != NULL);
     kfree(big);
 
-    fake_pmm_fail_after(0);
+    fake_physical_memory_fail_after(0);
     void *small = kmalloc(512);
     CHECK(small != NULL);
     kfree(small);
@@ -216,12 +216,12 @@ TEST(heap, an_allocation_that_fits_an_existing_block_succeeds_with_no_frames_lef
 
 TEST(heap, a_heap_that_could_never_grow_at_all_fails_cleanly) {
     heap_fixture();
-    fake_pmm_fail_after(0);
+    fake_physical_memory_fail_after(0);
     CHECK(kmalloc(1) == NULL);
     CHECK(kmalloc(PAGE_SIZE * 100) == NULL);
-    CHECK_EQ(fake_pmm_outstanding(), 0);
-    CHECK_EQ(fake_vmm_mapped_pages(), 0);
-    fake_pmm_fail_after(-1);
+    CHECK_EQ(fake_physical_memory_outstanding(), 0);
+    CHECK_EQ(fake_virtual_memory_mapped_pages(), 0);
+    fake_physical_memory_fail_after(-1);
     void *p = kmalloc(1);
     CHECK(p != NULL);
     kfree(p);
@@ -231,11 +231,11 @@ TEST(heap, a_block_of_exactly_the_right_size_is_reused) {
     heap_fixture();
     void *a = kmalloc(128);
     REQUIRE(a != NULL);
-    uint64_t pages_before = fake_vmm_mapped_pages();
+    uint64_t pages_before = fake_virtual_memory_mapped_pages();
     kfree(a);
     void *b = kmalloc(128);
     CHECK(b == a);
-    CHECK_EQ(fake_vmm_mapped_pages(), pages_before);
+    CHECK_EQ(fake_virtual_memory_mapped_pages(), pages_before);
     kfree(b);
 }
 
@@ -259,10 +259,10 @@ TEST(heap, the_split_threshold_is_exact_in_both_directions) {
     kfree(host);
     void *small = kmalloc(64);
     REQUIRE(small == host);
-    uint64_t pages = fake_vmm_mapped_pages();
+    uint64_t pages = fake_virtual_memory_mapped_pages();
     void *from_remainder = kmalloc(64);
     REQUIRE(from_remainder != NULL);
-    CHECK_EQ(fake_vmm_mapped_pages(), pages);
+    CHECK_EQ(fake_virtual_memory_mapped_pages(), pages);
     CHECK(from_remainder != small);
     kfree(small);
     kfree(from_remainder);
@@ -318,7 +318,7 @@ TEST(heap, the_growth_page_count_is_rounded_up_not_down) {
         REQUIRE(p != NULL);
         memset(p, 0xC7, size);
         CHECK_EQ(((unsigned char *)p)[size - 1], 0xC7);
-        CHECK(fake_vmm_mapped_pages() >= over + 1);
+        CHECK(fake_virtual_memory_mapped_pages() >= over + 1);
         kfree(p);
     }
 }

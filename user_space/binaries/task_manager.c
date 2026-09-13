@@ -83,14 +83,14 @@ static void format_int(int32_t v, char *out) {
         format_int(-v, out + 1);
         return;
     }
-    char tmp[12];
+    char temporary[12];
     int n = 0;
     do {
-        tmp[n++] = (char)('0' + v % 10);
+        temporary[n++] = (char)('0' + v % 10);
         v /= 10;
     } while (v > 0);
     for (int i = 0; i < n; i++) {
-        out[i] = tmp[n - 1 - i];
+        out[i] = temporary[n - 1 - i];
     }
     out[n] = '\0';
 }
@@ -160,36 +160,36 @@ static void signal_selected(int sig) {
     refresh_tasks();
 }
 
-static void draw_row(wm_window_t *win, int i, int32_t y) {
+static void draw_row(window_manager_window_t *win, int i, int32_t y) {
     const task_info_t *t = &tasks[i];
     int dead = (t->state == TASK_INFO_TERMINATED);
     uint32_t fg = dead ? DIM_TEXT_COLOR : TEXT_COLOR;
     if (i == selected) {
-        gfx_fill_rect(&win->gfx, 0, y, LIST_W, ROW_H, SELECT_COLOR);
+        graphics_fill_rect(&win->graphics, 0, y, LIST_W, ROW_H, SELECT_COLOR);
         fg = TEXT_COLOR;
     }
     char buf[16];
     format_int(t->pid, buf);
-    gfx_draw_text_font(&win->gfx, COL_PID, y + 2, buf, fg, &LIST_FONT, 0);
-    gfx_draw_text_font(&win->gfx, COL_NAME, y + 2, t->name[0] ? t->name : "?", fg, &LIST_FONT, 0);
-    gfx_draw_text_font(&win->gfx, COL_STATE, y + 2, state_name(t->state), fg, &LIST_FONT, 0);
+    graphics_draw_text_font(&win->graphics, COL_PID, y + 2, buf, fg, &LIST_FONT, 0);
+    graphics_draw_text_font(&win->graphics, COL_NAME, y + 2, t->name[0] ? t->name : "?", fg, &LIST_FONT, 0);
+    graphics_draw_text_font(&win->graphics, COL_STATE, y + 2, state_name(t->state), fg, &LIST_FONT, 0);
     format_int(t->parent_pid, buf);
-    gfx_draw_text_font(&win->gfx, COL_PPID, y + 2, buf, fg, &LIST_FONT, 0);
+    graphics_draw_text_font(&win->graphics, COL_PPID, y + 2, buf, fg, &LIST_FONT, 0);
     format_resources(t, buf);
-    gfx_draw_text_font(&win->gfx, COL_RES, y + 2, buf, fg, &LIST_FONT, 0);
+    graphics_draw_text_font(&win->graphics, COL_RES, y + 2, buf, fg, &LIST_FONT, 0);
 }
 
-static void redraw(wm_window_t *win) {
-    gfx_fill_rect(&win->gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
-    gfx_fill_rect(&win->gfx, 0, 0, WIN_W, HEADER_H, HEADER_COLOR);
-    gfx_draw_text(&win->gfx, 6, 3, "Processes", LABEL_COLOR);
+static void redraw(window_manager_window_t *win) {
+    graphics_fill_rect(&win->graphics, 0, 0, WIN_W, WIN_H, BG_COLOR);
+    graphics_fill_rect(&win->graphics, 0, 0, WIN_W, HEADER_H, HEADER_COLOR);
+    graphics_draw_text(&win->graphics, 6, 3, "Processes", LABEL_COLOR);
 
-    gfx_fill_rect(&win->gfx, 0, HEADER_H, WIN_W, COLS_H, COLS_COLOR);
-    gfx_draw_text_font(&win->gfx, COL_PID, HEADER_H + 1, "PID", LABEL_COLOR, &LIST_FONT, 0);
-    gfx_draw_text_font(&win->gfx, COL_NAME, HEADER_H + 1, "Name", LABEL_COLOR, &LIST_FONT, 0);
-    gfx_draw_text_font(&win->gfx, COL_STATE, HEADER_H + 1, "State", LABEL_COLOR, &LIST_FONT, 0);
-    gfx_draw_text_font(&win->gfx, COL_PPID, HEADER_H + 1, "PPID", LABEL_COLOR, &LIST_FONT, 0);
-    gfx_draw_text_font(&win->gfx, COL_RES, HEADER_H + 1, "fd/sh", LABEL_COLOR, &LIST_FONT, 0);
+    graphics_fill_rect(&win->graphics, 0, HEADER_H, WIN_W, COLS_H, COLS_COLOR);
+    graphics_draw_text_font(&win->graphics, COL_PID, HEADER_H + 1, "PID", LABEL_COLOR, &LIST_FONT, 0);
+    graphics_draw_text_font(&win->graphics, COL_NAME, HEADER_H + 1, "Name", LABEL_COLOR, &LIST_FONT, 0);
+    graphics_draw_text_font(&win->graphics, COL_STATE, HEADER_H + 1, "State", LABEL_COLOR, &LIST_FONT, 0);
+    graphics_draw_text_font(&win->graphics, COL_PPID, HEADER_H + 1, "PPID", LABEL_COLOR, &LIST_FONT, 0);
+    graphics_draw_text_font(&win->graphics, COL_RES, HEADER_H + 1, "fd/sh", LABEL_COLOR, &LIST_FONT, 0);
 
     for (int row = 0; row < ROWS_VISIBLE; row++) {
         int i = scroll_top + row;
@@ -199,27 +199,27 @@ static void redraw(wm_window_t *win) {
         draw_row(win, i, LIST_Y + row * ROW_H);
     }
 
-    gfx_draw_scrollbar(&win->gfx, LIST_W, LIST_Y, SCROLLBAR_W, LIST_H,
+    graphics_draw_scrollbar(&win->graphics, LIST_W, LIST_Y, SCROLLBAR_W, LIST_H,
                         task_count, ROWS_VISIBLE, scroll_top,
                         SCROLLBAR_TRACK, SCROLLBAR_THUMB);
 
-    gfx_draw_text(&win->gfx, 8, BTN_Y - (int32_t)gfx_ui_font()->height - 2, status_text, status_color);
-    gfx_draw_button_state(&win->gfx, END_BTN_X, BTN_Y, BTN_W, BTN_H, BTN_BG, BTN_BORDER,
+    graphics_draw_text(&win->graphics, 8, BTN_Y - (int32_t)graphics_ui_font()->height - 2, status_text, status_color);
+    graphics_draw_button_state(&win->graphics, END_BTN_X, BTN_Y, BTN_W, BTN_H, BTN_BG, BTN_BORDER,
                            "End Task", BTN_TEXT, pressed_btn == 0);
-    gfx_draw_button_state(&win->gfx, KILL_BTN_X, BTN_Y, BTN_W, BTN_H, KILL_BTN_BG, BTN_BORDER,
+    graphics_draw_button_state(&win->graphics, KILL_BTN_X, BTN_Y, BTN_W, BTN_H, KILL_BTN_BG, BTN_BORDER,
                            "Force Quit", BTN_TEXT, pressed_btn == 1);
 }
 
 int main(void) {
-    wm_window_t win;
-    if (wm_connect(WIN_W, WIN_H, "Tasks", &win) != 0) {
+    window_manager_window_t win;
+    if (window_manager_connect(WIN_W, WIN_H, "Tasks", &win) != 0) {
         sys_exit(1);
     }
 
     refresh_tasks();
     redraw(&win);
 
-    wm_present(&win);
+    window_manager_present(&win);
     long next_refresh = sys_uptime_ms() + REFRESH_MS;
     long last_click_ms = -1;
     int last_click_row = -1;
@@ -227,7 +227,7 @@ int main(void) {
     for (;;) {
         int changed = 0;
         wm_event_t ev;
-        while (wm_poll_event(&win, &ev)) {
+        while (window_manager_poll_event(&win, &ev)) {
             if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
                 changed = 1;
             } else if (ev.type == WM_EVENT_KEY) {
@@ -262,7 +262,7 @@ int main(void) {
             } else if (ev.type == WM_EVENT_MOUSE_MOVE) {
                 if (pressed_btn >= 0) {
                     int32_t bx = pressed_btn == 0 ? END_BTN_X : KILL_BTN_X;
-                    if (!((ev.buttons & 1) && gfx_point_in_rect(ev.x, ev.y, bx, BTN_Y, BTN_W, BTN_H))) {
+                    if (!((ev.buttons & 1) && graphics_point_in_rect(ev.x, ev.y, bx, BTN_Y, BTN_W, BTN_H))) {
                         pressed_btn = -1;
                         changed = 1;
                     }
@@ -273,11 +273,11 @@ int main(void) {
                     changed = 1;
                 }
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
-                if (gfx_point_in_rect(ev.x, ev.y, END_BTN_X, BTN_Y, BTN_W, BTN_H)) {
+                if (graphics_point_in_rect(ev.x, ev.y, END_BTN_X, BTN_Y, BTN_W, BTN_H)) {
                     pressed_btn = 0;
                     signal_selected(SIGTERM);
                     changed = 1;
-                } else if (gfx_point_in_rect(ev.x, ev.y, KILL_BTN_X, BTN_Y, BTN_W, BTN_H)) {
+                } else if (graphics_point_in_rect(ev.x, ev.y, KILL_BTN_X, BTN_Y, BTN_W, BTN_H)) {
                     pressed_btn = 1;
                     signal_selected(SIGKILL);
                     changed = 1;
@@ -309,8 +309,8 @@ int main(void) {
         }
         if (changed) {
             redraw(&win);
-            wm_present(&win);
+            window_manager_present(&win);
         }
-        wm_wait_ms(&win, NULL, 0, (int)(next_refresh - now));
+        window_manager_wait_ms(&win, NULL, 0, (int)(next_refresh - now));
     }
 }

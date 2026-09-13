@@ -102,11 +102,11 @@ static size_t align_up(size_t x, size_t a) {
 
 static void *grow_heap(size_t min_bytes) {
     size_t pages = (min_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
-    long prev_brk = sys_sbrk((long)(pages * PAGE_SIZE));
-    if (prev_brk < 0) {
+    long previous_brk = sys_sbrk((long)(pages * PAGE_SIZE));
+    if (previous_brk < 0) {
         return (void *)0;
     }
-    return (void *)(unsigned long)prev_brk;
+    return (void *)(unsigned long)previous_brk;
 }
 
 void *malloc(size_t size) {

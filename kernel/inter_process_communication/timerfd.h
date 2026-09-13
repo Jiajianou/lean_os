@@ -13,7 +13,7 @@ void timerfd_init(void);
 
 struct timerfd *timerfd_create(int clockid);
 
-void timerfd_ref(struct timerfd *t);
+void timerfd_reference(struct timerfd *t);
 void timerfd_unref(struct timerfd *t);
 
 int timerfd_clock(const struct timerfd *t);

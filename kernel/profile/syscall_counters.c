@@ -2,10 +2,10 @@
 
 #include "library/kernel_library.h"
 
-static syscount_entry_t table[SYSCALL_COUNT];
+static syscall_counters_entry_t table[SYSCALL_COUNT];
 static volatile int timing_on;
 
-void syscount_record(int num, uint64_t cycles) {
+void syscall_counters_record(int num, uint64_t cycles) {
     if (num < 0 || num >= SYSCALL_COUNT) {
         return;
     }
@@ -15,21 +15,21 @@ void syscount_record(int num, uint64_t cycles) {
     }
 }
 
-int syscount_set_timing(int on) {
+int syscall_counters_set_timing(int on) {
     int was = timing_on;
     timing_on = on ? 1 : 0;
     return was;
 }
 
-int syscount_timing_enabled(void) {
+int syscall_counters_timing_enabled(void) {
     return timing_on;
 }
 
-void syscount_reset(void) {
+void syscall_counters_reset(void) {
     k_memset(table, 0, sizeof(table));
 }
 
-void syscount_get(int num, syscount_entry_t *out) {
+void syscall_counters_get(int num, syscall_counters_entry_t *out) {
     if (!out) {
         return;
     }

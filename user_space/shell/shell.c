@@ -42,7 +42,7 @@ typedef struct {
     int retained;
 } Arena;
 
-static Arena *cur_arena;
+static Arena *current_arena;
 
 static void die_oom(void) {
     write(2, "sh: out of memory\n", 18);
@@ -86,7 +86,7 @@ static void arena_free(Arena *a) {
 }
 
 static char *astrndup(const char *s, size_t n) {
-    char *p = (char *)arena_alloc(cur_arena, n + 1);
+    char *p = (char *)arena_alloc(current_arena, n + 1);
     memcpy(p, s, n);
     p[n] = '\0';
     return p;
@@ -178,23 +178,23 @@ static char *xstrdup(const char *s) {
     return p;
 }
 
-static void out_fd_str(int fd, const char *s) {
+static void out_file_descriptor_string(int fd, const char *s) {
     write(fd, s, strlen(s));
 }
 
 static void errmsg(const char *a, const char *b, const char *c) {
-    out_fd_str(2, "sh: ");
-    out_fd_str(2, a);
+    out_file_descriptor_string(2, "sh: ");
+    out_file_descriptor_string(2, a);
     if (b) {
-        out_fd_str(2, b);
+        out_file_descriptor_string(2, b);
     }
     if (c) {
-        out_fd_str(2, c);
+        out_file_descriptor_string(2, c);
     }
-    out_fd_str(2, "\n");
+    out_file_descriptor_string(2, "\n");
 }
 
-static char *num_to_str(long v) {
+static char *number_to_string(long v) {
     static char b[24];
     int i = (int)sizeof(b) - 1;
     int neg = v < 0;
@@ -300,26 +300,26 @@ static void var_unset(const char *name) {
     unsetenv(name);
 }
 
-static char **pos_params;
-static int pos_count;
+static char **position_parameters;
+static int position_count;
 static char *script_name = (char *)"sh";
 
 static void set_positional(char **argv, int n) {
-    for (int i = 0; i < pos_count; i++) {
-        free(pos_params[i]);
+    for (int i = 0; i < position_count; i++) {
+        free(position_parameters[i]);
     }
-    free(pos_params);
-    pos_params = 0;
-    pos_count = 0;
+    free(position_parameters);
+    position_parameters = 0;
+    position_count = 0;
     if (n > 0) {
-        pos_params = (char **)malloc(sizeof(char *) * (size_t)n);
-        if (!pos_params) {
+        position_parameters = (char **)malloc(sizeof(char *) * (size_t)n);
+        if (!position_parameters) {
             die_oom();
         }
         for (int i = 0; i < n; i++) {
-            pos_params[i] = xstrdup(argv[i]);
+            position_parameters[i] = xstrdup(argv[i]);
         }
-        pos_count = n;
+        position_count = n;
     }
 }
 
@@ -434,7 +434,7 @@ static int has_glob(const char *s) {
     return 0;
 }
 
-static int str_cmp_qsort(const void *a, const void *b) {
+static int string_cmp_qsort(const void *a, const void *b) {
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
@@ -502,7 +502,7 @@ static void glob_expand(const char *pat, Vec *out) {
         vec_push(out, xstrdup(pat));
         return;
     }
-    qsort(hits.v, (size_t)hits.n, sizeof(char *), str_cmp_qsort);
+    qsort(hits.v, (size_t)hits.n, sizeof(char *), string_cmp_qsort);
     for (int i = 0; i < hits.n; i++) {
         vec_push(out, hits.v[i]);
     }
@@ -839,7 +839,7 @@ typedef struct Node {
 } Node;
 
 static Node *node_new(int kind) {
-    Node *n = (Node *)arena_alloc(cur_arena, sizeof(Node));
+    Node *n = (Node *)arena_alloc(current_arena, sizeof(Node));
     memset(n, 0, sizeof(*n));
     n->kind = kind;
     return n;
@@ -949,7 +949,7 @@ static Redir *parse_redirect(void) {
         return 0;
     }
 
-    Redir *r = (Redir *)arena_alloc(cur_arena, sizeof(Redir));
+    Redir *r = (Redir *)arena_alloc(current_arena, sizeof(Redir));
     memset(r, 0, sizeof(*r));
     r->kind = kind;
     r->word = tok.text;
@@ -978,7 +978,7 @@ static void append_redir(Node *n, Redir *r) {
 }
 
 static char **words_push(char **arr, int *n, char *w) {
-    char **v = (char **)arena_alloc(cur_arena, sizeof(char *) * (size_t)(*n + 2));
+    char **v = (char **)arena_alloc(current_arena, sizeof(char *) * (size_t)(*n + 2));
     for (int i = 0; i < *n; i++) {
         v[i] = arr[i];
     }
@@ -1142,7 +1142,7 @@ static Node *parse_case(void) {
 
     CaseItem **tail = &n->cases;
     while (!tok_is_word("esac") && tok.type != T_EOF && !parse_error) {
-        CaseItem *it = (CaseItem *)arena_alloc(cur_arena, sizeof(CaseItem));
+        CaseItem *it = (CaseItem *)arena_alloc(current_arena, sizeof(CaseItem));
         memset(it, 0, sizeof(*it));
         if (tok_is_op("(")) {
             advance();
@@ -1245,7 +1245,7 @@ static Node *parse_command(void) {
             n = node_new(N_FUNC);
             n->name = maybe_name;
             n->left = parse_command();
-            cur_arena->retained = 1;
+            current_arena->retained = 1;
             parse_depth--;
             return n;
         }
@@ -1467,34 +1467,34 @@ static char *capture_command(const char *text) {
     return b.p ? b.p : xstrdup("");
 }
 
-static char *param_value(const char *name) {
+static char *parameter_value(const char *name) {
     if (strcmp(name, "?") == 0) {
-        return xstrdup(num_to_str(last_status));
+        return xstrdup(number_to_string(last_status));
     }
     if (strcmp(name, "$") == 0) {
-        return xstrdup(num_to_str(shell_pid));
+        return xstrdup(number_to_string(shell_pid));
     }
     if (strcmp(name, "#") == 0) {
-        return xstrdup(num_to_str(pos_count));
+        return xstrdup(number_to_string(position_count));
     }
     if (strcmp(name, "0") == 0) {
         return xstrdup(script_name);
     }
     if (name[0] >= '1' && name[0] <= '9') {
         int idx = atoi(name);
-        if (idx >= 1 && idx <= pos_count) {
-            return xstrdup(pos_params[idx - 1]);
+        if (idx >= 1 && idx <= position_count) {
+            return xstrdup(position_parameters[idx - 1]);
         }
         return xstrdup("");
     }
     if (strcmp(name, "*") == 0 || strcmp(name, "@") == 0) {
         Sbuf b;
         sb_init(&b);
-        for (int i = 0; i < pos_count; i++) {
+        for (int i = 0; i < position_count; i++) {
             if (i) {
                 sb_putc(&b, ' ');
             }
-            sb_puts(&b, pos_params[i]);
+            sb_puts(&b, position_parameters[i]);
         }
         return b.p ? b.p : xstrdup("");
     }
@@ -1556,8 +1556,8 @@ static void expand_braced_word(Ex *e, const char *word, int in_quotes) {
 
 static void expand_braced(Ex *e, const char *body, int in_quotes) {
     if (body[0] == '#' && body[1] && !strchr(":-+=?", body[1])) {
-        char *v = param_value(body + 1);
-        char *len = xstrdup(num_to_str((long)strlen(v)));
+        char *v = parameter_value(body + 1);
+        char *len = xstrdup(number_to_string((long)strlen(v)));
         free(v);
         ex_add(e, len, strlen(len));
         free(len);
@@ -1577,18 +1577,18 @@ static void expand_braced(Ex *e, const char *body, int in_quotes) {
     const char *op = body + i;
 
     if (!*op) {
-        char *v = param_value(name);
+        char *v = parameter_value(name);
         if (strcmp(name, "@") == 0 && in_quotes) {
             free(v);
             free(name);
-            for (int p = 0; p < pos_count; p++) {
+            for (int p = 0; p < position_count; p++) {
                 if (p) {
                     ex_flush(e);
                 }
-                ex_add(e, pos_params[p], strlen(pos_params[p]));
+                ex_add(e, position_parameters[p], strlen(position_parameters[p]));
                 e->quoted_here = 1;
             }
-            if (pos_count == 0) {
+            if (position_count == 0) {
                 e->at_killed = 1;
             }
             return;
@@ -1615,7 +1615,7 @@ static void expand_braced(Ex *e, const char *body, int in_quotes) {
         if (longest) {
             word++;
         }
-        char *v = param_value(name);
+        char *v = parameter_value(name);
         Vec pv;
         vec_init(&pv);
         expand_word(word, &pv, 0, 0);
@@ -1632,13 +1632,13 @@ static void expand_braced(Ex *e, const char *body, int in_quotes) {
         return;
     }
 
-    char *v = param_value(name);
+    char *v = parameter_value(name);
     int unset_or_empty = colon ? (v[0] == '\0') : !var_is_set(name);
     if (name[0] >= '1' && name[0] <= '9') {
-        unset_or_empty = colon ? (v[0] == '\0') : (atoi(name) > pos_count);
+        unset_or_empty = colon ? (v[0] == '\0') : (atoi(name) > position_count);
     } else if (name[1] == '\0' && strchr("*@#?$0", name[0])) {
         if (name[0] == '*' || name[0] == '@') {
-            unset_or_empty = colon ? (v[0] == '\0') : (pos_count == 0);
+            unset_or_empty = colon ? (v[0] == '\0') : (position_count == 0);
         } else {
             unset_or_empty = colon ? (v[0] == '\0') : 0;
         }
@@ -1921,7 +1921,7 @@ static char *arith_eval(const char *text) {
         errmsg("arithmetic syntax error: ", text, 0);
         v = 0;
     }
-    return xstrdup(num_to_str(v));
+    return xstrdup(number_to_string(v));
 }
 
 static void expand_dollar(Ex *e, const char **pp, int in_quotes) {
@@ -2027,20 +2027,20 @@ static void expand_dollar(Ex *e, const char **pp, int in_quotes) {
         }
         name[n] = '\0';
         if (strcmp(name, "@") == 0 && in_quotes) {
-            for (int i = 0; i < pos_count; i++) {
+            for (int i = 0; i < position_count; i++) {
                 if (i) {
                     ex_flush(e);
                 }
-                ex_add(e, pos_params[i], strlen(pos_params[i]));
+                ex_add(e, position_parameters[i], strlen(position_parameters[i]));
                 e->quoted_here = 1;
             }
-            if (pos_count == 0) {
+            if (position_count == 0) {
                 e->at_killed = 1;
             }
             *pp = p;
             return;
         }
-        char *v = param_value(name);
+        char *v = parameter_value(name);
         if (in_quotes) {
             ex_add(e, v, strlen(v));
         } else {
@@ -2220,7 +2220,7 @@ typedef struct {
     int nhere;
 } RedirSave;
 
-static int heredoc_fd(Redir *r, RedirSave *save) {
+static int heredoc_file_descriptor(Redir *r, RedirSave *save) {
     Sbuf text;
     sb_init(&text);
     if (r->expand) {
@@ -2331,7 +2331,7 @@ static int apply_redirs(Redir *list, RedirSave *save) {
             save->n++;
         }
         if (r->kind == RD_HEREDOC) {
-            target = heredoc_fd(r, save);
+            target = heredoc_file_descriptor(r, save);
             if (target < 0) {
                 errmsg("cannot set up a here-document", 0, 0);
                 return -1;
@@ -2347,7 +2347,7 @@ static int apply_redirs(Redir *list, RedirSave *save) {
             free(w);
             int dupd = dup2(target, r->fd);
             if (dupd < 0) {
-                errmsg("cannot duplicate descriptor ", num_to_str(target), 0);
+                errmsg("cannot duplicate descriptor ", number_to_string(target), 0);
                 return -1;
             }
             continue;
@@ -2452,7 +2452,7 @@ static int is_builtin(const char *name) {
     return 0;
 }
 
-static int read_line_fd(int fd, Sbuf *out) {
+static int read_line_file_descriptor(int fd, Sbuf *out) {
     char c;
     int got = 0;
     for (;;) {
@@ -2589,9 +2589,9 @@ static int run_builtin(int argc, char **argv) {
             exec_keep_redirs = 1;
             return 0;
         }
-        char **args = argv + 1;
-        execvp(args[0], args);
-        errmsg("exec: ", args[0], ": not found");
+        char **arguments = argv + 1;
+        execvp(arguments[0], arguments);
+        errmsg("exec: ", arguments[0], ": not found");
         if (!interactive) {
             trap_run_exit();
             _exit(127);
@@ -2607,11 +2607,11 @@ static int run_builtin(int argc, char **argv) {
                     continue;
                 }
                 const char *name = trap_signame(sig);
-                out_fd_str(1, "trap -- '");
-                out_fd_str(1, action);
-                out_fd_str(1, "' ");
-                out_fd_str(1, name ? name : num_to_str(sig));
-                out_fd_str(1, "\n");
+                out_file_descriptor_string(1, "trap -- '");
+                out_file_descriptor_string(1, action);
+                out_file_descriptor_string(1, "' ");
+                out_file_descriptor_string(1, name ? name : number_to_string(sig));
+                out_file_descriptor_string(1, "\n");
             }
             return 0;
         }
@@ -2673,8 +2673,8 @@ static int run_builtin(int argc, char **argv) {
         if (!getcwd(buf, sizeof(buf))) {
             return 1;
         }
-        out_fd_str(1, buf);
-        out_fd_str(1, "\n");
+        out_file_descriptor_string(1, buf);
+        out_file_descriptor_string(1, "\n");
         return 0;
     }
     if (strcmp(cmd, "echo") == 0) {
@@ -2686,12 +2686,12 @@ static int run_builtin(int argc, char **argv) {
         }
         for (int i = start; i < argc; i++) {
             if (i > start) {
-                out_fd_str(1, " ");
+                out_file_descriptor_string(1, " ");
             }
-            out_fd_str(1, argv[i]);
+            out_file_descriptor_string(1, argv[i]);
         }
         if (newline) {
-            out_fd_str(1, "\n");
+            out_file_descriptor_string(1, "\n");
         }
         return 0;
     }
@@ -2699,11 +2699,11 @@ static int run_builtin(int argc, char **argv) {
         if (argc == 1) {
             for (Var *v = vars; v; v = v->next) {
                 if (v->exported) {
-                    out_fd_str(1, "export ");
-                    out_fd_str(1, v->name);
-                    out_fd_str(1, "=");
-                    out_fd_str(1, v->value ? v->value : "");
-                    out_fd_str(1, "\n");
+                    out_file_descriptor_string(1, "export ");
+                    out_file_descriptor_string(1, v->name);
+                    out_file_descriptor_string(1, "=");
+                    out_file_descriptor_string(1, v->value ? v->value : "");
+                    out_file_descriptor_string(1, "\n");
                 }
             }
             return 0;
@@ -2729,18 +2729,18 @@ static int run_builtin(int argc, char **argv) {
     }
     if (strcmp(cmd, "env") == 0) {
         for (int i = 0; environ && environ[i]; i++) {
-            out_fd_str(1, environ[i]);
-            out_fd_str(1, "\n");
+            out_file_descriptor_string(1, environ[i]);
+            out_file_descriptor_string(1, "\n");
         }
         return 0;
     }
     if (strcmp(cmd, "set") == 0) {
         if (argc == 1) {
             for (Var *v = vars; v; v = v->next) {
-                out_fd_str(1, v->name);
-                out_fd_str(1, "=");
-                out_fd_str(1, v->value ? v->value : "");
-                out_fd_str(1, "\n");
+                out_file_descriptor_string(1, v->name);
+                out_file_descriptor_string(1, "=");
+                out_file_descriptor_string(1, v->value ? v->value : "");
+                out_file_descriptor_string(1, "\n");
             }
             return 0;
         }
@@ -2768,10 +2768,10 @@ static int run_builtin(int argc, char **argv) {
                         {0, 0}
                     };
                     for (int k = 0; OPTS[k].name; k++) {
-                        out_fd_str(1, OPTS[k].name);
-                        out_fd_str(1, *OPTS[k].flag ? "\ton\n" : "\toff\n");
+                        out_file_descriptor_string(1, OPTS[k].name);
+                        out_file_descriptor_string(1, *OPTS[k].flag ? "\ton\n" : "\toff\n");
                     }
-                    out_fd_str(1, "posix\ton\n");
+                    out_file_descriptor_string(1, "posix\ton\n");
                     continue;
                 }
                 const char *name = argv[++i];
@@ -2807,22 +2807,22 @@ static int run_builtin(int argc, char **argv) {
     }
     if (strcmp(cmd, "shift") == 0) {
         int n = argc > 1 ? atoi(argv[1]) : 1;
-        if (n > pos_count || n < 0) {
+        if (n > position_count || n < 0) {
             return 1;
         }
         for (int i = 0; i < n; i++) {
-            free(pos_params[i]);
+            free(position_parameters[i]);
         }
-        for (int i = n; i < pos_count; i++) {
-            pos_params[i - n] = pos_params[i];
+        for (int i = n; i < position_count; i++) {
+            position_parameters[i - n] = position_parameters[i];
         }
-        pos_count -= n;
+        position_count -= n;
         return 0;
     }
     if (strcmp(cmd, "read") == 0) {
         Sbuf line;
         sb_init(&line);
-        int got = read_line_fd(0, &line);
+        int got = read_line_file_descriptor(0, &line);
         const char *text = line.p ? line.p : "";
         if (argc <= 1) {
             var_set("REPLY", text);
@@ -2919,18 +2919,18 @@ static int run_builtin(int argc, char **argv) {
 
 static int test_one(int argc, char **argv, int *i);
 
-static int file_is(const char *path, int want_dir) {
+static int file_is(const char *path, int want_directory) {
     DIR *d = opendir(path);
     if (d) {
         closedir(d);
-        return want_dir;
+        return want_directory;
     }
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
         return 0;
     }
     close(fd);
-    return !want_dir;
+    return !want_directory;
 }
 
 static int file_exists(const char *path) {
@@ -3090,9 +3090,9 @@ static int exec_external(char **argv, Node *n) {
                 p = end + 1;
             }
         }
-        out_fd_str(2, "sh: ");
-        out_fd_str(2, argv[0]);
-        out_fd_str(2, ": command not found\n");
+        out_file_descriptor_string(2, "sh: ");
+        out_file_descriptor_string(2, argv[0]);
+        out_file_descriptor_string(2, ": command not found\n");
         _exit(127);
     }
 
@@ -3102,11 +3102,11 @@ static int exec_external(char **argv, Node *n) {
 }
 
 static int call_function(Func *f, char **argv, int argc) {
-    char **saved = pos_params;
-    int saved_n = pos_count;
+    char **saved = position_parameters;
+    int saved_n = position_count;
     char *saved_name = script_name;
-    pos_params = 0;
-    pos_count = 0;
+    position_parameters = 0;
+    position_count = 0;
     set_positional(argv + 1, argc - 1);
 
     int st = exec_list_node(f->body);
@@ -3114,12 +3114,12 @@ static int call_function(Func *f, char **argv, int argc) {
         flow = FLOW_NONE;
     }
 
-    for (int i = 0; i < pos_count; i++) {
-        free(pos_params[i]);
+    for (int i = 0; i < position_count; i++) {
+        free(position_parameters[i]);
     }
-    free(pos_params);
-    pos_params = saved;
-    pos_count = saved_n;
+    free(position_parameters);
+    position_parameters = saved;
+    position_count = saved_n;
     script_name = saved_name;
     return st;
 }
@@ -3132,12 +3132,12 @@ static int exec_simple(Node *n) {
     }
 
     if (opt_xtrace && argv.n) {
-        out_fd_str(2, "+");
+        out_file_descriptor_string(2, "+");
         for (int i = 0; i < argv.n; i++) {
-            out_fd_str(2, " ");
-            out_fd_str(2, argv.v[i]);
+            out_file_descriptor_string(2, " ");
+            out_file_descriptor_string(2, argv.v[i]);
         }
-        out_fd_str(2, "\n");
+        out_file_descriptor_string(2, "\n");
     }
 
     if (argv.n == 0) {
@@ -3210,7 +3210,7 @@ static int exec_pipeline(Node *n) {
         stages[count - 1 - i] = t;
     }
 
-    int in_fd = -1;
+    int in_file_descriptor = -1;
     pid_t pids[32];
     for (int i = 0; i < count; i++) {
         int fds[2] = { -1, -1 };
@@ -3224,9 +3224,9 @@ static int exec_pipeline(Node *n) {
             return 1;
         }
         if (pid == 0) {
-            if (in_fd >= 0) {
-                dup2(in_fd, 0);
-                close(in_fd);
+            if (in_file_descriptor >= 0) {
+                dup2(in_file_descriptor, 0);
+                close(in_file_descriptor);
             }
             if (fds[1] >= 0) {
                 close(fds[0]);
@@ -3237,12 +3237,12 @@ static int exec_pipeline(Node *n) {
             _exit(st);
         }
         pids[i] = pid;
-        if (in_fd >= 0) {
-            close(in_fd);
+        if (in_file_descriptor >= 0) {
+            close(in_file_descriptor);
         }
         if (fds[1] >= 0) {
             close(fds[1]);
-            in_fd = fds[0];
+            in_file_descriptor = fds[0];
         }
     }
 
@@ -3425,9 +3425,9 @@ static int exec_node_inner(Node *n) {
             if (nbackground < (int)(sizeof(background_pids) / sizeof(background_pids[0]))) {
                 background_pids[nbackground++] = (int)pid;
             }
-            out_fd_str(1, "[");
-            out_fd_str(1, num_to_str(pid));
-            out_fd_str(1, "]\n");
+            out_file_descriptor_string(1, "[");
+            out_file_descriptor_string(1, number_to_string(pid));
+            out_file_descriptor_string(1, "]\n");
             return 0;
         }
         case N_IF: {
@@ -3502,14 +3502,14 @@ static int exec_node_inner(Node *n) {
 static int exec_text(const char *text) {
     Lexer save_lx = lx;
     Tok save_tok = tok;
-    Arena *save_arena = cur_arena;
-    int save_err = parse_error;
+    Arena *save_arena = current_arena;
+    int save_error = parse_error;
     int save_depth = parse_depth;
     int save_interactive = interactive;
 
     Arena a;
     memset(&a, 0, sizeof(a));
-    cur_arena = &a;
+    current_arena = &a;
     memset(&lx, 0, sizeof(lx));
     lx.src = text;
     parse_error = 0;
@@ -3527,10 +3527,10 @@ static int exec_text(const char *text) {
     }
 
     arena_free(&a);
-    cur_arena = save_arena;
+    current_arena = save_arena;
     lx = save_lx;
     tok = save_tok;
-    parse_error = save_err;
+    parse_error = save_error;
     parse_depth = save_depth;
     interactive = save_interactive;
     return st;
@@ -3568,11 +3568,11 @@ static void interactive_loop(void) {
         char dir[PATH_MAX_LEN];
         if (pending.len == 0) {
             if (getcwd(dir, sizeof(dir))) {
-                out_fd_str(1, dir);
+                out_file_descriptor_string(1, dir);
             }
-            out_fd_str(1, " $ ");
+            out_file_descriptor_string(1, " $ ");
         } else {
-            out_fd_str(1, "> ");
+            out_file_descriptor_string(1, "> ");
         }
 
         Sbuf line;
@@ -3587,7 +3587,7 @@ static void interactive_loop(void) {
 
         Arena a;
         memset(&a, 0, sizeof(a));
-        cur_arena = &a;
+        current_arena = &a;
         memset(&lx, 0, sizeof(lx));
         lx.src = pending.p;
         parse_error = 0;

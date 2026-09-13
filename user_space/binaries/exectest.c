@@ -12,16 +12,16 @@
 #define CHILD_SURVIVED  3
 #define CHILD_MISSING   4
 
-static int mode_child(int cloexec_fd, int plain_fd) {
-    if (fcntl(cloexec_fd, F_GETFD) >= 0) {
+static int mode_child(int cloexec_file_descriptor, int plain_file_descriptor) {
+    if (fcntl(cloexec_file_descriptor, F_GETFD) >= 0) {
         return CHILD_SURVIVED;
     }
-    if (fcntl(plain_fd, F_GETFD) < 0) {
+    if (fcntl(plain_file_descriptor, F_GETFD) < 0) {
         return CHILD_MISSING;
     }
     char buf[8];
     memset(buf, 0, sizeof(buf));
-    if (read(plain_fd, buf, 4) != 4 || memcmp(buf, "keep", 4) != 0) {
+    if (read(plain_file_descriptor, buf, 4) != 4 || memcmp(buf, "keep", 4) != 0) {
         return CHILD_MISSING;
     }
     return CHILD_OK;
@@ -32,14 +32,14 @@ static int digits(char *out, int v) {
     if (v == 0) {
         out[n++] = '0';
     }
-    char tmp[12];
+    char temporary[12];
     int t = 0;
     while (v > 0) {
-        tmp[t++] = (char)('0' + v % 10);
+        temporary[t++] = (char)('0' + v % 10);
         v /= 10;
     }
     while (t > 0) {
-        out[n++] = tmp[--t];
+        out[n++] = temporary[--t];
     }
     out[n] = '\0';
     return n;
@@ -80,28 +80,28 @@ int main(int argc, char **argv) {
     }
     close(w);
 
-    int cloexec_fd = open("/tmp/m84fd", O_RDONLY | O_CLOEXEC);
-    int plain_fd = open("/tmp/m84fd", O_RDONLY);
-    if (cloexec_fd < 0 || plain_fd < 0) {
+    int cloexec_file_descriptor = open("/tmp/m84fd", O_RDONLY | O_CLOEXEC);
+    int plain_file_descriptor = open("/tmp/m84fd", O_RDONLY);
+    if (cloexec_file_descriptor < 0 || plain_file_descriptor < 0) {
         return 2;
     }
-    if (fcntl(cloexec_fd, F_GETFD) != FD_CLOEXEC || fcntl(plain_fd, F_GETFD) != 0) {
+    if (fcntl(cloexec_file_descriptor, F_GETFD) != FD_CLOEXEC || fcntl(plain_file_descriptor, F_GETFD) != 0) {
         return 3;
     }
-    if (fcntl(plain_fd, F_SETFD, 0) != 0 || fcntl(plain_fd, F_GETFD) != 0) {
+    if (fcntl(plain_file_descriptor, F_SETFD, 0) != 0 || fcntl(plain_file_descriptor, F_GETFD) != 0) {
         return 3;
     }
 
-    char a_str[12], b_str[12];
-    digits(a_str, cloexec_fd);
-    digits(b_str, plain_fd);
+    char a_string[12], b_string[12];
+    digits(a_string, cloexec_file_descriptor);
+    digits(b_string, plain_file_descriptor);
 
     pid_t kid = fork();
     if (kid < 0) {
         return 2;
     }
     if (kid == 0) {
-        char *const av[] = {(char *)SELF, (char *)"child", a_str, b_str, 0};
+        char *const av[] = {(char *)SELF, (char *)"child", a_string, b_string, 0};
         execv(SELF, av);
         sys_exit(2);
     }
@@ -116,8 +116,8 @@ int main(int argc, char **argv) {
     if (WEXITSTATUS(status) != 0) {
         return WEXITSTATUS(status);
     }
-    close(cloexec_fd);
-    close(plain_fd);
+    close(cloexec_file_descriptor);
+    close(plain_file_descriptor);
 
     pid_t sk = fork();
     if (sk < 0) {

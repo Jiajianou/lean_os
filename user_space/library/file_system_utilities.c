@@ -5,19 +5,19 @@
 #include "syscall_wrappers.h"
 
 static int digits_into(uint32_t v, char *out) {
-    char tmp[12];
+    char temporary[12];
     int t = 0;
     do {
-        tmp[t++] = (char)('0' + (v % 10u));
+        temporary[t++] = (char)('0' + (v % 10u));
         v /= 10u;
     } while (v);
     for (int i = 0; i < t; i++) {
-        out[i] = tmp[t - 1 - i];
+        out[i] = temporary[t - 1 - i];
     }
     return t;
 }
 
-void fsutil_format_size(uint32_t bytes, char *out) {
+void file_system_utilities_format_size(uint32_t bytes, char *out) {
     static const char SUFFIX[] = " KMG";
     int unit = 0;
     uint32_t whole = bytes;
@@ -38,7 +38,7 @@ void fsutil_format_size(uint32_t bytes, char *out) {
     out[n] = '\0';
 }
 
-void fsutil_format_exact(uint32_t n, char *out) {
+void file_system_utilities_format_exact(uint32_t n, char *out) {
     char plain[12];
     int len = digits_into(n, plain);
     int w = 0;
@@ -51,7 +51,7 @@ void fsutil_format_exact(uint32_t n, char *out) {
     out[w] = '\0';
 }
 
-void fsutil_format_date(uint32_t mtime, char *out) {
+void file_system_utilities_format_date(uint32_t mtime, char *out) {
     if (mtime == 0) {
         out[0] = '-';
         out[1] = '\0';
@@ -74,7 +74,7 @@ void fsutil_format_date(uint32_t mtime, char *out) {
     out[n] = '\0';
 }
 
-int fsutil_name_ok(const char *name) {
+int file_system_utilities_name_ok(const char *name) {
     if (!name || !name[0]) {
         return 0;
     }
@@ -118,7 +118,7 @@ static int is_dot_entry(const char *name) {
     return name[0] == '.' && (!name[1] || (name[1] == '.' && !name[2]));
 }
 
-static int count_at(int len, int depth, fsutil_tree_t *out) {
+static int count_at(int len, int depth, file_system_utilities_tree_t *out) {
     if (depth >= FSUTIL_MAX_DEPTH) {
         out->deep = 1;
         return 0;
@@ -158,7 +158,7 @@ static int count_at(int len, int depth, fsutil_tree_t *out) {
     }
 }
 
-int fsutil_count_tree(const char *path, fsutil_tree_t *out) {
+int file_system_utilities_count_tree(const char *path, file_system_utilities_tree_t *out) {
     out->entries = 0;
     out->bytes = 0;
     out->deep = 0;
@@ -211,7 +211,7 @@ static int remove_at(int len, int depth) {
     return (int)sys_rmdir(walk_path);
 }
 
-int fsutil_remove_tree(const char *path) {
+int file_system_utilities_remove_tree(const char *path) {
     walk_path[0] = '\0';
     int len = walk_push(0, path);
     if (len < 0) {

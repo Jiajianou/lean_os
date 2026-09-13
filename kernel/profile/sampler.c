@@ -6,7 +6,7 @@
 
 static spinlock_t prof_lock;
 static prof_sample_t buckets[PROF_BUCKETS];
-static prof_stats_t stats;
+static prof_stats_t statistics;
 
 static uint32_t hash_key(uint64_t rip, int32_t pid) {
     uint64_t h = rip * 0x9E3779B97F4A7C15ULL;
@@ -17,31 +17,31 @@ static uint32_t hash_key(uint64_t rip, int32_t pid) {
 void profile_reset(void) {
     uint64_t flags = spin_lock_irqsave(&prof_lock);
     k_memset(buckets, 0, sizeof(buckets));
-    int was_running = stats.running;
-    k_memset(&stats, 0, sizeof(stats));
-    stats.running = was_running;
+    int was_running = statistics.running;
+    k_memset(&statistics, 0, sizeof(statistics));
+    statistics.running = was_running;
     spin_unlock_irqrestore(&prof_lock, flags);
 }
 
 void profile_start(void) {
     uint64_t flags = spin_lock_irqsave(&prof_lock);
-    stats.running = 1;
+    statistics.running = 1;
     spin_unlock_irqrestore(&prof_lock, flags);
 }
 
 void profile_stop(void) {
     uint64_t flags = spin_lock_irqsave(&prof_lock);
-    stats.running = 0;
+    statistics.running = 0;
     spin_unlock_irqrestore(&prof_lock, flags);
 }
 
 void profile_sample(isr_regs_t *regs) {
-    if (!stats.running) {
+    if (!statistics.running) {
         return;
     }
 
     int user = (regs->cs & 3) != 0;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     int32_t pid = PROF_PID_KERNEL;
     int idle = 0;
 
@@ -51,26 +51,26 @@ void profile_sample(isr_regs_t *regs) {
             pid = (int32_t)self->id;
         }
     }
-    if (!user && sched_task_is_idle_waiting(self)) {
+    if (!user && scheduler_task_is_idle_waiting(self)) {
         idle = 1;
     }
 
     uint64_t flags = spin_lock_irqsave(&prof_lock);
-    stats.samples++;
+    statistics.samples++;
     if (idle) {
-        stats.idle++;
+        statistics.idle++;
         spin_unlock_irqrestore(&prof_lock, flags);
         return;
     }
     if (user) {
-        stats.user++;
+        statistics.user++;
     } else {
-        stats.kernel++;
+        statistics.kernel++;
     }
 
     uint64_t rip = regs->rip;
     if (rip == 0) {
-        stats.overflow++;
+        statistics.overflow++;
         spin_unlock_irqrestore(&prof_lock, flags);
         return;
     }
@@ -87,22 +87,22 @@ void profile_sample(isr_regs_t *regs) {
             b->rip = rip;
             b->pid = pid;
             b->count = 1;
-            stats.distinct++;
+            statistics.distinct++;
             spin_unlock_irqrestore(&prof_lock, flags);
             return;
         }
         i = (i + 1) & (PROF_BUCKETS - 1);
     }
-    stats.overflow++;
+    statistics.overflow++;
     spin_unlock_irqrestore(&prof_lock, flags);
 }
 
-void profile_get_stats(prof_stats_t *out) {
+void profile_get_statistics(prof_stats_t *out) {
     if (!out) {
         return;
     }
     uint64_t flags = spin_lock_irqsave(&prof_lock);
-    *out = stats;
+    *out = statistics;
     spin_unlock_irqrestore(&prof_lock, flags);
 }
 

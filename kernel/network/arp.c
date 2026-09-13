@@ -112,7 +112,7 @@ int arp_lookup(uint32_t ip, uint8_t mac_out[ETH_ADDR_LEN]) {
     return 0;
 }
 
-static void build_and_send(uint16_t op, const uint8_t dst_mac[ETH_ADDR_LEN], uint32_t target_ip) {
+static void build_and_send(uint16_t op, const uint8_t destination_mac[ETH_ADDR_LEN], uint32_t target_ip) {
     uint8_t packet[ARP_PACKET_LEN];
     packet[0] = ARP_HTYPE_ETHERNET >> 8;
     packet[1] = ARP_HTYPE_ETHERNET & 0xFF;
@@ -124,10 +124,10 @@ static void build_and_send(uint16_t op, const uint8_t dst_mac[ETH_ADDR_LEN], uin
     packet[7] = (uint8_t)(op & 0xFF);
     k_memcpy(packet + 8, net_local_mac(), ETH_ADDR_LEN);
     net_write_be32(packet + 14, net_local_ip());
-    k_memcpy(packet + 18, dst_mac, ETH_ADDR_LEN);
+    k_memcpy(packet + 18, destination_mac, ETH_ADDR_LEN);
     net_write_be32(packet + 24, target_ip);
 
-    eth_send(dst_mac, ETH_TYPE_ARP, packet, ARP_PACKET_LEN);
+    eth_send(destination_mac, ETH_TYPE_ARP, packet, ARP_PACKET_LEN);
 }
 
 void arp_send_request(uint32_t target_ip) {

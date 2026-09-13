@@ -34,4 +34,4 @@ int gdt_current_cpu(void);
 void tss_set_rsp0(int cpu_id, uint64_t rsp0);
 uint64_t tss_get_rsp0(int cpu_id);
 
-void gdt_get_table_ptr(uint16_t *limit_out, uint64_t *base_out);
+void gdt_get_table_pointer(uint16_t *limit_out, uint64_t *base_out);

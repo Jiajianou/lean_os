@@ -57,7 +57,7 @@ static int survives(int signo, void (*fault)(void)) {
 }
 
 static sigjmp_buf info_recover;
-static volatile void *seen_addr;
+static volatile void *seen_address;
 static volatile int seen_signo;
 static volatile int seen_code;
 static volatile int chld_pid;
@@ -67,7 +67,7 @@ static volatile int chld_seen;
 static void on_segv_info(int sig, siginfo_t *si, void *uc) {
     (void)uc;
     seen_signo = sig;
-    seen_addr = si->si_addr;
+    seen_address = si->si_addr;
     seen_code = si->si_code;
     siglongjmp(info_recover, 1);
 }
@@ -101,9 +101,9 @@ static int siginfo_checks(void) {
         printf("faulttest: the siginfo handler saw signal %d\n", seen_signo);
         return 0;
     }
-    if (seen_addr != (void *)KNOWN_BAD) {
+    if (seen_address != (void *)KNOWN_BAD) {
         printf("faulttest: si_addr was %p, the faulting address was %p\n",
-               (void *)seen_addr, (void *)KNOWN_BAD);
+               (void *)seen_address, (void *)KNOWN_BAD);
         return 0;
     }
 
@@ -114,14 +114,14 @@ static int siginfo_checks(void) {
                got.sa_flags);
         return 0;
     }
-    seen_addr = 0;
+    seen_address = 0;
     if (sigsetjmp(info_recover, 1) == 0) {
         *KNOWN_BAD = 1;
         printf("faulttest: the second fault did not arrive\n");
         return 0;
     }
-    if (seen_addr != (void *)KNOWN_BAD) {
-        printf("faulttest: after a query, si_addr was %p\n", (void *)seen_addr);
+    if (seen_address != (void *)KNOWN_BAD) {
+        printf("faulttest: after a query, si_addr was %p\n", (void *)seen_address);
         return 0;
     }
 

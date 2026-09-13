@@ -258,7 +258,7 @@ long sys_rename(const char *old_path, const char *new_path) {
     return do_syscall(SYS_rename, (long)old_path, (long)new_path, 0);
 }
 
-long sys_shm_unmap(void *vaddr, unsigned long bytes) {
+long sys_shared_memory_unmap(void *vaddr, unsigned long bytes) {
     return do_syscall(SYS_shm_unmap, (long)vaddr, (long)bytes, 0);
 }
 
@@ -266,8 +266,8 @@ long sys_kill(long pid, int sig) {
     return do_syscall(SYS_kill, pid, sig, 0);
 }
 
-long sys_pipe(int fds_out[2]) {
-    return do_syscall(SYS_pipe, (long)fds_out, 0, 0);
+long sys_pipe(int file_descriptors_out[2]) {
+    return do_syscall(SYS_pipe, (long)file_descriptors_out, 0, 0);
 }
 
 long sys_getpgid(long pid) {
@@ -278,19 +278,19 @@ long sys_sbrk(long increment) {
     return do_syscall(SYS_sbrk, increment, 0, 0);
 }
 
-long sys_shm_create(size_t size) {
+long sys_shared_memory_create(size_t size) {
     return do_syscall(SYS_shm_create, (long)size, 0, 0);
 }
 
-long sys_shm_map(long id) {
+long sys_shared_memory_map(long id) {
     return do_syscall(SYS_shm_map, id, 0, 0);
 }
 
-long sys_fb_info(wm_fb_info_t *out) {
+long sys_framebuffer_info(wm_fb_info_t *out) {
     return do_syscall(SYS_fb_info, (long)out, 0, 0);
 }
 
-long sys_fb_map(void) {
+long sys_framebuffer_map(void) {
     return do_syscall(SYS_fb_map, 0, 0, 0);
 }
 
@@ -382,8 +382,8 @@ long sys_netconf(os_netconf_t *out) {
     return do_syscall(SYS_netconf, (long)out, 0, 0);
 }
 
-long sys_socketpair(int type, int fds_out[2]) {
-    return do_syscall(SYS_socketpair, type, (long)fds_out, 0);
+long sys_socketpair(int type, int file_descriptors_out[2]) {
+    return do_syscall(SYS_socketpair, type, (long)file_descriptors_out, 0);
 }
 
 long sys_bindun(int fd, const char *name, int len) {
@@ -470,11 +470,11 @@ long sys_mouse_read(mouse_event_t *out) {
     return do_syscall(SYS_mouse_read, (long)out, 0, 0);
 }
 
-long sys_pipe_open(const char *name, int fds_out[2]) {
-    return do_syscall(SYS_pipe_open, (long)name, (long)fds_out, 0);
+long sys_pipe_open(const char *name, int file_descriptors_out[2]) {
+    return do_syscall(SYS_pipe_open, (long)name, (long)file_descriptors_out, 0);
 }
 
-long sys_kbd_read(char *out) {
+long sys_keyboard_read(char *out) {
     return do_syscall(SYS_kbd_read, (long)out, 0, 0);
 }
 
@@ -518,7 +518,7 @@ long sys_yield(void) {
     return do_syscall(SYS_yield, 0, 0, 0);
 }
 
-long sys_kbd_modifiers(void) {
+long sys_keyboard_modifiers(void) {
     return do_syscall(SYS_kbd_modifiers, 0, 0, 0);
 }
 
@@ -558,6 +558,6 @@ long sys_close(int fd) {
     return do_syscall(SYS_close, fd, 0, 0);
 }
 
-long sys_shm_free(long id, void *vaddr) {
+long sys_shared_memory_free(long id, void *vaddr) {
     return do_syscall(SYS_shm_free, id, (long)vaddr, 0);
 }

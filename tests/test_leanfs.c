@@ -14,19 +14,19 @@
                                  LEANFS_SECTORS_PER_BLOCK))
 
 static void fs_fixture(void) {
-    klog_capture_reset();
-    fake_blk_reset(DISK_SECTORS);
+    kernel_log_capture_reset();
+    fake_block_device_reset(DISK_SECTORS);
     leanfs_init();
-    fake_blk_reset_counters();
+    fake_block_device_reset_counters();
 }
 
 TEST(leanfs, a_blank_disk_is_formatted_and_says_so) {
-    klog_capture_reset();
-    fake_blk_reset(DISK_SECTORS);
+    kernel_log_capture_reset();
+    fake_block_device_reset(DISK_SECTORS);
     leanfs_init();
-    CHECK(klog_capture_contains("no valid leanfs superblock found - formatting fresh"));
-    CHECK(leanfs_is_dir("/"));
-    fake_blk_free();
+    CHECK(kernel_log_capture_contains("no valid leanfs superblock found - formatting fresh"));
+    CHECK(leanfs_is_directory("/"));
+    fake_block_device_free();
 }
 
 TEST(leanfs, write_read_roundtrip_at_every_interesting_size) {
@@ -49,7 +49,7 @@ TEST(leanfs, write_read_roundtrip_at_every_interesting_size) {
     }
     free(buf);
     free(back);
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, a_rewrite_that_shrinks_a_file_returns_the_blocks_it_freed) {
@@ -67,7 +67,7 @@ TEST(leanfs, a_rewrite_that_shrinks_a_file_returns_the_blocks_it_freed) {
     CHECK(free_when_small > free_when_big);
     char back[64];
     CHECK_EQ(leanfs_read("/shrink", back, sizeof(back)), 10);
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, a_directory_keeps_the_block_it_grew_into) {
@@ -80,7 +80,7 @@ TEST(leanfs, a_directory_keeps_the_block_it_grew_into) {
     REQUIRE(leanfs_write("/second", "x", 1) == 0);
     REQUIRE(leanfs_unlink("/second") == 0);
     CHECK_EQ(leanfs_free_blocks(), after);
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, unlink_returns_every_block_it_took) {
@@ -95,7 +95,7 @@ TEST(leanfs, unlink_returns_every_block_it_took) {
     CHECK_EQ(leanfs_unlink("/temp"), 0);
     CHECK_EQ(leanfs_free_blocks(), before);
     CHECK_EQ(leanfs_exists("/temp"), 0);
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, a_thousand_create_delete_cycles_are_block_neutral) {
@@ -110,7 +110,7 @@ TEST(leanfs, a_thousand_create_delete_cycles_are_block_neutral) {
         REQUIRE(leanfs_unlink("/churn") == 0);
     }
     CHECK_EQ(leanfs_free_blocks(), before);
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, a_file_larger_than_the_format_allows_is_refused) {
@@ -118,7 +118,7 @@ TEST(leanfs, a_file_larger_than_the_format_allows_is_refused) {
     static char small[16];
     CHECK(leanfs_write("/toobig", small, (size_t)LEANFS_MAX_FILE_SIZE + 4096) != 0);
     CHECK_EQ(leanfs_exists("/toobig"), 0);
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, slow_running_out_of_inodes_is_an_error_and_not_a_corruption) {
@@ -136,8 +136,8 @@ TEST(leanfs, slow_running_out_of_inodes_is_an_error_and_not_a_corruption) {
     char back[8];
     CHECK_EQ(leanfs_read("/f0", back, sizeof(back)), 1);
     CHECK_EQ(back[0], 'x');
-    CHECK(leanfs_is_dir("/"));
-    fake_blk_free();
+    CHECK(leanfs_is_directory("/"));
+    fake_block_device_free();
 }
 
 TEST(leanfs, slow_running_out_of_data_blocks_is_an_error_and_leaves_the_disk_usable) {
@@ -168,27 +168,27 @@ TEST(leanfs, slow_running_out_of_data_blocks_is_an_error_and_leaves_the_disk_usa
     char back[16];
     CHECK_EQ(leanfs_read("/witness", back, sizeof(back)), 6);
     CHECK_MEMEQ(back, "keepme", 6);
-    CHECK(leanfs_is_dir("/"));
-    fake_blk_free();
+    CHECK(leanfs_is_directory("/"));
+    fake_block_device_free();
 }
 
 TEST(leanfs, a_superblock_with_the_wrong_magic_is_reformatted) {
     fs_fixture();
     CHECK_EQ(leanfs_write("/gone", "data", 4), 0);
 
-    uint8_t *sb = fake_blk_sector(LEANFS_START_LBA);
+    uint8_t *sb = fake_block_device_sector(LEANFS_START_LBA);
     sb[0] ^= 0xFF;
-    klog_capture_reset();
+    kernel_log_capture_reset();
     leanfs_init();
-    CHECK(klog_capture_contains("formatting fresh"));
+    CHECK(kernel_log_capture_contains("formatting fresh"));
     CHECK_EQ(leanfs_exists("/gone"), 0);
-    CHECK(leanfs_is_dir("/"));
-    fake_blk_free();
+    CHECK(leanfs_is_directory("/"));
+    fake_block_device_free();
 }
 
 TEST(leanfs, a_superblock_claiming_impossible_geometry_is_reformatted) {
     fs_fixture();
-    uint8_t *sb = fake_blk_sector(LEANFS_START_LBA);
+    uint8_t *sb = fake_block_device_sector(LEANFS_START_LBA);
     uint32_t absurd = 0xFFFFFFFFu;
     int found = -1;
     for (int off = 0; off + 4 <= 64; off += 4) {
@@ -202,20 +202,20 @@ TEST(leanfs, a_superblock_claiming_impossible_geometry_is_reformatted) {
     REQUIRE(found >= 0);
     memcpy(sb + found, &absurd, 4);
 
-    klog_capture_reset();
+    kernel_log_capture_reset();
     CHECK_NO_PANIC(leanfs_init());
-    CHECK(klog_capture_contains("formatting fresh"));
-    CHECK(leanfs_is_dir("/"));
-    fake_blk_free();
+    CHECK(kernel_log_capture_contains("formatting fresh"));
+    CHECK(leanfs_is_directory("/"));
+    fake_block_device_free();
 }
 
 TEST(leanfs, a_disk_of_zeroes_mounts_as_an_empty_filesystem) {
-    fake_blk_reset(DISK_SECTORS);
-    klog_capture_reset();
+    fake_block_device_reset(DISK_SECTORS);
+    kernel_log_capture_reset();
     CHECK_NO_PANIC(leanfs_init());
-    CHECK(leanfs_is_dir("/"));
+    CHECK(leanfs_is_directory("/"));
     CHECK_EQ(leanfs_write("/afterwards", "ok", 2), 0);
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, path_edge_cases_are_refused_rather_than_misparsed) {
@@ -239,7 +239,7 @@ TEST(leanfs, path_edge_cases_are_refused_rather_than_misparsed) {
     }
     deep[k] = '\0';
     CHECK_NO_PANIC(leanfs_write(deep, "x", 1));
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, a_name_at_exactly_the_maximum_length_is_accepted) {
@@ -251,7 +251,7 @@ TEST(leanfs, a_name_at_exactly_the_maximum_length_is_accepted) {
     CHECK_EQ(leanfs_write(name, "edge", 4), 0);
     char back[16];
     CHECK_EQ(leanfs_read(name, back, sizeof(back)), 4);
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, a_directory_grows_past_one_block_and_lists_every_entry) {
@@ -265,7 +265,7 @@ TEST(leanfs, a_directory_grows_past_one_block_and_lists_every_entry) {
     }
     int found = 0;
     uint32_t cookie = 0;
-    leanfs_dir_entry_t ent;
+    leanfs_directory_entry_t ent;
     int r;
     while ((r = leanfs_readdir("/many", &cookie, &ent)) == 1) {
         found++;
@@ -273,7 +273,7 @@ TEST(leanfs, a_directory_grows_past_one_block_and_lists_every_entry) {
     CHECK_EQ(r, 0);
     CHECK_EQ(found, N);
 
-    int h = leanfs_dir_open("/many");
+    int h = leanfs_directory_open("/many");
     REQUIRE(h >= 0);
     int found_at = 0;
     cookie = 0;
@@ -286,7 +286,7 @@ TEST(leanfs, a_directory_grows_past_one_block_and_lists_every_entry) {
         snprintf(p, sizeof(p), "/many/entry%03d", i);
         CHECK(leanfs_exists(p));
     }
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, removing_entries_from_a_grown_directory_keeps_the_rest) {
@@ -310,7 +310,7 @@ TEST(leanfs, removing_entries_from_a_grown_directory_keeps_the_rest) {
     }
     CHECK_EQ(leanfs_write("/mixed/reused", "y", 1), 0);
     CHECK(leanfs_exists("/mixed/reused"));
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, rmdir_refuses_a_directory_that_still_has_entries) {
@@ -318,23 +318,23 @@ TEST(leanfs, rmdir_refuses_a_directory_that_still_has_entries) {
     REQUIRE(leanfs_mkdir("/full") == 0);
     REQUIRE(leanfs_write("/full/child", "x", 1) == 0);
     CHECK(leanfs_rmdir("/full") != 0);
-    CHECK(leanfs_is_dir("/full"));
+    CHECK(leanfs_is_directory("/full"));
     REQUIRE(leanfs_unlink("/full/child") == 0);
     CHECK_EQ(leanfs_rmdir("/full"), 0);
     CHECK_EQ(leanfs_exists("/full"), 0);
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, a_file_and_a_directory_cannot_take_the_same_name) {
     fs_fixture();
     REQUIRE(leanfs_mkdir("/collide") == 0);
     CHECK(leanfs_write("/collide", "x", 1) != 0);
-    CHECK(leanfs_is_dir("/collide"));
+    CHECK(leanfs_is_directory("/collide"));
 
     REQUIRE(leanfs_write("/plain", "x", 1) == 0);
     CHECK(leanfs_mkdir("/plain") != 0);
-    CHECK(!leanfs_is_dir("/plain"));
-    fake_blk_free();
+    CHECK(!leanfs_is_directory("/plain"));
+    fake_block_device_free();
 }
 
 TEST(leanfs, unlink_refuses_a_directory_and_rmdir_refuses_a_file) {
@@ -342,10 +342,10 @@ TEST(leanfs, unlink_refuses_a_directory_and_rmdir_refuses_a_file) {
     REQUIRE(leanfs_mkdir("/adir") == 0);
     REQUIRE(leanfs_write("/afile", "x", 1) == 0);
     CHECK(leanfs_unlink("/adir") != 0);
-    CHECK(leanfs_is_dir("/adir"));
+    CHECK(leanfs_is_directory("/adir"));
     CHECK(leanfs_rmdir("/afile") != 0);
     CHECK(leanfs_exists("/afile"));
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, reading_a_file_twice_does_not_cost_twice_as_many_device_reads) {
@@ -355,28 +355,28 @@ TEST(leanfs, reading_a_file_twice_does_not_cost_twice_as_many_device_reads) {
     REQUIRE(leanfs_write("/counted", body, sizeof(body)) == 0);
 
     char back[sizeof(body)];
-    fake_blk_reset_counters();
+    fake_block_device_reset_counters();
     REQUIRE(leanfs_read("/counted", back, sizeof(back)) == (int64_t)sizeof(body));
-    uint64_t first = fake_blk_reads();
+    uint64_t first = fake_block_device_reads();
     CHECK(first > 0);
 
     CHECK(first < 4 * LEANFS_SECTORS_PER_BLOCK * 8);
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, remounting_does_not_leak_the_inode_table) {
-    fake_blk_reset(DISK_SECTORS);
-    klog_capture_reset();
+    fake_block_device_reset(DISK_SECTORS);
+    kernel_log_capture_reset();
 
     leanfs_init();
-    uint64_t baseline = fake_pmm_outstanding();
+    uint64_t baseline = fake_physical_memory_outstanding();
 
     for (int i = 0; i < 4; i++) {
         leanfs_init();
     }
-    CHECK_EQ(fake_pmm_outstanding(), baseline);
-    CHECK(leanfs_is_dir("/"));
-    fake_blk_free();
+    CHECK_EQ(fake_physical_memory_outstanding(), baseline);
+    CHECK(leanfs_is_directory("/"));
+    fake_block_device_free();
 }
 
 TEST(leanfs, a_write_to_a_disk_that_refuses_every_write_is_reported) {
@@ -386,18 +386,18 @@ TEST(leanfs, a_write_to_a_disk_that_refuses_every_write_is_reported) {
 
     CHECK_EQ(leanfs_write("/before", data, sizeof(data)), 0);
 
-    fake_blk_fail_writes_after(0);
+    fake_block_device_fail_writes_after(0);
     memset(data, 'b', sizeof(data));
     CHECK_EQ(leanfs_write("/during", data, sizeof(data)), -1);
 
-    fake_blk_fail_writes_after(-1);
+    fake_block_device_fail_writes_after(-1);
     memset(data, 'c', sizeof(data));
     CHECK_EQ(leanfs_write("/after", data, sizeof(data)), 0);
 
     static uint8_t got[8192];
     CHECK_EQ(leanfs_read("/after", got, sizeof(got)), (int64_t)sizeof(got));
     CHECK_EQ(got[0], 'c');
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, a_read_from_a_disk_that_refuses_every_read_is_reported) {
@@ -408,12 +408,12 @@ TEST(leanfs, a_read_from_a_disk_that_refuses_every_read_is_reported) {
 
     static uint8_t got[8192];
     memset(got, 'z', sizeof(got));
-    fake_blk_fail_reads_after(0);
+    fake_block_device_fail_reads_after(0);
     CHECK_EQ(leanfs_read("/f", got, sizeof(got)), -1);
-    fake_blk_fail_reads_after(-1);
+    fake_block_device_fail_reads_after(-1);
     CHECK_EQ(leanfs_read("/f", got, sizeof(got)), (int64_t)sizeof(got));
     CHECK_EQ(got[0], 'a');
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, a_file_written_before_the_disk_failed_survives_it) {
@@ -422,19 +422,19 @@ TEST(leanfs, a_file_written_before_the_disk_failed_survives_it) {
     memset(data, 'k', sizeof(data));
     CHECK_EQ(leanfs_write("/keep", data, sizeof(data)), 0);
 
-    fake_blk_reset_counters();
-    fake_blk_fail_writes_after(10);
+    fake_block_device_reset_counters();
+    fake_block_device_fail_writes_after(10);
     static uint8_t big[64 * 1024];
     memset(big, 'x', sizeof(big));
     CHECK_EQ(leanfs_write("/doomed", big, sizeof(big)), -1);
-    fake_blk_fail_writes_after(-1);
+    fake_block_device_fail_writes_after(-1);
 
     static uint8_t got[4096];
     memset(got, 0, sizeof(got));
     CHECK_EQ(leanfs_read("/keep", got, sizeof(got)), (int64_t)sizeof(got));
     CHECK_EQ(got[0], 'k');
     CHECK_EQ(got[sizeof(got) - 1], 'k');
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, the_filesystem_is_consistent_after_a_disk_that_failed_mid_write) {
@@ -449,12 +449,12 @@ TEST(leanfs, the_filesystem_is_consistent_after_a_disk_that_failed_mid_write) {
         CHECK_EQ(leanfs_write(name, data, sizeof(data)), 0);
     }
 
-    fake_blk_reset_counters();
-    fake_blk_fail_writes_silently_after(6);
+    fake_block_device_reset_counters();
+    fake_block_device_fail_writes_silently_after(6);
     static uint8_t big[128 * 1024];
     memset(big, 'x', sizeof(big));
     (void)leanfs_write("/torn", big, sizeof(big));
-    fake_blk_fail_writes_after(-1);
+    fake_block_device_fail_writes_after(-1);
 
     leanfs_init();
     uint32_t reclaimed = leanfs_check();
@@ -476,18 +476,18 @@ TEST(leanfs, the_filesystem_is_consistent_after_a_disk_that_failed_mid_write) {
             CHECK_EQ(got[sizeof(got) - 1], 'a');
         }
     }
-    fake_blk_free();
+    fake_block_device_free();
 }
 
 TEST(leanfs, a_directory_created_on_a_failing_disk_is_reported) {
     fs_fixture();
-    fake_blk_fail_writes_after(0);
+    fake_block_device_fail_writes_after(0);
     CHECK_EQ(leanfs_mkdir("/nope"), -1);
-    fake_blk_fail_writes_after(-1);
+    fake_block_device_fail_writes_after(-1);
 
     leanfs_init();
     CHECK(!leanfs_exists("/nope"));
     CHECK_EQ(leanfs_mkdir("/yes"), 0);
-    CHECK(leanfs_is_dir("/yes"));
-    fake_blk_free();
+    CHECK(leanfs_is_directory("/yes"));
+    fake_block_device_free();
 }

@@ -68,8 +68,8 @@ static void mouse_write(uint8_t data) {
 
 #define EVENT_BUFFER_SIZE 64
 static mouse_event_t event_buffer[EVENT_BUFFER_SIZE];
-static volatile uint32_t buf_head;
-static volatile uint32_t buf_tail;
+static volatile uint32_t buffer_head;
+static volatile uint32_t buffer_tail;
 
 static int packet_bytes = 3;
 
@@ -77,13 +77,13 @@ static uint8_t packet[4];
 static int packet_index;
 
 static void push_event(mouse_event_t ev) {
-    uint32_t next = (buf_head + 1) % EVENT_BUFFER_SIZE;
-    if (next == buf_tail) {
+    uint32_t next = (buffer_head + 1) % EVENT_BUFFER_SIZE;
+    if (next == buffer_tail) {
         return;
     }
-    event_buffer[buf_head] = ev;
-    buf_head = next;
-    sched_wake_all(SCHED_POLL_CHAN);
+    event_buffer[buffer_head] = ev;
+    buffer_head = next;
+    scheduler_wake_all(SCHED_POLL_CHAN);
 }
 
 static void mouse_irq(isr_regs_t *regs) {
@@ -127,8 +127,8 @@ static void mouse_irq(isr_regs_t *regs) {
 }
 
 void mouse_init(void) {
-    buf_head = 0;
-    buf_tail = 0;
+    buffer_head = 0;
+    buffer_tail = 0;
     packet_index = 0;
     packet_bytes = 3;
 
@@ -152,7 +152,7 @@ void mouse_init(void) {
     ps2_write_command(0x60);
     ps2_write_data(config);
 
-    klog_puts(packet_bytes == 4
+    kernel_log_puts(packet_bytes == 4
                   ? "[mouse] IntelliMouse 4-byte protocol negotiated - wheel events enabled.\n"
                   : "[mouse] standard 3-byte protocol - no wheel on this device.\n");
 
@@ -172,10 +172,10 @@ void mouse_inject(int32_t dx, int32_t dy, uint8_t buttons, int32_t wheel) {
 }
 
 int mouse_read(mouse_event_t *ev) {
-    if (buf_tail == buf_head) {
+    if (buffer_tail == buffer_head) {
         return 0;
     }
-    *ev = event_buffer[buf_tail];
-    buf_tail = (buf_tail + 1) % EVENT_BUFFER_SIZE;
+    *ev = event_buffer[buffer_tail];
+    buffer_tail = (buffer_tail + 1) % EVENT_BUFFER_SIZE;
     return 1;
 }

@@ -70,14 +70,14 @@ static void ac97_irq(isr_regs_t *regs) {
 void ac97_init(void) {
     pci_device_t dev;
     if (!pci_find_device(AC97_VENDOR_ID, AC97_DEVICE_ID, &dev)) {
-        klog_puts("[ac97] no AC'97 audio device found - the PC speaker is the only sound this boot.\n");
+        kernel_log_puts("[ac97] no AC'97 audio device found - the PC speaker is the only sound this boot.\n");
         return;
     }
     pci_enable_device(&dev);
     mixer_base = pci_bar0_io_base(&dev);
     bm_base = pci_bar1_io_base(&dev);
     if (mixer_base == 0 || bm_base == 0) {
-        klog_puts("[ac97] BARs are memory-mapped - carrying on without sound.\n");
+        kernel_log_puts("[ac97] BARs are memory-mapped - carrying on without sound.\n");
         return;
     }
 
@@ -86,15 +86,15 @@ void ac97_init(void) {
 
     ac97_set_volume(100);
 
-    bdl_phys = pmm_alloc_frame_dma();
+    bdl_phys = physical_memory_alloc_frame_dma();
     bdl = (bdl_entry_t *)bdl_phys;
     k_memset(bdl, 0, 4096);
 
-    pcm_phys = pmm_alloc_frame_dma();
+    pcm_phys = physical_memory_alloc_frame_dma();
     for (uint32_t i = 1; i < PCM_PAGES; i++) {
-        uint64_t next = pmm_alloc_frame_dma();
+        uint64_t next = physical_memory_alloc_frame_dma();
         if (next != pcm_phys + (uint64_t)i * 4096) {
-            klog_puts("[ac97] could not get a contiguous PCM buffer - audio disabled this boot.\n");
+            kernel_log_puts("[ac97] could not get a contiguous PCM buffer - audio disabled this boot.\n");
             return;
         }
     }
@@ -105,13 +105,13 @@ void ac97_init(void) {
     pic_clear_mask(dev.irq_line);
 
     available = 1;
-    klog_puts("[ac97] AC'97 audio at mixer 0x");
-    klog_put_hex32(mixer_base);
-    klog_puts(", bus master 0x");
-    klog_put_hex32(bm_base);
-    klog_puts(", IRQ 0x");
-    klog_put_hex32(dev.irq_line);
-    klog_puts(" - 16-bit stereo 48 kHz output ready.\n");
+    kernel_log_puts("[ac97] AC'97 audio at mixer 0x");
+    kernel_log_put_hex32(mixer_base);
+    kernel_log_puts(", bus master 0x");
+    kernel_log_put_hex32(bm_base);
+    kernel_log_puts(", IRQ 0x");
+    kernel_log_put_hex32(dev.irq_line);
+    kernel_log_puts(" - 16-bit stereo 48 kHz output ready.\n");
 }
 
 int ac97_available(void) {
@@ -180,20 +180,20 @@ int ac97_play(const int16_t *samples, uint32_t frames) {
 
 void ac97_debug_dump(void) {
     if (!available) {
-        klog_puts("[ac97] no device\n");
+        kernel_log_puts("[ac97] no device\n");
         return;
     }
-    klog_puts("[ac97] SR=0x");
-    klog_put_hex32(inw((uint16_t)(bm_base + PO_SR)));
-    klog_puts(" CIV=0x");
-    klog_put_hex32(inb((uint16_t)(bm_base + PO_CIV)));
-    klog_puts(" LVI=0x");
-    klog_put_hex32(inb((uint16_t)(bm_base + PO_LVI)));
-    klog_puts(" PICB=0x");
-    klog_put_hex32(inw((uint16_t)(bm_base + PO_PICB)));
-    klog_puts(" CR=0x");
-    klog_put_hex32(inb((uint16_t)(bm_base + PO_CR)));
-    klog_puts(" GLOB_STA=0x");
-    klog_put_hex32(inl((uint16_t)(bm_base + GLOB_STA)));
-    klog_putc('\n');
+    kernel_log_puts("[ac97] SR=0x");
+    kernel_log_put_hex32(inw((uint16_t)(bm_base + PO_SR)));
+    kernel_log_puts(" CIV=0x");
+    kernel_log_put_hex32(inb((uint16_t)(bm_base + PO_CIV)));
+    kernel_log_puts(" LVI=0x");
+    kernel_log_put_hex32(inb((uint16_t)(bm_base + PO_LVI)));
+    kernel_log_puts(" PICB=0x");
+    kernel_log_put_hex32(inw((uint16_t)(bm_base + PO_PICB)));
+    kernel_log_puts(" CR=0x");
+    kernel_log_put_hex32(inb((uint16_t)(bm_base + PO_CR)));
+    kernel_log_puts(" GLOB_STA=0x");
+    kernel_log_put_hex32(inl((uint16_t)(bm_base + GLOB_STA)));
+    kernel_log_putc('\n');
 }

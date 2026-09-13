@@ -21,45 +21,45 @@
 
 #define UNIX_MAX_NAMES 16
 
-struct unixsock;
+struct unix_socket;
 
 #define UNIX_RECV_TRUNC  1
 #define UNIX_RECV_CTRUNC 2
 
-void unixsock_init(void);
+void unix_socket_init(void);
 
-struct unixsock *unixsock_alloc(int type);
+struct unix_socket *unix_socket_alloc(int type);
 
-int unixsock_pair(int type, struct unixsock **a_out, struct unixsock **b_out);
+int unix_socket_pair(int type, struct unix_socket **a_out, struct unix_socket **b_out);
 
-void unixsock_ref(struct unixsock *s);
-void unixsock_unref(struct unixsock *s);
+void unix_socket_reference(struct unix_socket *s);
+void unix_socket_unref(struct unix_socket *s);
 
-int unixsock_type(const struct unixsock *s);
+int unix_socket_type(const struct unix_socket *s);
 
-int unixsock_bind(struct unixsock *s, const char *name, int len);
+int unix_socket_bind(struct unix_socket *s, const char *name, int len);
 
-int unixsock_listen(struct unixsock *s);
+int unix_socket_listen(struct unix_socket *s);
 
-int unixsock_connect(struct unixsock *s, const char *name, int len);
+int unix_socket_connect(struct unix_socket *s, const char *name, int len);
 
-struct unixsock *unixsock_accept(struct unixsock *listener);
+struct unix_socket *unix_socket_accept(struct unix_socket *listener);
 
-long unixsock_send(struct unixsock *s, const uint8_t *data, uint32_t len,
-                   const fd_slot_t *fds, int nfds);
+long unix_socket_send(struct unix_socket *s, const uint8_t *data, uint32_t len,
+                   const file_descriptor_slot_t *fds, int nfds);
 
-long unixsock_recv(struct unixsock *s, uint8_t *out, uint32_t max,
-                   fd_slot_t *fds_out, int max_fds, int *nfds_out,
+long unix_socket_receive(struct unix_socket *s, uint8_t *out, uint32_t max,
+                   file_descriptor_slot_t *file_descriptors_out, int max_fds, int *nfds_out,
                    int *flags_out);
 
-int unixsock_pending(const struct unixsock *s);
+int unix_socket_pending(const struct unix_socket *s);
 
-int unixsock_writable(const struct unixsock *s);
-int unixsock_hup(const struct unixsock *s);
-int unixsock_rdhup(const struct unixsock *s);
+int unix_socket_writable(const struct unix_socket *s);
+int unix_socket_hup(const struct unix_socket *s);
+int unix_socket_rdhup(const struct unix_socket *s);
 
-int unixsock_shutdown(struct unixsock *s, int how);
+int unix_socket_shutdown(struct unix_socket *s, int how);
 
-int unixsock_in_use(void);
+int unix_socket_in_use(void);
 
-int unixsock_queued_fds(void);
+int unix_socket_queued_file_descriptors(void);

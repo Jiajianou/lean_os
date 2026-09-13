@@ -49,7 +49,7 @@ struct timerfd *timerfd_create(int clockid) {
     return t;
 }
 
-void timerfd_ref(struct timerfd *t) {
+void timerfd_reference(struct timerfd *t) {
     if (!t) {
         return;
     }
@@ -119,7 +119,7 @@ int timerfd_settime(struct timerfd *t, uint64_t now_ns, int absolute,
         t->interval_ns = 0;
         t->expirations = 0;
         spin_unlock_irqrestore(&timerfd_lock, f);
-        sched_wake_all(SCHED_POLL_CHAN);
+        scheduler_wake_all(SCHED_POLL_CHAN);
         return 0;
     }
     if (absolute) {
@@ -130,7 +130,7 @@ int timerfd_settime(struct timerfd *t, uint64_t now_ns, int absolute,
     t->interval_ns = round_to_tick(interval_ns);
     t->expirations = 0;
     spin_unlock_irqrestore(&timerfd_lock, f);
-    sched_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHED_POLL_CHAN);
     return 0;
 }
 

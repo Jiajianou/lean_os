@@ -192,7 +192,7 @@ typedef struct {
 
 typedef struct {
     i64 d_tag;
-    u64 d_val;
+    u64 d_value;
 } Dyn;
 
 typedef struct {
@@ -225,7 +225,7 @@ typedef struct {
     const char *name;
     const Dyn *dyn;
     const char *strtab;
-    const Sym *symtab;
+    const Sym *symbol_table;
     const u32 *gnu_hash;
     const u32 *elf_hash;
     const Rela *rela;
@@ -261,9 +261,9 @@ static void self_relocate(u64 base, const Dyn *dyn) {
     u64 relasz = 0;
     for (const Dyn *d = dyn; d->d_tag != DT_NULL; d++) {
         if (d->d_tag == DT_RELA) {
-            rela = (const Rela *)(base + d->d_val);
+            rela = (const Rela *)(base + d->d_value);
         } else if (d->d_tag == DT_RELASZ) {
-            relasz = d->d_val;
+            relasz = d->d_value;
         }
     }
     if (!rela) {
@@ -280,22 +280,22 @@ static u64 lookup(const char *name, const Object *skip, int *found) {
     *found = 0;
     for (int i = 0; i < object_count; i++) {
         const Object *o = &objects[i];
-        if (o == skip || !o->symtab || !o->strtab) {
+        if (o == skip || !o->symbol_table || !o->strtab) {
             continue;
         }
         for (u32 s = 0; ; s++) {
-            const Sym *sym = &o->symtab[s];
-            if ((const char *)sym >= o->strtab) {
+            const Sym *symbol = &o->symbol_table[s];
+            if ((const char *)symbol >= o->strtab) {
                 break;
             }
-            if (sym->st_shndx == SHN_UNDEF || sym->st_name == 0) {
+            if (symbol->st_shndx == SHN_UNDEF || symbol->st_name == 0) {
                 continue;
             }
-            if (!dl_streq(o->strtab + sym->st_name, name)) {
+            if (!dl_streq(o->strtab + symbol->st_name, name)) {
                 continue;
             }
             *found = 1;
-            return o->base + sym->st_value;
+            return o->base + symbol->st_value;
         }
     }
     return 0;
@@ -315,8 +315,8 @@ static void apply_rela(Object *o, const Rela *r, u64 count) {
             continue;
         }
 
-        const Sym *sym = &o->symtab[symi];
-        const char *name = o->strtab + sym->st_name;
+        const Sym *symbol = &o->symbol_table[symi];
+        const char *name = o->strtab + symbol->st_name;
 
         if (symi == 0 && type == R_X86_64_TPOFF64) {
             if (o->tls_offset == 0) {
@@ -330,7 +330,7 @@ static void apply_rela(Object *o, const Rela *r, u64 count) {
         int found = 0;
         u64 value = lookup(name, 0, &found);
         if (!found) {
-            if (ELF64_ST_BIND(sym->st_info) == STB_WEAK) {
+            if (ELF64_ST_BIND(symbol->st_info) == STB_WEAK) {
                 value = 0;
             } else {
                 dl_fail("undefined symbol", name);
@@ -347,22 +347,22 @@ static void apply_rela(Object *o, const Rela *r, u64 count) {
             break;
         case R_X86_64_COPY:
             {
-                int src_found = 0;
-                u64 src = lookup(name, &objects[0], &src_found);
-                if (!src_found) {
+                int source_found = 0;
+                u64 src = lookup(name, &objects[0], &source_found);
+                if (!source_found) {
                     dl_fail("undefined symbol for a copy relocation", name);
                 }
-                dl_memcpy(where, (const void *)src, sym->st_size);
+                dl_memcpy(where, (const void *)src, symbol->st_size);
             }
             break;
         case R_X86_64_TPOFF64: {
             const Object *def = 0;
             for (int k = 0; k < object_count; k++) {
-                if (!objects[k].symtab || !objects[k].strtab) {
+                if (!objects[k].symbol_table || !objects[k].strtab) {
                     continue;
                 }
                 for (u32 t = 0; ; t++) {
-                    const Sym *cand = &objects[k].symtab[t];
+                    const Sym *cand = &objects[k].symbol_table[t];
                     if ((const char *)cand >= objects[k].strtab) {
                         break;
                     }
@@ -400,23 +400,23 @@ static void scan_dynamic(Object *o) {
     u64 relasz = 0, pltrelsz = 0, init_arraysz = 0;
     for (const Dyn *d = o->dyn; d->d_tag != DT_NULL; d++) {
         switch (d->d_tag) {
-        case DT_STRTAB: o->strtab = (const char *)(o->base + d->d_val); break;
-        case DT_SYMTAB: o->symtab = (const Sym *)(o->base + d->d_val); break;
-        case DT_RELA:   o->rela = (const Rela *)(o->base + d->d_val); break;
-        case DT_RELASZ: relasz = d->d_val; break;
-        case DT_JMPREL: o->jmprel = (const Rela *)(o->base + d->d_val); break;
-        case DT_PLTRELSZ: pltrelsz = d->d_val; break;
+        case DT_STRTAB: o->strtab = (const char *)(o->base + d->d_value); break;
+        case DT_SYMTAB: o->symbol_table = (const Sym *)(o->base + d->d_value); break;
+        case DT_RELA:   o->rela = (const Rela *)(o->base + d->d_value); break;
+        case DT_RELASZ: relasz = d->d_value; break;
+        case DT_JMPREL: o->jmprel = (const Rela *)(o->base + d->d_value); break;
+        case DT_PLTRELSZ: pltrelsz = d->d_value; break;
         case DT_INIT:
-            if (d->d_val != 0) {
-                o->init = (void (*)(void))(o->base + d->d_val);
+            if (d->d_value != 0) {
+                o->init = (void (*)(void))(o->base + d->d_value);
             }
             break;
         case DT_INIT_ARRAY:
-            if (d->d_val != 0) {
-                o->init_array = (void (**)(void))(o->base + d->d_val);
+            if (d->d_value != 0) {
+                o->init_array = (void (**)(void))(o->base + d->d_value);
             }
             break;
-        case DT_INIT_ARRAYSZ: init_arraysz = d->d_val; break;
+        case DT_INIT_ARRAYSZ: init_arraysz = d->d_value; break;
         default: break;
         }
     }
@@ -518,17 +518,17 @@ static Object *load_object(const char *soname) {
         dl_fail("cannot find shared object", soname);
     }
 
-    static u8 hdr[4096];
-    i64 got = sys(SYS_read, fd, (long)hdr, sizeof(hdr));
+    static u8 header[4096];
+    i64 got = sys(SYS_read, fd, (long)header, sizeof(header));
     if (got < (i64)sizeof(Ehdr)) {
         dl_fail("short read on", soname);
     }
-    const Ehdr *eh = (const Ehdr *)hdr;
+    const Ehdr *eh = (const Ehdr *)header;
     if (eh->e_ident[0] != 0x7f || eh->e_ident[1] != 'E' ||
         eh->e_ident[2] != 'L' || eh->e_ident[3] != 'F') {
         dl_fail("not an ELF file", soname);
     }
-    const Phdr *ph = (const Phdr *)(hdr + eh->e_phoff);
+    const Phdr *ph = (const Phdr *)(header + eh->e_phoff);
 
     u64 lo = ~0ull, hi = 0;
     for (u16 i = 0; i < eh->e_phnum; i++) {
@@ -614,17 +614,17 @@ static Object *load_object(const char *soname) {
 
     for (const Dyn *d = o->dyn; d->d_tag != DT_NULL; d++) {
         if (d->d_tag == DT_NEEDED) {
-            load_object(o->strtab + d->d_val);
+            load_object(o->strtab + d->d_value);
         }
     }
     return o;
 }
 
-u64 _dl_entry(u64 *args);
+u64 _dl_entry(u64 *arguments);
 
-u64 _dl_entry(u64 *args) {
-    u64 argc = args[0];
-    u64 *envp = &args[1 + argc + 1];
+u64 _dl_entry(u64 *arguments) {
+    u64 argc = arguments[0];
+    u64 *envp = &arguments[1 + argc + 1];
     u64 i = 0;
     while (envp[i]) {
         i++;
@@ -700,7 +700,7 @@ u64 _dl_entry(u64 *args) {
 
     for (const Dyn *d = prog->dyn; d->d_tag != DT_NULL; d++) {
         if (d->d_tag == DT_NEEDED) {
-            load_object(prog->strtab + d->d_val);
+            load_object(prog->strtab + d->d_value);
         }
     }
 
@@ -761,7 +761,7 @@ u64 _dl_entry(u64 *args) {
 #define RTLD_GLOBAL 0x0100
 #define RTLD_LOCAL  0x0000
 
-static const char *dl_error_msg;
+static const char *dl_error_message;
 
 void *dlopen(const char *file, int flags);
 void *dlsym(void *handle, const char *name);
@@ -771,12 +771,12 @@ char *dlerror(void);
 __attribute__((visibility("default")))
 void *dlopen(const char *file, int flags) {
     (void)flags;
-    dl_error_msg = 0;
+    dl_error_message = 0;
     if (!file) {
         return &objects[0];
     }
     if (object_count >= MAX_OBJECTS) {
-        dl_error_msg = "too many shared objects loaded";
+        dl_error_message = "too many shared objects loaded";
         return 0;
     }
 
@@ -796,7 +796,7 @@ void *dlopen(const char *file, int flags) {
         }
         object_count = before;
         name_used = name_mark;
-        dl_error_msg = dl_fail_text;
+        dl_error_message = dl_fail_text;
         return 0;
     }
     dl_recovering = 1;
@@ -807,7 +807,7 @@ void *dlopen(const char *file, int flags) {
         for (int i = 0; i < 8; i++) {
             dl_recover[i] = saved_recover[i];
         }
-        dl_error_msg = "cannot load shared object";
+        dl_error_message = "cannot load shared object";
         return 0;
     }
     for (int k = object_count - 1; k >= before; k--) {
@@ -835,43 +835,43 @@ void *dlopen(const char *file, int flags) {
 
 __attribute__((visibility("default")))
 void *dlsym(void *handle, const char *name) {
-    dl_error_msg = 0;
+    dl_error_message = 0;
     if (!handle || !name) {
-        dl_error_msg = "dlsym: null handle or name";
+        dl_error_message = "dlsym: null handle or name";
         return 0;
     }
     Object *o = (Object *)handle;
-    if (!o->symtab || !o->strtab) {
-        dl_error_msg = "dlsym: that handle has no symbols";
+    if (!o->symbol_table || !o->strtab) {
+        dl_error_message = "dlsym: that handle has no symbols";
         return 0;
     }
     for (u32 s = 0; ; s++) {
-        const Sym *sym = &o->symtab[s];
-        if ((const char *)sym >= o->strtab) {
+        const Sym *symbol = &o->symbol_table[s];
+        if ((const char *)symbol >= o->strtab) {
             break;
         }
-        if (sym->st_shndx == SHN_UNDEF || sym->st_name == 0) {
+        if (symbol->st_shndx == SHN_UNDEF || symbol->st_name == 0) {
             continue;
         }
-        if (dl_streq(o->strtab + sym->st_name, name)) {
-            return (void *)(o->base + sym->st_value);
+        if (dl_streq(o->strtab + symbol->st_name, name)) {
+            return (void *)(o->base + symbol->st_value);
         }
     }
-    dl_error_msg = "dlsym: no such symbol";
+    dl_error_message = "dlsym: no such symbol";
     return 0;
 }
 
 __attribute__((visibility("default")))
 int dlclose(void *handle) {
     (void)handle;
-    dl_error_msg = 0;
+    dl_error_message = 0;
     return 0;
 }
 
 __attribute__((visibility("default")))
 char *dlerror(void) {
-    char *m = (char *)dl_error_msg;
-    dl_error_msg = 0;
+    char *m = (char *)dl_error_message;
+    dl_error_message = 0;
     return m;
 }
 

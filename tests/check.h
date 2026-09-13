@@ -6,12 +6,12 @@
 #include <stdio.h>
 #include <string.h>
 
-typedef void (*test_fn_t)(void);
+typedef void (*test_function_t)(void);
 
 typedef struct test_case {
     const char *suite;
     const char *name;
-    test_fn_t fn;
+    test_function_t fn;
     struct test_case *next;
 } test_case_t;
 
@@ -94,11 +94,11 @@ void test_abandon(void);
 
 extern jmp_buf test_panic_jmp;
 extern int test_panic_armed;
-extern char test_panic_msg[256];
+extern char test_panic_message[256];
 
 #define CHECK_PANIC(stmt, substr)                                              \
     do {                                                                       \
-        test_panic_msg[0] = '\0';                                              \
+        test_panic_message[0] = '\0';                                              \
         test_panic_armed = 1;                                                  \
         if (setjmp(test_panic_jmp) == 0) {                                     \
             stmt;                                                              \
@@ -108,17 +108,17 @@ extern char test_panic_msg[256];
                       (substr), #stmt);                                        \
         } else {                                                               \
             test_panic_armed = 0;                                              \
-            if (!strstr(test_panic_msg, (substr))) {                           \
+            if (!strstr(test_panic_message, (substr))) {                           \
                 test_fail(__FILE__, __LINE__,                                  \
                           "panicked, but on \"%s\" rather than \"%s\"",        \
-                          test_panic_msg, (substr));                           \
+                          test_panic_message, (substr));                           \
             }                                                                  \
         }                                                                      \
     } while (0)
 
 #define CHECK_NO_PANIC(stmt)                                                   \
     do {                                                                       \
-        test_panic_msg[0] = '\0';                                              \
+        test_panic_message[0] = '\0';                                              \
         test_panic_armed = 1;                                                  \
         if (setjmp(test_panic_jmp) == 0) {                                     \
             stmt;                                                              \
@@ -126,7 +126,7 @@ extern char test_panic_msg[256];
         } else {                                                               \
             test_panic_armed = 0;                                              \
             test_fail(__FILE__, __LINE__, "unexpected panic: \"%s\"",          \
-                      test_panic_msg);                                         \
+                      test_panic_message);                                         \
         }                                                                      \
     } while (0)
 

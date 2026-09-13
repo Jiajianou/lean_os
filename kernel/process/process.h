@@ -33,7 +33,7 @@
 
 void process_destroy_address_space(uint64_t pml4_phys);
 
-uint64_t process_fork_address_space(uint64_t src_pml4_phys);
+uint64_t process_fork_address_space(uint64_t source_pml4_phys);
 
 uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
                                      const char *const *argv,

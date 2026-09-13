@@ -58,17 +58,17 @@ static uint32_t wallpaper_row_color(int id, uint32_t base, int32_t row, int32_t 
     return out;
 }
 
-void wallpaper_fill(gfx_ctx_t *ctx, int32_t x, int32_t y, int32_t w, int32_t h, int id, uint32_t base) {
+void wallpaper_fill(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h, int id, uint32_t base) {
     for (int32_t row = 0; row < h; row++) {
-        gfx_fill_rect(ctx, x, y + row, w, 1, wallpaper_row_color(id, base, row, h));
+        graphics_fill_rect(context, x, y + row, w, 1, wallpaper_row_color(id, base, row, h));
     }
     if (style_index(id) == WALLPAPER_GRID) {
         uint32_t line = scale_color(base, GRID_PCT);
         for (int32_t gx = x + GRID_STEP; gx < x + w; gx += GRID_STEP) {
-            gfx_fill_rect(ctx, gx, y, 1, h, line);
+            graphics_fill_rect(context, gx, y, 1, h, line);
         }
         for (int32_t gy = y + GRID_STEP; gy < y + h; gy += GRID_STEP) {
-            gfx_fill_rect(ctx, x, gy, w, 1, line);
+            graphics_fill_rect(context, x, gy, w, 1, line);
         }
     }
 }

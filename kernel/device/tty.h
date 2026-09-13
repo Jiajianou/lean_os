@@ -11,7 +11,7 @@
 
 typedef struct tty {
     char line[TTY_LINE_MAX];
-    uint32_t line_len;
+    uint32_t line_length;
 
     char inbuf[TTY_INBUF];
     uint32_t in_head;

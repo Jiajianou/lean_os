@@ -181,14 +181,14 @@ irq_stub_table:
     dq irq0, irq1, irq2,  irq3,  irq4,  irq5,  irq6,  irq7
     dq irq8, irq9, irq10, irq11, irq12, irq13, irq14, irq15
 
-global syscall_stub_addr
-syscall_stub_addr:
+global syscall_stub_address
+syscall_stub_address:
     dq isr128
 
-global isr_ipi_schedule_addr
-isr_ipi_schedule_addr:
+global isr_ipi_schedule_address
+isr_ipi_schedule_address:
     dq isr_ipi_schedule
 
-global isr_lapic_spurious_addr
-isr_lapic_spurious_addr:
+global isr_lapic_spurious_address
+isr_lapic_spurious_address:
     dq isr_lapic_spurious

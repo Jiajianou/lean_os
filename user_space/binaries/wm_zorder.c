@@ -56,36 +56,36 @@ int main(int argc, char **argv) {
         }
     }
 
-    wm_window_t win;
-    if (wm_connect(WIN_W, WIN_H, title, &win) != 0) {
+    window_manager_window_t win;
+    if (window_manager_connect(WIN_W, WIN_H, title, &win) != 0) {
         sys_exit(1);
     }
 
     int ticks = 0;
-    gfx_fill_rect(&win.gfx, 0, 0, (int32_t)win.width, (int32_t)win.height, fill);
-    wm_present(&win);
+    graphics_fill_rect(&win.graphics, 0, 0, (int32_t)win.width, (int32_t)win.height, fill);
+    window_manager_present(&win);
 
     for (;;) {
         wm_event_t ev;
         int drew = 0;
-        while (wm_poll_event(&win, &ev)) {
+        while (window_manager_poll_event(&win, &ev)) {
             if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
                 drew = 1;
-                gfx_fill_rect(&win.gfx, 0, 0, (int32_t)win.width, (int32_t)win.height, fill);
+                graphics_fill_rect(&win.graphics, 0, 0, (int32_t)win.width, (int32_t)win.height, fill);
                 for (int t = 0; t < ticks; t++) {
-                    gfx_fill_rect(&win.gfx, tick_x(t), WIN_H - TICK_INSET - TICK_SIZE,
+                    graphics_fill_rect(&win.graphics, tick_x(t), WIN_H - TICK_INSET - TICK_SIZE,
                                    TICK_SIZE, TICK_SIZE, TICK_COLOR);
                 }
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && ticks < TICK_MAX) {
                 drew = 1;
-                gfx_fill_rect(&win.gfx, tick_x(ticks), WIN_H - TICK_INSET - TICK_SIZE,
+                graphics_fill_rect(&win.graphics, tick_x(ticks), WIN_H - TICK_INSET - TICK_SIZE,
                                TICK_SIZE, TICK_SIZE, TICK_COLOR);
                 ticks++;
             }
         }
         if (drew) {
-            wm_present(&win);
+            window_manager_present(&win);
         }
-        wm_wait_ms(&win, NULL, 0, -1);
+        window_manager_wait_ms(&win, NULL, 0, -1);
     }
 }

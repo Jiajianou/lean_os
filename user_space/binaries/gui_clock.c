@@ -8,37 +8,37 @@
 #define REDRAW_INTERVAL_MS 250
 
 static int format_uint(uint32_t v, char *buf) {
-    char tmp[10];
+    char temporary[10];
     int n = 0;
     if (v == 0) {
-        tmp[n++] = '0';
+        temporary[n++] = '0';
     }
     while (v > 0) {
-        tmp[n++] = (char)('0' + (v % 10));
+        temporary[n++] = (char)('0' + (v % 10));
         v /= 10;
     }
     int len = 0;
     for (int i = n - 1; i >= 0; i--) {
-        buf[len++] = tmp[i];
+        buf[len++] = temporary[i];
     }
     buf[len] = '\0';
     return len;
 }
 
 int main(void) {
-    wm_window_t win;
-    if (wm_connect(WIN_W, WIN_H, "Clock", &win) != 0) {
+    window_manager_window_t win;
+    if (window_manager_connect(WIN_W, WIN_H, "Clock", &win) != 0) {
         sys_exit(1);
     }
 
-    gfx_fill_rect(&win.gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
-    gfx_draw_text(&win.gfx, 10, 10, "CLOCK", TEXT_COLOR);
+    graphics_fill_rect(&win.graphics, 0, 0, WIN_W, WIN_H, BG_COLOR);
+    graphics_draw_text(&win.graphics, 10, 10, "CLOCK", TEXT_COLOR);
 
     long next_redraw = 0;
     for (;;) {
         wm_event_t ev;
         int expose = 0;
-        while (wm_poll_event(&win, &ev)) {
+        while (window_manager_poll_event(&win, &ev)) {
             if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
                 expose = 1;
             }
@@ -46,12 +46,12 @@ int main(void) {
 
         long now = sys_uptime_ms();
         if (now < next_redraw && !expose) {
-            wm_wait_ms(&win, NULL, 0, (int)(next_redraw - now));
+            window_manager_wait_ms(&win, NULL, 0, (int)(next_redraw - now));
             continue;
         }
         next_redraw = now + REDRAW_INTERVAL_MS;
 
-        gfx_fill_rect(&win.gfx, 10, 34, WIN_W - 20, UI_FONT_UI_HEIGHT, BG_COLOR);
+        graphics_fill_rect(&win.graphics, 10, 34, WIN_W - 20, UI_FONT_UI_HEIGHT, BG_COLOR);
 
         char line[32];
         int li = 0;
@@ -67,7 +67,7 @@ int main(void) {
         line[li++] = 's';
         line[li] = '\0';
 
-        gfx_draw_text(&win.gfx, 10, 34, line, TEXT_COLOR);
-        wm_present(&win);
+        graphics_draw_text(&win.graphics, 10, 34, line, TEXT_COLOR);
+        window_manager_present(&win);
     }
 }

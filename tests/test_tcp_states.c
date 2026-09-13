@@ -36,25 +36,25 @@ static uint32_t be32_get(const uint8_t *p) {
 static void tcp_fixture(void) {
     fake_net_reset();
     fake_socket_reset();
-    klog_capture_reset();
+    kernel_log_capture_reset();
     tcp_init();
     arp_learn(PEER_IP, peer_mac);
 }
 
-static uint16_t tcp_checksum(uint32_t src_ip, uint32_t dst_ip,
-                             const uint8_t *seg, uint16_t seg_len) {
+static uint16_t tcp_checksum(uint32_t source_ip, uint32_t destination_ip,
+                             const uint8_t *seg, uint16_t seg_length) {
     uint32_t sum = 0;
-    sum += (src_ip >> 16) & 0xFFFF;
-    sum += src_ip & 0xFFFF;
-    sum += (dst_ip >> 16) & 0xFFFF;
-    sum += dst_ip & 0xFFFF;
+    sum += (source_ip >> 16) & 0xFFFF;
+    sum += source_ip & 0xFFFF;
+    sum += (destination_ip >> 16) & 0xFFFF;
+    sum += destination_ip & 0xFFFF;
     sum += 6;
-    sum += seg_len;
-    for (uint16_t i = 0; i + 1 < seg_len; i += 2) {
+    sum += seg_length;
+    for (uint16_t i = 0; i + 1 < seg_length; i += 2) {
         sum += (uint32_t)((seg[i] << 8) | seg[i + 1]);
     }
-    if (seg_len & 1) {
-        sum += (uint32_t)(seg[seg_len - 1] << 8);
+    if (seg_length & 1) {
+        sum += (uint32_t)(seg[seg_length - 1] << 8);
     }
     while (sum >> 16) {
         sum = (sum & 0xFFFF) + (sum >> 16);
@@ -62,32 +62,32 @@ static uint16_t tcp_checksum(uint32_t src_ip, uint32_t dst_ip,
     return (uint16_t)(~sum & 0xFFFF);
 }
 
-static void from_peer(uint16_t dst_port, uint16_t src_port, uint32_t seq,
+static void from_peer(uint16_t destination_port, uint16_t source_port, uint32_t seq,
                       uint32_t ack, uint8_t flags,
-                      const uint8_t *payload, uint16_t payload_len) {
+                      const uint8_t *payload, uint16_t payload_length) {
     uint8_t seg[20 + 128];
     memset(seg, 0, sizeof(seg));
-    be16_put(seg + 0, src_port);
-    be16_put(seg + 2, dst_port);
+    be16_put(seg + 0, source_port);
+    be16_put(seg + 2, destination_port);
     be32_put(seg + 4, seq);
     be32_put(seg + 8, ack);
     seg[12] = 5 << 4;
     seg[13] = flags;
     be16_put(seg + 14, 4096);
-    if (payload_len) {
-        memcpy(seg + 20, payload, payload_len);
+    if (payload_length) {
+        memcpy(seg + 20, payload, payload_length);
     }
-    uint16_t total = (uint16_t)(20 + payload_len);
+    uint16_t total = (uint16_t)(20 + payload_length);
     be16_put(seg + 16, tcp_checksum(PEER_IP, LOCAL_IP, seg, total));
     tcp_handle_packet(PEER_IP, LOCAL_IP, seg, total);
 }
 
-static void from_peer_window(uint16_t dst_port, uint16_t src_port, uint32_t seq,
+static void from_peer_window(uint16_t destination_port, uint16_t source_port, uint32_t seq,
                              uint32_t ack, uint8_t flags, uint16_t window) {
     uint8_t seg[20];
     memset(seg, 0, sizeof(seg));
-    be16_put(seg + 0, src_port);
-    be16_put(seg + 2, dst_port);
+    be16_put(seg + 0, source_port);
+    be16_put(seg + 2, destination_port);
     be32_put(seg + 4, seq);
     be32_put(seg + 8, ack);
     seg[12] = 5 << 4;
@@ -98,11 +98,11 @@ static void from_peer_window(uint16_t dst_port, uint16_t src_port, uint32_t seq,
 }
 
 typedef struct {
-    uint16_t src_port, dst_port, window;
+    uint16_t source_port, destination_port, window;
     uint32_t seq, ack;
     uint8_t flags;
     const uint8_t *payload;
-    uint16_t payload_len;
+    uint16_t payload_length;
 } sent_t;
 
 static int last_sent(sent_t *out) {
@@ -119,15 +119,15 @@ static int last_sent(sent_t *out) {
     uint16_t ihl = (uint16_t)((ip[0] & 0x0F) * 4);
     const uint8_t *tcp = ip + ihl;
     uint16_t total = be16_get(ip + 2);
-    out->src_port = be16_get(tcp + 0);
-    out->dst_port = be16_get(tcp + 2);
+    out->source_port = be16_get(tcp + 0);
+    out->destination_port = be16_get(tcp + 2);
     out->seq = be32_get(tcp + 4);
     out->ack = be32_get(tcp + 8);
     out->flags = tcp[13];
     out->window = be16_get(tcp + 14);
     uint16_t data_off = (uint16_t)((tcp[12] >> 4) * 4);
     out->payload = tcp + data_off;
-    out->payload_len = (uint16_t)(total - ihl - data_off);
+    out->payload_length = (uint16_t)(total - ihl - data_off);
     return 1;
 }
 
@@ -186,8 +186,8 @@ TEST(tcp_state, a_SYN_to_a_listener_is_answered_with_SYN_ACK) {
     sent_t s;
     REQUIRE(last_sent(&s));
     CHECK_EQ(s.flags & (F_SYN | F_ACK), F_SYN | F_ACK);
-    CHECK_EQ(s.src_port, OUR_PORT);
-    CHECK_EQ(s.dst_port, PEER_PORT);
+    CHECK_EQ(s.source_port, OUR_PORT);
+    CHECK_EQ(s.destination_port, PEER_PORT);
     CHECK_EQ(s.ack, 1001);
     CHECK_NE(s.seq, 0);
     tcp_release(l);
@@ -235,8 +235,8 @@ TEST(tcp_state, an_ACK_with_the_wrong_number_does_not_complete_the_handshake) {
     tcp_release(l);
 }
 
-static struct tcpcb *established(struct tcpcb **listener_out, uint32_t *peer_seq,
-                                 uint32_t *our_seq) {
+static struct tcpcb *established(struct tcpcb **listener_out, uint32_t *peer_sequence,
+                                 uint32_t *our_sequence) {
     struct tcpcb *l = listening();
     fake_net_reset();
     from_peer(OUR_PORT, PEER_PORT, 1000, 0, F_SYN, NULL, 0);
@@ -245,8 +245,8 @@ static struct tcpcb *established(struct tcpcb **listener_out, uint32_t *peer_seq
     from_peer(OUR_PORT, PEER_PORT, 1001, s.seq + 1, F_ACK, NULL, 0);
     struct tcpcb *c = tcp_accept(l);
     if (listener_out) { *listener_out = l; }
-    if (peer_seq) { *peer_seq = 1001; }
-    if (our_seq) { *our_seq = s.seq + 1; }
+    if (peer_sequence) { *peer_sequence = 1001; }
+    if (our_sequence) { *our_sequence = s.seq + 1; }
     return c;
 }
 
@@ -263,7 +263,7 @@ TEST(tcp_state, data_arriving_is_buffered_and_acknowledged) {
 
     CHECK_EQ(tcp_bytes_available(c), 5);
     uint8_t out[16] = {0};
-    CHECK_EQ(tcp_recv(c, out, sizeof(out)), 5);
+    CHECK_EQ(tcp_receive(c, out, sizeof(out)), 5);
     CHECK_MEMEQ(out, body, 5);
 
     sent_t s;
@@ -288,7 +288,7 @@ TEST(tcp_state, a_segment_out_of_order_is_not_delivered_as_if_it_were_in_order) 
     const uint8_t now[] = "FIRST";
     from_peer(OUR_PORT, PEER_PORT, pseq, oseq, F_ACK, now, 5);
     uint8_t out[16] = {0};
-    CHECK_EQ(tcp_recv(c, out, sizeof(out)), 5);
+    CHECK_EQ(tcp_receive(c, out, sizeof(out)), 5);
     CHECK_MEMEQ(out, "FIRST", 5);
     tcp_release(c);
     tcp_release(l);
@@ -302,7 +302,7 @@ TEST(tcp_state, a_corrupt_segment_is_dropped_counted_and_reported) {
     REQUIRE(c != NULL);
 
     uint32_t before = tcp_checksum_failures();
-    klog_capture_reset();
+    kernel_log_capture_reset();
 
     uint8_t seg[20 + 5];
     memset(seg, 0, sizeof(seg));
@@ -320,7 +320,7 @@ TEST(tcp_state, a_corrupt_segment_is_dropped_counted_and_reported) {
 
     CHECK_EQ(tcp_bytes_available(c), 0);
     CHECK_EQ(tcp_checksum_failures(), before + 1);
-    CHECK(klog_capture_contains("[tcp] checksum: dropped a corrupt segment"));
+    CHECK(kernel_log_capture_contains("[tcp] checksum: dropped a corrupt segment"));
 
     seg[24] ^= 0x20;
     tcp_handle_packet(PEER_IP, LOCAL_IP, seg, sizeof(seg));
@@ -368,7 +368,7 @@ TEST(tcp_state, a_duplicate_segment_is_acknowledged_but_not_delivered_twice) {
     tcp_release(l);
 }
 
-TEST(tcp_state, a_peer_FIN_moves_us_to_CLOSE_WAIT_and_recv_reports_end_of_stream) {
+TEST(tcp_state, a_peer_FIN_moves_us_to_CLOSE_WAIT_and_receive_reports_end_of_stream) {
     tcp_fixture();
     struct tcpcb *l = NULL;
     uint32_t pseq = 0, oseq = 0;
@@ -378,7 +378,7 @@ TEST(tcp_state, a_peer_FIN_moves_us_to_CLOSE_WAIT_and_recv_reports_end_of_stream
     from_peer(OUR_PORT, PEER_PORT, pseq, oseq, F_ACK | F_FIN, NULL, 0);
     CHECK_EQ(tcp_state(c), TCP_CLOSE_WAIT);
     uint8_t out[8];
-    CHECK_EQ(tcp_recv(c, out, sizeof(out)), -1);
+    CHECK_EQ(tcp_receive(c, out, sizeof(out)), -1);
     tcp_release(c);
     tcp_release(l);
 }
@@ -401,9 +401,9 @@ TEST(tcp_state, a_FIN_carried_with_data_is_taken_with_it) {
     CHECK_EQ(s.ack, pseq + 4 + 1);
 
     uint8_t out[8] = {0};
-    CHECK_EQ(tcp_recv(c, out, sizeof(out)), 4);
+    CHECK_EQ(tcp_receive(c, out, sizeof(out)), 4);
     CHECK_MEMEQ(out, "last", 4);
-    CHECK_EQ(tcp_recv(c, out, sizeof(out)), -1);
+    CHECK_EQ(tcp_receive(c, out, sizeof(out)), -1);
     tcp_release(c);
     tcp_release(l);
 }
@@ -466,12 +466,12 @@ TEST(tcp_state, an_active_close_goes_FIN_WAIT_1_then_FIN_WAIT_2_then_TIME_WAIT) 
     sent_t s;
     REQUIRE(last_sent(&s));
     CHECK(s.flags & F_FIN);
-    uint32_t our_fin_seq = s.seq;
+    uint32_t our_fin_sequence = s.seq;
 
-    from_peer(OUR_PORT, PEER_PORT, pseq, our_fin_seq + 1, F_ACK, NULL, 0);
+    from_peer(OUR_PORT, PEER_PORT, pseq, our_fin_sequence + 1, F_ACK, NULL, 0);
     CHECK_EQ(tcp_state(c), TCP_FIN_WAIT_2);
 
-    from_peer(OUR_PORT, PEER_PORT, pseq, our_fin_seq + 1, F_ACK | F_FIN, NULL, 0);
+    from_peer(OUR_PORT, PEER_PORT, pseq, our_fin_sequence + 1, F_ACK | F_FIN, NULL, 0);
     CHECK_EQ(tcp_state(c), TCP_TIME_WAIT);
     tcp_release(c);
     tcp_release(l);
@@ -583,7 +583,7 @@ TEST(tcp_state, sequence_numbers_wrap_through_zero_correctly) {
     from_peer(OUR_PORT, PEER_PORT, near_top + 1, s.seq + 1, F_ACK, body, 32);
     CHECK_EQ(tcp_bytes_available(c), 32);
     uint8_t out[32] = {0};
-    CHECK_EQ(tcp_recv(c, out, sizeof(out)), 32);
+    CHECK_EQ(tcp_receive(c, out, sizeof(out)), 32);
     CHECK_MEMEQ(out, body, 32);
     tcp_release(c);
     tcp_release(l);

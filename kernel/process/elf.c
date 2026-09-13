@@ -60,9 +60,9 @@ static uint64_t align_up(uint64_t x, uint64_t a) {
 }
 
 static uint64_t reject(const char *why) {
-    klog_debug("[elf] rejected image: ");
-    klog_debug(why);
-    klog_debug("\n");
+    kernel_log_debug("[elf] rejected image: ");
+    kernel_log_debug(why);
+    kernel_log_debug("\n");
     return 0;
 }
 
@@ -227,7 +227,7 @@ uint64_t elf_load_at(uint64_t pml4_phys, const uint8_t *image, size_t image_size
         uint64_t seg_end = align_up(vaddr + memsz, PAGE_SIZE);
 
         for (uint64_t page_va = seg_start; page_va < seg_end; page_va += PAGE_SIZE) {
-            uint64_t phys = pmm_try_alloc_frame();
+            uint64_t phys = physical_memory_try_alloc_frame();
             if (phys == 0) {
                 return reject("out of physical memory mapping a segment");
             }
@@ -251,16 +251,16 @@ uint64_t elf_load_at(uint64_t pml4_phys, const uint8_t *image, size_t image_size
             if (ph[i].p_flags & PF_X) {
                 seg_flags |= VMM_FLAG_EXEC;
             }
-            if (vmm_try_map_page_in(pml4_phys, page_va, phys, seg_flags) != 0) {
-                klog_debug("[elf] out of page tables mapping a segment\n");
+            if (virtual_memory_try_map_page_in(pml4_phys, page_va, phys, seg_flags) != 0) {
+                kernel_log_debug("[elf] out of page tables mapping a segment\n");
                 return 0;
             }
         }
     }
 
-    klog_debug("[elf] loaded, entry = 0x");
-    klog_log_hex64(KLOG_DEBUG, eh->e_entry + bias);
-    klog_debug("\n");
+    kernel_log_debug("[elf] loaded, entry = 0x");
+    kernel_log_log_hex64(KLOG_DEBUG, eh->e_entry + bias);
+    kernel_log_debug("\n");
 
     return eh->e_entry + bias;
 }

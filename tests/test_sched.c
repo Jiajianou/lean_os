@@ -25,7 +25,7 @@ void q13_boot(void) {
         return;
     }
     booted = 1;
-    sched_init();
+    scheduler_init();
     fake_arch_set_cpu(0);
 }
 
@@ -38,25 +38,25 @@ void q13_kill(task_t *t) {
         return;
     }
     fake_arch_set_cpu(0);
-    if (sched_current() == t) {
+    if (scheduler_current() == t) {
         t->state = TASK_TERMINATED;
         fake_arch_stand_on(t->kernel_stack_top ? t->kernel_stack_top - 64 : 0);
         schedule();
     }
     t->state = TASK_TERMINATED;
-    sched_reap_slot(t);
+    scheduler_reap_slot(t);
 }
 
 static void q13_tick(int cpu) {
     fake_arch_set_cpu(cpu);
-    task_t *cur = sched_current();
+    task_t *cur = scheduler_current();
     fake_arch_stand_on(cur && cur->kernel_stack_top
                            ? cur->kernel_stack_top - 64
                            : 0);
     scheduler_tick_cpu(cpu);
 }
 
-TEST(sched, the_constants_are_the_kernels_own) {
+TEST(scheduler, the_constants_are_the_kernels_own) {
     CHECK_EQ(MAX_TASKS, 128);
     CHECK_EQ(MAX_CPUS, 8);
     CHECK(MAX_FDS >= 128);
@@ -68,11 +68,11 @@ TEST(sched, the_constants_are_the_kernels_own) {
     int placed = 0;
     for (int i = 0; i < 200 && !placed; i++) {
         q13_tick(0);
-        placed = (sched_current() == a);
+        placed = (scheduler_current() == a);
     }
     REQUIRE(placed);
     int ticks = 0;
-    while (sched_current() == a && ticks < 64) {
+    while (scheduler_current() == a && ticks < 64) {
         q13_tick(0);
         ticks++;
     }
@@ -81,7 +81,7 @@ TEST(sched, the_constants_are_the_kernels_own) {
     q13_kill(b);
 }
 
-TEST(sched, every_runnable_task_gets_a_turn) {
+TEST(scheduler, every_runnable_task_gets_a_turn) {
     q13_boot();
     task_t *t[6];
     for (int i = 0; i < 6; i++) {
@@ -93,7 +93,7 @@ TEST(sched, every_runnable_task_gets_a_turn) {
     memset(seen, 0, sizeof(seen));
     for (int i = 0; i < 6 * Q13_QUANTUM * 4; i++) {
         q13_tick(0);
-        task_t *cur = sched_current();
+        task_t *cur = scheduler_current();
         for (int j = 0; j < 6; j++) {
             if (cur == t[j]) {
                 seen[j]++;
@@ -108,7 +108,7 @@ TEST(sched, every_runnable_task_gets_a_turn) {
     }
 }
 
-TEST(sched, slow_shares_within_one_quantum_at_every_task_count) {
+TEST(scheduler, slow_shares_within_one_quantum_at_every_task_count) {
     q13_boot();
     for (int n = 1; n <= 32; n++) {
         task_t *t[32];
@@ -121,7 +121,7 @@ TEST(sched, slow_shares_within_one_quantum_at_every_task_count) {
         memset(seen, 0, sizeof(seen));
         for (int i = 0; i < n * quanta * Q13_QUANTUM; i++) {
             q13_tick(0);
-            task_t *cur = sched_current();
+            task_t *cur = scheduler_current();
             for (int j = 0; j < n; j++) {
                 if (cur == t[j]) {
                     seen[j]++;
@@ -149,7 +149,7 @@ TEST(sched, slow_shares_within_one_quantum_at_every_task_count) {
     }
 }
 
-TEST(sched, a_blocked_task_is_not_runnable_and_a_wake_makes_it_so) {
+TEST(scheduler, a_blocked_task_is_not_runnable_and_a_wake_makes_it_so) {
     q13_boot();
     task_t *a = q13_spawn("a");
     task_t *b = q13_spawn("b");
@@ -160,17 +160,17 @@ TEST(sched, a_blocked_task_is_not_runnable_and_a_wake_makes_it_so) {
     int saw_b = 0;
     for (int i = 0; i < 40 * Q13_QUANTUM; i++) {
         q13_tick(0);
-        if (sched_current() == b) {
+        if (scheduler_current() == b) {
             saw_b = 1;
         }
     }
     CHECK_EQ(saw_b, 0);
 
-    sched_wake_task(b);
+    scheduler_wake_task(b);
     CHECK_EQ(b->state, TASK_READY);
     for (int i = 0; i < 40 * Q13_QUANTUM && !saw_b; i++) {
         q13_tick(0);
-        if (sched_current() == b) {
+        if (scheduler_current() == b) {
             saw_b = 1;
         }
     }
@@ -180,14 +180,14 @@ TEST(sched, a_blocked_task_is_not_runnable_and_a_wake_makes_it_so) {
     q13_kill(b);
 }
 
-TEST(sched, a_stopped_task_is_not_woken_by_anything_but_a_resume) {
+TEST(scheduler, a_stopped_task_is_not_woken_by_anything_but_a_resume) {
     q13_boot();
     task_t *a = q13_spawn("a");
     task_t *s = q13_spawn("stopped");
     REQUIRE(a != NULL);
     REQUIRE(s != NULL);
 
-    sched_raise_signal(s, SIGTSTP);
+    scheduler_raise_signal(s, SIGTSTP);
     CHECK_EQ(s->pending_stop, SIGTSTP);
     for (int i = 0; i < 60 * Q13_QUANTUM && s->state != TASK_STOPPED; i++) {
         q13_tick(0);
@@ -195,22 +195,22 @@ TEST(sched, a_stopped_task_is_not_woken_by_anything_but_a_resume) {
     CHECK_EQ(s->state, TASK_STOPPED);
     CHECK_EQ(s->pending_stop, 0);
 
-    sched_wake_task(s);
-    sched_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_task(s);
+    scheduler_wake_all(SCHED_POLL_CHAN);
     CHECK_EQ(s->state, TASK_STOPPED);
     for (int i = 0; i < 40 * Q13_QUANTUM; i++) {
         q13_tick(0);
-        CHECK_NE((long long)(uintptr_t)sched_current(), (long long)(uintptr_t)s);
+        CHECK_NE((long long)(uintptr_t)scheduler_current(), (long long)(uintptr_t)s);
     }
 
-    sched_resume_stopped(s);
+    scheduler_resume_stopped(s);
     CHECK_EQ(s->state, TASK_READY);
 
     q13_kill(a);
     q13_kill(s);
 }
 
-TEST(sched, a_stopped_task_can_still_be_killed) {
+TEST(scheduler, a_stopped_task_can_still_be_killed) {
     q13_boot();
     task_t *a = q13_spawn("a");
     task_t *s = q13_spawn("stopped");
@@ -218,7 +218,7 @@ TEST(sched, a_stopped_task_can_still_be_killed) {
     REQUIRE(s != NULL);
 
     s->state = TASK_STOPPED;
-    sched_raise_signal(s, SIGKILL);
+    scheduler_raise_signal(s, SIGKILL);
     CHECK_EQ(s->state, TASK_READY);
     CHECK_EQ(s->pending_signal, SIGKILL);
 
@@ -227,28 +227,28 @@ TEST(sched, a_stopped_task_can_still_be_killed) {
     q13_kill(s);
 }
 
-TEST(sched, sigcont_resumes_a_task_that_ignores_it) {
+TEST(scheduler, sigcont_resumes_a_task_that_ignores_it) {
     q13_boot();
     task_t *s = q13_spawn("ignorer");
     REQUIRE(s != NULL);
     s->sig_handler[SIGCONT] = SIG_IGN_ADDR;
     s->state = TASK_STOPPED;
-    sched_raise_signal(s, SIGCONT);
+    scheduler_raise_signal(s, SIGCONT);
     CHECK_EQ(s->state, TASK_READY);
     s->sig_handler[SIGCONT] = SIG_DFL_ADDR;
     q13_kill(s);
 }
 
-TEST(sched, a_pending_stop_is_cleared_by_sigcont_before_it_is_ever_taken) {
+TEST(scheduler, a_pending_stop_is_cleared_by_sigcont_before_it_is_ever_taken) {
     q13_boot();
     task_t *a = q13_spawn("a");
     task_t *s = q13_spawn("racer");
     REQUIRE(a != NULL);
     REQUIRE(s != NULL);
 
-    sched_raise_signal(s, SIGTSTP);
+    scheduler_raise_signal(s, SIGTSTP);
     CHECK_EQ(s->pending_stop, SIGTSTP);
-    sched_raise_signal(s, SIGCONT);
+    scheduler_raise_signal(s, SIGCONT);
     CHECK_EQ(s->pending_stop, 0);
     for (int i = 0; i < 40 * Q13_QUANTUM; i++) {
         q13_tick(0);
@@ -258,35 +258,35 @@ TEST(sched, a_pending_stop_is_cleared_by_sigcont_before_it_is_ever_taken) {
     q13_kill(s);
 }
 
-TEST(sched, the_disposition_decides_which_field_a_signal_lands_in) {
+TEST(scheduler, the_disposition_decides_which_field_a_signal_lands_in) {
     q13_boot();
     task_t *t = q13_spawn("dispositions");
     REQUIRE(t != NULL);
 
-    sched_raise_signal(t, SIGTERM);
+    scheduler_raise_signal(t, SIGTERM);
     CHECK_EQ(t->pending_signal, SIGTERM);
     CHECK_EQ(t->sig_pending, 0u);
     t->pending_signal = 0;
 
-    sched_raise_signal(t, SIGCHLD);
+    scheduler_raise_signal(t, SIGCHLD);
     CHECK_EQ(t->pending_signal, 0);
     CHECK_EQ(t->sig_pending, 0u);
 
     t->sig_handler[SIGTERM] = 0x1234;
-    sched_raise_signal(t, SIGTERM);
+    scheduler_raise_signal(t, SIGTERM);
     CHECK_EQ(t->pending_signal, 0);
     CHECK((t->sig_pending & (1u << SIGTERM)) != 0);
     t->sig_handler[SIGTERM] = SIG_DFL_ADDR;
     t->sig_pending = 0;
 
     t->sig_handler[SIGTERM] = SIG_IGN_ADDR;
-    sched_raise_signal(t, SIGTERM);
+    scheduler_raise_signal(t, SIGTERM);
     CHECK_EQ(t->pending_signal, 0);
     CHECK_EQ(t->sig_pending, 0u);
     t->sig_handler[SIGTERM] = SIG_DFL_ADDR;
 
     t->sig_handler[SIGKILL] = 0x1234;
-    sched_raise_signal(t, SIGKILL);
+    scheduler_raise_signal(t, SIGKILL);
     CHECK_EQ(t->pending_signal, SIGKILL);
     CHECK_EQ(t->sig_pending, 0u);
     t->pending_signal = 0;
@@ -295,34 +295,34 @@ TEST(sched, the_disposition_decides_which_field_a_signal_lands_in) {
     q13_kill(t);
 }
 
-TEST(sched, a_signal_number_outside_the_table_is_refused) {
+TEST(scheduler, a_signal_number_outside_the_table_is_refused) {
     q13_boot();
     task_t *t = q13_spawn("bounds");
     REQUIRE(t != NULL);
-    sched_raise_signal(t, 0);
-    sched_raise_signal(t, -1);
-    sched_raise_signal(t, SIG_MAX + 1);
-    sched_raise_signal(t, 100000);
+    scheduler_raise_signal(t, 0);
+    scheduler_raise_signal(t, -1);
+    scheduler_raise_signal(t, SIG_MAX + 1);
+    scheduler_raise_signal(t, 100000);
     CHECK_EQ(t->pending_signal, 0);
     CHECK_EQ(t->pending_stop, 0);
     CHECK_EQ(t->sig_pending, 0u);
     q13_kill(t);
 }
 
-TEST(sched, a_dead_task_absorbs_a_signal_rather_than_taking_it) {
+TEST(scheduler, a_dead_task_absorbs_a_signal_rather_than_taking_it) {
     q13_boot();
     task_t *t = q13_spawn("corpse");
     REQUIRE(t != NULL);
     t->state = TASK_TERMINATED;
-    sched_raise_signal(t, SIGKILL);
-    sched_raise_signal(t, SIGTSTP);
+    scheduler_raise_signal(t, SIGKILL);
+    scheduler_raise_signal(t, SIGTSTP);
     CHECK_EQ(t->state, TASK_TERMINATED);
     CHECK_EQ(t->pending_signal, 0);
     CHECK_EQ(t->pending_stop, 0);
-    sched_reap_slot(t);
+    scheduler_reap_slot(t);
 }
 
-TEST(sched, a_group_signal_reaches_every_member_and_nobody_else) {
+TEST(scheduler, a_group_signal_reaches_every_member_and_nobody_else) {
     q13_boot();
     task_t *in1 = q13_spawn("in1");
     task_t *in2 = q13_spawn("in2");
@@ -336,14 +336,14 @@ TEST(sched, a_group_signal_reaches_every_member_and_nobody_else) {
     in2->pgid = pg;
     out->pgid = out->id;
 
-    sched_raise_signal_group(pg, SIGINT);
+    scheduler_raise_signal_group(pg, SIGINT);
     CHECK_EQ(in1->pending_signal, SIGINT);
     CHECK_EQ(in2->pending_signal, SIGINT);
     CHECK_EQ(out->pending_signal, 0);
 
     in1->pending_signal = 0;
     in2->pending_signal = 0;
-    sched_raise_signal_group(0x7ffffff, SIGINT);
+    scheduler_raise_signal_group(0x7ffffff, SIGINT);
     CHECK_EQ(in1->pending_signal, 0);
     CHECK_EQ(in2->pending_signal, 0);
     CHECK_EQ(out->pending_signal, 0);
@@ -353,7 +353,7 @@ TEST(sched, a_group_signal_reaches_every_member_and_nobody_else) {
     q13_kill(out);
 }
 
-TEST(sched, a_slot_comes_back_and_the_recycled_pid_is_a_different_pid) {
+TEST(scheduler, a_slot_comes_back_and_the_recycled_pid_is_a_different_pid) {
     q13_boot();
     task_t *first = q13_spawn("first");
     REQUIRE(first != NULL);
@@ -365,12 +365,12 @@ TEST(sched, a_slot_comes_back_and_the_recycled_pid_is_a_different_pid) {
     REQUIRE(second != NULL);
     CHECK_EQ(PID_SLOT(second->id), slot);
     CHECK_NE(second->id, old_pid);
-    CHECK_EQ(sched_task_by_id(old_pid), NULL);
-    CHECK_EQ(sched_task_by_id(second->id), second);
+    CHECK_EQ(scheduler_task_by_id(old_pid), NULL);
+    CHECK_EQ(scheduler_task_by_id(second->id), second);
     q13_kill(second);
 }
 
-TEST(sched, a_recycled_slot_inherits_nothing_from_the_task_that_had_it) {
+TEST(scheduler, a_recycled_slot_inherits_nothing_from_the_task_that_had_it) {
     q13_boot();
     task_t *t = q13_spawn("leaver");
     REQUIRE(t != NULL);
@@ -399,7 +399,7 @@ TEST(sched, a_recycled_slot_inherits_nothing_from_the_task_that_had_it) {
     q13_kill(reused);
 }
 
-TEST(sched, a_reaped_childs_peak_resident_set_reaches_its_parent) {
+TEST(scheduler, a_reaped_childs_peak_resident_set_reaches_its_parent) {
     q13_boot();
     task_t *parent = q13_spawn("parent");
     task_t *child = q13_spawn("child");
@@ -409,14 +409,14 @@ TEST(sched, a_reaped_childs_peak_resident_set_reaches_its_parent) {
     child->max_rss_pages = 4096;
 
     child->state = TASK_TERMINATED;
-    sched_reap_slot(child);
+    scheduler_reap_slot(child);
 
     CHECK_EQ(parent->child_max_rss_pages, 4096u);
     CHECK_EQ(parent->max_rss_pages, 0u);
     q13_kill(parent);
 }
 
-TEST(sched, a_parent_keeps_the_largest_childs_peak_not_the_last_one) {
+TEST(scheduler, a_parent_keeps_the_largest_childs_peak_not_the_last_one) {
     q13_boot();
     task_t *parent = q13_spawn("parent");
     REQUIRE(parent != NULL);
@@ -428,7 +428,7 @@ TEST(sched, a_parent_keeps_the_largest_childs_peak_not_the_last_one) {
         c->parent_id = parent->id;
         c->max_rss_pages = peaks[i];
         c->state = TASK_TERMINATED;
-        sched_reap_slot(c);
+        scheduler_reap_slot(c);
     }
     CHECK_EQ(parent->child_max_rss_pages, 9000u);
 
@@ -437,31 +437,31 @@ TEST(sched, a_parent_keeps_the_largest_childs_peak_not_the_last_one) {
     mid->parent_id = parent->id;
     mid->child_max_rss_pages = 20000;
     mid->state = TASK_TERMINATED;
-    sched_reap_slot(mid);
+    scheduler_reap_slot(mid);
     CHECK_EQ(parent->child_max_rss_pages, 20000u);
     q13_kill(parent);
 }
 
-TEST(sched, a_joined_threads_peak_is_the_processs_own_not_a_childs) {
+TEST(scheduler, a_joined_threads_peak_is_the_processs_own_not_a_childs) {
     q13_boot();
-    task_t *proc = q13_spawn("proc");
-    REQUIRE(proc != NULL);
+    task_t *process = q13_spawn("proc");
+    REQUIRE(process != NULL);
     task_t *thread = q13_spawn("thread");
     REQUIRE(thread != NULL);
-    thread->parent_id = proc->id;
+    thread->parent_id = process->id;
     thread->is_thread = 1;
-    thread->tgid = proc->tgid;
+    thread->tgid = process->tgid;
     thread->max_rss_pages = 7777;
 
     thread->state = TASK_TERMINATED;
-    sched_reap_slot(thread);
+    scheduler_reap_slot(thread);
 
-    CHECK_EQ(proc->max_rss_pages, 7777u);
-    CHECK_EQ(proc->child_max_rss_pages, 0u);
-    q13_kill(proc);
+    CHECK_EQ(process->max_rss_pages, 7777u);
+    CHECK_EQ(process->child_max_rss_pages, 0u);
+    q13_kill(process);
 }
 
-TEST(sched, a_recycled_slot_reports_no_peak_from_the_task_before_it) {
+TEST(scheduler, a_recycled_slot_reports_no_peak_from_the_task_before_it) {
     q13_boot();
     task_t *t = q13_spawn("big");
     REQUIRE(t != NULL);
@@ -478,7 +478,7 @@ TEST(sched, a_recycled_slot_reports_no_peak_from_the_task_before_it) {
     q13_kill(reused);
 }
 
-TEST(sched, the_task_table_fills_and_recovers) {
+TEST(scheduler, the_task_table_fills_and_recovers) {
     q13_boot();
     task_t *held[MAX_TASKS];
     int n = 0;
@@ -499,34 +499,34 @@ TEST(sched, the_task_table_fills_and_recovers) {
     q13_kill(again);
 }
 
-TEST(sched, a_kernel_stack_goes_back_when_a_task_is_reaped) {
+TEST(scheduler, a_kernel_stack_goes_back_when_a_task_is_reaped) {
     q13_boot();
-    uint64_t before = fake_pmm_outstanding();
+    uint64_t before = fake_physical_memory_outstanding();
     task_t *t[8];
     for (int i = 0; i < 8; i++) {
         t[i] = q13_spawn("stacky");
         REQUIRE(t[i] != NULL);
     }
-    CHECK(fake_pmm_outstanding() > before);
+    CHECK(fake_physical_memory_outstanding() > before);
     for (int i = 0; i < 8; i++) {
         q13_kill(t[i]);
     }
-    CHECK_EQ(fake_pmm_outstanding(), before);
+    CHECK_EQ(fake_physical_memory_outstanding(), before);
 }
 
-TEST(sched, a_spawn_that_cannot_get_a_stack_returns_null) {
+TEST(scheduler, a_spawn_that_cannot_get_a_stack_returns_null) {
     q13_boot();
-    uint64_t allocs = fake_pmm_total_allocs();
-    fake_pmm_fail_after((int64_t)allocs);
+    uint64_t allocs = fake_physical_memory_total_allocs();
+    fake_physical_memory_fail_after((int64_t)allocs);
     task_t *t = q13_spawn("starved");
     CHECK_EQ(t, NULL);
-    fake_pmm_fail_after(-1);
+    fake_physical_memory_fail_after(-1);
     task_t *ok = q13_spawn("fed");
     CHECK(ok != NULL);
     q13_kill(ok);
 }
 
-TEST(sched, a_dying_task_gives_back_every_descriptor_it_held) {
+TEST(scheduler, a_dying_task_gives_back_every_descriptor_it_held) {
     q13_boot();
     task_t *t = q13_spawn("holder");
     REQUIRE(t != NULL);
@@ -537,25 +537,25 @@ TEST(sched, a_dying_task_gives_back_every_descriptor_it_held) {
     t->fds[4].type = FD_PIPE_WRITE;
     t->fds[4].pipe = (struct pipe *)0x1000;
     t->fds[5].type = FD_FILE;
-    t->fds[5].file = (struct openfile *)0x2000;
+    t->fds[5].file = (struct open_file *)0x2000;
     t->fds[6].type = FD_SOCKET;
     t->fds[6].sock = (struct socket *)0x3000;
 
-    sched_release_fds(t);
+    scheduler_release_file_descriptors(t);
     CHECK_EQ(fake_objects_pipe_read_refs(), -1);
     CHECK_EQ(fake_objects_pipe_write_refs(), -1);
     CHECK_EQ(fake_objects_file_refs(), -1);
     CHECK_EQ(fake_objects_socket_refs(), -1);
     CHECK_EQ(t->fds[3].type, FD_NONE);
     CHECK_EQ(t->fds[6].type, FD_NONE);
-    sched_release_fds(t);
+    scheduler_release_file_descriptors(t);
     CHECK_EQ(fake_objects_pipe_read_refs(), -1);
     CHECK_EQ(fake_objects_socket_refs(), -1);
 
     q13_kill(t);
 }
 
-TEST(sched, a_dying_task_gives_back_every_record_lock_it_held) {
+TEST(scheduler, a_dying_task_gives_back_every_record_lock_it_held) {
     q13_boot();
     task_t *t = q13_spawn("locker");
     task_t *u = q13_spawn("bystander");
@@ -570,14 +570,14 @@ TEST(sched, a_dying_task_gives_back_every_record_lock_it_held) {
     CHECK_EQ(flock_set(11, u->id, OS_FLOCK_WR, 50, 10), 0);
     CHECK_EQ(flock_count(), before + 3);
 
-    sched_release_fds(t);
+    scheduler_release_file_descriptors(t);
     CHECK_EQ(flock_count(), before + 1);
     os_flock_t who;
     CHECK_EQ(flock_test(11, 0, OS_FLOCK_WR, 0, 10, &who), 0);
     CHECK_EQ(flock_test(11, 0, OS_FLOCK_WR, 50, 10, &who), 1);
     CHECK_EQ(who.pid, u->id);
 
-    sched_release_fds(t);
+    scheduler_release_file_descriptors(t);
     CHECK_EQ(flock_count(), before + 1);
 
     flock_release_pid(u->id);
@@ -586,7 +586,7 @@ TEST(sched, a_dying_task_gives_back_every_record_lock_it_held) {
     q13_kill(u);
 }
 
-TEST(sched, a_fork_inherits_what_it_must_and_nothing_it_must_not) {
+TEST(scheduler, a_fork_inherits_what_it_must_and_nothing_it_must_not) {
     q13_boot();
     task_t *parent = q13_spawn("parent");
     REQUIRE(parent != NULL);
@@ -603,7 +603,7 @@ TEST(sched, a_fork_inherits_what_it_must_and_nothing_it_must_not) {
     parent->sys_ticks = 5678;
     memcpy(parent->cwd, "/somewhere", sizeof("/somewhere"));
 
-    task_t *saved = sched_current();
+    task_t *saved = scheduler_current();
     (void)saved;
     isr_regs_t regs;
     memset(&regs, 0, sizeof(regs));
@@ -612,7 +612,7 @@ TEST(sched, a_fork_inherits_what_it_must_and_nothing_it_must_not) {
     int placed = 0;
     for (int i = 0; i < 200 * Q13_QUANTUM && !placed; i++) {
         q13_tick(0);
-        placed = (sched_current() == parent);
+        placed = (scheduler_current() == parent);
     }
     REQUIRE(placed);
 
@@ -641,7 +641,7 @@ TEST(sched, a_fork_inherits_what_it_must_and_nothing_it_must_not) {
     q13_kill(parent);
 }
 
-TEST(sched, switching_away_from_a_stack_this_cpu_is_not_on_is_a_panic) {
+TEST(scheduler, switching_away_from_a_stack_this_cpu_is_not_on_is_a_panic) {
     q13_boot();
     task_t *a = q13_spawn("a");
     task_t *b = q13_spawn("b");
@@ -651,7 +651,7 @@ TEST(sched, switching_away_from_a_stack_this_cpu_is_not_on_is_a_panic) {
     int placed = 0;
     for (int i = 0; i < 200 * Q13_QUANTUM && !placed; i++) {
         q13_tick(0);
-        placed = (sched_current() == a);
+        placed = (scheduler_current() == a);
     }
     REQUIRE(placed);
 
@@ -668,7 +668,7 @@ TEST(sched, switching_away_from_a_stack_this_cpu_is_not_on_is_a_panic) {
     q13_kill(b);
 }
 
-TEST(sched, a_woken_task_still_current_on_another_cpu_is_not_picked) {
+TEST(scheduler, a_woken_task_still_current_on_another_cpu_is_not_picked) {
     q13_boot();
     task_t *w = q13_spawn("w");
     task_t *f = q13_spawn("f");
@@ -679,26 +679,26 @@ TEST(sched, a_woken_task_still_current_on_another_cpu_is_not_picked) {
     if (!cpu1_up) {
         cpu1_up = 1;
         fake_arch_set_cpu(1);
-        sched_init_ap(1);
+        scheduler_init_ap(1);
     }
 
     int placed = 0;
     for (int i = 0; i < 200 * Q13_QUANTUM && !placed; i++) {
         q13_tick(1);
         fake_arch_set_cpu(1);
-        placed = (sched_current() == w);
+        placed = (scheduler_current() == w);
     }
     REQUIRE(placed);
 
     w->state = TASK_BLOCKED;
-    sched_wake_task(w);
+    scheduler_wake_task(w);
     CHECK_EQ(w->state, TASK_READY);
 
     int stolen = 0;
     for (int i = 0; i < 40 * Q13_QUANTUM; i++) {
         q13_tick(0);
         fake_arch_set_cpu(0);
-        if (sched_current() == w) {
+        if (scheduler_current() == w) {
             stolen = 1;
         }
     }
@@ -708,24 +708,24 @@ TEST(sched, a_woken_task_still_current_on_another_cpu_is_not_picked) {
     for (int i = 0; i < 4 * Q13_QUANTUM; i++) {
         q13_tick(1);
         fake_arch_set_cpu(1);
-        if (sched_current() != w) {
+        if (scheduler_current() != w) {
             break;
         }
     }
     fake_arch_set_cpu(1);
-    REQUIRE(sched_current() != w);
-    sched_wake_task(w);
+    REQUIRE(scheduler_current() != w);
+    scheduler_wake_task(w);
     int picked = 0;
     for (int i = 0; i < 200 * Q13_QUANTUM && !picked; i++) {
         q13_tick(0);
         fake_arch_set_cpu(0);
-        picked = (sched_current() == w);
+        picked = (scheduler_current() == w);
     }
     CHECK_EQ(picked, 1);
 
     for (int i = 0; i < 200 * Q13_QUANTUM; i++) {
         fake_arch_set_cpu(0);
-        if (sched_current() != w) {
+        if (scheduler_current() != w) {
             break;
         }
         w->state = TASK_READY;
@@ -733,7 +733,7 @@ TEST(sched, a_woken_task_still_current_on_another_cpu_is_not_picked) {
     }
     for (int i = 0; i < 4 * Q13_QUANTUM; i++) {
         fake_arch_set_cpu(1);
-        task_t *cur = sched_current();
+        task_t *cur = scheduler_current();
         if (!cur || cur->is_idle) {
             break;
         }
@@ -745,7 +745,7 @@ TEST(sched, a_woken_task_still_current_on_another_cpu_is_not_picked) {
     q13_kill(f);
 }
 
-TEST(sched, a_switch_loads_the_incoming_tasks_thread_pointer) {
+TEST(scheduler, a_switch_loads_the_incoming_tasks_thread_pointer) {
     q13_boot();
     task_t *a = q13_spawn("tls-a");
     task_t *b = q13_spawn("tls-b");
@@ -756,7 +756,7 @@ TEST(sched, a_switch_loads_the_incoming_tasks_thread_pointer) {
 
     for (int i = 0; i < 400 * Q13_QUANTUM; i++) {
         q13_tick(0);
-        task_t *cur = sched_current();
+        task_t *cur = scheduler_current();
         if (cur == a) {
             CHECK_EQ(fake_cpu_last_msr(MSR_FS_BASE), 0xAAAA0000u);
         } else if (cur == b) {
@@ -768,7 +768,7 @@ TEST(sched, a_switch_loads_the_incoming_tasks_thread_pointer) {
     q13_kill(b);
 }
 
-TEST(sched, taking_two_locks_in_both_orders_is_caught) {
+TEST(scheduler, taking_two_locks_in_both_orders_is_caught) {
 
     static spinlock_t a, b;
     a.locked = 0;

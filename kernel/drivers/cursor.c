@@ -27,7 +27,7 @@ static void erase(void) {
     }
     for (uint32_t y = 0; y < CURSOR_SIZE; y++) {
         for (uint32_t x = 0; x < CURSOR_SIZE; x++) {
-            fb_put_pixel((uint32_t)cx + x, (uint32_t)cy + y, saved[y][x]);
+            framebuffer_put_pixel((uint32_t)cx + x, (uint32_t)cy + y, saved[y][x]);
         }
     }
     drawn = 0;
@@ -39,9 +39,9 @@ static void draw(void) {
         for (uint32_t x = 0; x < CURSOR_SIZE; x++) {
             uint32_t px = (uint32_t)cx + x;
             uint32_t py = (uint32_t)cy + y;
-            saved[y][x] = fb_get_pixel(px, py);
+            saved[y][x] = framebuffer_get_pixel(px, py);
             if (row & (0x80 >> x)) {
-                fb_put_pixel(px, py, CURSOR_COLOR);
+                framebuffer_put_pixel(px, py, CURSOR_COLOR);
             }
         }
     }
@@ -49,8 +49,8 @@ static void draw(void) {
 }
 
 static void clamp_to_screen(void) {
-    int32_t maxx = (int32_t)fb_width() - CURSOR_SIZE;
-    int32_t maxy = (int32_t)fb_height() - CURSOR_SIZE;
+    int32_t maxx = (int32_t)framebuffer_width() - CURSOR_SIZE;
+    int32_t maxy = (int32_t)framebuffer_height() - CURSOR_SIZE;
     if (cx < 0) {
         cx = 0;
     }

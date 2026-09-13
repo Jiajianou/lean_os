@@ -9,7 +9,7 @@ static spinlock_t epoll_lock;
 typedef struct {
     int used;
     int fd;
-    const void *obj;
+    const void *object;
     uint32_t events;
     uint64_t data;
     uint32_t last;
@@ -47,7 +47,7 @@ struct epoll *epoll_create_set(void) {
     return ep;
 }
 
-void epoll_ref(struct epoll *ep) {
+void epoll_reference(struct epoll *ep) {
     if (!ep) {
         return;
     }
@@ -80,7 +80,7 @@ static epoll_watch_t *find(epoll_t *ep, int fd) {
     return (epoll_watch_t *)0;
 }
 
-int epoll_ctl_set(struct epoll *ep, int op, int fd, const void *obj,
+int epoll_control_set(struct epoll *ep, int op, int fd, const void *object,
                   uint32_t events, uint64_t data) {
     if (!ep || fd < 0) {
         return -1;
@@ -97,7 +97,7 @@ int epoll_ctl_set(struct epoll *ep, int op, int fd, const void *obj,
             if (!ep->w[i].used) {
                 ep->w[i].used = 1;
                 ep->w[i].fd = fd;
-                ep->w[i].obj = obj;
+                ep->w[i].object = object;
                 ep->w[i].events = events;
                 ep->w[i].data = data;
                 ep->w[i].last = 0;
@@ -113,7 +113,7 @@ int epoll_ctl_set(struct epoll *ep, int op, int fd, const void *obj,
         }
         w->events = events;
         w->data = data;
-        w->obj = obj;
+        w->object = object;
         w->last = 0;
         w->disarmed = 0;
         rc = 0;
@@ -123,7 +123,7 @@ int epoll_ctl_set(struct epoll *ep, int op, int fd, const void *obj,
             break;
         }
         w->used = 0;
-        w->obj = (const void *)0;
+        w->object = (const void *)0;
         rc = 0;
         break;
     default:
@@ -148,9 +148,9 @@ int epoll_watch_count(const struct epoll *ep) {
     return n;
 }
 
-int epoll_scan(struct epoll *ep, epoll_mask_fn mask_fn, void *ctx,
+int epoll_scan(struct epoll *ep, epoll_mask_function mask_function, void *context,
                epoll_ev_t *out, int max) {
-    if (!ep || !mask_fn || !out || max <= 0) {
+    if (!ep || !mask_function || !out || max <= 0) {
         return 0;
     }
     int n = 0;
@@ -163,12 +163,12 @@ int epoll_scan(struct epoll *ep, epoll_mask_fn mask_fn, void *ctx,
         epoll_watch_t snap = ep->w[i];
         spin_unlock_irqrestore(&epoll_lock, f);
 
-        uint32_t mask = mask_fn(ctx, snap.fd, snap.obj);
+        uint32_t mask = mask_function(context, snap.fd, snap.object);
         if (mask == EPOLL_STALE) {
             f = spin_lock_irqsave(&epoll_lock);
-            if (ep->w[i].used && ep->w[i].fd == snap.fd && ep->w[i].obj == snap.obj) {
+            if (ep->w[i].used && ep->w[i].fd == snap.fd && ep->w[i].object == snap.object) {
                 ep->w[i].used = 0;
-                ep->w[i].obj = (const void *)0;
+                ep->w[i].object = (const void *)0;
             }
             spin_unlock_irqrestore(&epoll_lock, f);
             continue;
@@ -198,7 +198,7 @@ int epoll_scan(struct epoll *ep, epoll_mask_fn mask_fn, void *ctx,
         out[n].data = snap.data;
         n++;
         f = spin_lock_irqsave(&epoll_lock);
-        if (ep->w[i].used && ep->w[i].fd == snap.fd && ep->w[i].obj == snap.obj) {
+        if (ep->w[i].used && ep->w[i].fd == snap.fd && ep->w[i].object == snap.object) {
             ep->w[i].last |= hit;
             if (snap.events & EPOLLONESHOT) {
                 ep->w[i].disarmed = 1;

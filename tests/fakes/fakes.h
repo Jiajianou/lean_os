@@ -3,29 +3,29 @@
 #include <stdint.h>
 #include <stddef.h>
 
-void fake_pmm_reset(void);
-void fake_pmm_fail_after(int64_t n);
-uint64_t fake_pmm_outstanding(void);
-uint64_t fake_pmm_total_allocs(void);
+void fake_physical_memory_reset(void);
+void fake_physical_memory_fail_after(int64_t n);
+uint64_t fake_physical_memory_outstanding(void);
+uint64_t fake_physical_memory_total_allocs(void);
 
-void fake_vmm_reset(void);
-uint64_t fake_vmm_mapped_pages(void);
-void fake_vmm_fail_map_after(int n);
+void fake_virtual_memory_reset(void);
+uint64_t fake_virtual_memory_mapped_pages(void);
+void fake_virtual_memory_fail_map_after(int n);
 
-void klog_capture_reset(void);
-const char *klog_capture(void);
-int klog_capture_contains(const char *needle);
+void kernel_log_capture_reset(void);
+const char *kernel_log_capture(void);
+int kernel_log_capture_contains(const char *needle);
 
-void fake_blk_reset(uint32_t sectors);
-void fake_blk_free(void);
-void fake_blk_reset_counters(void);
-uint64_t fake_blk_reads(void);
-uint64_t fake_blk_writes(void);
-uint8_t *fake_blk_sector(uint32_t lba);
-uint32_t fake_blk_sector_count(void);
-void fake_blk_fail_writes_after(int64_t n);
-void fake_blk_fail_writes_silently_after(int64_t n);
-void fake_blk_fail_reads_after(int64_t n);
+void fake_block_device_reset(uint32_t sectors);
+void fake_block_device_free(void);
+void fake_block_device_reset_counters(void);
+uint64_t fake_block_device_reads(void);
+uint64_t fake_block_device_writes(void);
+uint8_t *fake_block_device_sector(uint32_t lba);
+uint32_t fake_block_device_sector_count(void);
+void fake_block_device_fail_writes_after(int64_t n);
+void fake_block_device_fail_writes_silently_after(int64_t n);
+void fake_block_device_fail_reads_after(int64_t n);
 
 void fake_net_reset(void);
 int fake_net_tx_count(void);
@@ -50,9 +50,9 @@ void fake_pci_set_bar(int handle, int index, uint32_t value, uint32_t size_mask)
 
 void fake_socket_reset(void);
 int fake_socket_delivered_count(void);
-const uint8_t *fake_socket_delivered(int i, uint32_t *len_out, uint16_t *dst_port_out);
-uint16_t fake_socket_delivered_src_port(int i);
-uint32_t fake_socket_delivered_src_ip(int i);
+const uint8_t *fake_socket_delivered(int i, uint32_t *len_out, uint16_t *destination_port_out);
+uint16_t fake_socket_delivered_source_port(int i);
+uint32_t fake_socket_delivered_source_ip(int i);
 
 void fake_spinlock_release_all(void);
 int fake_spinlock_order_pairs(void);
@@ -72,15 +72,15 @@ int fake_objects_pipe_write_refs(void);
 int fake_objects_file_refs(void);
 int fake_objects_socket_refs(void);
 int fake_objects_address_spaces_destroyed(void);
-int fake_objects_shm_frees(void);
+int fake_objects_shared_memory_frees(void);
 
 void fake_user_heap_reset(void);
 void fake_user_sbrk_refuse(int on);
 size_t fake_user_heap_used(void);
 
-uint64_t fake_vmm_cow_breaks(void);
-uint64_t fake_vmm_unmaps_in(void);
-void fake_vmm_set_rss_peak(uint64_t pages);
+uint64_t fake_virtual_memory_cow_breaks(void);
+uint64_t fake_virtual_memory_unmaps_in(void);
+void fake_virtual_memory_set_rss_peak(uint64_t pages);
 
 void fake_user_fs_reset(void);
 int fake_user_fs_mkdir(const char *guest);

@@ -47,28 +47,28 @@ static const uint8_t *find_option(const uint8_t *msg, uint16_t len, uint8_t code
         if ((uint16_t)(i + 2) > len) {
             return (const uint8_t *)0;
         }
-        uint8_t opt_len = msg[i + 1];
-        if ((uint32_t)i + 2 + opt_len > len) {
+        uint8_t opt_length = msg[i + 1];
+        if ((uint32_t)i + 2 + opt_length > len) {
             return (const uint8_t *)0;
         }
         if (opt == code) {
-            *len_out = opt_len;
+            *len_out = opt_length;
             return msg + i + 2;
         }
-        i = (uint16_t)(i + 2 + opt_len);
+        i = (uint16_t)(i + 2 + opt_length);
     }
     return (const uint8_t *)0;
 }
 
 static volatile int have_reply;
-static volatile uint16_t reply_len;
+static volatile uint16_t reply_length;
 #define DHCP_MAX_MESSAGE 576
 static uint8_t reply[DHCP_MAX_MESSAGE];
 static uint32_t our_xid;
 
-static void dhcp_receive(uint32_t src_ip, uint16_t src_port, const uint8_t *data, uint16_t len) {
-    (void)src_ip;
-    (void)src_port;
+static void dhcp_receive(uint32_t source_ip, uint16_t source_port, const uint8_t *data, uint16_t len) {
+    (void)source_ip;
+    (void)source_port;
     if (have_reply || len < DHCP_MIN_LEN || len > sizeof(reply)) {
         return;
     }
@@ -76,7 +76,7 @@ static void dhcp_receive(uint32_t src_ip, uint16_t src_port, const uint8_t *data
         return;
     }
     k_memcpy(reply, data, len);
-    reply_len = len;
+    reply_length = len;
     have_reply = 1;
 }
 
@@ -127,9 +127,9 @@ static int exchange(const uint8_t *msg, uint16_t len, uint8_t want, uint32_t ms)
     uint64_t deadline = pit_get_ticks() + (uint64_t)ms * PIT_HZ / 1000;
     while (pit_get_ticks() < deadline) {
         if (have_reply) {
-            uint8_t opt_len = 0;
-            const uint8_t *type = find_option(reply, reply_len, OPT_MESSAGE_TYPE, &opt_len);
-            if (type && opt_len == 1 && type[0] == want) {
+            uint8_t opt_length = 0;
+            const uint8_t *type = find_option(reply, reply_length, OPT_MESSAGE_TYPE, &opt_length);
+            if (type && opt_length == 1 && type[0] == want) {
                 return 1;
             }
             have_reply = 0;
@@ -141,7 +141,7 @@ static int exchange(const uint8_t *msg, uint16_t len, uint8_t want, uint32_t ms)
 
 static uint32_t option_ip(uint8_t code) {
     uint8_t len = 0;
-    const uint8_t *v = find_option(reply, reply_len, code, &len);
+    const uint8_t *v = find_option(reply, reply_length, code, &len);
     return (v && len >= 4) ? net_read_be32(v) : 0;
 }
 

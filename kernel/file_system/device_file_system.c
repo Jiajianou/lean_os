@@ -73,7 +73,7 @@ static int dev_exists(const char *rel) {
     return lookup(rel) >= 0;
 }
 
-static int dev_is_dir(const char *rel) {
+static int dev_is_directory(const char *rel) {
     int c = lookup(rel);
     return (c == DEV_DIR || c == DEV_PTS_DIR);
 }
@@ -183,7 +183,7 @@ static int64_t dev_write(int handle, const void *buf, size_t len, uint32_t off) 
     case DEV_TTY:
     case DEV_CONSOLE:
         for (size_t i = 0; i < len; i++) {
-            klog_putc(b[i]);
+            kernel_log_putc(b[i]);
         }
         return (int64_t)len;
     default:
@@ -228,7 +228,7 @@ static struct tty *dev_tty_of(int handle, int *pty_number) {
     return (struct tty *)0;
 }
 
-static int dev_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *out) {
+static int dev_readdir(const char *rel, uint32_t *cookie, leanfs_directory_entry_t *out) {
     int c = lookup(rel);
     if (c == DEV_PTS_DIR) {
         for (uint32_t n = *cookie; n < PTY_MAX; n++) {
@@ -271,9 +271,9 @@ static int dev_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *ou
     return 1;
 }
 
-static const vfs_ops_t DEVFS_OPS = {
+static const virtual_file_system_ops_t DEVFS_OPS = {
     .stat = dev_stat,
-    .is_dir = dev_is_dir,
+    .is_dir = dev_is_directory,
     .exists = dev_exists,
     .open = dev_open,
     .read = dev_read,
@@ -286,6 +286,6 @@ static const vfs_ops_t DEVFS_OPS = {
     .tty_of = dev_tty_of,
 };
 
-const vfs_ops_t *devfs_ops(void) {
+const virtual_file_system_ops_t *devfs_ops(void) {
     return &DEVFS_OPS;
 }

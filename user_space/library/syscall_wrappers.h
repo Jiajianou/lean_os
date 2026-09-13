@@ -86,23 +86,23 @@ long sys_unlink(const char *path);
 
 long sys_rename(const char *old_path, const char *new_path);
 
-long sys_shm_unmap(void *vaddr, unsigned long bytes);
+long sys_shared_memory_unmap(void *vaddr, unsigned long bytes);
 
 long sys_kill(long pid, int sig);
 
-long sys_pipe(int fds_out[2]);
+long sys_pipe(int file_descriptors_out[2]);
 
 long sys_getpgid(long pid);
 
 long sys_sbrk(long increment);
 
-long sys_shm_create(size_t size);
+long sys_shared_memory_create(size_t size);
 
-long sys_shm_map(long id);
+long sys_shared_memory_map(long id);
 
-long sys_fb_info(wm_fb_info_t *out);
+long sys_framebuffer_info(wm_fb_info_t *out);
 
-long sys_fb_map(void);
+long sys_framebuffer_map(void);
 
 long sys_display_modes(display_mode_t *out, long max);
 
@@ -135,7 +135,7 @@ long sys_recvfrom(int fd, void *data, uint32_t max, os_sockaddr_t *from);
 long sys_sockpoll(int fd);
 long sys_netconf(os_netconf_t *out);
 
-long sys_socketpair(int type, int fds_out[2]);
+long sys_socketpair(int type, int file_descriptors_out[2]);
 long sys_bindun(int fd, const char *name, int len);
 long sys_connectun(int fd, const char *name, int len);
 long sys_sendmsg(int fd, const os_msg_t *msg, int flags);
@@ -163,9 +163,9 @@ long sys_audio_play(const int16_t *samples, uint32_t frames);
 
 long sys_mouse_read(mouse_event_t *out);
 
-long sys_pipe_open(const char *name, int fds_out[2]);
+long sys_pipe_open(const char *name, int file_descriptors_out[2]);
 
-long sys_kbd_read(char *out);
+long sys_keyboard_read(char *out);
 
 long sys_pipe_poll(int fd);
 
@@ -190,7 +190,7 @@ long sys_task_alive(long pid);
 
 long sys_pipe_reset(int fd);
 
-long sys_kbd_modifiers(void);
+long sys_keyboard_modifiers(void);
 
 long sys_clipboard_set(const void *buf, size_t len);
 long sys_clipboard_get(void *buf, size_t maxlen);
@@ -205,4 +205,4 @@ long sys_shutdown(int mode);
 
 long sys_close(int fd);
 
-long sys_shm_free(long id, void *vaddr);
+long sys_shared_memory_free(long id, void *vaddr);

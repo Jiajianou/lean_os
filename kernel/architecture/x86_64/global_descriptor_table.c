@@ -36,7 +36,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint16_t limit;
     uint64_t base;
-} table_ptr_t;
+} table_pointer_t;
 
 typedef struct __attribute__((packed)) {
     uint32_t reserved0;
@@ -59,10 +59,10 @@ typedef struct __attribute__((packed)) {
 
 static gdt_table_t gdt;
 static tss_t tss[MAX_CPUS];
-static table_ptr_t gdtp;
+static table_pointer_t gdtp;
 static uint8_t double_fault_stack[MAX_CPUS][DOUBLE_FAULT_STACK_SIZE] __attribute__((aligned(16)));
 
-extern void gdt_flush(table_ptr_t *ptr);
+extern void gdt_flush(table_pointer_t *ptr);
 extern void tss_flush(uint16_t selector);
 
 static void gdt_set_entry(gdt_entry_t *e, uint8_t access, uint8_t granularity) {
@@ -122,7 +122,7 @@ void tss_set_rsp0(int cpu_id, uint64_t rsp0) {
     tss[cpu_id].rsp0 = rsp0;
 }
 
-void gdt_get_table_ptr(uint16_t *limit_out, uint64_t *base_out) {
+void gdt_get_table_pointer(uint16_t *limit_out, uint64_t *base_out) {
     *limit_out = gdtp.limit;
     *base_out = gdtp.base;
 }

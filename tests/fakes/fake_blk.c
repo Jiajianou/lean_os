@@ -1,4 +1,4 @@
-#include "drivers/block.h"
+#include "drivers/block_device.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -15,18 +15,18 @@ static int64_t fail_reads_after = -1;
 static int silent_writes;
 static uint64_t errors;
 
-void fake_blk_reset(uint32_t sectors);
-void fake_blk_free(void);
-void fake_blk_reset_counters(void);
-uint64_t fake_blk_reads(void);
-uint64_t fake_blk_writes(void);
-uint8_t *fake_blk_sector(uint32_t lba);
-uint32_t fake_blk_sector_count(void);
-void fake_blk_fail_writes_after(int64_t n);
-void fake_blk_fail_writes_silently_after(int64_t n);
-void fake_blk_fail_reads_after(int64_t n);
+void fake_block_device_reset(uint32_t sectors);
+void fake_block_device_free(void);
+void fake_block_device_reset_counters(void);
+uint64_t fake_block_device_reads(void);
+uint64_t fake_block_device_writes(void);
+uint8_t *fake_block_device_sector(uint32_t lba);
+uint32_t fake_block_device_sector_count(void);
+void fake_block_device_fail_writes_after(int64_t n);
+void fake_block_device_fail_writes_silently_after(int64_t n);
+void fake_block_device_fail_reads_after(int64_t n);
 
-void fake_blk_reset(uint32_t sectors) {
+void fake_block_device_reset(uint32_t sectors) {
     if (disk && disk_sectors == sectors) {
         memset(disk, 0, (size_t)sectors * BLK_SECTOR_SIZE);
     } else {
@@ -44,29 +44,29 @@ void fake_blk_reset(uint32_t sectors) {
     errors = 0;
 }
 
-void fake_blk_free(void) {
+void fake_block_device_free(void) {
     free(disk);
     disk = NULL;
     disk_sectors = 0;
 }
 
-void fake_blk_reset_counters(void) { reads = writes = 0; }
-uint64_t fake_blk_reads(void) { return reads; }
-uint64_t fake_blk_writes(void) { return writes; }
-uint32_t fake_blk_sector_count(void) { return disk_sectors; }
-void fake_blk_fail_writes_after(int64_t n) {
+void fake_block_device_reset_counters(void) { reads = writes = 0; }
+uint64_t fake_block_device_reads(void) { return reads; }
+uint64_t fake_block_device_writes(void) { return writes; }
+uint32_t fake_block_device_sector_count(void) { return disk_sectors; }
+void fake_block_device_fail_writes_after(int64_t n) {
     fail_writes_after = n;
     silent_writes = 0;
 }
 
-void fake_blk_fail_writes_silently_after(int64_t n) {
+void fake_block_device_fail_writes_silently_after(int64_t n) {
     fail_writes_after = n;
     silent_writes = 1;
 }
 
-void fake_blk_fail_reads_after(int64_t n) { fail_reads_after = n; }
+void fake_block_device_fail_reads_after(int64_t n) { fail_reads_after = n; }
 
-uint8_t *fake_blk_sector(uint32_t lba) {
+uint8_t *fake_block_device_sector(uint32_t lba) {
     if (!disk || lba >= disk_sectors) {
         panic("fake_blk_sector: out of range");
     }
@@ -82,7 +82,7 @@ static void range_check(uint32_t lba, uint32_t count, const char *what) {
     }
 }
 
-int blk_read(uint32_t lba, uint32_t count, void *buf) {
+int block_device_read(uint32_t lba, uint32_t count, void *buf) {
     range_check(lba, count, "fake_blk: read past the end of the disk");
     if (fail_reads_after >= 0 && (int64_t)reads >= fail_reads_after) {
         memset(buf, 0, (size_t)count * BLK_SECTOR_SIZE);
@@ -95,7 +95,7 @@ int blk_read(uint32_t lba, uint32_t count, void *buf) {
     return 0;
 }
 
-int blk_write(uint32_t lba, uint32_t count, const void *buf) {
+int block_device_write(uint32_t lba, uint32_t count, const void *buf) {
     range_check(lba, count, "fake_blk: write past the end of the disk");
     if (fail_writes_after >= 0 && (int64_t)writes >= fail_writes_after) {
         writes += count;
@@ -107,11 +107,11 @@ int blk_write(uint32_t lba, uint32_t count, const void *buf) {
     return 0;
 }
 
-void blk_init(void) {}
-const char *blk_backend_name(void) { return "fake-ram"; }
-void blk_cache_drop(void) {}
+void block_device_init(void) {}
+const char *block_device_backend_name(void) { return "fake-ram"; }
+void block_device_cache_drop(void) {}
 
-void blk_stats(blk_stats_t *out) {
+void block_device_statistics(block_device_statistics_t *out) {
     if (!out) {
         return;
     }
@@ -121,20 +121,20 @@ void blk_stats(blk_stats_t *out) {
     out->device_writes = writes;
 }
 
-int blk_flush(void) {
+int block_device_flush(void) {
     return 0;
 }
 
-void blk_fault_inject(int64_t reads_after, int64_t writes_after) {
+void block_device_fault_inject(int64_t reads_after, int64_t writes_after) {
     fail_reads_after = reads_after;
     fail_writes_after = writes_after;
     silent_writes = 0;
 }
 
-uint64_t blk_error_count(void) {
+uint64_t block_device_error_count(void) {
     return errors;
 }
 
-void blk_set_readahead(uint32_t lines) {
+void block_device_set_readahead(uint32_t lines) {
     (void)lines;
 }

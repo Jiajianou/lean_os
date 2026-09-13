@@ -53,7 +53,7 @@ int main(int argc, char **argv) {
         sys_yield();
     }
 
-    static const char resp[] =
+    static const char response[] =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/plain\r\n"
         "Content-Length: 35\r\n"
@@ -61,10 +61,10 @@ int main(int argc, char **argv) {
         "\r\n"
         BODY;
     long sent = 0;
-    long slen = (long)sizeof(resp) - 1;
+    long slen = (long)sizeof(response) - 1;
     long sdeadline = sys_uptime_ms() + 5000;
     while (sent < slen && sys_uptime_ms() < sdeadline) {
-        long n = sys_send(cs, resp + sent, (uint32_t)(slen - sent));
+        long n = sys_send(cs, response + sent, (uint32_t)(slen - sent));
         if (n < 0) {
             break;
         }

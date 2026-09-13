@@ -30,7 +30,7 @@ void tcp_init(void);
 
 void tcp_tick(void);
 
-void tcp_handle_packet(uint32_t src_ip, uint32_t dst_ip, const uint8_t *segment, uint16_t len);
+void tcp_handle_packet(uint32_t source_ip, uint32_t destination_ip, const uint8_t *segment, uint16_t len);
 
 struct tcpcb *tcp_open(void);
 void tcp_close(struct tcpcb *tcb);
@@ -48,7 +48,7 @@ int tcp_accept_pending(const struct tcpcb *listener);
 
 int tcp_send(struct tcpcb *tcb, const uint8_t *data, uint16_t len);
 
-int tcp_recv(struct tcpcb *tcb, uint8_t *out, uint16_t max);
+int tcp_receive(struct tcpcb *tcb, uint8_t *out, uint16_t max);
 
 int tcp_bytes_available(const struct tcpcb *tcb);
 int tcp_send_space(const struct tcpcb *tcb);

@@ -3,10 +3,10 @@
 #include "library/spinlock.h"
 #include "virtual_file_system.h"
 
-static openfile_t table[MAX_OPEN_FILES];
+static open_file_t table[MAX_OPEN_FILES];
 static int initialized;
 
-static spinlock_t openfile_lock;
+static spinlock_t open_file_lock;
 
 static void ensure_init(void) {
     if (initialized) {
@@ -18,8 +18,8 @@ static void ensure_init(void) {
     initialized = 1;
 }
 
-openfile_t *openfile_alloc(int handle, int writable, const char *path, int is_dir) {
-    uint64_t flags = spin_lock_irqsave(&openfile_lock);
+open_file_t *open_file_alloc(int handle, int writable, const char *path, int is_dir) {
+    uint64_t flags = spin_lock_irqsave(&open_file_lock);
     ensure_init();
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (table[i].handle < 0) {
@@ -40,42 +40,42 @@ openfile_t *openfile_alloc(int handle, int writable, const char *path, int is_di
                     }
                 }
             }
-            spin_unlock_irqrestore(&openfile_lock, flags);
+            spin_unlock_irqrestore(&open_file_lock, flags);
             return &table[i];
         }
     }
-    spin_unlock_irqrestore(&openfile_lock, flags);
+    spin_unlock_irqrestore(&open_file_lock, flags);
     return 0;
 }
 
-void openfile_ref(openfile_t *f) {
+void open_file_reference(open_file_t *f) {
     if (!f) {
         return;
     }
-    uint64_t flags = spin_lock_irqsave(&openfile_lock);
+    uint64_t flags = spin_lock_irqsave(&open_file_lock);
     f->refcount++;
-    spin_unlock_irqrestore(&openfile_lock, flags);
+    spin_unlock_irqrestore(&open_file_lock, flags);
 }
 
-void openfile_unref(openfile_t *f) {
+void open_file_unref(open_file_t *f) {
     if (!f) {
         return;
     }
-    uint64_t flags = spin_lock_irqsave(&openfile_lock);
+    uint64_t flags = spin_lock_irqsave(&open_file_lock);
     int closing = -1;
     if (f->refcount > 0 && --f->refcount == 0) {
         closing = f->handle;
         f->handle = -1;
     }
-    spin_unlock_irqrestore(&openfile_lock, flags);
+    spin_unlock_irqrestore(&open_file_lock, flags);
 
     if (closing >= 0) {
-        vfs_handle_close(closing);
+        virtual_file_system_handle_close(closing);
     }
 }
 
-int openfile_in_use(void) {
-    uint64_t flags = spin_lock_irqsave(&openfile_lock);
+int open_file_in_use(void) {
+    uint64_t flags = spin_lock_irqsave(&open_file_lock);
     ensure_init();
     int n = 0;
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
@@ -83,6 +83,6 @@ int openfile_in_use(void) {
             n++;
         }
     }
-    spin_unlock_irqrestore(&openfile_lock, flags);
+    spin_unlock_irqrestore(&open_file_lock, flags);
     return n;
 }

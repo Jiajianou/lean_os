@@ -42,7 +42,7 @@ typedef struct __attribute__((packed)) {
     uint32_t len;
     uint16_t flags;
     uint16_t next;
-} vring_desc_t;
+} vring_descriptor_t;
 
 typedef struct __attribute__((packed)) {
     uint16_t flags;
@@ -53,48 +53,48 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint32_t id;
     uint32_t len;
-} vring_used_elem_t;
+} vring_used_element_t;
 
 typedef struct __attribute__((packed)) {
     uint16_t flags;
     uint16_t idx;
-    vring_used_elem_t ring[];
+    vring_used_element_t ring[];
 } vring_used_t;
 
 typedef struct __attribute__((packed)) {
     uint32_t type;
     uint32_t reserved;
     uint64_t sector;
-} virtio_blk_req_t;
+} virtio_block_device_request_t;
 
 static uint16_t io_base;
 static uint16_t queue_size;
 static int present;
 static uint64_t capacity_sectors;
 
-static volatile vring_desc_t *desc;
+static volatile vring_descriptor_t *desc;
 static volatile vring_avail_t *avail;
 static volatile vring_used_t *used;
 static uint64_t ring_phys;
 static uint32_t ring_frames;
 
-static virtio_blk_req_t *req_hdr;
-static volatile uint8_t *req_status;
+static virtio_block_device_request_t *request_header;
+static volatile uint8_t *request_status;
 static uint8_t *bounce;
-static uint64_t hdr_phys, bounce_phys;
+static uint64_t header_phys, bounce_phys;
 
-static uint16_t last_used_idx;
+static uint16_t last_used_index;
 
 static uint64_t ring_bytes(uint16_t qsize) {
-    uint64_t a = (uint64_t)qsize * sizeof(vring_desc_t) +
+    uint64_t a = (uint64_t)qsize * sizeof(vring_descriptor_t) +
                  (uint64_t)(3 + qsize) * sizeof(uint16_t);
     uint64_t aligned = (a + 4095) & ~4095ULL;
     uint64_t b = (uint64_t)(3 * sizeof(uint16_t)) +
-                 (uint64_t)qsize * sizeof(vring_used_elem_t);
+                 (uint64_t)qsize * sizeof(vring_used_element_t);
     return aligned + b;
 }
 
-int virtio_blk_init(void) {
+int virtio_block_device_init(void) {
     pci_device_t dev;
     if (!pci_find_device(VIRTIO_VENDOR, VIRTIO_BLK_DEVICE, &dev)) {
         return 0;
@@ -102,7 +102,7 @@ int virtio_blk_init(void) {
     pci_enable_device(&dev);
     io_base = pci_bar0_io_base(&dev);
     if (io_base == 0) {
-        klog_puts("[virtio-blk] BAR0 is memory-mapped - falling back.\n");
+        kernel_log_puts("[virtio-blk] BAR0 is memory-mapped - falling back.\n");
         return 0;
     }
     if (io_base == 0) {
@@ -132,21 +132,21 @@ int virtio_blk_init(void) {
 
     uint64_t bytes = ring_bytes(queue_size);
     ring_frames = (uint32_t)((bytes + 4095) / 4096);
-    ring_phys = pmm_alloc_contiguous(ring_frames);
+    ring_phys = physical_memory_alloc_contiguous(ring_frames);
     k_memset((void *)ring_phys, 0, ring_frames * 4096);
-    desc = (volatile vring_desc_t *)ring_phys;
-    avail = (volatile vring_avail_t *)(ring_phys + (uint64_t)queue_size * sizeof(vring_desc_t));
-    uint64_t used_off = ((uint64_t)queue_size * sizeof(vring_desc_t) +
+    desc = (volatile vring_descriptor_t *)ring_phys;
+    avail = (volatile vring_avail_t *)(ring_phys + (uint64_t)queue_size * sizeof(vring_descriptor_t));
+    uint64_t used_off = ((uint64_t)queue_size * sizeof(vring_descriptor_t) +
                          (uint64_t)(3 + queue_size) * sizeof(uint16_t) + 4095) & ~4095ULL;
     used = (volatile vring_used_t *)(ring_phys + used_off);
 
-    uint64_t hdr_page = pmm_alloc_contiguous(1);
-    k_memset((void *)hdr_page, 0, 4096);
-    req_hdr = (virtio_blk_req_t *)hdr_page;
-    req_status = (volatile uint8_t *)(hdr_page + sizeof(virtio_blk_req_t));
-    hdr_phys = hdr_page;
+    uint64_t header_page = physical_memory_alloc_contiguous(1);
+    k_memset((void *)header_page, 0, 4096);
+    request_header = (virtio_block_device_request_t *)header_page;
+    request_status = (volatile uint8_t *)(header_page + sizeof(virtio_block_device_request_t));
+    header_phys = header_page;
 
-    bounce_phys = pmm_alloc_contiguous(BOUNCE_BYTES / 4096);
+    bounce_phys = physical_memory_alloc_contiguous(BOUNCE_BYTES / 4096);
     bounce = (uint8_t *)bounce_phys;
 
     avail->flags = 1;
@@ -155,31 +155,31 @@ int virtio_blk_init(void) {
     outb((uint16_t)(io_base + VIO_STATUS),
          VIO_STATUS_ACK | VIO_STATUS_DRIVER | VIO_STATUS_DRIVER_OK);
 
-    last_used_idx = used->idx;
+    last_used_index = used->idx;
     present = 1;
 
-    klog_puts("[virtio-blk] ");
-    klog_put_hex64(capacity_sectors);
-    klog_puts(" sectors, queue ");
-    klog_put_hex32(queue_size);
-    klog_puts(", ring at 0x");
-    klog_put_hex64(ring_phys);
-    klog_putc('\n');
+    kernel_log_puts("[virtio-blk] ");
+    kernel_log_put_hex64(capacity_sectors);
+    kernel_log_puts(" sectors, queue ");
+    kernel_log_put_hex32(queue_size);
+    kernel_log_puts(", ring at 0x");
+    kernel_log_put_hex64(ring_phys);
+    kernel_log_putc('\n');
     return 1;
 }
 
 static uint32_t errors;
 
 static int submit(uint32_t type, uint64_t sector, uint32_t len, int device_writes) {
-    req_hdr->type = type;
-    req_hdr->reserved = 0;
-    req_hdr->sector = sector;
-    *req_status = 0xFF;
+    request_header->type = type;
+    request_header->reserved = 0;
+    request_header->sector = sector;
+    *request_status = 0xFF;
 
-    uint16_t status_desc = len > 0 ? 2 : 1;
+    uint16_t status_descriptor = len > 0 ? 2 : 1;
 
-    desc[0].addr = hdr_phys;
-    desc[0].len = sizeof(virtio_blk_req_t);
+    desc[0].addr = header_phys;
+    desc[0].len = sizeof(virtio_block_device_request_t);
     desc[0].flags = VRING_DESC_F_NEXT;
     desc[0].next = 1;
 
@@ -190,10 +190,10 @@ static int submit(uint32_t type, uint64_t sector, uint32_t len, int device_write
         desc[1].next = 2;
     }
 
-    desc[status_desc].addr = hdr_phys + sizeof(virtio_blk_req_t);
-    desc[status_desc].len = 1;
-    desc[status_desc].flags = VRING_DESC_F_WRITE;
-    desc[status_desc].next = 0;
+    desc[status_descriptor].addr = header_phys + sizeof(virtio_block_device_request_t);
+    desc[status_descriptor].len = 1;
+    desc[status_descriptor].flags = VRING_DESC_F_WRITE;
+    desc[status_descriptor].next = 0;
 
     avail->ring[avail->idx % queue_size] = 0;
     __asm__ volatile("" ::: "memory");
@@ -202,10 +202,10 @@ static int submit(uint32_t type, uint64_t sector, uint32_t len, int device_write
     outw((uint16_t)(io_base + VIO_QUEUE_NOTIFY), 0);
 
     for (uint32_t spin = 0; spin < 200000000u; spin++) {
-        if (used->idx != last_used_idx) {
-            last_used_idx = used->idx;
+        if (used->idx != last_used_index) {
+            last_used_index = used->idx;
             (void)inb((uint16_t)(io_base + VIO_ISR));
-            if (*req_status != 0) {
+            if (*request_status != 0) {
                 errors++;
                 return -1;
             }
@@ -217,7 +217,7 @@ static int submit(uint32_t type, uint64_t sector, uint32_t len, int device_write
     return -1;
 }
 
-int virtio_blk_read(uint64_t lba, uint32_t count, void *buf) {
+int virtio_block_device_read(uint64_t lba, uint32_t count, void *buf) {
     uint8_t *dst = (uint8_t *)buf;
     while (count > 0) {
         uint32_t n = count > BOUNCE_SECTORS ? BOUNCE_SECTORS : count;
@@ -232,7 +232,7 @@ int virtio_blk_read(uint64_t lba, uint32_t count, void *buf) {
     return 0;
 }
 
-int virtio_blk_write(uint64_t lba, uint32_t count, const void *buf) {
+int virtio_block_device_write(uint64_t lba, uint32_t count, const void *buf) {
     const uint8_t *src = (const uint8_t *)buf;
     while (count > 0) {
         uint32_t n = count > BOUNCE_SECTORS ? BOUNCE_SECTORS : count;

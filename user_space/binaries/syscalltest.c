@@ -32,7 +32,7 @@ typedef enum { CLASS_SKIP, CLASS_PLAIN, CLASS_PTR, CLASS_BLOCK } class_t;
 typedef struct {
     long num;
     class_t klass;
-    int ptr_arg;
+    int pointer_argument;
     const char *why;
 } entry_t;
 
@@ -207,7 +207,7 @@ int main(void) {
         for (int p = 0; p < N_BAD_PTRS; p++) {
             unsigned long long bad = bad_ptrs[p];
             if (e->klass == CLASS_BLOCK) {
-                switch (e->ptr_arg) {
+                switch (e->pointer_argument) {
                     case 1: (void)sys_raw(n, (long)bad, 1, 0); break;
                     case 2: (void)sys_raw(n, UNOPENABLE_FD, (long)bad, 1); break;
                     case 3: (void)sys_raw(n, UNOPENABLE_FD, 1, (long)bad); break;
@@ -226,17 +226,17 @@ int main(void) {
            swept, N_BAD_PTRS * 4);
     fflush(stdout);
 
-    int ptr_checked = 0;
+    int pointer_checked = 0;
     for (int i = 0; i < N_TABLE; i++) {
         const entry_t *e = &table[i];
-        if (e->klass != CLASS_PTR && !(e->klass == CLASS_BLOCK && e->ptr_arg)) {
+        if (e->klass != CLASS_PTR && !(e->klass == CLASS_BLOCK && e->pointer_argument)) {
             continue;
         }
         long fd = (e->klass == CLASS_BLOCK) ? UNOPENABLE_FD : 1;
         for (int p = 0; p < N_BAD_PTRS; p++) {
             unsigned long long bad = bad_ptrs[p];
             long r;
-            switch (e->ptr_arg) {
+            switch (e->pointer_argument) {
                 case 1: r = sys_raw(e->num, (long)bad, 64, 64); break;
                 case 2: r = sys_raw(e->num, fd, (long)bad, 64); break;
                 default: r = sys_raw(e->num, fd, 64, (long)bad); break;
@@ -244,15 +244,15 @@ int main(void) {
             check(r < 0,
                   "a kernel or unmapped address was accepted rather than refused",
                   e->num);
-            ptr_checked++;
+            pointer_checked++;
         }
     }
-    printf("syscalltest: %d pointer-argument refusals checked\n", ptr_checked);
+    printf("syscalltest: %d pointer-argument refusals checked\n", pointer_checked);
 
-    static const long bad_fds[] = {-1, -2, 127, 128, 1000, 0x7FFFFFFF};
+    static const long bad_file_descriptors[] = {-1, -2, 127, 128, 1000, 0x7FFFFFFF};
     char scratch[64];
-    for (int i = 0; i < (int)(sizeof(bad_fds) / sizeof(bad_fds[0])); i++) {
-        long fd = bad_fds[i];
+    for (int i = 0; i < (int)(sizeof(bad_file_descriptors) / sizeof(bad_file_descriptors[0])); i++) {
+        long fd = bad_file_descriptors[i];
         check(sys_raw(SYS_read, fd, (long)scratch, sizeof(scratch)) < 0,
               "read from an fd that was never opened", SYS_read);
         check(sys_raw(SYS_write, fd, (long)scratch, sizeof(scratch)) < 0,

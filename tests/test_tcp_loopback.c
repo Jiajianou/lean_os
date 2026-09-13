@@ -14,7 +14,7 @@ static uint8_t pattern(long pos) {
 
 static void connect_pair(struct tcpcb **client, struct tcpcb **server, struct tcpcb **listener) {
     fake_net_reset();
-    klog_capture_reset();
+    kernel_log_capture_reset();
     tcp_init();
     *listener = tcp_open();
     REQUIRE(*listener != NULL);
@@ -57,7 +57,7 @@ TEST(tcp_loopback, sixty_four_KiB_arrives_intact_under_the_syscalls_chunking) {
             }
         }
         if (recvd < N) {
-            int n = tcp_recv(s, got + recvd, TCP_MAX_MSS);
+            int n = tcp_receive(s, got + recvd, TCP_MAX_MSS);
             if (n < 0) {
                 break;
             }
@@ -109,7 +109,7 @@ TEST(tcp_loopback, a_receiver_that_reads_late_gets_every_byte_once) {
         }
         for (;;) {
             if (recvd >= N) break;
-            int n = tcp_recv(s, got + recvd, 100);
+            int n = tcp_receive(s, got + recvd, 100);
             CHECK(n >= 0);
             if (n == 0) break;
             recvd += n;

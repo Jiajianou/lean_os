@@ -8,13 +8,13 @@
 #define FWCFG_SIGNATURE 0x0000
 #define FWCFG_FILE_DIR  0x0019
 
-static void dir_begin(uint32_t count) {
-    uint8_t hdr[4] = {(uint8_t)(count >> 24), (uint8_t)(count >> 16),
+static void directory_begin(uint32_t count) {
+    uint8_t header[4] = {(uint8_t)(count >> 24), (uint8_t)(count >> 16),
                       (uint8_t)(count >> 8), (uint8_t)count};
-    fake_fwcfg_set_item(FWCFG_FILE_DIR, hdr, sizeof(hdr));
+    fake_fwcfg_set_item(FWCFG_FILE_DIR, header, sizeof(header));
 }
 
-static void dir_add(const char *name, uint32_t size, uint16_t selector) {
+static void directory_add(const char *name, uint32_t size, uint16_t selector) {
     uint8_t entry[64];
     memset(entry, 0, sizeof(entry));
     entry[0] = (uint8_t)(size >> 24);
@@ -39,7 +39,7 @@ TEST(fwcfg, a_machine_with_no_such_device_says_so_and_runs_no_tests) {
     fwcfg_init();
     CHECK_EQ(fwcfg_present(), 0);
     CHECK_EQ(boot_selftests_enabled(), 0);
-    CHECK(klog_capture_contains("no firmware config device"));
+    CHECK(kernel_log_capture_contains("no firmware config device"));
 }
 
 TEST(fwcfg, the_signature_must_match_exactly) {
@@ -67,8 +67,8 @@ TEST(fwcfg, the_selftest_file_is_read_and_only_exactly_one_enables_them) {
     };
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         with_signature();
-        dir_begin(1);
-        dir_add("opt/leanos/selftest", (uint32_t)strlen(cases[i].value), 0x0100);
+        directory_begin(1);
+        directory_add("opt/leanos/selftest", (uint32_t)strlen(cases[i].value), 0x0100);
         fake_fwcfg_set_item(0x0100, (const uint8_t *)cases[i].value,
                             (uint32_t)strlen(cases[i].value));
         fwcfg_init();
@@ -91,9 +91,9 @@ TEST(fwcfg, the_four_switches_are_read_independently_of_each_other) {
 
     for (unsigned i = 0; i < N; i++) {
         with_signature();
-        dir_begin((int)N);
+        directory_begin((int)N);
         for (unsigned k = 0; k < N; k++) {
-            dir_add(SWITCHES[k].name, 1, (uint16_t)(0x0100 + k));
+            directory_add(SWITCHES[k].name, 1, (uint16_t)(0x0100 + k));
         }
         for (unsigned k = 0; k < N; k++) {
             fake_fwcfg_set_item((uint16_t)(0x0100 + k),
@@ -111,8 +111,8 @@ TEST(fwcfg, the_four_switches_are_read_independently_of_each_other) {
 
 TEST(fwcfg, a_machine_with_no_bootstrap_file_runs_no_build) {
     with_signature();
-    dir_begin(1);
-    dir_add("opt/leanos/selftest", 1, 0x0100);
+    directory_begin(1);
+    directory_add("opt/leanos/selftest", 1, 0x0100);
     fake_fwcfg_set_item(0x0100, (const uint8_t *)"1", 1);
     fwcfg_init();
     CHECK_EQ(boot_selftests_enabled(), 1);
@@ -122,9 +122,9 @@ TEST(fwcfg, a_machine_with_no_bootstrap_file_runs_no_build) {
 
 TEST(fwcfg, a_present_device_with_no_such_file_runs_no_tests) {
     with_signature();
-    dir_begin(2);
-    dir_add("etc/something-else", 4, 0x0100);
-    dir_add("opt/leanos/other", 4, 0x0101);
+    directory_begin(2);
+    directory_add("etc/something-else", 4, 0x0100);
+    directory_add("opt/leanos/other", 4, 0x0101);
     fwcfg_init();
     CHECK_EQ(fwcfg_present(), 1);
     CHECK_EQ(boot_selftests_enabled(), 0);
@@ -140,8 +140,8 @@ TEST(fwcfg, a_name_that_is_a_prefix_of_the_wanted_one_does_not_match) {
     };
     for (unsigned i = 0; i < sizeof(wrong) / sizeof(wrong[0]); i++) {
         with_signature();
-        dir_begin(1);
-        dir_add(wrong[i], 1, 0x0100);
+        directory_begin(1);
+        directory_add(wrong[i], 1, 0x0100);
         fake_fwcfg_set_item(0x0100, (const uint8_t *)"1", 1);
         fwcfg_init();
             CHECK_EQ(boot_selftests_enabled(), 0);
@@ -150,11 +150,11 @@ TEST(fwcfg, a_name_that_is_a_prefix_of_the_wanted_one_does_not_match) {
 
 TEST(fwcfg, a_file_after_the_match_does_not_disturb_it) {
     with_signature();
-    dir_begin(4);
-    dir_add("opt/leanos/selftest", 1, 0x0100);
-    dir_add("etc/a", 100, 0x0101);
-    dir_add("etc/b", 100, 0x0102);
-    dir_add("etc/c", 100, 0x0103);
+    directory_begin(4);
+    directory_add("opt/leanos/selftest", 1, 0x0100);
+    directory_add("etc/a", 100, 0x0101);
+    directory_add("etc/b", 100, 0x0102);
+    directory_add("etc/c", 100, 0x0103);
     fake_fwcfg_set_item(0x0100, (const uint8_t *)"1", 1);
     fwcfg_init();
     CHECK_EQ(boot_selftests_enabled(), 1);
@@ -162,8 +162,8 @@ TEST(fwcfg, a_file_after_the_match_does_not_disturb_it) {
 
 TEST(fwcfg, an_absurd_directory_count_is_refused_rather_than_walked) {
     with_signature();
-    dir_begin(0xFFFFFFFFu);
-    dir_add("opt/leanos/selftest", 1, 0x0100);
+    directory_begin(0xFFFFFFFFu);
+    directory_add("opt/leanos/selftest", 1, 0x0100);
     fake_fwcfg_set_item(0x0100, (const uint8_t *)"1", 1);
     fwcfg_init();
     char buf[8];
@@ -176,8 +176,8 @@ TEST(fwcfg, a_blob_larger_than_the_buffer_is_truncated_not_overrun) {
     with_signature();
     uint8_t big[512];
     memset(big, 'x', sizeof(big));
-    dir_begin(1);
-    dir_add("opt/leanos/big", (uint32_t)sizeof(big), 0x0100);
+    directory_begin(1);
+    directory_add("opt/leanos/big", (uint32_t)sizeof(big), 0x0100);
     fake_fwcfg_set_item(0x0100, big, sizeof(big));
     fwcfg_init();
 
@@ -193,8 +193,8 @@ TEST(fwcfg, a_blob_larger_than_the_buffer_is_truncated_not_overrun) {
 
 TEST(fwcfg, reading_a_file_twice_gives_the_same_answer) {
     with_signature();
-    dir_begin(1);
-    dir_add("opt/leanos/selftest", 1, 0x0100);
+    directory_begin(1);
+    directory_add("opt/leanos/selftest", 1, 0x0100);
     fake_fwcfg_set_item(0x0100, (const uint8_t *)"1", 1);
     fwcfg_init();
 

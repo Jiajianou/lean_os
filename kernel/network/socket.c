@@ -5,8 +5,8 @@
 #include "scheduler/scheduler.h"
 
 typedef struct {
-    uint32_t src_ip;
-    uint16_t src_port;
+    uint32_t source_ip;
+    uint16_t source_port;
     uint16_t len;
     uint8_t data[SOCKET_MAX_DATAGRAM];
 } datagram_t;
@@ -78,7 +78,7 @@ struct tcpcb *socket_tcb(struct socket *s) {
     return (s && s->in_use && s->type == SOCK_STREAM) ? s->tcb : (struct tcpcb *)0;
 }
 
-void socket_ref(struct socket *s) {
+void socket_reference(struct socket *s) {
     if (!s) {
         return;
     }
@@ -155,7 +155,7 @@ int socket_bind(struct socket *s, uint16_t port) {
     return port;
 }
 
-int socket_sendto(struct socket *s, uint32_t dst_ip, uint16_t dst_port,
+int socket_sendto(struct socket *s, uint32_t destination_ip, uint16_t destination_port,
                   const uint8_t *data, uint16_t len) {
     if (!s || !s->in_use || s->type != SOCK_DGRAM || len > UDP_MAX_PAYLOAD) {
         return -1;
@@ -163,25 +163,25 @@ int socket_sendto(struct socket *s, uint32_t dst_ip, uint16_t dst_port,
     if (!s->bound && bind_ephemeral(s) < 0) {
         return -1;
     }
-    if (udp_send(dst_ip, dst_port, s->port, data, len) < 0) {
+    if (udp_send(destination_ip, destination_port, s->port, data, len) < 0) {
         return -1;
     }
     return len;
 }
 
 int socket_recvfrom(struct socket *s, uint8_t *out, uint16_t max,
-                    uint32_t *src_ip_out, uint16_t *src_port_out) {
+                    uint32_t *source_ip_out, uint16_t *source_port_out) {
     if (!s || !s->in_use || s->count == 0) {
         return -1;
     }
     datagram_t *d = &s->queue[s->tail];
     uint16_t n = d->len < max ? d->len : max;
     k_memcpy(out, d->data, n);
-    if (src_ip_out) {
-        *src_ip_out = d->src_ip;
+    if (source_ip_out) {
+        *source_ip_out = d->source_ip;
     }
-    if (src_port_out) {
-        *src_port_out = d->src_port;
+    if (source_port_out) {
+        *source_port_out = d->source_port;
     }
     s->tail = (uint16_t)((s->tail + 1) % SOCKET_QUEUE_DEPTH);
     s->count--;
@@ -248,29 +248,29 @@ struct socket *socket_accept(struct socket *s) {
     return (struct socket *)0;
 }
 
-void socket_deliver(uint16_t dst_port, uint32_t src_ip, uint16_t src_port,
+void socket_deliver(uint16_t destination_port, uint32_t source_ip, uint16_t source_port,
                     const uint8_t *data, uint16_t len) {
-    if (raw_port && dst_port == raw_port && raw_handler) {
-        raw_handler(src_ip, src_port, data, len);
+    if (raw_port && destination_port == raw_port && raw_handler) {
+        raw_handler(source_ip, source_port, data, len);
         return;
     }
     for (int i = 0; i < MAX_SOCKETS; i++) {
         struct socket *s = &sockets[i];
-        if (!s->in_use || !s->bound || s->port != dst_port) {
+        if (!s->in_use || !s->bound || s->port != destination_port) {
             continue;
         }
         if (s->count >= SOCKET_QUEUE_DEPTH) {
             return;
         }
         datagram_t *d = &s->queue[s->head];
-        d->src_ip = src_ip;
-        d->src_port = src_port;
+        d->source_ip = source_ip;
+        d->source_port = source_port;
         d->len = len < SOCKET_MAX_DATAGRAM ? len : SOCKET_MAX_DATAGRAM;
         k_memcpy(d->data, data, d->len);
         s->head = (uint16_t)((s->head + 1) % SOCKET_QUEUE_DEPTH);
         s->count++;
         return;
     }
-    sched_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHED_POLL_CHAN);
 
 }

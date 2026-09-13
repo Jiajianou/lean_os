@@ -213,12 +213,12 @@ TEST(timerfd, a_clock_that_does_not_exist_is_refused) {
 }
 
 static uint32_t scripted[16];
-static int stale_fd = -1;
+static int stale_file_descriptor = -1;
 
-static uint32_t script_mask(void *ctx, int fd, const void *obj) {
-    (void)ctx;
-    (void)obj;
-    if (fd == stale_fd) {
+static uint32_t script_mask(void *context, int fd, const void *object) {
+    (void)context;
+    (void)object;
+    if (fd == stale_file_descriptor) {
         return EPOLL_STALE;
     }
     if (fd < 0 || fd >= 16) {
@@ -231,11 +231,11 @@ static void script_reset(void) {
     for (int i = 0; i < 16; i++) {
         scripted[i] = 0;
     }
-    stale_fd = -1;
+    stale_file_descriptor = -1;
     epoll_init();
 }
 
-static const void *obj_for(int fd) {
+static const void *object_for(int fd) {
     return (const void *)(uintptr_t)(0x2000 + fd);
 }
 
@@ -244,8 +244,8 @@ TEST(epoll, a_set_remembers_its_registrations_and_carries_their_cookies) {
     struct epoll *ep = epoll_create_set();
     REQUIRE(ep != NULL);
     CHECK_EQ(epoll_watch_count(ep), 0);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 3, obj_for(3), EPOLLIN, 0xAAAA), 0);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 4, obj_for(4), EPOLLIN, 0xBBBB), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 3, object_for(3), EPOLLIN, 0xAAAA), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 4, object_for(4), EPOLLIN, 0xBBBB), 0);
     CHECK_EQ(epoll_watch_count(ep), 2);
 
     epoll_ev_t out[8];
@@ -262,8 +262,8 @@ TEST(epoll, level_triggered_reports_again_and_edge_triggered_does_not) {
     script_reset();
     struct epoll *ep = epoll_create_set();
     REQUIRE(ep != NULL);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 3, obj_for(3), EPOLLIN, 3), 0);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 4, obj_for(4), EPOLLIN | EPOLLET, 4), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 3, object_for(3), EPOLLIN, 3), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 4, object_for(4), EPOLLIN | EPOLLET, 4), 0);
     scripted[3] = EPOLLIN;
     scripted[4] = EPOLLIN;
     epoll_ev_t out[8];
@@ -271,7 +271,7 @@ TEST(epoll, level_triggered_reports_again_and_edge_triggered_does_not) {
     CHECK_EQ(epoll_scan(ep, script_mask, NULL, out, 8), 1);
     CHECK_EQ(out[0].data, 3);
     scripted[4] = EPOLLIN | EPOLLOUT;
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_MOD, 4, obj_for(4),
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_MOD, 4, object_for(4),
                            EPOLLIN | EPOLLOUT | EPOLLET, 4), 0);
     int n = epoll_scan(ep, script_mask, NULL, out, 8);
     CHECK_EQ(n, 2);
@@ -288,13 +288,13 @@ TEST(epoll, one_shot_fires_once_and_a_mod_re_arms_it) {
     script_reset();
     struct epoll *ep = epoll_create_set();
     REQUIRE(ep != NULL);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 5, obj_for(5), EPOLLIN | EPOLLONESHOT, 5), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 5, object_for(5), EPOLLIN | EPOLLONESHOT, 5), 0);
     scripted[5] = EPOLLIN;
     epoll_ev_t out[4];
     CHECK_EQ(epoll_scan(ep, script_mask, NULL, out, 4), 1);
     CHECK_EQ(epoll_scan(ep, script_mask, NULL, out, 4), 0);
     CHECK_EQ(epoll_watch_count(ep), 1);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_MOD, 5, obj_for(5), EPOLLIN | EPOLLONESHOT, 5), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_MOD, 5, object_for(5), EPOLLIN | EPOLLONESHOT, 5), 0);
     CHECK_EQ(epoll_scan(ep, script_mask, NULL, out, 4), 1);
     epoll_unref(ep);
     CHECK_EQ(epoll_in_use(), 0);
@@ -304,7 +304,7 @@ TEST(epoll, errors_and_hangups_arrive_whether_or_not_they_were_asked_for) {
     script_reset();
     struct epoll *ep = epoll_create_set();
     REQUIRE(ep != NULL);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 6, obj_for(6), EPOLLOUT, 6), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 6, object_for(6), EPOLLOUT, 6), 0);
     scripted[6] = EPOLLIN;
     epoll_ev_t out[4];
     CHECK_EQ(epoll_scan(ep, script_mask, NULL, out, 4), 0);
@@ -322,11 +322,11 @@ TEST(epoll, a_stale_registration_is_dropped_rather_than_reported) {
     script_reset();
     struct epoll *ep = epoll_create_set();
     REQUIRE(ep != NULL);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 7, obj_for(7), EPOLLIN, 7), 0);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 8, obj_for(8), EPOLLIN, 8), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 7, object_for(7), EPOLLIN, 7), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 8, object_for(8), EPOLLIN, 8), 0);
     scripted[7] = EPOLLIN;
     scripted[8] = EPOLLIN;
-    stale_fd = 7;
+    stale_file_descriptor = 7;
     epoll_ev_t out[4];
     CHECK_EQ(epoll_scan(ep, script_mask, NULL, out, 4), 1);
     CHECK_EQ(out[0].data, 8);
@@ -339,13 +339,13 @@ TEST(epoll, add_mod_and_del_refuse_what_they_should) {
     script_reset();
     struct epoll *ep = epoll_create_set();
     REQUIRE(ep != NULL);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 3, obj_for(3), EPOLLIN, 1), 0);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 3, obj_for(3), EPOLLOUT, 2), -1);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_MOD, 9, obj_for(9), EPOLLIN, 1), -1);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_DEL, 9, NULL, 0, 0), -1);
-    CHECK_EQ(epoll_ctl_set(ep, 99, 3, obj_for(3), EPOLLIN, 1), -1);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, -1, obj_for(3), EPOLLIN, 1), -1);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_DEL, 3, NULL, 0, 0), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 3, object_for(3), EPOLLIN, 1), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 3, object_for(3), EPOLLOUT, 2), -1);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_MOD, 9, object_for(9), EPOLLIN, 1), -1);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_DEL, 9, NULL, 0, 0), -1);
+    CHECK_EQ(epoll_control_set(ep, 99, 3, object_for(3), EPOLLIN, 1), -1);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, -1, object_for(3), EPOLLIN, 1), -1);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_DEL, 3, NULL, 0, 0), 0);
     CHECK_EQ(epoll_watch_count(ep), 0);
     scripted[3] = EPOLLIN;
     epoll_ev_t out[4];
@@ -359,11 +359,11 @@ TEST(epoll, a_full_set_refuses_and_recovers) {
     struct epoll *ep = epoll_create_set();
     REQUIRE(ep != NULL);
     for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
-        CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 100 + i, obj_for(i), EPOLLIN, (uint64_t)i), 0);
+        CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 100 + i, object_for(i), EPOLLIN, (uint64_t)i), 0);
     }
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 999, obj_for(99), EPOLLIN, 99), -1);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_DEL, 100, NULL, 0, 0), 0);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 999, obj_for(99), EPOLLIN, 99), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 999, object_for(99), EPOLLIN, 99), -1);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_DEL, 100, NULL, 0, 0), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 999, object_for(99), EPOLLIN, 99), 0);
     epoll_unref(ep);
     CHECK_EQ(epoll_in_use(), 0);
 }
@@ -373,7 +373,7 @@ TEST(epoll, a_scan_returns_no_more_than_it_was_offered_room_for) {
     struct epoll *ep = epoll_create_set();
     REQUIRE(ep != NULL);
     for (int i = 0; i < 6; i++) {
-        CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, i, obj_for(i), EPOLLIN, (uint64_t)i), 0);
+        CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, i, object_for(i), EPOLLIN, (uint64_t)i), 0);
         scripted[i] = EPOLLIN;
     }
     epoll_ev_t out[2];
@@ -425,7 +425,7 @@ TEST(readyfds, every_call_refuses_a_null_object) {
     CHECK_EQ(eventfd_readable(NULL), 0);
     CHECK_EQ(eventfd_writable(NULL), 0);
     eventfd_unref(NULL);
-    eventfd_ref(NULL);
+    eventfd_reference(NULL);
 
     struct eventfd *e = eventfd_create(1, 0);
     REQUIRE(e != NULL);
@@ -438,7 +438,7 @@ TEST(readyfds, every_call_refuses_a_null_object) {
     CHECK_EQ(timerfd_settime(NULL, 0, 0, 1, 0, NULL, NULL), -1);
     CHECK_EQ(timerfd_clock(NULL), -1);
     timerfd_unref(NULL);
-    timerfd_ref(NULL);
+    timerfd_reference(NULL);
     uint64_t value = 7, interval = 7;
     timerfd_gettime(NULL, 0, &value, &interval);
     CHECK_EQ(value, 0);
@@ -448,10 +448,10 @@ TEST(readyfds, every_call_refuses_a_null_object) {
     CHECK_EQ(timerfd_read(t, 0, NULL), -1);
     timerfd_unref(t);
 
-    CHECK_EQ(epoll_ctl_set(NULL, EPOLL_CTL_ADD, 1, NULL, 0, 0), -1);
+    CHECK_EQ(epoll_control_set(NULL, EPOLL_CTL_ADD, 1, NULL, 0, 0), -1);
     CHECK_EQ(epoll_watch_count(NULL), 0);
     epoll_unref(NULL);
-    epoll_ref(NULL);
+    epoll_reference(NULL);
 
     CHECK_EQ(eventfd_in_use(), 0);
     CHECK_EQ(timerfd_in_use(), 0);
@@ -468,9 +468,9 @@ TEST(readyfds, a_second_reference_keeps_each_object_alive) {
     REQUIRE(e != NULL);
     REQUIRE(t != NULL);
     REQUIRE(ep != NULL);
-    eventfd_ref(e);
-    timerfd_ref(t);
-    epoll_ref(ep);
+    eventfd_reference(e);
+    timerfd_reference(t);
+    epoll_reference(ep);
     eventfd_unref(e);
     timerfd_unref(t);
     epoll_unref(ep);
@@ -482,7 +482,7 @@ TEST(readyfds, a_second_reference_keeps_each_object_alive) {
     CHECK_EQ(v, 3);
     CHECK_EQ(timerfd_settime(t, 0, 0, 10 * MS, 0, NULL, NULL), 0);
     CHECK_EQ(timerfd_readable(t, 10 * MS), 1);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 3, obj_for(3), EPOLLIN, 1), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 3, object_for(3), EPOLLIN, 1), 0);
     CHECK_EQ(epoll_watch_count(ep), 1);
     eventfd_unref(e);
     timerfd_unref(t);
@@ -547,7 +547,7 @@ TEST(epoll, an_edge_registration_that_was_never_ready_stays_armed) {
     script_reset();
     struct epoll *ep = epoll_create_set();
     REQUIRE(ep != NULL);
-    CHECK_EQ(epoll_ctl_set(ep, EPOLL_CTL_ADD, 3, obj_for(3), EPOLLIN | EPOLLET, 3), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 3, object_for(3), EPOLLIN | EPOLLET, 3), 0);
     epoll_ev_t out[4];
     CHECK_EQ(epoll_scan(ep, script_mask, NULL, out, 4), 0);
     CHECK_EQ(epoll_scan(ep, script_mask, NULL, out, 4), 0);
@@ -562,7 +562,7 @@ TEST(readyfds, the_descriptor_table_refs_and_releases_all_three_kinds) {
     eventfd_init();
     timerfd_init();
     epoll_init();
-    fd_slot_t slots[3];
+    file_descriptor_slot_t slots[3];
     memset(slots, 0, sizeof(slots));
     slots[0].type = FD_EVENT;
     slots[0].event = eventfd_create(0, 0);
@@ -575,16 +575,16 @@ TEST(readyfds, the_descriptor_table_refs_and_releases_all_three_kinds) {
     REQUIRE(slots[2].epoll != NULL);
 
     for (int i = 0; i < 3; i++) {
-        fd_retain(&slots[i]);
+        file_descriptor_retain(&slots[i]);
     }
     CHECK_EQ(eventfd_in_use(), 1);
     CHECK_EQ(timerfd_in_use(), 1);
     CHECK_EQ(epoll_in_use(), 1);
 
-    fd_slot_t copies[3];
+    file_descriptor_slot_t copies[3];
     memcpy(copies, slots, sizeof(copies));
     for (int i = 0; i < 3; i++) {
-        fd_release(&copies[i]);
+        file_descriptor_release(&copies[i]);
         CHECK(copies[i].type == FD_NONE);
     }
     CHECK_EQ(eventfd_in_use(), 1);
@@ -592,7 +592,7 @@ TEST(readyfds, the_descriptor_table_refs_and_releases_all_three_kinds) {
     CHECK_EQ(epoll_in_use(), 1);
 
     for (int i = 0; i < 3; i++) {
-        fd_release(&slots[i]);
+        file_descriptor_release(&slots[i]);
     }
     CHECK_EQ(eventfd_in_use(), 0);
     CHECK_EQ(timerfd_in_use(), 0);

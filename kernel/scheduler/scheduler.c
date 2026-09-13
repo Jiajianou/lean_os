@@ -35,7 +35,7 @@
 #include "memory_management/file_mapping.h"
 #include "signal.h"
 
-static void sched_deliver_pending_signal(void);
+static void scheduler_deliver_pending_signal(void);
 
 #define TASK_STACK_SIZE (32 * 1024)
 #define SCHED_QUANTUM_TICKS 2
@@ -54,50 +54,50 @@ static volatile int need_resched[MAX_CPUS];
 static int peak_live_tasks;
 static uint64_t loaded_pml4_phys[MAX_CPUS];
 
-static spinlock_t sched_lock;
+static spinlock_t scheduler_lock;
 
-static uint64_t event_seq;
+static uint64_t event_sequence;
 
 static int blocked_count;
 
 static task_t *pick_next(task_t *from);
-void sched_dump_cpus(void);
+void scheduler_dump_cpus(void);
 static void wake_expired(uint64_t now_ms);
 static void fire_expired_alarms(uint64_t now_ms);
 static void unblock_self(task_t *self);
 
-const int sched_poll_channel = 0;
-const int sched_keyboard_channel = 0;
+const int scheduler_poll_channel = 0;
+const int scheduler_keyboard_channel = 0;
 
 static uint64_t idle_ticks[MAX_CPUS];
 static uint64_t total_ticks[MAX_CPUS];
 
-void sched_debug_dump(const char *label) {
-    klog_puts("[sched-dump] ");
-    klog_puts(label);
-    klog_putc('\n');
+void scheduler_debug_dump(const char *label) {
+    kernel_log_puts("[sched-dump] ");
+    kernel_log_puts(label);
+    kernel_log_putc('\n');
     for (int i = 0; i < task_count; i++) {
         task_t *t = &tasks[i];
         if (t->state == TASK_FREE) {
             continue;
         }
-        klog_puts("  slot=");
-        klog_put_dec((uint32_t)i);
-        klog_puts(" pid=");
-        klog_put_dec((uint32_t)t->id);
-        klog_puts(" name=");
-        klog_puts(t->name);
-        klog_puts(" state=");
-        klog_put_dec((uint32_t)t->state);
-        klog_puts(" chan=0x");
-        klog_put_hex32((uint32_t)(uint64_t)t->wait_chan);
-        klog_puts(" deadline=");
-        klog_put_dec((uint32_t)t->wake_deadline_ms);
-        klog_putc('\n');
+        kernel_log_puts("  slot=");
+        kernel_log_put_dec((uint32_t)i);
+        kernel_log_puts(" pid=");
+        kernel_log_put_dec((uint32_t)t->id);
+        kernel_log_puts(" name=");
+        kernel_log_puts(t->name);
+        kernel_log_puts(" state=");
+        kernel_log_put_dec((uint32_t)t->state);
+        kernel_log_puts(" chan=0x");
+        kernel_log_put_hex32((uint32_t)(uint64_t)t->wait_chan);
+        kernel_log_puts(" deadline=");
+        kernel_log_put_dec((uint32_t)t->wake_deadline_ms);
+        kernel_log_putc('\n');
     }
 }
 
-void sched_idle_enter(void) {
+void scheduler_idle_enter(void) {
     uint64_t flags = irq_save_disable();
     int cpu = smp_current_cpu();
     task_t *self = current_task[cpu];
@@ -107,11 +107,11 @@ void sched_idle_enter(void) {
     irq_restore(flags);
 }
 
-int sched_task_is_idle_waiting(const task_t *t) {
+int scheduler_task_is_idle_waiting(const task_t *t) {
     return t && t->idle_wait_depth > 0;
 }
 
-void sched_idle_exit(void) {
+void scheduler_idle_exit(void) {
     uint64_t flags = irq_save_disable();
     int cpu = smp_current_cpu();
     task_t *self = current_task[cpu];
@@ -129,7 +129,7 @@ static void idle_task_body(void *arg) {
     }
 }
 
-void sched_spawn_idle_tasks(int cpus) {
+void scheduler_spawn_idle_tasks(int cpus) {
     for (int i = 0; i < cpus; i++) {
         task_t *t = task_spawn("idle", idle_task_body, (void *)0);
         if (!t) {
@@ -140,23 +140,23 @@ void sched_spawn_idle_tasks(int cpus) {
     }
 }
 
-void sched_mark_self_idle(void) {
+void scheduler_mark_self_idle(void) {
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
+    spin_lock(&scheduler_lock);
     current_task[smp_current_cpu()]->is_idle = 1;
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
 }
 
-uint64_t sched_idle_ticks(int cpu) {
+uint64_t scheduler_idle_ticks(int cpu) {
     return (cpu >= 0 && cpu < MAX_CPUS) ? idle_ticks[cpu] : 0;
 }
 
-uint64_t sched_total_ticks(int cpu) {
+uint64_t scheduler_total_ticks(int cpu) {
     return (cpu >= 0 && cpu < MAX_CPUS) ? total_ticks[cpu] : 0;
 }
 
-void sched_account_tick(int user) {
+void scheduler_account_tick(int user) {
     task_t *t = current_task[smp_current_cpu()];
     if (!t) {
         return;
@@ -170,7 +170,7 @@ void sched_account_tick(int user) {
 
 static void set_task_name(task_t *t, const char *name);
 
-void sched_set_task_name(task_t *t, const char *name) {
+void scheduler_set_task_name(task_t *t, const char *name) {
     set_task_name(t, name);
 }
 
@@ -185,7 +185,7 @@ static void set_task_name(task_t *t, const char *name) {
 }
 
 static void task_entry_trampoline(void) {
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     task_t *t = current_task[smp_current_cpu()];
     t->entry(t->arg);
     task_exit();
@@ -195,17 +195,17 @@ extern void fork_return_to_user(void *frame) __attribute__((noreturn));
 
 static void fork_child_trampoline(void) __attribute__((noreturn));
 static void fork_child_trampoline(void) {
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     task_t *t = current_task[smp_current_cpu()];
     fork_return_to_user((void *)(t->kernel_stack_top - sizeof(isr_regs_t)));
 }
 
-void sched_resume_stopped(task_t *t) {
+void scheduler_resume_stopped(task_t *t) {
     if (!t) {
         return;
     }
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
+    spin_lock(&scheduler_lock);
     if (t->state == TASK_STOPPED) {
         t->state = TASK_READY;
         t->prio = PRIO_INTERACTIVE;
@@ -214,9 +214,9 @@ void sched_resume_stopped(task_t *t) {
         t->wake_deadline_ms = 0;
         t->stopped_sig = 0;
         t->stop_reported = 0;
-        event_seq++;
+        event_sequence++;
     }
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
 }
 
@@ -224,19 +224,19 @@ static void take_pending_stop(task_t *t) {
     int sig = t->pending_stop;
     t->pending_stop = 0;
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
+    spin_lock(&scheduler_lock);
     t->state = TASK_STOPPED;
     t->stopped_sig = sig;
     t->stop_reported = 0;
-    event_seq++;
-    spin_unlock(&sched_lock);
+    event_sequence++;
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
-    sched_wake_all((const void *)t);
-    sched_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all((const void *)t);
+    scheduler_wake_all(SCHED_POLL_CHAN);
     schedule();
 }
 
-void sched_take_pending_stop_if_any(task_t *t) {
+void scheduler_take_pending_stop_if_any(task_t *t) {
     if (t && t->pending_stop != 0) {
         take_pending_stop(t);
     }
@@ -253,9 +253,9 @@ void scheduler_tick_cpu(int cpu) {
     task_t *t = current_task[cpu];
 
     total_ticks[cpu]++;
-    if (t->is_idle || sched_task_is_idle_waiting(t)) {
+    if (t->is_idle || scheduler_task_is_idle_waiting(t)) {
         uint64_t f = irq_save_disable();
-        spin_lock(&sched_lock);
+        spin_lock(&scheduler_lock);
         int nothing_else = 1;
         for (int i = 0; i < task_count; i++) {
             if (tasks[i].state == TASK_READY && !tasks[i].is_idle) {
@@ -263,7 +263,7 @@ void scheduler_tick_cpu(int cpu) {
                 break;
             }
         }
-        spin_unlock(&sched_lock);
+        spin_unlock(&scheduler_lock);
         irq_restore(f);
         if (nothing_else) {
             idle_ticks[cpu]++;
@@ -282,14 +282,14 @@ void scheduler_tick_cpu(int cpu) {
     if (cpu == 0 && ++aging_ticks >= SCHED_AGING_TICKS) {
         aging_ticks = 0;
         uint64_t af = irq_save_disable();
-        spin_lock(&sched_lock);
+        spin_lock(&scheduler_lock);
         for (int i = 0; i < task_count; i++) {
             tasks[i].prio = PRIO_INTERACTIVE;
             tasks[i].full_slices = 0;
             tasks[i].last_block_tick = pit_get_ticks();
             need_resched[smp_current_cpu()] = 1;
         }
-        spin_unlock(&sched_lock);
+        spin_unlock(&scheduler_lock);
         irq_restore(af);
     }
 
@@ -315,13 +315,13 @@ static void scheduler_tick(void) {
     smp_broadcast_schedule_tick();
 }
 
-void sched_init(void) {
+void scheduler_init(void) {
     tasks[0].state = TASK_RUNNING;
     tasks[0].generation = 0;
     tasks[0].id = PID_MAKE(0, 0);
     tasks[0].stack_base = NULL;
     tasks[0].kernel_stack_top = 0;
-    tasks[0].pml4_phys = vmm_kernel_pml4_phys();
+    tasks[0].pml4_phys = virtual_memory_kernel_pml4_phys();
     fpu_state_init(tasks[0].fpu_state);
     tasks[0].fds[0].type = FD_STDIN;
     tasks[0].fds[1].type = FD_STDOUT;
@@ -333,7 +333,7 @@ void sched_init(void) {
     tasks[0].cwd[0] = '/';
     tasks[0].cwd[1] = '\0';
     tasks[0].env_block = NULL;
-    tasks[0].env_len = 0;
+    tasks[0].env_length = 0;
     tasks[0].env_count = 0;
     set_task_name(&tasks[0], "kernel");
     task_count = 1;
@@ -343,9 +343,9 @@ void sched_init(void) {
     pit_set_tick_hook(scheduler_tick);
 }
 
-void sched_init_ap(int cpu_id) {
+void scheduler_init_ap(int cpu_id) {
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
+    spin_lock(&scheduler_lock);
     int slot = -1;
     for (int i = 0; i < task_count; i++) {
         if (tasks[i].state == TASK_FREE) {
@@ -364,7 +364,7 @@ void sched_init_ap(int cpu_id) {
     t->id = PID_MAKE(slot, t->generation);
     t->stack_base = NULL;
     t->kernel_stack_top = 0;
-    t->pml4_phys = vmm_kernel_pml4_phys();
+    t->pml4_phys = virtual_memory_kernel_pml4_phys();
     fpu_state_init(t->fpu_state);
     t->fds[0].type = FD_STDIN;
     t->fds[1].type = FD_STDOUT;
@@ -380,25 +380,25 @@ void sched_init_ap(int cpu_id) {
     t->cwd[0] = '/';
     t->cwd[1] = '\0';
     t->env_block = NULL;
-    t->env_len = 0;
+    t->env_length = 0;
     t->env_count = 0;
     set_task_name(t, "cpu-idle");
     current_task[cpu_id] = t;
     loaded_pml4_phys[cpu_id] = t->pml4_phys;
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
 }
 
 static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
-                                  uint64_t heap_start, uint64_t shm_base, task_t *thread_of) {
+                                  uint64_t heap_start, uint64_t shared_memory_base, task_t *thread_of) {
     _Static_assert(TASK_STACK_SIZE % 4096 == 0, "a kernel stack must be a whole number of frames");
-    uint8_t *stack_base = (uint8_t *)(uintptr_t)pmm_try_alloc_contiguous(TASK_STACK_SIZE / 4096);
+    uint8_t *stack_base = (uint8_t *)(uintptr_t)physical_memory_try_alloc_contiguous(TASK_STACK_SIZE / 4096);
     if (!stack_base) {
         return (task_t *)0;
     }
 
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
+    spin_lock(&scheduler_lock);
     int slot = -1;
     for (int i = 0; i < task_count; i++) {
         if (tasks[i].state == TASK_FREE) {
@@ -408,9 +408,9 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     }
     if (slot < 0) {
         if (task_count >= MAX_TASKS) {
-            spin_unlock(&sched_lock);
+            spin_unlock(&scheduler_lock);
             irq_restore(flags);
-            pmm_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
+            physical_memory_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
             return NULL;
         }
         slot = task_count++;
@@ -432,7 +432,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
             t->fds[i].cloexec = 0;
             continue;
         }
-        fd_retain(&t->fds[i]);
+        file_descriptor_retain(&t->fds[i]);
     }
     t->parent_id = caller->id;
     t->pgid = caller->pgid;
@@ -457,7 +457,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
         t->cwd[1] = '\0';
     }
     t->env_block = NULL;
-    t->env_len = 0;
+    t->env_length = 0;
     t->env_count = 0;
     for (int i = 0; i <= SIG_MAX; i++) {
         t->sig_handler[i] = SIG_DFL_ADDR;
@@ -488,7 +488,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
 
     t->heap_brk = heap_start;
     t->heap_mapped_end = heap_start;
-    t->shm_next_vaddr = shm_base;
+    t->shared_memory_next_vaddr = shared_memory_base;
     set_task_name(t, name);
 
     uint64_t *sp = (uint64_t *)t->kernel_stack_top;
@@ -514,18 +514,18 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
         }
     }
 
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
     return t;
 }
 
 task_t *task_spawn(const char *name, void (*entry)(void *arg), void *arg) {
-    return task_spawn_common(name, vmm_kernel_pml4_phys(), entry, arg, 0, 0, (task_t *)0);
+    return task_spawn_common(name, virtual_memory_kernel_pml4_phys(), entry, arg, 0, 0, (task_t *)0);
 }
 
 task_t *task_spawn_in(const char *name, uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
-                       uint64_t heap_start, uint64_t shm_base) {
-    return task_spawn_common(name, pml4_phys, entry, arg, heap_start, shm_base, (task_t *)0);
+                       uint64_t heap_start, uint64_t shared_memory_base) {
+    return task_spawn_common(name, pml4_phys, entry, arg, heap_start, shared_memory_base, (task_t *)0);
 }
 
 static int current_on_some_cpu(const task_t *t) {
@@ -574,7 +574,7 @@ static task_t *pick_next(task_t *from) {
 
 static void fire_expired_alarms(uint64_t now_ms) {
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
+    spin_lock(&scheduler_lock);
     int to_signal[MAX_TASKS];
     int n = 0;
     for (int i = 0; i < task_count; i++) {
@@ -585,38 +585,38 @@ static void fire_expired_alarms(uint64_t now_ms) {
             to_signal[n++] = tasks[i].id;
         }
     }
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
     for (int i = 0; i < n; i++) {
-        task_t *t = sched_task_by_id(to_signal[i]);
+        task_t *t = scheduler_task_by_id(to_signal[i]);
         if (t) {
-            sched_raise_signal(t, SIGALRM);
+            scheduler_raise_signal(t, SIGALRM);
         }
     }
 }
 
-unsigned int sched_set_alarm(task_t *t, unsigned int seconds) {
+unsigned int scheduler_set_alarm(task_t *t, unsigned int seconds) {
     if (!t) {
         return 0;
     }
     uint64_t now_ms = pit_get_ticks() * (1000 / PIT_HZ);
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
+    spin_lock(&scheduler_lock);
     unsigned int remaining = 0;
     if (t->alarm_deadline_ms > now_ms) {
         remaining = (unsigned int)((t->alarm_deadline_ms - now_ms + 999) / 1000);
     }
     t->alarm_deadline_ms = seconds ? now_ms + (uint64_t)seconds * 1000 : 0;
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
     return remaining;
 }
 
 static void wake_expired(uint64_t now_ms) {
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
+    spin_lock(&scheduler_lock);
     if (blocked_count == 0) {
-        spin_unlock(&sched_lock);
+        spin_unlock(&scheduler_lock);
         irq_restore(flags);
         return;
     }
@@ -633,26 +633,26 @@ static void wake_expired(uint64_t now_ms) {
             tasks[i].wake_deadline_ms = 0;
         }
     }
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
 }
 
-uint64_t sched_event_seq(void) {
+uint64_t scheduler_event_sequence(void) {
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
-    uint64_t v = event_seq;
-    spin_unlock(&sched_lock);
+    spin_lock(&scheduler_lock);
+    uint64_t v = event_sequence;
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
     return v;
 }
 
-int sched_wake_n(const void *chan, int max) {
+int scheduler_wake_n(const void *chan, int max) {
     if (!chan || max <= 0) {
         return 0;
     }
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
-    event_seq++;
+    spin_lock(&scheduler_lock);
+    event_sequence++;
     int woken = 0;
     for (int i = 0; i < task_count && woken < max; i++) {
         if (tasks[i].state == TASK_BLOCKED && tasks[i].wait_chan == chan) {
@@ -668,20 +668,20 @@ int sched_wake_n(const void *chan, int max) {
     if (woken > 0) {
         need_resched[smp_current_cpu()] = 1;
     }
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
     return woken;
 }
 
-void sched_wake_all(const void *chan) {
+void scheduler_wake_all(const void *chan) {
     if (!chan) {
         return;
     }
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
-    event_seq++;
+    spin_lock(&scheduler_lock);
+    event_sequence++;
     if (blocked_count == 0) {
-        spin_unlock(&sched_lock);
+        spin_unlock(&scheduler_lock);
         irq_restore(flags);
         return;
     }
@@ -695,32 +695,32 @@ void sched_wake_all(const void *chan) {
             tasks[i].wake_deadline_ms = 0;
         }
     }
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
 }
 
 static void unblock_self(task_t *self) {
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
+    spin_lock(&scheduler_lock);
     if (self->state == TASK_BLOCKED) {
         self->state = TASK_RUNNING;
         blocked_count--;
     }
     self->wait_chan = (const void *)0;
     self->wake_deadline_ms = 0;
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
 }
 
-void sched_block_on_seq(const void *chan, uint64_t deadline_ms, uint64_t expected_seq) {
-    sched_deliver_pending_signal();
-    sched_take_pending_stop_if_any(current_task[smp_current_cpu()]);
+void scheduler_block_on_sequence(const void *chan, uint64_t deadline_ms, uint64_t expected_sequence) {
+    scheduler_deliver_pending_signal();
+    scheduler_take_pending_stop_if_any(current_task[smp_current_cpu()]);
 
     int cpu = smp_current_cpu();
     uint64_t sflags = irq_save_disable();
-    spin_lock(&sched_lock);
-    if (event_seq != expected_seq) {
-        spin_unlock(&sched_lock);
+    spin_lock(&scheduler_lock);
+    if (event_sequence != expected_sequence) {
+        spin_unlock(&scheduler_lock);
         irq_restore(sflags);
         return;
     }
@@ -729,28 +729,28 @@ void sched_block_on_seq(const void *chan, uint64_t deadline_ms, uint64_t expecte
     self->wake_deadline_ms = deadline_ms;
     self->state = TASK_BLOCKED;
     blocked_count++;
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(sflags);
 
     schedule();
     unblock_self(self);
 }
 
-void sched_block_on(const void *chan, uint64_t deadline_ms, spinlock_t *lock, uint64_t *flags) {
+void scheduler_block_on(const void *chan, uint64_t deadline_ms, spinlock_t *lock, uint64_t *flags) {
     int cpu = smp_current_cpu();
     uint64_t sflags = irq_save_disable();
-    spin_lock(&sched_lock);
+    spin_lock(&scheduler_lock);
     task_t *self = current_task[cpu];
     self->wait_chan = chan;
     self->wake_deadline_ms = deadline_ms;
     self->state = TASK_BLOCKED;
     blocked_count++;
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(sflags);
 
     spin_unlock_irqrestore(lock, *flags);
 
-    sched_deliver_pending_signal();
+    scheduler_deliver_pending_signal();
 
     schedule();
     unblock_self(self);
@@ -760,25 +760,25 @@ void sched_block_on(const void *chan, uint64_t deadline_ms, spinlock_t *lock, ui
 void schedule(void) {
     int cpu = smp_current_cpu();
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
+    spin_lock(&scheduler_lock);
     task_t *prev = current_task[cpu];
     task_t *next = pick_next(prev);
 
     if (next == prev) {
-        spin_unlock(&sched_lock);
+        spin_unlock(&scheduler_lock);
         irq_restore(flags);
         return;
     }
 
     for (int c = 0; c < MAX_CPUS; c++) {
         if (c != cpu && current_task[c] == next) {
-            klog_puts("[sched] cpu ");
-            klog_put_dec((uint32_t)cpu);
-            klog_puts(" picked task '");
-            klog_puts(next->name[0] ? next->name : "(unnamed)");
-            klog_puts("' which cpu ");
-            klog_put_dec((uint32_t)c);
-            klog_puts(" is already running\n");
+            kernel_log_puts("[sched] cpu ");
+            kernel_log_put_dec((uint32_t)cpu);
+            kernel_log_puts(" picked task '");
+            kernel_log_puts(next->name[0] ? next->name : "(unnamed)");
+            kernel_log_puts("' which cpu ");
+            kernel_log_put_dec((uint32_t)c);
+            kernel_log_puts(" is already running\n");
             panic("sched: one task, two CPUs - a stack with two owners");
         }
     }
@@ -791,7 +791,7 @@ void schedule(void) {
 
     tss_set_rsp0(cpu, next->kernel_stack_top);
     if (next->pml4_phys != loaded_pml4_phys[cpu]) {
-        vmm_switch_address_space(next->pml4_phys);
+        virtual_memory_switch_address_space(next->pml4_phys);
         loaded_pml4_phys[cpu] = next->pml4_phys;
     }
 
@@ -804,47 +804,47 @@ void schedule(void) {
         uint64_t sp = cpu_stack_pointer();
         uint64_t base = (uint64_t)(uintptr_t)prev->stack_base;
         if (sp < base || sp >= prev->kernel_stack_top) {
-            klog_puts("[sched] cpu ");
-            klog_put_dec((uint32_t)cpu);
-            klog_puts(" is switching away from '");
-            klog_puts(prev->name[0] ? prev->name : "(unnamed)");
-            klog_puts("' (stack 0x");
-            klog_put_hex64(base);
-            klog_puts("..0x");
-            klog_put_hex64(prev->kernel_stack_top);
-            klog_puts(") while standing on rsp=0x");
-            klog_put_hex64(sp);
-            klog_putc('\n');
-            sched_dump_cpus();
+            kernel_log_puts("[sched] cpu ");
+            kernel_log_put_dec((uint32_t)cpu);
+            kernel_log_puts(" is switching away from '");
+            kernel_log_puts(prev->name[0] ? prev->name : "(unnamed)");
+            kernel_log_puts("' (stack 0x");
+            kernel_log_put_hex64(base);
+            kernel_log_puts("..0x");
+            kernel_log_put_hex64(prev->kernel_stack_top);
+            kernel_log_puts(") while standing on rsp=0x");
+            kernel_log_put_hex64(sp);
+            kernel_log_putc('\n');
+            scheduler_dump_cpus();
             panic("sched: this CPU is not on the stack of the task it thinks it is running");
         }
     }
 
     context_switch(&prev->rsp, next->rsp);
 
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
 }
 
-void sched_dump_cpus(void) {
+void scheduler_dump_cpus(void) {
     for (int c = 0; c < MAX_CPUS; c++) {
         task_t *t = current_task[c];
         if (!t) {
             continue;
         }
-        klog_puts("  cpu");
-        klog_put_dec((uint32_t)c);
-        klog_puts("=");
-        klog_puts(t->name[0] ? t->name : "(unnamed)");
-        klog_puts("/0x");
-        klog_put_hex32((uint32_t)t->id);
-        klog_puts(" kstack=0x");
-        klog_put_hex64(t->kernel_stack_top);
+        kernel_log_puts("  cpu");
+        kernel_log_put_dec((uint32_t)c);
+        kernel_log_puts("=");
+        kernel_log_puts(t->name[0] ? t->name : "(unnamed)");
+        kernel_log_puts("/0x");
+        kernel_log_put_hex32((uint32_t)t->id);
+        kernel_log_puts(" kstack=0x");
+        kernel_log_put_hex64(t->kernel_stack_top);
     }
-    klog_putc('\n');
+    kernel_log_putc('\n');
 }
 
-static void sched_deliver_pending_signal(void) {
+static void scheduler_deliver_pending_signal(void) {
     task_t *t = current_task[smp_current_cpu()];
     if (t->pending_signal != 0) {
         deliver_pending_signal_and_exit(t);
@@ -861,25 +861,25 @@ void task_exit_with_signal(int sig) {
 
 void task_exit_with_code(int code) {
     task_t *t = current_task[smp_current_cpu()];
-    shm_free_by_owner(t->id);
-    sched_release_fds(t);
-    sched_release_env(t);
+    shared_memory_free_by_owner(t->id);
+    scheduler_release_file_descriptors(t);
+    scheduler_release_env(t);
 
     if (t->sid != 0 && t->sid == t->id) {
         tty_release_session(tty_console(), t->sid);
         pty_release_session(t->sid);
     }
 
-    if (t->pml4_phys != vmm_kernel_pml4_phys()) {
+    if (t->pml4_phys != virtual_memory_kernel_pml4_phys()) {
         int cpu = smp_current_cpu();
         uint64_t dead = t->pml4_phys;
-        uint64_t peak = vmm_rss_peak_pages(dead);
+        uint64_t peak = virtual_memory_rss_peak_pages(dead);
         if (peak > t->max_rss_pages) {
             t->max_rss_pages = peak;
         }
         int others = 0;
         uint64_t eflags = irq_save_disable();
-        spin_lock(&sched_lock);
+        spin_lock(&scheduler_lock);
         t->exiting = 1;
         for (int i = 0; i < task_count; i++) {
             task_t *o = &tasks[i];
@@ -891,14 +891,14 @@ void task_exit_with_code(int code) {
                 break;
             }
         }
-        spin_unlock(&sched_lock);
+        spin_unlock(&scheduler_lock);
         irq_restore(eflags);
 
         if (!others) {
-            sched_release_shared_range(t, USER_MMAP_BASE, USER_MMAP_LIMIT);
+            scheduler_release_shared_range(t, USER_MMAP_BASE, USER_MMAP_LIMIT);
         }
-        t->pml4_phys = vmm_kernel_pml4_phys();
-        vmm_switch_address_space(t->pml4_phys);
+        t->pml4_phys = virtual_memory_kernel_pml4_phys();
+        virtual_memory_switch_address_space(t->pml4_phys);
         loaded_pml4_phys[cpu] = t->pml4_phys;
         if (!others) {
             process_destroy_address_space(dead);
@@ -910,15 +910,15 @@ void task_exit_with_code(int code) {
         blocked_count--;
     }
     t->state = TASK_TERMINATED;
-    sched_wake_all((const void *)t);
-    sched_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all((const void *)t);
+    scheduler_wake_all(SCHED_POLL_CHAN);
     if (t->parent_id >= 0) {
-        task_t *parent = sched_task_by_id(t->parent_id);
+        task_t *parent = scheduler_task_by_id(t->parent_id);
         if (parent && parent != t) {
             parent->si_pid = (int32_t)t->id;
             parent->si_status = t->exit_signal ? (int32_t)(t->exit_signal & 0x7F)
                                                : (int32_t)(t->exit_code & 0xFF);
-            sched_raise_signal(parent, SIGCHLD);
+            scheduler_raise_signal(parent, SIGCHLD);
         }
     }
     schedule();
@@ -929,11 +929,11 @@ void task_exit(void) {
     task_exit_with_code(0);
 }
 
-task_t *sched_current(void) {
+task_t *scheduler_current(void) {
     return current_task[smp_current_cpu()];
 }
 
-task_t *sched_task_by_id(int pid) {
+task_t *scheduler_task_by_id(int pid) {
     if (pid < 0) {
         return (task_t *)0;
     }
@@ -948,24 +948,24 @@ task_t *sched_task_by_id(int pid) {
     return t;
 }
 
-task_t *sched_task_by_slot(int slot) {
+task_t *scheduler_task_by_slot(int slot) {
     if (slot < 0 || slot >= task_count || tasks[slot].state == TASK_FREE) {
         return (task_t *)0;
     }
     return &tasks[slot];
 }
 
-int sched_task_count(void) {
+int scheduler_task_count(void) {
     return task_count;
 }
 
-int sched_peak_live_tasks(void) {
+int scheduler_peak_live_tasks(void) {
     return peak_live_tasks;
 }
 
-int sched_fd_high_water(int *which_task_out) {
+int scheduler_file_descriptor_high_water(int *which_task_out) {
     int best = 0;
-    uint64_t f = spin_lock_irqsave(&sched_lock);
+    uint64_t f = spin_lock_irqsave(&scheduler_lock);
     for (int i = 0; i < task_count; i++) {
         if (tasks[i].state == TASK_FREE) {
             continue;
@@ -983,11 +983,11 @@ int sched_fd_high_water(int *which_task_out) {
             }
         }
     }
-    spin_unlock_irqrestore(&sched_lock, f);
+    spin_unlock_irqrestore(&scheduler_lock, f);
     return best;
 }
 
-int sched_live_task_count(void) {
+int scheduler_live_task_count(void) {
     int n = 0;
     for (int i = 0; i < task_count; i++) {
         if (tasks[i].state != TASK_FREE) {
@@ -997,7 +997,7 @@ int sched_live_task_count(void) {
     return n;
 }
 
-int sched_has_free_task_slot(void) {
+int scheduler_has_free_task_slot(void) {
     if (task_count < MAX_TASKS) {
         return 1;
     }
@@ -1009,7 +1009,7 @@ int sched_has_free_task_slot(void) {
     return 0;
 }
 
-void sched_reap_slot(task_t *t) {
+void scheduler_reap_slot(task_t *t) {
     if (!t || t->state != TASK_TERMINATED) {
         return;
     }
@@ -1018,7 +1018,7 @@ void sched_reap_slot(task_t *t) {
         uint64_t deadline = pit_get_ticks() + PIT_HZ;
         for (;;) {
             flags = irq_save_disable();
-            spin_lock(&sched_lock);
+            spin_lock(&scheduler_lock);
             int still_running = 0;
             for (int c = 0; c < MAX_CPUS; c++) {
                 if (current_task[c] == t) {
@@ -1029,21 +1029,21 @@ void sched_reap_slot(task_t *t) {
             if (!still_running) {
                 break;
             }
-            spin_unlock(&sched_lock);
+            spin_unlock(&scheduler_lock);
             irq_restore(flags);
             if (pit_get_ticks() > deadline) {
-                klog_puts("[sched] '");
-                klog_puts(t->name[0] ? t->name : "(unnamed)");
-                klog_puts("' pid 0x");
-                klog_put_hex32((uint32_t)t->id);
-                klog_puts(" is terminated and still on a CPU\n");
-                sched_dump_cpus();
+                kernel_log_puts("[sched] '");
+                kernel_log_puts(t->name[0] ? t->name : "(unnamed)");
+                kernel_log_puts("' pid 0x");
+                kernel_log_put_hex32((uint32_t)t->id);
+                kernel_log_puts(" is terminated and still on a CPU\n");
+                scheduler_dump_cpus();
                 panic("sched_reap_slot: a terminated task never left its kernel stack");
             }
             cpu_spin_hint();
         }
     }
-    task_t *parent = sched_task_by_id(t->parent_id);
+    task_t *parent = scheduler_task_by_id(t->parent_id);
     if (parent) {
         if (t->is_thread && t->tgid == parent->tgid) {
             parent->user_ticks += t->user_ticks;
@@ -1090,9 +1090,9 @@ void sched_reap_slot(task_t *t) {
     t->full_slices = 0;
     t->parent_id = -1;
     t->caps = 0;
-    sched_reset_fds_to_std(t);
+    scheduler_reset_file_descriptors_to_std(t);
     t->env_block = NULL;
-    t->env_len = 0;
+    t->env_length = 0;
     t->env_count = 0;
     t->sig_pending = 0;
     t->sig_blocked = 0;
@@ -1104,7 +1104,7 @@ void sched_reap_slot(task_t *t) {
     for (int i = 0; i <= SIG_MAX; i++) {
         t->sig_handler[i] = SIG_DFL_ADDR;
     }
-    sched_regions_forget_memfds(t);
+    scheduler_regions_forget_memfds(t);
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         t->mmaps[i].base = 0;
         t->mmaps[i].pages = 0;
@@ -1118,20 +1118,20 @@ void sched_reap_slot(task_t *t) {
     t->fds[0].type = FD_NONE;
     t->fds[1].type = FD_NONE;
     set_task_name(t, "");
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
     if (stack) {
-        pmm_free_contiguous((uint64_t)(uintptr_t)stack, TASK_STACK_SIZE / 4096);
+        physical_memory_free_contiguous((uint64_t)(uintptr_t)stack, TASK_STACK_SIZE / 4096);
     }
 }
 
-void sched_wake_task(task_t *t) {
+void scheduler_wake_task(task_t *t) {
     if (!t) {
         return;
     }
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
-    event_seq++;
+    spin_lock(&scheduler_lock);
+    event_sequence++;
     if (t->state == TASK_BLOCKED) {
         blocked_count--;
         t->state = TASK_READY;
@@ -1140,15 +1140,15 @@ void sched_wake_task(task_t *t) {
         t->wait_chan = (const void *)0;
         t->wake_deadline_ms = 0;
     }
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
 }
 
-task_t *sched_vm_owner(task_t *t) {
+task_t *scheduler_vm_owner(task_t *t) {
     if (!t || !t->is_thread) {
         return t;
     }
-    task_t *leader = sched_task_by_id(t->tgid);
+    task_t *leader = scheduler_task_by_id(t->tgid);
     return leader ? leader : t;
 }
 
@@ -1216,7 +1216,7 @@ static const mmap_region_t *mmap_region_for(task_t *self, uint64_t page) {
     return 0;
 }
 
-void sched_region_forget_memfd(mmap_region_t *r) {
+void scheduler_region_forget_memfd(mmap_region_t *r) {
     if (!r || !r->memfd_id) {
         return;
     }
@@ -1226,13 +1226,13 @@ void sched_region_forget_memfd(mmap_region_t *r) {
     memfd_region_unref(m);
 }
 
-void sched_regions_forget_memfds(task_t *t) {
+void scheduler_regions_forget_memfds(task_t *t) {
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
-        sched_region_forget_memfd(&t->mmaps[i]);
+        scheduler_region_forget_memfd(&t->mmaps[i]);
     }
 }
 
-void sched_regions_retain_memfds(task_t *t) {
+void scheduler_regions_retain_memfds(task_t *t) {
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         if (t->mmaps[i].pages == 0 || !t->mmaps[i].memfd_id) {
             continue;
@@ -1244,11 +1244,11 @@ void sched_regions_retain_memfds(task_t *t) {
             t->mmaps[i].memfd_gen = 0;
             continue;
         }
-        memfd_region_ref(m);
+        memfd_region_reference(m);
     }
 }
 
-int sched_release_shared_range(task_t *t, uint64_t start, uint64_t end) {
+int scheduler_release_shared_range(task_t *t, uint64_t start, uint64_t end) {
     int dropped = 0;
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         if (t->mmaps[i].pages == 0) {
@@ -1260,10 +1260,10 @@ int sched_release_shared_range(task_t *t, uint64_t start, uint64_t end) {
             uint64_t from = start > rstart ? start : rstart;
             uint64_t to = end < rend ? end : rend;
             for (uint64_t p = from; p < to; p += PAGE_SIZE) {
-                if (!vmm_user_range_ok(t->pml4_phys, p, 1, 0)) {
+                if (!virtual_memory_user_range_ok(t->pml4_phys, p, 1, 0)) {
                     continue;
                 }
-                vmm_unmap_page_in(t->pml4_phys, p);
+                virtual_memory_unmap_page_in(t->pml4_phys, p);
                 dropped++;
             }
             continue;
@@ -1276,11 +1276,11 @@ int sched_release_shared_range(task_t *t, uint64_t start, uint64_t end) {
         uint64_t from = start > rstart ? start : rstart;
         uint64_t to = end < rend ? end : rend;
         for (uint64_t p = from; p < to; p += PAGE_SIZE) {
-            if (!vmm_user_range_ok(t->pml4_phys, p, 1, 0)) {
+            if (!virtual_memory_user_range_ok(t->pml4_phys, p, 1, 0)) {
                 continue;
             }
-            vmm_unmap_page_in(t->pml4_phys, p);
-            filemap_put(t->mmaps[i].handle,
+            virtual_memory_unmap_page_in(t->pml4_phys, p);
+            file_mapping_put(t->mmaps[i].handle,
                         t->mmaps[i].file_page +
                             (uint32_t)((p - rstart) / PAGE_SIZE));
             dropped++;
@@ -1291,7 +1291,7 @@ int sched_release_shared_range(task_t *t, uint64_t start, uint64_t end) {
 
 static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_exec) {
 
-    if (vmm_user_range_ok(self->pml4_phys, page, 1, 0)) {
+    if (virtual_memory_user_range_ok(self->pml4_phys, page, 1, 0)) {
         return 0;
     }
 
@@ -1312,26 +1312,26 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
         if (phys == 0) {
             return 0;
         }
-        return vmm_try_map_page_in(self->pml4_phys, page, phys, flags) == 0
+        return virtual_memory_try_map_page_in(self->pml4_phys, page, phys, flags) == 0
                    ? 1
                    : FILL_NO_MEMORY;
     }
     if (region && region->handle >= 0 && region->shared) {
         uint32_t index = region->file_page +
                          (uint32_t)((page - region->base) / PAGE_SIZE);
-        uint64_t sphys = filemap_get(region->handle, index,
+        uint64_t sphys = file_mapping_get(region->handle, index,
                                      (region->prot & PROT_WRITE) != 0);
         if (sphys == 0) {
             return FILL_NO_MEMORY;
         }
-        if (vmm_try_map_page_in(self->pml4_phys, page, sphys, flags) != 0) {
-            filemap_put(region->handle, index);
+        if (virtual_memory_try_map_page_in(self->pml4_phys, page, sphys, flags) != 0) {
+            file_mapping_put(region->handle, index);
             return FILL_NO_MEMORY;
         }
         return 1;
     }
 
-    uint64_t phys = pmm_try_alloc_frame();
+    uint64_t phys = physical_memory_try_alloc_frame();
     if (phys == 0) {
         return FILL_NO_MEMORY;
     }
@@ -1339,11 +1339,11 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
     if (region && region->handle >= 0) {
         uint32_t index = region->file_page +
                          (uint32_t)((page - region->base) / PAGE_SIZE);
-        (void)vfs_handle_read(region->handle, (void *)phys, PAGE_SIZE,
+        (void)virtual_file_system_handle_read(region->handle, (void *)phys, PAGE_SIZE,
                               index * PAGE_SIZE);
     }
-    if (vmm_try_map_page_in(self->pml4_phys, page, phys, flags) != 0) {
-        pmm_free_frame(phys);
+    if (virtual_memory_try_map_page_in(self->pml4_phys, page, phys, flags) != 0) {
+        physical_memory_free_frame(phys);
         return FILL_NO_MEMORY;
     }
     return 1;
@@ -1355,9 +1355,9 @@ static int fill_one_page(task_t *self, uint64_t page, int for_write) {
 
 #define STACK_GROW_SLACK 65536ULL
 
-int sched_fault_fill(uint64_t addr, uint64_t error_code, uint64_t user_rsp) {
-    task_t *self = sched_vm_owner(sched_current());
-    if (!self || self->pml4_phys == vmm_kernel_pml4_phys()) {
+int scheduler_fault_fill(uint64_t addr, uint64_t error_code, uint64_t user_rsp) {
+    task_t *self = scheduler_vm_owner(scheduler_current());
+    if (!self || self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return 0;
     }
     uint64_t page = addr & ~(uint64_t)(PAGE_SIZE - 1);
@@ -1370,22 +1370,22 @@ int sched_fault_fill(uint64_t addr, uint64_t error_code, uint64_t user_rsp) {
 
     if (error_code & 1u) {
         if (error_code & 2u) {
-            return vmm_cow_break(self->pml4_phys, page);
+            return virtual_memory_cow_break(self->pml4_phys, page);
         }
         return 0;
     }
     return fill_one_page_ex(self, page, (error_code & 2u) != 0, (error_code & 16u) != 0);
 }
 
-void sched_prefault_range(uint64_t addr, uint64_t len, int for_write) {
+void scheduler_prefault_range(uint64_t addr, uint64_t len, int for_write) {
     if (len == 0) {
         return;
     }
-    task_t *self = sched_vm_owner(sched_current());
-    if (!self || self->pml4_phys == vmm_kernel_pml4_phys()) {
+    task_t *self = scheduler_vm_owner(scheduler_current());
+    if (!self || self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return;
     }
-    if (vmm_user_range_ok(self->pml4_phys, addr, len, for_write)) {
+    if (virtual_memory_user_range_ok(self->pml4_phys, addr, len, for_write)) {
         return;
     }
     uint64_t first = addr & ~(uint64_t)(PAGE_SIZE - 1);
@@ -1399,10 +1399,10 @@ void sched_prefault_range(uint64_t addr, uint64_t len, int for_write) {
         return;
     }
     for (uint64_t page = first; page <= last; page += PAGE_SIZE) {
-        if (vmm_user_range_ok(self->pml4_phys, page, 1, for_write)) {
+        if (virtual_memory_user_range_ok(self->pml4_phys, page, 1, for_write)) {
             continue;
         }
-        if (for_write && vmm_cow_break(self->pml4_phys, page)) {
+        if (for_write && virtual_memory_cow_break(self->pml4_phys, page)) {
             continue;
         }
         fill_one_page(self, page, for_write);
@@ -1411,13 +1411,13 @@ void sched_prefault_range(uint64_t addr, uint64_t len, int for_write) {
 
 task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     _Static_assert(TASK_STACK_SIZE % 4096 == 0, "a kernel stack must be a whole number of frames");
-    uint8_t *stack_base = (uint8_t *)(uintptr_t)pmm_try_alloc_contiguous(TASK_STACK_SIZE / 4096);
+    uint8_t *stack_base = (uint8_t *)(uintptr_t)physical_memory_try_alloc_contiguous(TASK_STACK_SIZE / 4096);
     if (!stack_base) {
         return (task_t *)0;
     }
 
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
+    spin_lock(&scheduler_lock);
 
     int slot = -1;
     for (int i = 0; i < task_count; i++) {
@@ -1428,9 +1428,9 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     }
     if (slot < 0) {
         if (task_count >= MAX_TASKS) {
-            spin_unlock(&sched_lock);
+            spin_unlock(&scheduler_lock);
             irq_restore(flags);
-            pmm_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
+            physical_memory_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
             return NULL;
         }
         slot = task_count++;
@@ -1449,7 +1449,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
 
     for (int i = 0; i < MAX_FDS; i++) {
         t->fds[i] = parent->fds[i];
-        fd_retain(&t->fds[i]);
+        file_descriptor_retain(&t->fds[i]);
     }
     t->parent_id = parent->id;
     t->pgid = parent->pgid;
@@ -1475,7 +1475,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
         t->cwd[1] = '\0';
     }
     t->env_block = NULL;
-    t->env_len = 0;
+    t->env_length = 0;
     t->env_count = 0;
 
     for (int i = 0; i <= SIG_MAX; i++) {
@@ -1492,7 +1492,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         t->mmaps[i] = parent->mmaps[i];
     }
-    sched_regions_retain_memfds(t);
+    scheduler_regions_retain_memfds(t);
 
     t->tgid = t->id;
     t->is_thread = 0;
@@ -1507,7 +1507,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
 
     t->heap_brk = parent->heap_brk;
     t->heap_mapped_end = parent->heap_mapped_end;
-    t->shm_next_vaddr = parent->shm_next_vaddr;
+    t->shared_memory_next_vaddr = parent->shared_memory_next_vaddr;
     set_task_name(t, parent->name);
 
     isr_regs_t *child_frame =
@@ -1526,7 +1526,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     *(--sp) = 0;
     t->rsp = (uint64_t)sp;
 
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
     return t;
 }
@@ -1535,10 +1535,10 @@ task_t *task_spawn_thread(const char *name, task_t *leader, void (*entry)(void *
     return task_spawn_common(name, leader->pml4_phys, entry, arg, 0, 0, leader);
 }
 
-int sched_count_sharing_address_space(uint64_t pml4_phys) {
+int scheduler_count_sharing_address_space(uint64_t pml4_phys) {
     int n = 0;
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
+    spin_lock(&scheduler_lock);
     for (int i = 0; i < task_count; i++) {
         if (tasks[i].state == TASK_FREE || tasks[i].state == TASK_TERMINATED) {
             continue;
@@ -1547,12 +1547,12 @@ int sched_count_sharing_address_space(uint64_t pml4_phys) {
             n++;
         }
     }
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
     return n;
 }
 
-void sched_kill_thread_group(task_t *t) {
+void scheduler_kill_thread_group(task_t *t) {
     if (!t) {
         return;
     }
@@ -1560,7 +1560,7 @@ void sched_kill_thread_group(task_t *t) {
     task_t *victims[MAX_TASKS];
     int n = 0;
     uint64_t flags = irq_save_disable();
-    spin_lock(&sched_lock);
+    spin_lock(&scheduler_lock);
     for (int i = 0; i < task_count; i++) {
         task_t *o = &tasks[i];
         if (o == t || o->state == TASK_FREE || o->state == TASK_TERMINATED) {
@@ -1570,14 +1570,14 @@ void sched_kill_thread_group(task_t *t) {
             victims[n++] = o;
         }
     }
-    spin_unlock(&sched_lock);
+    spin_unlock(&scheduler_lock);
     irq_restore(flags);
     for (int i = 0; i < n; i++) {
-        sched_raise_signal(victims[i], SIGKILL);
+        scheduler_raise_signal(victims[i], SIGKILL);
     }
 }
 
-void sched_raise_signal(task_t *t, int sig) {
+void scheduler_raise_signal(task_t *t, int sig) {
     if (!t || t->state == TASK_TERMINATED || t->state == TASK_FREE) {
         return;
     }
@@ -1588,21 +1588,21 @@ void sched_raise_signal(task_t *t, int sig) {
     if (sig == SIGCONT) {
         t->pending_stop = 0;
         if (t->state == TASK_STOPPED) {
-            sched_resume_stopped(t);
+            scheduler_resume_stopped(t);
         }
     }
 
     if (!SIG_IS_CATCHABLE(sig)) {
         if (sig == SIGSTOP) {
             t->pending_stop = sig;
-            sched_wake_task(t);
+            scheduler_wake_task(t);
             return;
         }
         t->pending_signal = sig;
         if (t->state == TASK_STOPPED) {
-            sched_resume_stopped(t);
+            scheduler_resume_stopped(t);
         }
-        sched_wake_task(t);
+        scheduler_wake_task(t);
         return;
     }
     uint64_t h = t->sig_handler[sig];
@@ -1616,23 +1616,23 @@ void sched_raise_signal(task_t *t, int sig) {
             return;
         case SIG_DFL_STOP:
             t->pending_stop = sig;
-            sched_wake_task(t);
+            scheduler_wake_task(t);
             return;
         default:
             break;
         }
         t->pending_signal = sig;
         if (t->state == TASK_STOPPED) {
-            sched_resume_stopped(t);
+            scheduler_resume_stopped(t);
         }
-        sched_wake_task(t);
+        scheduler_wake_task(t);
         return;
     }
     t->sig_pending |= (1u << sig);
-    sched_wake_task(t);
+    scheduler_wake_task(t);
 }
 
-void sched_raise_signal_group(int pgid, int sig) {
+void scheduler_raise_signal_group(int pgid, int sig) {
     if (pgid == 0) {
         return;
     }
@@ -1642,29 +1642,29 @@ void sched_raise_signal_group(int pgid, int sig) {
             continue;
         }
         if (t->pgid == pgid) {
-            sched_raise_signal(t, sig);
+            scheduler_raise_signal(t, sig);
         }
     }
 }
 
-int sched_signal_pending(void) {
+int scheduler_signal_pending(void) {
     task_t *t = current_task[smp_current_cpu()];
     return (t->sig_pending & ~t->sig_blocked) != 0;
 }
 
-void sched_release_env(task_t *t) {
+void scheduler_release_env(task_t *t) {
     char *block = t->env_block;
     t->env_block = NULL;
-    t->env_len = 0;
+    t->env_length = 0;
     t->env_count = 0;
     if (block) {
         kfree(block);
     }
 }
 
-int sched_set_env(task_t *t, const char *block, uint32_t len, uint32_t count) {
+int scheduler_set_env(task_t *t, const char *block, uint32_t len, uint32_t count) {
     if (!block || len == 0 || count == 0) {
-        sched_release_env(t);
+        scheduler_release_env(t);
         return 0;
     }
     char *copy = (char *)kmalloc(len);
@@ -1674,14 +1674,14 @@ int sched_set_env(task_t *t, const char *block, uint32_t len, uint32_t count) {
     for (uint32_t i = 0; i < len; i++) {
         copy[i] = block[i];
     }
-    sched_release_env(t);
+    scheduler_release_env(t);
     t->env_block = copy;
-    t->env_len = len;
+    t->env_length = len;
     t->env_count = count;
     return 0;
 }
 
-void fd_release(fd_slot_t *slot) {
+void file_descriptor_release(file_descriptor_slot_t *slot) {
     slot->cloexec = 0;
     slot->nonblock = 0;
     switch (slot->type) {
@@ -1692,13 +1692,13 @@ void fd_release(fd_slot_t *slot) {
         pipe_unref_write(slot->pipe);
         break;
     case FD_FILE:
-        openfile_unref(slot->file);
+        open_file_unref(slot->file);
         break;
     case FD_SOCKET:
         socket_unref(slot->sock);
         break;
     case FD_UNIX:
-        unixsock_unref(slot->un);
+        unix_socket_unref(slot->un);
         break;
     case FD_EVENT:
         eventfd_unref(slot->event);
@@ -1719,52 +1719,52 @@ void fd_release(fd_slot_t *slot) {
     slot->pipe = (struct pipe *)0;
 }
 
-void fd_retain(const fd_slot_t *slot) {
+void file_descriptor_retain(const file_descriptor_slot_t *slot) {
     switch (slot->type) {
     case FD_PIPE_READ:
-        pipe_ref_read(slot->pipe);
+        pipe_reference_read(slot->pipe);
         break;
     case FD_PIPE_WRITE:
-        pipe_ref_write(slot->pipe);
+        pipe_reference_write(slot->pipe);
         break;
     case FD_FILE:
-        openfile_ref(slot->file);
+        open_file_reference(slot->file);
         break;
     case FD_SOCKET:
-        socket_ref(slot->sock);
+        socket_reference(slot->sock);
         break;
     case FD_UNIX:
-        unixsock_ref(slot->un);
+        unix_socket_reference(slot->un);
         break;
     case FD_EVENT:
-        eventfd_ref(slot->event);
+        eventfd_reference(slot->event);
         break;
     case FD_TIMER:
-        timerfd_ref(slot->timer);
+        timerfd_reference(slot->timer);
         break;
     case FD_EPOLL:
-        epoll_ref(slot->epoll);
+        epoll_reference(slot->epoll);
         break;
     case FD_MEMFD:
-        memfd_ref(slot->memfd);
+        memfd_reference(slot->memfd);
         break;
     default:
         break;
     }
 }
 
-void sched_release_fds(task_t *t) {
+void scheduler_release_file_descriptors(task_t *t) {
     for (int i = 0; i < MAX_FDS; i++) {
-        fd_release(&t->fds[i]);
+        file_descriptor_release(&t->fds[i]);
     }
     if (flock_release_pid(t->id) > 0) {
-        sched_wake_all(FLOCK_CHAN);
+        scheduler_wake_all(FLOCK_CHAN);
     }
 }
 
-void sched_reset_fds_to_std(task_t *t) {
+void scheduler_reset_file_descriptors_to_std(task_t *t) {
     for (int i = 0; i < MAX_FDS; i++) {
-        fd_release(&t->fds[i]);
+        file_descriptor_release(&t->fds[i]);
     }
     t->fds[0].type = FD_STDIN;
     t->fds[1].type = FD_STDOUT;

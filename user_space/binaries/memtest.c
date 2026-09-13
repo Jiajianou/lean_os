@@ -6,14 +6,14 @@
 #define SHM_TEST_SIZE 4096
 #define PATTERN_BYTE  0x5A
 
-static void write_str(const char *s) {
+static void write_string(const char *s) {
     sys_write(1, s, strlen(s));
 }
 
 static void fail(const char *msg) {
-    write_str("[memtest] FAIL: ");
-    write_str(msg);
-    write_str("\n");
+    write_string("[memtest] FAIL: ");
+    write_string(msg);
+    write_string("\n");
     sys_exit(1);
 }
 
@@ -23,16 +23,16 @@ static void itoa_dec(long v, char *buf) {
         buf[1] = 0;
         return;
     }
-    char tmp[24];
+    char temporary[24];
     int i = 0;
     unsigned long u = (unsigned long)v;
     while (u > 0) {
-        tmp[i++] = (char)('0' + (u % 10));
+        temporary[i++] = (char)('0' + (u % 10));
         u /= 10;
     }
     int j = 0;
     while (i > 0) {
-        buf[j++] = tmp[--i];
+        buf[j++] = temporary[--i];
     }
     buf[j] = 0;
 }
@@ -89,23 +89,23 @@ static void malloc_self_test(void) {
         }
     }
 
-    write_str("[memtest] malloc/free self-test passed.\n");
+    write_string("[memtest] malloc/free self-test passed.\n");
 }
 
 static int run_as_creator(void) {
-    long id = sys_shm_create(SHM_TEST_SIZE);
+    long id = sys_shared_memory_create(SHM_TEST_SIZE);
     if (id < 0) {
         fail("sys_shm_create failed");
     }
-    long vaddr = sys_shm_map(id);
+    long vaddr = sys_shared_memory_map(id);
     if (vaddr < 0) {
         fail("sys_shm_map failed (creator)");
     }
     memset((void *)vaddr, PATTERN_BYTE, SHM_TEST_SIZE);
 
-    char id_str[24];
-    itoa_dec(id, id_str);
-    long child_pid = sys_spawn(PATH_BIN_DIR "memtest", id_str);
+    char id_string[24];
+    itoa_dec(id, id_string);
+    long child_pid = sys_spawn(PATH_BIN_DIR "memtest", id_string);
     if (child_pid < 0) {
         fail("sys_spawn(memtest, <id>) failed");
     }
@@ -114,13 +114,13 @@ static int run_as_creator(void) {
         fail("child (shm reader) reported failure");
     }
 
-    write_str("[memtest] cross-process shm self-test passed (writer + reader agree).\n");
+    write_string("[memtest] cross-process shm self-test passed (writer + reader agree).\n");
     return 0;
 }
 
-static int run_as_shm_reader(const char *arg) {
+static int run_as_shared_memory_reader(const char *arg) {
     long id = atoi_dec(arg);
-    long vaddr = sys_shm_map(id);
+    long vaddr = sys_shared_memory_map(id);
     if (vaddr < 0) {
         fail("sys_shm_map failed (reader)");
     }
@@ -139,5 +139,5 @@ int main(int argc, char **argv) {
         malloc_self_test();
         return run_as_creator();
     }
-    return run_as_shm_reader(arg);
+    return run_as_shared_memory_reader(arg);
 }

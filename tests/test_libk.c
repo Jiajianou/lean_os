@@ -31,7 +31,7 @@ static int guard_intact(const guarded_t *g) {
     return 1;
 }
 
-TEST(libk, memset_fills_exactly_its_range) {
+TEST(kernel_library, memset_fills_exactly_its_range) {
     guarded_t g;
     for (size_t n = 0; n <= 64; n++) {
         guard_init(&g, n);
@@ -43,7 +43,7 @@ TEST(libk, memset_fills_exactly_its_range) {
     }
 }
 
-TEST(libk, memset_truncates_its_value_to_a_byte) {
+TEST(kernel_library, memset_truncates_its_value_to_a_byte) {
     guarded_t g;
     guard_init(&g, 4);
     k_memset(g.usable, 0x1FF, 4);
@@ -53,7 +53,7 @@ TEST(libk, memset_truncates_its_value_to_a_byte) {
     CHECK(guard_intact(&g));
 }
 
-TEST(libk, memcpy_copies_exactly_its_range) {
+TEST(kernel_library, memcpy_copies_exactly_its_range) {
     guarded_t dst;
     unsigned char src[64];
     for (size_t i = 0; i < sizeof(src); i++) {
@@ -67,7 +67,7 @@ TEST(libk, memcpy_copies_exactly_its_range) {
     }
 }
 
-TEST(libk, memmove_handles_every_overlap_direction) {
+TEST(kernel_library, memmove_handles_every_overlap_direction) {
     for (int shift = -16; shift <= 16; shift++) {
         unsigned char buf[64];
         unsigned char expect[64];
@@ -90,7 +90,7 @@ TEST(libk, memmove_handles_every_overlap_direction) {
     }
 }
 
-TEST(libk, memmove_of_zero_bytes_and_onto_itself_touch_nothing) {
+TEST(kernel_library, memmove_of_zero_bytes_and_onto_itself_touch_nothing) {
     guarded_t g;
     guard_init(&g, 16);
     for (int i = 0; i < 16; i++) {
@@ -104,7 +104,7 @@ TEST(libk, memmove_of_zero_bytes_and_onto_itself_touch_nothing) {
     CHECK(guard_intact(&g));
 }
 
-TEST(libk, memmove_boundary_where_ranges_just_touch) {
+TEST(kernel_library, memmove_boundary_where_ranges_just_touch) {
     unsigned char buf[32];
     for (size_t i = 0; i < sizeof(buf); i++) {
         buf[i] = (unsigned char)i;
@@ -115,14 +115,14 @@ TEST(libk, memmove_boundary_where_ranges_just_touch) {
     }
 }
 
-TEST(libk, strlen_counts_to_the_terminator) {
+TEST(kernel_library, strlen_counts_to_the_terminator) {
     CHECK_EQ(k_strlen(""), 0);
     CHECK_EQ(k_strlen("a"), 1);
     CHECK_EQ(k_strlen("hello"), 5);
     CHECK_EQ(k_strlen("ab\0cd"), 2);
 }
 
-TEST(libk, memcmp_reads_exactly_n_bytes_and_signs_correctly) {
+TEST(kernel_library, memcmp_reads_exactly_n_bytes_and_signs_correctly) {
     CHECK_EQ(k_memcmp("abc", "abc", 3), 0);
     CHECK_EQ(k_memcmp("", "", 0), 0);
     CHECK_EQ(k_memcmp("abcZ", "abcQ", 3), 0);
@@ -132,7 +132,7 @@ TEST(libk, memcmp_reads_exactly_n_bytes_and_signs_correctly) {
     CHECK(k_memcmp("\x01", "\x80", 1) < 0);
 }
 
-TEST(libk, strcmp_signs_correctly_including_high_bytes) {
+TEST(kernel_library, strcmp_signs_correctly_including_high_bytes) {
     CHECK_EQ(k_strcmp("", ""), 0);
     CHECK_EQ(k_strcmp("same", "same"), 0);
     CHECK(k_strcmp("abc", "abd") < 0);
@@ -142,7 +142,7 @@ TEST(libk, strcmp_signs_correctly_including_high_bytes) {
     CHECK(k_strcmp("\x80", "\x01") > 0);
 }
 
-TEST(libk, strlcpy_always_terminates_and_never_overruns) {
+TEST(kernel_library, strlcpy_always_terminates_and_never_overruns) {
     guarded_t g;
     guard_init(&g, 0);
     k_strlcpy((char *)g.usable, "anything", 0);
@@ -159,7 +159,7 @@ TEST(libk, strlcpy_always_terminates_and_never_overruns) {
     }
 }
 
-TEST(libk, strstr_finds_at_every_position_and_refuses_the_rest) {
+TEST(kernel_library, strstr_finds_at_every_position_and_refuses_the_rest) {
     const char *hay = "the quick brown fox";
     CHECK(k_strstr(hay, "the") == hay);
     CHECK(k_strstr(hay, "quick") == hay + 4);
@@ -171,24 +171,24 @@ TEST(libk, strstr_finds_at_every_position_and_refuses_the_rest) {
     CHECK_STREQ(k_strstr("aaab", "aab"), "aab");
 }
 
-TEST(libk, memmove_at_exactly_one_byte_of_overlap) {
+TEST(kernel_library, memmove_at_exactly_one_byte_of_overlap) {
     for (int dir = 0; dir < 2; dir++) {
         unsigned char buf[32], expect[32];
         for (int i = 0; i < 32; i++) {
             buf[i] = expect[i] = (unsigned char)(i + 1);
         }
         const size_t n = 8;
-        size_t src_off = dir ? 8 : 15;
-        size_t dst_off = dir ? 15 : 8;
+        size_t source_off = dir ? 8 : 15;
+        size_t destination_off = dir ? 15 : 8;
         for (size_t i = 0; i < n; i++) {
-            expect[dst_off + i] = (unsigned char)(src_off + i + 1);
+            expect[destination_off + i] = (unsigned char)(source_off + i + 1);
         }
-        k_memmove(buf + dst_off, buf + src_off, n);
+        k_memmove(buf + destination_off, buf + source_off, n);
         CHECK_MEMEQ(buf, expect, sizeof(buf));
     }
 }
 
-TEST(libk, memmove_of_a_single_byte_in_both_directions) {
+TEST(kernel_library, memmove_of_a_single_byte_in_both_directions) {
     unsigned char buf[4] = {1, 2, 3, 4};
     k_memmove(buf + 1, buf, 1);
     CHECK_EQ(buf[1], 1);
@@ -197,7 +197,7 @@ TEST(libk, memmove_of_a_single_byte_in_both_directions) {
     CHECK_EQ(buf2[0], 4);
 }
 
-TEST(libk, memmove_backwards_copies_the_first_byte_too) {
+TEST(kernel_library, memmove_backwards_copies_the_first_byte_too) {
     unsigned char buf[16];
     for (int i = 0; i < 16; i++) {
         buf[i] = (unsigned char)(0xA0 + i);
@@ -209,7 +209,7 @@ TEST(libk, memmove_backwards_copies_the_first_byte_too) {
     }
 }
 
-TEST(libk, strlcpy_at_exactly_the_length_of_the_source) {
+TEST(kernel_library, strlcpy_at_exactly_the_length_of_the_source) {
     char dst[6];
     k_strlcpy(dst, "hello", sizeof(dst));
     CHECK_STREQ(dst, "hello");

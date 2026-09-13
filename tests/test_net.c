@@ -23,7 +23,7 @@ static const uint8_t peer_mac[6] = {0x52, 0x55, 0x0A, 0x00, 0x02, 0x02};
 static void net_fixture(void) {
     fake_net_reset();
     fake_socket_reset();
-    klog_capture_reset();
+    kernel_log_capture_reset();
 }
 
 static void be16_put(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
@@ -46,27 +46,27 @@ static void arp_request(uint8_t out[28], uint32_t sender_ip, uint32_t target_ip)
 
 TEST(net_arp, a_request_for_us_is_answered_and_one_for_someone_else_is_not) {
     net_fixture();
-    uint8_t pkt[28];
+    uint8_t packet[28];
 
-    arp_request(pkt, PEER_IP, LOCAL_IP);
-    arp_handle_packet(pkt, sizeof(pkt));
+    arp_request(packet, PEER_IP, LOCAL_IP);
+    arp_handle_packet(packet, sizeof(packet));
     CHECK_EQ(fake_net_tx_count(), 1);
 
     fake_net_reset();
-    arp_request(pkt, PEER_IP, OTHER_IP);
-    arp_handle_packet(pkt, sizeof(pkt));
+    arp_request(packet, PEER_IP, OTHER_IP);
+    arp_handle_packet(packet, sizeof(packet));
     CHECK_EQ(fake_net_tx_count(), 0);
 }
 
 TEST(net_arp, a_truncated_packet_is_dropped_at_every_length) {
     net_fixture();
-    uint8_t pkt[28];
-    arp_request(pkt, PEER_IP, LOCAL_IP);
+    uint8_t packet[28];
+    arp_request(packet, PEER_IP, LOCAL_IP);
     for (uint16_t len = 0; len < 28; len++) {
         fake_net_reset();
         uint8_t *heap = malloc(len ? len : 1);
         REQUIRE(heap != NULL);
-        memcpy(heap, pkt, len);
+        memcpy(heap, packet, len);
         CHECK_NO_PANIC(arp_handle_packet(heap, len));
         CHECK_EQ(fake_net_tx_count(), 0);
         free(heap);
@@ -75,15 +75,15 @@ TEST(net_arp, a_truncated_packet_is_dropped_at_every_length) {
 
 TEST(net_arp, a_packet_for_a_protocol_we_do_not_speak_is_dropped) {
     net_fixture();
-    uint8_t pkt[28];
-    arp_request(pkt, PEER_IP, LOCAL_IP);
-    be16_put(pkt + 0, 6);
-    arp_handle_packet(pkt, sizeof(pkt));
+    uint8_t packet[28];
+    arp_request(packet, PEER_IP, LOCAL_IP);
+    be16_put(packet + 0, 6);
+    arp_handle_packet(packet, sizeof(packet));
     CHECK_EQ(fake_net_tx_count(), 0);
 
-    arp_request(pkt, PEER_IP, LOCAL_IP);
-    be16_put(pkt + 2, 0x86DD);
-    arp_handle_packet(pkt, sizeof(pkt));
+    arp_request(packet, PEER_IP, LOCAL_IP);
+    be16_put(packet + 2, 0x86DD);
+    arp_handle_packet(packet, sizeof(packet));
     CHECK_EQ(fake_net_tx_count(), 0);
 }
 
@@ -109,9 +109,9 @@ TEST(net_arp, the_first_packet_to_an_unresolved_neighbour_is_sent_when_it_answer
     }
 
     fake_net_reset();
-    uint8_t pkt[28];
-    arp_reply(pkt, NEIGHBOUR, neighbour_mac);
-    arp_handle_packet(pkt, sizeof(pkt));
+    uint8_t packet[28];
+    arp_reply(packet, NEIGHBOUR, neighbour_mac);
+    arp_handle_packet(packet, sizeof(packet));
 
     REQUIRE(fake_net_tx_count() == 1);
     uint32_t len = 0;
@@ -124,7 +124,7 @@ TEST(net_arp, the_first_packet_to_an_unresolved_neighbour_is_sent_when_it_answer
     CHECK_MEMEQ(f + 14 + 20, payload, sizeof(payload));
 
     fake_net_reset();
-    arp_handle_packet(pkt, sizeof(pkt));
+    arp_handle_packet(packet, sizeof(packet));
     CHECK_EQ(fake_net_tx_count(), 0);
 }
 
@@ -139,13 +139,13 @@ TEST(net_arp, a_held_packet_is_replaced_by_a_newer_one_and_released_only_by_its_
     ip_send(A, 253, (const uint8_t *)"new", 3);
     fake_net_reset();
 
-    uint8_t pkt[28];
-    arp_reply(pkt, B, mac_b);
-    arp_handle_packet(pkt, sizeof(pkt));
+    uint8_t packet[28];
+    arp_reply(packet, B, mac_b);
+    arp_handle_packet(packet, sizeof(packet));
     CHECK_EQ(fake_net_tx_count(), 0);
 
-    arp_reply(pkt, A, mac_a);
-    arp_handle_packet(pkt, sizeof(pkt));
+    arp_reply(packet, A, mac_a);
+    arp_handle_packet(packet, sizeof(packet));
     REQUIRE(fake_net_tx_count() == 1);
     uint32_t len = 0;
     const uint8_t *f = fake_net_tx_frame(0, &len);
@@ -185,38 +185,38 @@ TEST(net_eth, an_unknown_ethertype_is_dropped_rather_than_guessed_at) {
 }
 
 static uint16_t ip_build(uint8_t *out, uint8_t proto, uint32_t dst,
-                         const uint8_t *payload, uint16_t payload_len) {
+                         const uint8_t *payload, uint16_t payload_length) {
     memset(out, 0, 20);
     out[0] = 0x45;
-    be16_put(out + 2, (uint16_t)(20 + payload_len));
+    be16_put(out + 2, (uint16_t)(20 + payload_length));
     out[8] = 64;
     out[9] = proto;
     be32_put(out + 12, PEER_IP);
     be32_put(out + 16, dst);
-    if (payload_len) {
-        memcpy(out + 20, payload, payload_len);
+    if (payload_length) {
+        memcpy(out + 20, payload, payload_length);
     }
-    return (uint16_t)(20 + payload_len);
+    return (uint16_t)(20 + payload_length);
 }
 
 TEST(net_ip, a_datagram_addressed_to_someone_else_is_not_processed) {
     net_fixture();
     uint8_t icmp[8] = {8, 0, 0, 0, 0x12, 0x34, 0, 1};
-    uint8_t pkt[64];
-    uint16_t n = ip_build(pkt, 1  , OTHER_IP, icmp, sizeof(icmp));
-    ip_handle_packet(peer_mac, pkt, n);
+    uint8_t packet[64];
+    uint16_t n = ip_build(packet, 1  , OTHER_IP, icmp, sizeof(icmp));
+    ip_handle_packet(peer_mac, packet, n);
     CHECK_EQ(fake_net_tx_count(), 0);
 }
 
 TEST(net_ip, a_header_claiming_a_length_longer_than_the_frame_is_not_believed) {
     net_fixture();
     uint8_t icmp[8] = {8, 0, 0, 0, 0x12, 0x34, 0, 1};
-    uint8_t pkt[64];
-    uint16_t n = ip_build(pkt, 1, LOCAL_IP, icmp, sizeof(icmp));
+    uint8_t packet[64];
+    uint16_t n = ip_build(packet, 1, LOCAL_IP, icmp, sizeof(icmp));
 
     uint8_t *heap = malloc(n);
     REQUIRE(heap != NULL);
-    memcpy(heap, pkt, n);
+    memcpy(heap, packet, n);
     be16_put(heap + 2, 1500);
     CHECK_NO_PANIC(ip_handle_packet(peer_mac, heap, n));
     free(heap);
@@ -224,22 +224,22 @@ TEST(net_ip, a_header_claiming_a_length_longer_than_the_frame_is_not_believed) {
 
 TEST(net_ip, an_ihl_smaller_than_the_minimum_is_refused) {
     net_fixture();
-    uint8_t pkt[64];
-    uint16_t n = ip_build(pkt, 1, LOCAL_IP, NULL, 0);
+    uint8_t packet[64];
+    uint16_t n = ip_build(packet, 1, LOCAL_IP, NULL, 0);
     for (uint8_t ihl = 0; ihl < 5; ihl++) {
-        pkt[0] = (uint8_t)(0x40 | ihl);
-        CHECK_NO_PANIC(ip_handle_packet(peer_mac, pkt, n));
+        packet[0] = (uint8_t)(0x40 | ihl);
+        CHECK_NO_PANIC(ip_handle_packet(peer_mac, packet, n));
         CHECK_EQ(fake_net_tx_count(), 0);
     }
 }
 
 TEST(net_ip, an_ihl_claiming_options_that_are_not_there_is_refused) {
     net_fixture();
-    uint8_t pkt[64];
-    uint16_t n = ip_build(pkt, 1, LOCAL_IP, NULL, 0);
+    uint8_t packet[64];
+    uint16_t n = ip_build(packet, 1, LOCAL_IP, NULL, 0);
     uint8_t *heap = malloc(n);
     REQUIRE(heap != NULL);
-    memcpy(heap, pkt, n);
+    memcpy(heap, packet, n);
     heap[0] = 0x4F;
     CHECK_NO_PANIC(ip_handle_packet(peer_mac, heap, n));
     CHECK_EQ(fake_net_tx_count(), 0);
@@ -248,12 +248,12 @@ TEST(net_ip, an_ihl_claiming_options_that_are_not_there_is_refused) {
 
 TEST(net_ip, a_version_other_than_four_is_refused) {
     net_fixture();
-    uint8_t pkt[64];
-    uint16_t n = ip_build(pkt, 1, LOCAL_IP, NULL, 0);
+    uint8_t packet[64];
+    uint16_t n = ip_build(packet, 1, LOCAL_IP, NULL, 0);
     for (uint8_t v = 0; v < 16; v++) {
         if (v == 4) { continue; }
-        pkt[0] = (uint8_t)((v << 4) | 5);
-        CHECK_NO_PANIC(ip_handle_packet(peer_mac, pkt, n));
+        packet[0] = (uint8_t)((v << 4) | 5);
+        CHECK_NO_PANIC(ip_handle_packet(peer_mac, packet, n));
     }
     CHECK_EQ(fake_net_tx_count(), 0);
 }
@@ -261,12 +261,12 @@ TEST(net_ip, a_version_other_than_four_is_refused) {
 TEST(net_ip, every_truncation_of_a_valid_datagram_is_survived) {
     net_fixture();
     uint8_t icmp[8] = {8, 0, 0, 0, 0x12, 0x34, 0, 1};
-    uint8_t pkt[64];
-    uint16_t n = ip_build(pkt, 1, LOCAL_IP, icmp, sizeof(icmp));
+    uint8_t packet[64];
+    uint16_t n = ip_build(packet, 1, LOCAL_IP, icmp, sizeof(icmp));
     for (uint16_t len = 0; len <= n; len++) {
         uint8_t *heap = malloc(len ? len : 1);
         REQUIRE(heap != NULL);
-        memcpy(heap, pkt, len);
+        memcpy(heap, packet, len);
         CHECK_NO_PANIC(ip_handle_packet(peer_mac, heap, len));
         free(heap);
     }
@@ -275,17 +275,17 @@ TEST(net_ip, every_truncation_of_a_valid_datagram_is_survived) {
 TEST(net_icmp, an_echo_request_is_answered_and_a_truncated_one_is_not) {
     net_fixture();
     uint8_t echo[12] = {8, 0, 0, 0, 0x1E, 0xA5, 0x00, 0x01, 'd', 'a', 't', 'a'};
-    uint8_t pkt[64];
-    uint16_t n = ip_build(pkt, 1, LOCAL_IP, echo, sizeof(echo));
-    ip_handle_packet(peer_mac, pkt, n);
+    uint8_t packet[64];
+    uint16_t n = ip_build(packet, 1, LOCAL_IP, echo, sizeof(echo));
+    ip_handle_packet(peer_mac, packet, n);
     CHECK_EQ(fake_net_tx_count(), 1);
 
     for (uint16_t cut = 0; cut < sizeof(echo); cut++) {
         fake_net_reset();
-        uint16_t m = ip_build(pkt, 1, LOCAL_IP, echo, cut);
+        uint16_t m = ip_build(packet, 1, LOCAL_IP, echo, cut);
         uint8_t *heap = malloc(m);
         REQUIRE(heap != NULL);
-        memcpy(heap, pkt, m);
+        memcpy(heap, packet, m);
         CHECK_NO_PANIC(ip_handle_packet(peer_mac, heap, m));
         free(heap);
     }
@@ -297,9 +297,9 @@ TEST(net_icmp, an_unknown_icmp_type_is_not_answered) {
         if (type == 8) { continue; }
         fake_net_reset();
         uint8_t body[12] = {type, 0, 0, 0, 0x1E, 0xA5, 0, 1, 'x', 'y', 'z', 'w'};
-        uint8_t pkt[64];
-        uint16_t n = ip_build(pkt, 1, LOCAL_IP, body, sizeof(body));
-        CHECK_NO_PANIC(ip_handle_packet(peer_mac, pkt, n));
+        uint8_t packet[64];
+        uint16_t n = ip_build(packet, 1, LOCAL_IP, body, sizeof(body));
+        CHECK_NO_PANIC(ip_handle_packet(peer_mac, packet, n));
         CHECK_EQ(fake_net_tx_count(), 0);
     }
 }
@@ -315,16 +315,16 @@ TEST(net_udp, a_well_formed_datagram_reaches_the_socket_layer_intact) {
     be16_put(udp + 6, 0);
     memcpy(udp + 8, body, blen);
 
-    uint8_t pkt[128];
-    uint16_t n = ip_build(pkt, 17, LOCAL_IP, udp, (uint16_t)(8 + blen));
-    ip_handle_packet(peer_mac, pkt, n);
+    uint8_t packet[128];
+    uint16_t n = ip_build(packet, 17, LOCAL_IP, udp, (uint16_t)(8 + blen));
+    ip_handle_packet(peer_mac, packet, n);
 
     REQUIRE(fake_socket_delivered_count() == 1);
-    uint32_t got_len = 0;
+    uint32_t got_length = 0;
     uint16_t got_port = 0;
-    const uint8_t *got = fake_socket_delivered(0, &got_len, &got_port);
+    const uint8_t *got = fake_socket_delivered(0, &got_length, &got_port);
     CHECK_EQ(got_port, 1234);
-    CHECK_EQ(got_len, blen);
+    CHECK_EQ(got_length, blen);
     CHECK_MEMEQ(got, body, blen);
 }
 
@@ -337,17 +337,17 @@ TEST(net_udp, a_length_field_that_lies_does_not_deliver_bytes_that_are_not_there
     be16_put(udp + 6, 0);
     memcpy(udp + 8, "abcd", 4);
 
-    uint8_t pkt[64];
-    uint16_t n = ip_build(pkt, 17, LOCAL_IP, udp, sizeof(udp));
+    uint8_t packet[64];
+    uint16_t n = ip_build(packet, 17, LOCAL_IP, udp, sizeof(udp));
     uint8_t *heap = malloc(n);
     REQUIRE(heap != NULL);
-    memcpy(heap, pkt, n);
+    memcpy(heap, packet, n);
     CHECK_NO_PANIC(ip_handle_packet(peer_mac, heap, n));
 
     if (fake_socket_delivered_count() > 0) {
-        uint32_t got_len = 0;
-        fake_socket_delivered(0, &got_len, NULL);
-        CHECK(got_len <= 4);
+        uint32_t got_length = 0;
+        fake_socket_delivered(0, &got_length, NULL);
+        CHECK(got_length <= 4);
     }
     free(heap);
 }
@@ -363,11 +363,11 @@ TEST(net_udp, every_truncation_of_a_datagram_is_survived) {
 
     for (uint16_t cut = 0; cut <= sizeof(udp); cut++) {
         fake_socket_reset();
-        uint8_t pkt[128];
-        uint16_t n = ip_build(pkt, 17, LOCAL_IP, udp, cut);
+        uint8_t packet[128];
+        uint16_t n = ip_build(packet, 17, LOCAL_IP, udp, cut);
         uint8_t *heap = malloc(n);
         REQUIRE(heap != NULL);
-        memcpy(heap, pkt, n);
+        memcpy(heap, packet, n);
         CHECK_NO_PANIC(ip_handle_packet(peer_mac, heap, n));
         free(heap);
     }
@@ -447,10 +447,10 @@ TEST(net_tcp, a_segment_for_a_port_nothing_is_listening_on_is_not_a_crash) {
 
 typedef struct {
     const uint8_t *eth;
-    uint32_t eth_len;
+    uint32_t eth_length;
     const uint8_t *ip;
     const uint8_t *payload;
-    uint16_t payload_len;
+    uint16_t payload_length;
     uint16_t ethertype;
     uint8_t protocol;
 } tx_t;
@@ -460,22 +460,22 @@ static int last_tx(tx_t *out) {
     if (n == 0) {
         return 0;
     }
-    out->eth = fake_net_tx_frame(n - 1, &out->eth_len);
-    if (!out->eth || out->eth_len < 14) {
+    out->eth = fake_net_tx_frame(n - 1, &out->eth_length);
+    if (!out->eth || out->eth_length < 14) {
         return 0;
     }
     out->ethertype = (uint16_t)((out->eth[12] << 8) | out->eth[13]);
     out->ip = out->eth + 14;
-    if (out->ethertype == 0x0800 && out->eth_len >= 14 + 20) {
+    if (out->ethertype == 0x0800 && out->eth_length >= 14 + 20) {
         uint16_t ihl = (uint16_t)((out->ip[0] & 0x0F) * 4);
         uint16_t total = (uint16_t)((out->ip[2] << 8) | out->ip[3]);
         out->protocol = out->ip[9];
         out->payload = out->ip + ihl;
-        out->payload_len = (uint16_t)(total - ihl);
+        out->payload_length = (uint16_t)(total - ihl);
     } else {
         out->protocol = 0;
         out->payload = out->ip;
-        out->payload_len = (uint16_t)(out->eth_len - 14);
+        out->payload_length = (uint16_t)(out->eth_length - 14);
     }
     return 1;
 }
@@ -501,9 +501,9 @@ TEST(net_eth, a_short_frame_is_padded_to_the_minimum_and_the_padding_is_zero) {
 
     tx_t tx;
     REQUIRE(last_tx(&tx));
-    CHECK_EQ(tx.eth_len, 60);
+    CHECK_EQ(tx.eth_length, 60);
     CHECK_EQ(tx.eth[14], 0xAA);
-    for (uint32_t i = 15; i < tx.eth_len; i++) {
+    for (uint32_t i = 15; i < tx.eth_length; i++) {
         CHECK_EQ(tx.eth[i], 0);
     }
 }
@@ -515,7 +515,7 @@ TEST(net_eth, a_frame_at_or_over_the_minimum_is_not_padded_further) {
     eth_send(peer_mac, 0x0800, body, sizeof(body));
     tx_t tx;
     REQUIRE(last_tx(&tx));
-    CHECK_EQ(tx.eth_len, 14 + sizeof(body));
+    CHECK_EQ(tx.eth_length, 14 + sizeof(body));
 }
 
 TEST(net_eth, the_ethertype_decides_which_parser_sees_the_frame) {
@@ -559,14 +559,14 @@ TEST(net_icmp, an_echo_reply_mirrors_the_request_exactly) {
     echo[6] = 0x00; echo[7] = 0x2A;
     memcpy(echo + 8, body, sizeof(body));
 
-    uint8_t pkt[128];
-    uint16_t n = ip_build(pkt, 1, LOCAL_IP, echo, sizeof(echo));
-    ip_handle_packet(peer_mac, pkt, n);
+    uint8_t packet[128];
+    uint16_t n = ip_build(packet, 1, LOCAL_IP, echo, sizeof(echo));
+    ip_handle_packet(peer_mac, packet, n);
 
     tx_t tx;
     REQUIRE(last_tx(&tx));
     CHECK_EQ(tx.protocol, 1);
-    REQUIRE(tx.payload_len >= 8 + (uint16_t)sizeof(body));
+    REQUIRE(tx.payload_length >= 8 + (uint16_t)sizeof(body));
     CHECK_EQ(tx.payload[0], 0);
     CHECK_EQ(tx.payload[1], 0);
     CHECK_EQ(tx.payload[4], 0x1E);
@@ -583,18 +583,18 @@ TEST(net_icmp, an_echo_reply_mirrors_the_request_exactly) {
 TEST(net_icmp, the_reply_checksum_is_correct) {
     net_fixture();
     uint8_t echo[12] = {8, 0, 0, 0, 0x12, 0x34, 0, 7, 'a', 'b', 'c', 'd'};
-    uint8_t pkt[128];
-    uint16_t n = ip_build(pkt, 1, LOCAL_IP, echo, sizeof(echo));
-    ip_handle_packet(peer_mac, pkt, n);
+    uint8_t packet[128];
+    uint16_t n = ip_build(packet, 1, LOCAL_IP, echo, sizeof(echo));
+    ip_handle_packet(peer_mac, packet, n);
 
     tx_t tx;
     REQUIRE(last_tx(&tx));
     uint32_t sum = 0;
-    for (uint16_t i = 0; i + 1 < tx.payload_len; i += 2) {
+    for (uint16_t i = 0; i + 1 < tx.payload_length; i += 2) {
         sum += (uint32_t)((tx.payload[i] << 8) | tx.payload[i + 1]);
     }
-    if (tx.payload_len & 1) {
-        sum += (uint32_t)(tx.payload[tx.payload_len - 1] << 8);
+    if (tx.payload_length & 1) {
+        sum += (uint32_t)(tx.payload[tx.payload_length - 1] << 8);
     }
     while (sum >> 16) {
         sum = (sum & 0xFFFF) + (sum >> 16);
@@ -604,9 +604,9 @@ TEST(net_icmp, the_reply_checksum_is_correct) {
 
 TEST(net_arp, a_reply_carries_our_address_and_is_addressed_to_the_asker) {
     net_fixture();
-    uint8_t pkt[28];
-    arp_request(pkt, PEER_IP, LOCAL_IP);
-    arp_handle_packet(pkt, sizeof(pkt));
+    uint8_t packet[28];
+    arp_request(packet, PEER_IP, LOCAL_IP);
+    arp_handle_packet(packet, sizeof(packet));
 
     tx_t tx;
     REQUIRE(last_tx(&tx));
@@ -638,19 +638,19 @@ TEST(net_udp, a_datagram_is_delivered_with_the_ports_the_wire_carried) {
     be16_put(udp + 6, 0);
     memcpy(udp + 8, body, 8);
 
-    uint8_t pkt[128];
-    uint16_t n = ip_build(pkt, 17, LOCAL_IP, udp, sizeof(udp));
-    ip_handle_packet(peer_mac, pkt, n);
+    uint8_t packet[128];
+    uint16_t n = ip_build(packet, 17, LOCAL_IP, udp, sizeof(udp));
+    ip_handle_packet(peer_mac, packet, n);
 
     REQUIRE(fake_socket_delivered_count() == 1);
     uint32_t len = 0;
-    uint16_t dst_port = 0;
-    const uint8_t *got = fake_socket_delivered(0, &len, &dst_port);
-    CHECK_EQ(dst_port, 1234);
+    uint16_t destination_port = 0;
+    const uint8_t *got = fake_socket_delivered(0, &len, &destination_port);
+    CHECK_EQ(destination_port, 1234);
     CHECK_EQ(len, 8);
     CHECK_MEMEQ(got, body, 8);
-    CHECK_EQ(fake_socket_delivered_src_port(0), 0xBEEF);
-    CHECK_EQ(fake_socket_delivered_src_ip(0), PEER_IP);
+    CHECK_EQ(fake_socket_delivered_source_port(0), 0xBEEF);
+    CHECK_EQ(fake_socket_delivered_source_ip(0), PEER_IP);
 }
 
 TEST(net_ip, an_outbound_datagram_has_a_well_formed_header) {
@@ -680,20 +680,20 @@ TEST(net_ip, an_outbound_datagram_has_a_well_formed_header) {
     CHECK_EQ(sum, 0xFFFF);
 }
 
-static uint16_t udp_checksum(uint32_t src_ip, uint32_t dst_ip,
-                             const uint8_t *datagram, uint16_t udp_len) {
+static uint16_t udp_checksum(uint32_t source_ip, uint32_t destination_ip,
+                             const uint8_t *datagram, uint16_t udp_length) {
     uint32_t sum = 0;
-    sum += (src_ip >> 16) & 0xFFFF;
-    sum += src_ip & 0xFFFF;
-    sum += (dst_ip >> 16) & 0xFFFF;
-    sum += dst_ip & 0xFFFF;
+    sum += (source_ip >> 16) & 0xFFFF;
+    sum += source_ip & 0xFFFF;
+    sum += (destination_ip >> 16) & 0xFFFF;
+    sum += destination_ip & 0xFFFF;
     sum += 17;
-    sum += udp_len;
-    for (uint16_t i = 0; i + 1 < udp_len; i += 2) {
+    sum += udp_length;
+    for (uint16_t i = 0; i + 1 < udp_length; i += 2) {
         sum += (uint32_t)((datagram[i] << 8) | datagram[i + 1]);
     }
-    if (udp_len & 1) {
-        sum += (uint32_t)(datagram[udp_len - 1] << 8);
+    if (udp_length & 1) {
+        sum += (uint32_t)(datagram[udp_length - 1] << 8);
     }
     while (sum >> 16) {
         sum = (sum & 0xFFFF) + (sum >> 16);
@@ -702,20 +702,20 @@ static uint16_t udp_checksum(uint32_t src_ip, uint32_t dst_ip,
     return csum ? csum : 0xFFFF;
 }
 
-static uint16_t udp_build(uint8_t *out, uint16_t src_port, uint16_t dst_port,
-                          const uint8_t *body, uint16_t body_len,
+static uint16_t udp_build(uint8_t *out, uint16_t source_port, uint16_t destination_port,
+                          const uint8_t *body, uint16_t body_length,
                           uint16_t csum_override) {
-    uint16_t udp_len = (uint16_t)(8 + body_len);
-    be16_put(out + 0, src_port);
-    be16_put(out + 2, dst_port);
-    be16_put(out + 4, udp_len);
+    uint16_t udp_length = (uint16_t)(8 + body_length);
+    be16_put(out + 0, source_port);
+    be16_put(out + 2, destination_port);
+    be16_put(out + 4, udp_length);
     be16_put(out + 6, 0);
-    if (body_len) {
-        memcpy(out + 8, body, body_len);
+    if (body_length) {
+        memcpy(out + 8, body, body_length);
     }
     be16_put(out + 6, csum_override ? csum_override
-                                    : udp_checksum(PEER_IP, LOCAL_IP, out, udp_len));
-    return udp_len;
+                                    : udp_checksum(PEER_IP, LOCAL_IP, out, udp_length));
+    return udp_length;
 }
 
 TEST(net_udp, a_datagram_with_a_correct_checksum_is_delivered) {
@@ -723,9 +723,9 @@ TEST(net_udp, a_datagram_with_a_correct_checksum_is_delivered) {
     const uint8_t body[] = "checksummed";
     uint8_t udp[64];
     uint16_t n = udp_build(udp, 4321, 1234, body, sizeof(body) - 1, 0);
-    uint8_t pkt[128];
-    uint16_t m = ip_build(pkt, 17, LOCAL_IP, udp, n);
-    ip_handle_packet(peer_mac, pkt, m);
+    uint8_t packet[128];
+    uint16_t m = ip_build(packet, 17, LOCAL_IP, udp, n);
+    ip_handle_packet(peer_mac, packet, m);
 
     REQUIRE(fake_socket_delivered_count() == 1);
     uint32_t len = 0;
@@ -742,16 +742,16 @@ TEST(net_udp, a_datagram_with_a_wrong_checksum_is_dropped) {
 
     uint16_t good = (uint16_t)((udp[6] << 8) | udp[7]);
     be16_put(udp + 6, (uint16_t)(good ^ 0x0001));
-    uint8_t pkt[128];
-    uint16_t m = ip_build(pkt, 17, LOCAL_IP, udp, n);
-    ip_handle_packet(peer_mac, pkt, m);
+    uint8_t packet[128];
+    uint16_t m = ip_build(packet, 17, LOCAL_IP, udp, n);
+    ip_handle_packet(peer_mac, packet, m);
     CHECK_EQ(fake_socket_delivered_count(), 0);
 
     fake_socket_reset();
     n = udp_build(udp, 4321, 1234, body, sizeof(body) - 1, 0);
     udp[9] ^= 0x20;
-    m = ip_build(pkt, 17, LOCAL_IP, udp, n);
-    ip_handle_packet(peer_mac, pkt, m);
+    m = ip_build(packet, 17, LOCAL_IP, udp, n);
+    ip_handle_packet(peer_mac, packet, m);
     CHECK_EQ(fake_socket_delivered_count(), 0);
 }
 
@@ -761,9 +761,9 @@ TEST(net_udp, a_checksum_of_zero_means_the_sender_did_not_compute_one) {
     uint8_t udp[64];
     uint16_t n = udp_build(udp, 4321, 1234, body, sizeof(body) - 1, 0);
     be16_put(udp + 6, 0);
-    uint8_t pkt[128];
-    uint16_t m = ip_build(pkt, 17, LOCAL_IP, udp, n);
-    ip_handle_packet(peer_mac, pkt, m);
+    uint8_t packet[128];
+    uint16_t m = ip_build(packet, 17, LOCAL_IP, udp, n);
+    ip_handle_packet(peer_mac, packet, m);
     CHECK_EQ(fake_socket_delivered_count(), 1);
 }
 
@@ -772,9 +772,9 @@ TEST(net_udp, a_datagram_with_no_payload_at_all_is_delivered) {
     uint8_t udp[8];
     uint16_t n = udp_build(udp, 4321, 1234, NULL, 0, 0);
     CHECK_EQ(n, 8);
-    uint8_t pkt[64];
-    uint16_t m = ip_build(pkt, 17, LOCAL_IP, udp, n);
-    ip_handle_packet(peer_mac, pkt, m);
+    uint8_t packet[64];
+    uint16_t m = ip_build(packet, 17, LOCAL_IP, udp, n);
+    ip_handle_packet(peer_mac, packet, m);
 
     REQUIRE(fake_socket_delivered_count() == 1);
     uint32_t len = 1;
@@ -791,9 +791,9 @@ TEST(net_udp, a_length_field_shorter_than_the_header_is_refused) {
         uint8_t udp[16];
         udp_build(udp, 4321, 1234, (const uint8_t *)"ab", 2, 0);
         be16_put(udp + 4, claimed);
-        uint8_t pkt[64];
-        uint16_t m = ip_build(pkt, 17, LOCAL_IP, udp, 10);
-        CHECK_NO_PANIC(ip_handle_packet(peer_mac, pkt, m));
+        uint8_t packet[64];
+        uint16_t m = ip_build(packet, 17, LOCAL_IP, udp, 10);
+        CHECK_NO_PANIC(ip_handle_packet(peer_mac, packet, m));
         CHECK_EQ(fake_socket_delivered_count(), 0);
     }
 }
@@ -806,7 +806,7 @@ TEST(net_udp, a_sent_datagram_has_a_header_a_peer_would_accept) {
     tx_t tx;
     REQUIRE(last_tx(&tx));
     CHECK_EQ(tx.protocol, 17);
-    REQUIRE(tx.payload_len == 8 + sizeof(body));
+    REQUIRE(tx.payload_length == 8 + sizeof(body));
     CHECK_EQ((tx.payload[0] << 8) | tx.payload[1], 1053);
     CHECK_EQ((tx.payload[2] << 8) | tx.payload[3], 53);
     CHECK_EQ((tx.payload[4] << 8) | tx.payload[5], 8 + (int)sizeof(body));
@@ -818,12 +818,12 @@ TEST(net_udp, a_sent_datagram_has_a_header_a_peer_would_accept) {
     sum += (src >> 16) & 0xFFFF; sum += src & 0xFFFF;
     sum += (PEER_IP >> 16) & 0xFFFF; sum += PEER_IP & 0xFFFF;
     sum += 17;
-    sum += tx.payload_len;
-    for (uint16_t i = 0; i + 1 < tx.payload_len; i += 2) {
+    sum += tx.payload_length;
+    for (uint16_t i = 0; i + 1 < tx.payload_length; i += 2) {
         sum += (uint32_t)((tx.payload[i] << 8) | tx.payload[i + 1]);
     }
-    if (tx.payload_len & 1) {
-        sum += (uint32_t)(tx.payload[tx.payload_len - 1] << 8);
+    if (tx.payload_length & 1) {
+        sum += (uint32_t)(tx.payload[tx.payload_length - 1] << 8);
     }
     while (sum >> 16) {
         sum = (sum & 0xFFFF) + (sum >> 16);

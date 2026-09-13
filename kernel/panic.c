@@ -17,14 +17,14 @@ static void panic_draw_char(uint32_t x, uint32_t y, char c, uint32_t rgb) {
         uint8_t bits = glyph[row];
         for (uint32_t col = 0; col < FONT_WIDTH; col++) {
             if (bits & (0x80u >> col)) {
-                fb_put_pixel(x + col, y + row, rgb);
+                framebuffer_put_pixel(x + col, y + row, rgb);
             }
         }
     }
 }
 
 static void panic_draw_text(uint32_t x, uint32_t y, const char *s, uint32_t rgb) {
-    uint32_t max_x = fb_width();
+    uint32_t max_x = framebuffer_width();
     for (const char *p = s; *p; p++) {
         if (x + FONT_WIDTH > max_x) {
             return;
@@ -35,8 +35,8 @@ static void panic_draw_text(uint32_t x, uint32_t y, const char *s, uint32_t rgb)
 }
 
 void panic_render(const char *msg) {
-    uint32_t w = fb_width();
-    uint32_t h = fb_height();
+    uint32_t w = framebuffer_width();
+    uint32_t h = framebuffer_height();
     if (w == 0 || h == 0) {
         return;
     }
@@ -46,7 +46,7 @@ void panic_render(const char *msg) {
     if (band_y + band_h > h) {
         return;
     }
-    fb_fill_rect(0, band_y, w, band_h, 0x00800000u);
+    framebuffer_fill_rect(0, band_y, w, band_h, 0x00800000u);
 
     uint32_t x = 16, y = band_y + FONT_HEIGHT;
     panic_draw_text(x, y, "*** KERNEL PANIC ***", 0x00FFFFFFu);
@@ -58,10 +58,10 @@ void panic_render(const char *msg) {
 }
 
 void panic(const char *msg) {
-    klog_enter_panic();
-    klog_puts("\n*** KERNEL PANIC: ");
-    klog_puts(msg);
-    klog_puts(" ***\n");
+    kernel_log_enter_panic();
+    kernel_log_puts("\n*** KERNEL PANIC: ");
+    kernel_log_puts(msg);
+    kernel_log_puts(" ***\n");
     panic_render(msg);
     if (smp_is_initialized() && __atomic_exchange_n(&panic_broadcast_sent, 1, __ATOMIC_ACQ_REL) == 0) {
         smp_halt_other_cpus();

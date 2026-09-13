@@ -22,7 +22,7 @@
 #define MAX_COL  200
 
 static char lines[ROWS][MAX_COL + 1];
-static int line_len[ROWS];
+static int line_length[ROWS];
 static int line_count;
 static int line_head;
 
@@ -41,18 +41,18 @@ static void push_line(const char *src, int len) {
         lines[slot][i] = src[i];
     }
     lines[slot][len] = '\0';
-    line_len[slot] = len;
+    line_length[slot] = len;
 }
 
 static char pending[MAX_COL + 1];
-static int pending_len;
+static int pending_length;
 
 static void feed(const char *buf, long n) {
     for (long i = 0; i < n; i++) {
         char c = buf[i];
         if (c == '\n') {
-            push_line(pending, pending_len);
-            pending_len = 0;
+            push_line(pending, pending_length);
+            pending_length = 0;
             continue;
         }
         if (c == '\r' || c == '\t') {
@@ -61,10 +61,10 @@ static void feed(const char *buf, long n) {
         if (c < 0x20 || c > 0x7E) {
             continue;
         }
-        pending[pending_len++] = c;
-        if (pending_len >= COLS || pending_len >= MAX_COL) {
-            push_line(pending, pending_len);
-            pending_len = 0;
+        pending[pending_length++] = c;
+        if (pending_length >= COLS || pending_length >= MAX_COL) {
+            push_line(pending, pending_length);
+            pending_length = 0;
         }
     }
 }
@@ -82,10 +82,10 @@ static int contains(const char *hay, const char *needle) {
     return 0;
 }
 
-static void redraw(wm_window_t *win, int fell_behind) {
-    gfx_fill_rect(&win->gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
-    gfx_fill_rect(&win->gfx, 0, 0, WIN_W, HEADER_H, HEADER_BG);
-    gfx_draw_text_font(&win->gfx, TEXT_X, 3,
+static void redraw(window_manager_window_t *win, int fell_behind) {
+    graphics_fill_rect(&win->graphics, 0, 0, WIN_W, WIN_H, BG_COLOR);
+    graphics_fill_rect(&win->graphics, 0, 0, WIN_W, HEADER_H, HEADER_BG);
+    graphics_draw_text_font(&win->graphics, TEXT_X, 3,
                         fell_behind ? "kernel log  (following - some output was dropped)"
                                     : "kernel log  (following)",
                         HEADER_TXT, &ui_font_small, 0);
@@ -96,17 +96,17 @@ static void redraw(wm_window_t *win, int fell_behind) {
         uint32_t colour = TEXT_COLOR;
         if (contains(lines[slot], "refused") || contains(lines[slot], "PANIC")) {
             colour = 0x00E09090u;
-        } else if (line_len[slot] == 0) {
+        } else if (line_length[slot] == 0) {
             colour = DIM_COLOR;
         }
-        gfx_draw_text_font(&win->gfx, TEXT_X, y, lines[slot], colour, &ui_font_small, 0);
+        graphics_draw_text_font(&win->graphics, TEXT_X, y, lines[slot], colour, &ui_font_small, 0);
         y += LINE_H;
     }
 }
 
 int main(void) {
-    wm_window_t win;
-    if (wm_connect(WIN_W, WIN_H, "Console", &win) != 0) {
+    window_manager_window_t win;
+    if (window_manager_connect(WIN_W, WIN_H, "Console", &win) != 0) {
         return 1;
     }
 
@@ -118,7 +118,7 @@ int main(void) {
     static char buf[2048];
     for (;;) {
         wm_event_t ev;
-        while (wm_poll_event(&win, &ev)) {
+        while (window_manager_poll_event(&win, &ev)) {
             if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
                 dirty = 1;
             }
@@ -127,8 +127,8 @@ int main(void) {
         uint64_t next = cursor;
         long n = sys_klog(cursor, buf, sizeof(buf), &next);
         if (n < 0) {
-            gfx_fill_rect(&win.gfx, 0, 0, WIN_W, WIN_H, BG_COLOR);
-            gfx_draw_text_font(&win.gfx, TEXT_X, HEADER_H,
+            graphics_fill_rect(&win.graphics, 0, 0, WIN_W, WIN_H, BG_COLOR);
+            graphics_draw_text_font(&win.graphics, TEXT_X, HEADER_H,
                                 "refused: this program does not hold the 'syslog' capability",
                                 0x00E09090u, &ui_font_small, 0);
             return 1;
@@ -146,8 +146,8 @@ int main(void) {
         if (dirty) {
             redraw(&win, fell_behind);
             dirty = 0;
-            wm_present(&win);
+            window_manager_present(&win);
         }
-        wm_wait_ms(&win, NULL, 0, 100);
+        window_manager_wait_ms(&win, NULL, 0, 100);
     }
 }

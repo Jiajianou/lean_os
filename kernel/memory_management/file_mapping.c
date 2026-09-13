@@ -12,12 +12,12 @@ typedef struct {
     uint64_t phys;
     int refs;
     uint8_t dirty;
-} filemap_page_t;
+} file_mapping_page_t;
 
-static filemap_page_t table[FILEMAP_MAX_PAGES];
+static file_mapping_page_t table[FILEMAP_MAX_PAGES];
 static int initialized;
 
-static spinlock_t filemap_lock;
+static spinlock_t file_mapping_lock;
 
 static void ensure_init(void) {
     if (initialized) {
@@ -38,11 +38,11 @@ static int find_slot(int handle, uint32_t index) {
     return -1;
 }
 
-uint64_t filemap_get(int handle, uint32_t index, int writable) {
+uint64_t file_mapping_get(int handle, uint32_t index, int writable) {
     if (handle < 0) {
         return 0;
     }
-    uint64_t flags = spin_lock_irqsave(&filemap_lock);
+    uint64_t flags = spin_lock_irqsave(&file_mapping_lock);
     ensure_init();
     int slot = find_slot(handle, index);
     if (slot >= 0) {
@@ -51,24 +51,24 @@ uint64_t filemap_get(int handle, uint32_t index, int writable) {
             table[slot].dirty = 1;
         }
         uint64_t phys = table[slot].phys;
-        spin_unlock_irqrestore(&filemap_lock, flags);
+        spin_unlock_irqrestore(&file_mapping_lock, flags);
         return phys;
     }
-    spin_unlock_irqrestore(&filemap_lock, flags);
+    spin_unlock_irqrestore(&file_mapping_lock, flags);
 
-    uint64_t phys = pmm_try_alloc_frame();
+    uint64_t phys = physical_memory_try_alloc_frame();
     if (phys == 0) {
         return 0;
     }
     k_memset((void *)phys, 0, PAGE_SIZE);
-    int64_t n = vfs_handle_read(handle, (void *)phys, PAGE_SIZE,
+    int64_t n = virtual_file_system_handle_read(handle, (void *)phys, PAGE_SIZE,
                                 index * PAGE_SIZE);
     if (n < 0) {
-        pmm_free_frame(phys);
+        physical_memory_free_frame(phys);
         return 0;
     }
 
-    flags = spin_lock_irqsave(&filemap_lock);
+    flags = spin_lock_irqsave(&file_mapping_lock);
     slot = find_slot(handle, index);
     if (slot >= 0) {
         table[slot].refs++;
@@ -76,8 +76,8 @@ uint64_t filemap_get(int handle, uint32_t index, int writable) {
             table[slot].dirty = 1;
         }
         uint64_t theirs = table[slot].phys;
-        spin_unlock_irqrestore(&filemap_lock, flags);
-        pmm_free_frame(phys);
+        spin_unlock_irqrestore(&file_mapping_lock, flags);
+        physical_memory_free_frame(phys);
         return theirs;
     }
     for (int i = 0; i < FILEMAP_MAX_PAGES; i++) {
@@ -87,48 +87,48 @@ uint64_t filemap_get(int handle, uint32_t index, int writable) {
             table[i].phys = phys;
             table[i].refs = 1;
             table[i].dirty = (uint8_t)(writable != 0);
-            spin_unlock_irqrestore(&filemap_lock, flags);
+            spin_unlock_irqrestore(&file_mapping_lock, flags);
             return phys;
         }
     }
-    spin_unlock_irqrestore(&filemap_lock, flags);
-    pmm_free_frame(phys);
+    spin_unlock_irqrestore(&file_mapping_lock, flags);
+    physical_memory_free_frame(phys);
     return 0;
 }
 
-void filemap_put(int handle, uint32_t index) {
+void file_mapping_put(int handle, uint32_t index) {
     if (handle < 0) {
         return;
     }
-    uint64_t flags = spin_lock_irqsave(&filemap_lock);
+    uint64_t flags = spin_lock_irqsave(&file_mapping_lock);
     ensure_init();
     int slot = find_slot(handle, index);
     if (slot < 0) {
-        spin_unlock_irqrestore(&filemap_lock, flags);
+        spin_unlock_irqrestore(&file_mapping_lock, flags);
         return;
     }
     if (--table[slot].refs > 0) {
-        spin_unlock_irqrestore(&filemap_lock, flags);
+        spin_unlock_irqrestore(&file_mapping_lock, flags);
         return;
     }
     uint64_t phys = table[slot].phys;
     int dirty = table[slot].dirty;
     table[slot].handle = -1;
-    spin_unlock_irqrestore(&filemap_lock, flags);
+    spin_unlock_irqrestore(&file_mapping_lock, flags);
 
     if (dirty) {
-        vfs_handle_write(handle, (const void *)phys, PAGE_SIZE,
+        virtual_file_system_handle_write(handle, (const void *)phys, PAGE_SIZE,
                          index * PAGE_SIZE);
     }
-    pmm_free_frame(phys);
+    physical_memory_free_frame(phys);
 }
 
-void filemap_sync(int handle) {
+void file_mapping_sync(int handle) {
     if (handle < 0) {
         return;
     }
     for (int i = 0; i < FILEMAP_MAX_PAGES; i++) {
-        uint64_t flags = spin_lock_irqsave(&filemap_lock);
+        uint64_t flags = spin_lock_irqsave(&file_mapping_lock);
         ensure_init();
         int dirty = (table[i].handle == handle && table[i].dirty);
         uint64_t phys = table[i].phys;
@@ -136,16 +136,16 @@ void filemap_sync(int handle) {
         if (dirty) {
             table[i].dirty = 0;
         }
-        spin_unlock_irqrestore(&filemap_lock, flags);
+        spin_unlock_irqrestore(&file_mapping_lock, flags);
         if (dirty) {
-            vfs_handle_write(handle, (const void *)phys, PAGE_SIZE,
+            virtual_file_system_handle_write(handle, (const void *)phys, PAGE_SIZE,
                              index * PAGE_SIZE);
         }
     }
 }
 
-int filemap_in_use(void) {
-    uint64_t flags = spin_lock_irqsave(&filemap_lock);
+int file_mapping_in_use(void) {
+    uint64_t flags = spin_lock_irqsave(&file_mapping_lock);
     ensure_init();
     int n = 0;
     for (int i = 0; i < FILEMAP_MAX_PAGES; i++) {
@@ -153,6 +153,6 @@ int filemap_in_use(void) {
             n++;
         }
     }
-    spin_unlock_irqrestore(&filemap_lock, flags);
+    spin_unlock_irqrestore(&file_mapping_lock, flags);
     return n;
 }

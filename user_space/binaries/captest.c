@@ -24,7 +24,7 @@ int main(int argc, char **argv) {
     check(mine == CAP_APP_DEFAULT,
           "this program did not start with the default application capability set");
 
-    check((uint64_t)sys_fb_map() == (uint64_t)-1, "an ordinary program mapped the framebuffer");
+    check((uint64_t)sys_framebuffer_map() == (uint64_t)-1, "an ordinary program mapped the framebuffer");
 
     char clip[16];
     check(sys_clipboard_get(clip, sizeof(clip)) < 0, "an ordinary program read the clipboard");
@@ -64,9 +64,9 @@ int main(int argc, char **argv) {
         check(0, "could not spawn a child to test signalling one");
     }
 
-    wm_fb_info_t fb;
-    check(sys_fb_info(&fb) == 0, "an ordinary program could not ask the screen's size");
-    check(fb.width > 0 && fb.height > 0, "the screen geometry came back empty");
+    wm_fb_info_t framebuffer;
+    check(sys_framebuffer_info(&framebuffer) == 0, "an ordinary program could not ask the screen's size");
+    check(framebuffer.width > 0 && framebuffer.height > 0, "the screen geometry came back empty");
 
     const char *path = "/tmp/captest.txt";
     check(sys_writefile(path, "kept", 4) == 0, "an ordinary program could not write a file");

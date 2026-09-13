@@ -155,7 +155,7 @@ static const uint8_t ui_wid_small[128] = {
 
 const ui_font_t ui_font_small = {
     .height = 12, .cap_top = 1, .x_top = 4, .baseline = 9,
-    .desc_last = 11, .max_advance = 8,
+    .descriptor_last = 11, .max_advance = 8,
     .rows = ui_rows_small,
     .rows_bold = 0,
     .advance = ui_adv_small,
@@ -448,7 +448,7 @@ static const uint8_t ui_wid_ui[128] = {
 
 const ui_font_t ui_font_ui = {
     .height = 16, .cap_top = 2, .x_top = 5, .baseline = 12,
-    .desc_last = 14, .max_advance = 11,
+    .descriptor_last = 14, .max_advance = 11,
     .rows = ui_rows_ui,
     .rows_bold = ui_bold_ui,
     .advance = ui_adv_ui,
@@ -610,7 +610,7 @@ static const uint8_t ui_wid_large[128] = {
 
 const ui_font_t ui_font_large = {
     .height = 24, .cap_top = 3, .x_top = 8, .baseline = 18,
-    .desc_last = 22, .max_advance = 16,
+    .descriptor_last = 22, .max_advance = 16,
     .rows = ui_rows_large,
     .rows_bold = 0,
     .advance = ui_adv_large,

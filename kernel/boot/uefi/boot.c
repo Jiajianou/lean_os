@@ -30,12 +30,12 @@ typedef struct __attribute__((packed)) {
 } e820_map_t;
 
 typedef struct __attribute__((packed)) {
-    UINT64 phys_addr;
+    UINT64 phys_address;
     UINT32 pitch;
     UINT32 width;
     UINT32 height;
     UINT32 bpp;
-} fb_boot_info_t;
+} framebuffer_boot_info_t;
 
 static EFI_SYSTEM_TABLE *gST;
 
@@ -50,7 +50,7 @@ static void halt(CHAR16 *msg) {
     }
 }
 
-static void init_framebuffer(fb_boot_info_t *fb) {
+static void init_framebuffer(framebuffer_boot_info_t *framebuffer) {
     EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
     if (EFI_ERROR(gST->BootServices->LocateProtocol(&gop_guid, NULL, (void **)&gop)) || !gop) {
@@ -85,11 +85,11 @@ static void init_framebuffer(fb_boot_info_t *fb) {
         }
     }
 
-    fb->phys_addr = gop->Mode->FrameBufferBase;
-    fb->pitch = gop->Mode->Info->PixelsPerScanLine * 4;
-    fb->width = gop->Mode->Info->HorizontalResolution;
-    fb->height = gop->Mode->Info->VerticalResolution;
-    fb->bpp = 32;
+    framebuffer->phys_address = gop->Mode->FrameBufferBase;
+    framebuffer->pitch = gop->Mode->Info->PixelsPerScanLine * 4;
+    framebuffer->width = gop->Mode->Info->HorizontalResolution;
+    framebuffer->height = gop->Mode->Info->VerticalResolution;
+    framebuffer->bpp = 32;
 }
 
 static UINT16 device_path_node_length(const EFI_DEVICE_PATH_PROTOCOL *node) {
@@ -138,7 +138,7 @@ static EFI_BLOCK_IO_PROTOCOL *find_whole_disk_block_io(EFI_HANDLE image_handle) 
     if (EFI_ERROR(bs->HandleProtocol(loaded_image->DeviceHandle, &device_path_guid, (void **)&our_path)) || !our_path) {
         return NULL;
     }
-    UINTN disk_path_len = device_path_size_without_last_node(our_path);
+    UINTN disk_path_length = device_path_size_without_last_node(our_path);
 
     UINTN count = 0;
     EFI_HANDLE *handles = NULL;
@@ -151,8 +151,8 @@ static EFI_BLOCK_IO_PROTOCOL *find_whole_disk_block_io(EFI_HANDLE image_handle) 
             continue;
         }
         const EFI_DEVICE_PATH_PROTOCOL *candidate_end =
-            (const EFI_DEVICE_PATH_PROTOCOL *)((const UINT8 *)candidate_path + disk_path_len);
-        if (!device_path_is_end(candidate_end) || !bytes_equal(candidate_path, our_path, disk_path_len)) {
+            (const EFI_DEVICE_PATH_PROTOCOL *)((const UINT8 *)candidate_path + disk_path_length);
+        if (!device_path_is_end(candidate_end) || !bytes_equal(candidate_path, our_path, disk_path_length)) {
             continue;
         }
         EFI_BLOCK_IO_PROTOCOL *bio = NULL;
@@ -200,15 +200,15 @@ static e820_map_t *build_e820_and_exit_boot_services(EFI_HANDLE image_handle) {
 
     for (;;) {
         UINTN map_size = map_capacity;
-        UINTN map_key, desc_size;
-        UINT32 desc_version;
-        EFI_STATUS status = bs->GetMemoryMap(&map_size, map, &map_key, &desc_size, &desc_version);
+        UINTN map_key, descriptor_size;
+        UINT32 descriptor_version;
+        EFI_STATUS status = bs->GetMemoryMap(&map_size, map, &map_key, &descriptor_size, &descriptor_version);
 
         if (status == EFI_BUFFER_TOO_SMALL) {
             if (map) {
                 bs->FreePool(map);
             }
-            map_capacity = map_size + MAP_SLACK_DESCRIPTORS * desc_size;
+            map_capacity = map_size + MAP_SLACK_DESCRIPTORS * descriptor_size;
             if (EFI_ERROR(bs->AllocatePool(EfiLoaderData, map_capacity, (void **)&map))) {
                 halt(u"lean_os uefi: out of pool memory for the UEFI memory map\r\n");
             }
@@ -218,7 +218,7 @@ static e820_map_t *build_e820_and_exit_boot_services(EFI_HANDLE image_handle) {
             halt(u"lean_os uefi: GetMemoryMap failed\r\n");
         }
 
-        UINTN entries_now = map_size / desc_size;
+        UINTN entries_now = map_size / descriptor_size;
         if (entries_now > e820_capacity) {
             if (e820) {
                 bs->FreePool(e820);
@@ -232,7 +232,7 @@ static e820_map_t *build_e820_and_exit_boot_services(EFI_HANDLE image_handle) {
         }
 
         UINT32 n = 0;
-        for (UINTN off = 0; off < map_size && n < e820_capacity; off += desc_size) {
+        for (UINTN off = 0; off < map_size && n < e820_capacity; off += descriptor_size) {
             EFI_MEMORY_DESCRIPTOR *d = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)map + off);
             e820->entries[n].base = d->PhysicalStart;
             e820->entries[n].length = d->NumberOfPages * PAGE_SIZE;
@@ -306,8 +306,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     UINTN rsdp = find_rsdp(SystemTable);
 
-    static fb_boot_info_t fb;
-    init_framebuffer(&fb);
+    static framebuffer_boot_info_t framebuffer;
+    init_framebuffer(&framebuffer);
 
     puts16(u"lean_os uefi: framebuffer ready, loading kernel...\r\n");
     load_kernel(ImageHandle);
@@ -321,7 +321,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         "mov %3, %%rdx\n\t"
         "jmp *%2\n\t"
         :
-        : "r"((UINTN)e820), "r"((UINTN)&fb), "r"((UINTN)KERNEL_LOAD_ADDR), "r"(rsdp)
+        : "r"((UINTN)e820), "r"((UINTN)&framebuffer), "r"((UINTN)KERNEL_LOAD_ADDR), "r"(rsdp)
         : "rdi", "rsi", "rdx");
 
     __builtin_unreachable();

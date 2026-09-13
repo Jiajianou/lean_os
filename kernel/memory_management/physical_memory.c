@@ -25,7 +25,7 @@ static uint64_t total_frames;
 static uint64_t dma_frames;
 static uint64_t search_hint;
 
-static spinlock_t pmm_lock;
+static spinlock_t physical_memory_lock;
 
 static inline void bitmap_set(uint64_t frame) {
     bitmap[frame / 8] |= (uint8_t)(1u << (frame % 8));
@@ -95,7 +95,7 @@ static uint64_t place_after_exclusions(uint64_t start, uint64_t entry_end, uint6
     return 0;
 }
 
-void pmm_init(const uint32_t *e820_map) {
+void physical_memory_init(const uint32_t *e820_map) {
     uint32_t count = e820_count(e820_map);
     const e820_entry_t *entries = e820_entries(e820_map);
 
@@ -166,17 +166,17 @@ void pmm_init(const uint32_t *e820_map) {
         panic("pmm_init: no usable memory found");
     }
 
-    klog_puts("[pmm] ");
-    klog_put_hex64(free_frames);
-    klog_puts(" / ");
-    klog_put_hex64(total_frames);
-    klog_puts(" frames free, tracking to 0x");
-    klog_put_hex64(highest_usable_end);
-    klog_puts(" (");
-    klog_put_hex64(highest_usable_end / (1024 * 1024));
-    klog_puts(" MiB); bitmap+refcounts at 0x");
-    klog_put_hex64(meta_base);
-    klog_putc('\n');
+    kernel_log_puts("[pmm] ");
+    kernel_log_put_hex64(free_frames);
+    kernel_log_puts(" / ");
+    kernel_log_put_hex64(total_frames);
+    kernel_log_puts(" frames free, tracking to 0x");
+    kernel_log_put_hex64(highest_usable_end);
+    kernel_log_puts(" (");
+    kernel_log_put_hex64(highest_usable_end / (1024 * 1024));
+    kernel_log_puts(" MiB); bitmap+refcounts at 0x");
+    kernel_log_put_hex64(meta_base);
+    kernel_log_putc('\n');
 }
 
 static uint64_t claim_first_free(uint64_t first, uint64_t limit) {
@@ -191,44 +191,44 @@ static uint64_t claim_first_free(uint64_t first, uint64_t limit) {
     return 0;
 }
 
-uint64_t pmm_try_alloc_frame(void) {
-    uint64_t irq_flags = spin_lock_irqsave(&pmm_lock);
+uint64_t physical_memory_try_alloc_frame(void) {
+    uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
     uint64_t phys = claim_first_free(search_hint, total_frames);
     if (phys != 0) {
         search_hint = phys / PAGE_SIZE + 1;
     }
-    spin_unlock_irqrestore(&pmm_lock, irq_flags);
+    spin_unlock_irqrestore(&physical_memory_lock, irq_flags);
     return phys;
 }
 
-uint64_t pmm_alloc_frame(void) {
-    uint64_t phys = pmm_try_alloc_frame();
+uint64_t physical_memory_alloc_frame(void) {
+    uint64_t phys = physical_memory_try_alloc_frame();
     if (phys == 0) {
         panic("pmm_alloc_frame: out of physical memory");
     }
     return phys;
 }
 
-uint64_t pmm_alloc_frame_dma(void) {
-    uint64_t irq_flags = spin_lock_irqsave(&pmm_lock);
+uint64_t physical_memory_alloc_frame_dma(void) {
+    uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
     uint64_t phys = claim_first_free(0, dma_frames);
-    spin_unlock_irqrestore(&pmm_lock, irq_flags);
+    spin_unlock_irqrestore(&physical_memory_lock, irq_flags);
     if (phys == 0) {
         panic("pmm_alloc_frame_dma: no free frame below 4 GiB");
     }
     return phys;
 }
 
-uint64_t pmm_alloc_frame_above(uint64_t min_phys) {
-    uint64_t irq_flags = spin_lock_irqsave(&pmm_lock);
+uint64_t physical_memory_alloc_frame_above(uint64_t min_phys) {
+    uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
     uint64_t phys = claim_first_free(min_phys / PAGE_SIZE, total_frames);
-    spin_unlock_irqrestore(&pmm_lock, irq_flags);
+    spin_unlock_irqrestore(&physical_memory_lock, irq_flags);
     return phys;
 }
 
-void pmm_free_frame(uint64_t phys_addr) {
-    uint64_t irq_flags = spin_lock_irqsave(&pmm_lock);
-    uint64_t f = phys_addr / PAGE_SIZE;
+void physical_memory_free_frame(uint64_t phys_address) {
+    uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
+    uint64_t f = phys_address / PAGE_SIZE;
     if (f >= total_frames || !bitmap_test(f) || frame_refs[f] == 0) {
         panic("pmm_free_frame: double-free or invalid frame");
     }
@@ -239,32 +239,32 @@ void pmm_free_frame(uint64_t phys_addr) {
             search_hint = f;
         }
     }
-    spin_unlock_irqrestore(&pmm_lock, irq_flags);
+    spin_unlock_irqrestore(&physical_memory_lock, irq_flags);
 }
 
-uint64_t pmm_free_frame_count(void) {
+uint64_t physical_memory_free_frame_count(void) {
     return free_frames;
 }
 
-uint64_t pmm_total_frame_count(void) {
+uint64_t physical_memory_total_frame_count(void) {
     return total_frames;
 }
 
-uint64_t pmm_tracked_limit(void) {
+uint64_t physical_memory_tracked_limit(void) {
     return total_frames * PAGE_SIZE;
 }
 
-uint64_t pmm_try_alloc_contiguous(uint64_t count) {
-    uint64_t irq_flags = spin_lock_irqsave(&pmm_lock);
+uint64_t physical_memory_try_alloc_contiguous(uint64_t count) {
+    uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
     uint64_t run_start = 0;
-    uint64_t run_len = 0;
+    uint64_t run_length = 0;
     for (uint64_t f = 0; f < dma_frames; f++) {
         if (!bitmap_test(f)) {
-            if (run_len == 0) {
+            if (run_length == 0) {
                 run_start = f;
             }
-            run_len++;
-            if (run_len == count) {
+            run_length++;
+            if (run_length == count) {
                 for (uint64_t i = 0; i < count; i++) {
                     bitmap_set(run_start + i);
                     frame_refs[run_start + i] = 1;
@@ -273,28 +273,28 @@ uint64_t pmm_try_alloc_contiguous(uint64_t count) {
                 if (run_start <= search_hint && search_hint < run_start + count) {
                     search_hint = run_start + count;
                 }
-                spin_unlock_irqrestore(&pmm_lock, irq_flags);
+                spin_unlock_irqrestore(&physical_memory_lock, irq_flags);
                 return run_start * PAGE_SIZE;
             }
         } else {
-            run_len = 0;
+            run_length = 0;
         }
     }
-    spin_unlock_irqrestore(&pmm_lock, irq_flags);
+    spin_unlock_irqrestore(&physical_memory_lock, irq_flags);
     return 0;
 }
 
-uint64_t pmm_alloc_contiguous(uint64_t count) {
-    uint64_t phys = pmm_try_alloc_contiguous(count);
+uint64_t physical_memory_alloc_contiguous(uint64_t count) {
+    uint64_t phys = physical_memory_try_alloc_contiguous(count);
     if (!phys) {
         panic("pmm_alloc_contiguous: no contiguous run of that size found");
     }
     return phys;
 }
 
-void pmm_free_contiguous(uint64_t phys_addr, uint64_t count) {
-    uint64_t irq_flags = spin_lock_irqsave(&pmm_lock);
-    uint64_t first = phys_addr / PAGE_SIZE;
+void physical_memory_free_contiguous(uint64_t phys_address, uint64_t count) {
+    uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
+    uint64_t first = phys_address / PAGE_SIZE;
     if (first + count > total_frames) {
         panic("pmm_free_contiguous: invalid range");
     }
@@ -310,12 +310,12 @@ void pmm_free_contiguous(uint64_t phys_addr, uint64_t count) {
     if (first < search_hint) {
         search_hint = first;
     }
-    spin_unlock_irqrestore(&pmm_lock, irq_flags);
+    spin_unlock_irqrestore(&physical_memory_lock, irq_flags);
 }
 
-void pmm_frame_ref(uint64_t phys_addr) {
-    uint64_t irq_flags = spin_lock_irqsave(&pmm_lock);
-    uint64_t f = phys_addr / PAGE_SIZE;
+void physical_memory_frame_reference(uint64_t phys_address) {
+    uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
+    uint64_t f = phys_address / PAGE_SIZE;
     if (f >= total_frames || !bitmap_test(f) || frame_refs[f] == 0) {
         panic("pmm_frame_ref: no such allocated frame");
     }
@@ -323,11 +323,11 @@ void pmm_frame_ref(uint64_t phys_addr) {
         panic("pmm_frame_ref: frame owner count would overflow");
     }
     frame_refs[f]++;
-    spin_unlock_irqrestore(&pmm_lock, irq_flags);
+    spin_unlock_irqrestore(&physical_memory_lock, irq_flags);
 }
 
-uint8_t pmm_frame_refs(uint64_t phys_addr) {
-    uint64_t f = phys_addr / PAGE_SIZE;
+uint8_t physical_memory_frame_refs(uint64_t phys_address) {
+    uint64_t f = phys_address / PAGE_SIZE;
     if (f >= total_frames) {
         return 0;
     }

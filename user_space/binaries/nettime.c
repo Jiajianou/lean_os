@@ -8,13 +8,13 @@
 
 int main(int argc, char **argv) {
     int set_clock = 0;
-    const char *server_arg = 0;
+    const char *server_argument = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-s") == 0) {
             set_clock = 1;
-        } else if (!server_arg) {
-            server_arg = argv[i];
+        } else if (!server_argument) {
+            server_argument = argv[i];
         } else {
             printf("usage: nettime [-s] [server-ip]\n");
             return 2;
@@ -22,9 +22,9 @@ int main(int argc, char **argv) {
     }
 
     uint32_t server;
-    if (server_arg) {
-        if (!os_ip_from_string(server_arg, &server)) {
-            printf("nettime: '%s' is not an IPv4 address\n", server_arg);
+    if (server_argument) {
+        if (!os_ip_from_string(server_argument, &server)) {
+            printf("nettime: '%s' is not an IPv4 address\n", server_argument);
             return 2;
         }
     } else {

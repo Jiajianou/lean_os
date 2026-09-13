@@ -36,8 +36,8 @@ static int gone(const char *path) {
 }
 
 int main(void) {
-    fsutil_remove_tree(ROOT);
-    fsutil_remove_tree(NEIGHBOUR);
+    file_system_utilities_remove_tree(ROOT);
+    file_system_utilities_remove_tree(NEIGHBOUR);
 
     if (sys_mkdir(ROOT) != 0 || sys_mkdir(ROOT "/mid") != 0 ||
         sys_mkdir(ROOT "/mid/deep") != 0 || sys_mkdir(ROOT "/wide") != 0) {
@@ -64,8 +64,8 @@ int main(void) {
         }
     }
 
-    fsutil_tree_t t;
-    if (fsutil_count_tree(ROOT, &t) != 0) {
+    file_system_utilities_tree_t t;
+    if (file_system_utilities_count_tree(ROOT, &t) != 0) {
         return E_COUNT;
     }
     if (t.entries != (uint32_t)(6 + WIDE_FILES) ||
@@ -77,7 +77,7 @@ int main(void) {
         return E_RMDIR_TOOK_A_FULL_ONE;
     }
 
-    if (fsutil_remove_tree(ROOT) != 0) {
+    if (file_system_utilities_remove_tree(ROOT) != 0) {
         return E_REMOVE;
     }
     if (!gone(ROOT) || !gone(ROOT "/mid") || !gone(ROOT "/mid/deep") ||
@@ -90,10 +90,10 @@ int main(void) {
         st.size != 5) {
         return E_TOOK_A_NEIGHBOUR;
     }
-    fsutil_remove_tree(NEIGHBOUR);
+    file_system_utilities_remove_tree(NEIGHBOUR);
 
-    if (fsutil_name_ok("../elsewhere") || fsutil_name_ok("a/b") ||
-        fsutil_name_ok("..") || fsutil_name_ok("") || !fsutil_name_ok("ordinary.txt")) {
+    if (file_system_utilities_name_ok("../elsewhere") || file_system_utilities_name_ok("a/b") ||
+        file_system_utilities_name_ok("..") || file_system_utilities_name_ok("") || !file_system_utilities_name_ok("ordinary.txt")) {
         return E_NAME_RULE;
     }
     return E_OK;

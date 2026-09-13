@@ -70,7 +70,7 @@ void LeanOS::addLibStdCxxIncludePaths(const ArgList &DriverArgs,
                                       ArgStringList &CC1Args) const {
   const std::string Base = getTargetLibDir() + "/include/c++";
   std::error_code EC;
-  for (llvm::vfs::directory_iterator LI = getVFS().dir_begin(Base, EC), LE;
+  for (llvm::virtual_file_system::directory_iterator LI = getVFS().directory_begin(Base, EC), LE;
        !EC && LI != LE; LI = LI.increment(EC)) {
     llvm::StringRef Version = llvm::sys::path::filename(LI->path());
     addSystemInclude(DriverArgs, CC1Args, LI->path());

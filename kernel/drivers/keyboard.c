@@ -51,8 +51,8 @@ static const char shifted_table[0x3A] = {
 static char buffer[BUFFER_SIZE];
 static uint8_t mods_buffer[BUFFER_SIZE];
 static volatile int last_read_mods;
-static volatile uint32_t buf_head;
-static volatile uint32_t buf_tail;
+static volatile uint32_t buffer_head;
+static volatile uint32_t buffer_tail;
 
 static volatile int shift_held;
 static volatile int ctrl_held;
@@ -74,15 +74,15 @@ static int current_modifiers(void) {
 }
 
 static void buffer_push(char c) {
-    uint32_t next = (buf_head + 1) % BUFFER_SIZE;
-    if (next == buf_tail) {
+    uint32_t next = (buffer_head + 1) % BUFFER_SIZE;
+    if (next == buffer_tail) {
         return;
     }
-    buffer[buf_head] = c;
-    mods_buffer[buf_head] = (uint8_t)current_modifiers();
-    buf_head = next;
-    sched_wake_all(SCHED_KEYBOARD_CHAN);
-    sched_wake_all(SCHED_POLL_CHAN);
+    buffer[buffer_head] = c;
+    mods_buffer[buffer_head] = (uint8_t)current_modifiers();
+    buffer_head = next;
+    scheduler_wake_all(SCHED_KEYBOARD_CHAN);
+    scheduler_wake_all(SCHED_POLL_CHAN);
 }
 
 static void keyboard_irq(isr_regs_t *regs) {
@@ -159,8 +159,8 @@ static void keyboard_irq(isr_regs_t *regs) {
 }
 
 void keyboard_init(void) {
-    buf_head = 0;
-    buf_tail = 0;
+    buffer_head = 0;
+    buffer_tail = 0;
     shift_held = 0;
     ctrl_held = 0;
     alt_held = 0;
@@ -175,27 +175,27 @@ int keyboard_modifiers(void) {
 }
 
 void keyboard_inject(char ch, int mods) {
-    uint32_t next = (buf_head + 1) % BUFFER_SIZE;
-    if (next == buf_tail) {
+    uint32_t next = (buffer_head + 1) % BUFFER_SIZE;
+    if (next == buffer_tail) {
         return;
     }
-    buffer[buf_head] = ch;
-    mods_buffer[buf_head] = (uint8_t)mods;
-    buf_head = next;
-    sched_wake_all(SCHED_KEYBOARD_CHAN);
-    sched_wake_all(SCHED_POLL_CHAN);
+    buffer[buffer_head] = ch;
+    mods_buffer[buffer_head] = (uint8_t)mods;
+    buffer_head = next;
+    scheduler_wake_all(SCHED_KEYBOARD_CHAN);
+    scheduler_wake_all(SCHED_POLL_CHAN);
 }
 
 int keyboard_peek(void) {
-    return buf_tail != buf_head;
+    return buffer_tail != buffer_head;
 }
 
 int keyboard_read(void) {
-    if (buf_tail == buf_head) {
+    if (buffer_tail == buffer_head) {
         return -1;
     }
-    char c = buffer[buf_tail];
-    last_read_mods = (int)mods_buffer[buf_tail];
-    buf_tail = (buf_tail + 1) % BUFFER_SIZE;
+    char c = buffer[buffer_tail];
+    last_read_mods = (int)mods_buffer[buffer_tail];
+    buffer_tail = (buffer_tail + 1) % BUFFER_SIZE;
     return (int)(unsigned char)c;
 }

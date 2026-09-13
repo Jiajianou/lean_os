@@ -12,25 +12,25 @@
 #include "memory_management/virtual_memory.h"
 #include "panic.h"
 
-extern void enter_user_mode(uint64_t entry, uint64_t user_stack, uint64_t arg_ptr,
+extern void enter_user_mode(uint64_t entry, uint64_t user_stack, uint64_t argument_pointer,
                              uint64_t user_data_sel, uint64_t user_code_sel);
 
 typedef struct {
     uint64_t entry;
     uint64_t user_stack_top;
-    uint64_t arg_ptr;
-} user_launch_args_t;
+    uint64_t argument_pointer;
+} user_launch_arguments_t;
 
 static void user_task_launcher(void *arg) {
-    user_launch_args_t *args = (user_launch_args_t *)arg;
-    uint64_t entry = args->entry;
-    uint64_t stack = args->user_stack_top;
-    uint64_t arg_ptr = args->arg_ptr;
-    kfree(args);
-    enter_user_mode(entry, stack, arg_ptr, GDT_USER_DATA_SEL | 3, GDT_USER_CODE_SEL | 3);
+    user_launch_arguments_t *arguments = (user_launch_arguments_t *)arg;
+    uint64_t entry = arguments->entry;
+    uint64_t stack = arguments->user_stack_top;
+    uint64_t argument_pointer = arguments->argument_pointer;
+    kfree(arguments);
+    enter_user_mode(entry, stack, argument_pointer, GDT_USER_DATA_SEL | 3, GDT_USER_CODE_SEL | 3);
 }
 
-static const vmm_range_t PROCESS_OWNED[] = {
+static const virtual_memory_range_t PROCESS_OWNED[] = {
         {USER_IMAGE_BASE, USER_IMAGE_LIMIT},
         {USER_STACK_LIMIT, USER_ARG_ADDR + USER_ARG_BYTES},
         {USER_HEAP_START, USER_HEAP_LIMIT},
@@ -39,17 +39,17 @@ static const vmm_range_t PROCESS_OWNED[] = {
 #define PROCESS_OWNED_COUNT ((int)(sizeof(PROCESS_OWNED) / sizeof(PROCESS_OWNED[0])))
 
 void process_destroy_address_space(uint64_t pml4_phys) {
-    if (pml4_phys == 0 || pml4_phys == vmm_kernel_pml4_phys()) {
+    if (pml4_phys == 0 || pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return;
     }
-    vmm_destroy_address_space(pml4_phys, PROCESS_OWNED, PROCESS_OWNED_COUNT);
+    virtual_memory_destroy_address_space(pml4_phys, PROCESS_OWNED, PROCESS_OWNED_COUNT);
 }
 
-uint64_t process_fork_address_space(uint64_t src_pml4_phys) {
-    if (src_pml4_phys == 0 || src_pml4_phys == vmm_kernel_pml4_phys()) {
+uint64_t process_fork_address_space(uint64_t source_pml4_phys) {
+    if (source_pml4_phys == 0 || source_pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return 0;
     }
-    return vmm_fork_address_space(src_pml4_phys, PROCESS_OWNED, PROCESS_OWNED_COUNT);
+    return virtual_memory_fork_address_space(source_pml4_phys, PROCESS_OWNED, PROCESS_OWNED_COUNT);
 }
 
 uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
@@ -65,15 +65,15 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
     int has_interp = elf_interp(image, image_size, interp_path, sizeof(interp_path));
     if (has_interp) {
         if (k_strcmp(interp_path, USER_INTERP_PATH) != 0) {
-            klog_debug("[elf] refused: unknown interpreter ");
-            klog_debug(interp_path);
-            klog_debug("\n");
+            kernel_log_debug("[elf] refused: unknown interpreter ");
+            kernel_log_debug(interp_path);
+            kernel_log_debug("\n");
             return 0;
         }
         leanfs_stat_t ist;
-        int64_t n = (vfs_stat(interp_path, &ist) == 0) ? (int64_t)ist.size : -1;
+        int64_t n = (virtual_file_system_stat(interp_path, &ist) == 0) ? (int64_t)ist.size : -1;
         if (n <= 0) {
-            klog_debug("[elf] refused: " USER_INTERP_PATH " is not on this disk\n");
+            kernel_log_debug("[elf] refused: " USER_INTERP_PATH " is not on this disk\n");
             return 0;
         }
         interp_bytes = (size_t)n;
@@ -81,18 +81,18 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
         if (!interp_image) {
             return 0;
         }
-        if (vfs_read(interp_path, interp_image, interp_bytes) != (int64_t)interp_bytes) {
+        if (virtual_file_system_read(interp_path, interp_image, interp_bytes) != (int64_t)interp_bytes) {
             kfree(interp_image);
             return 0;
         }
         if (!elf_is_dyn(interp_image, interp_bytes)) {
-            klog_debug("[elf] refused: the interpreter is not a shared object\n");
+            kernel_log_debug("[elf] refused: the interpreter is not a shared object\n");
             kfree(interp_image);
             return 0;
         }
     }
 
-    uint64_t pml4_phys = vmm_create_address_space();
+    uint64_t pml4_phys = virtual_memory_create_address_space();
     if (pml4_phys == 0) {
         return 0;
     }
@@ -118,23 +118,23 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
 
     uint64_t stack_bottom = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
     for (uint64_t va = stack_bottom; va < USER_STACK_TOP; va += PAGE_SIZE) {
-        uint64_t phys = pmm_try_alloc_frame();
+        uint64_t phys = physical_memory_try_alloc_frame();
         if (phys == 0) {
             process_destroy_address_space(pml4_phys);
             return 0;
         }
         k_memset((void *)phys, 0, PAGE_SIZE);
-        if (vmm_try_map_page_in(pml4_phys, va, phys,
+        if (virtual_memory_try_map_page_in(pml4_phys, va, phys,
                                 VMM_FLAG_WRITABLE | VMM_FLAG_USER) != 0) {
-            pmm_free_frame(phys);
+            physical_memory_free_frame(phys);
             process_destroy_address_space(pml4_phys);
             return 0;
         }
     }
 
-    uint64_t arg_frames[USER_ARG_PAGES];
-    int arg_pages = 0;
-    size_t arg_used = 0;
+    uint64_t argument_frames[USER_ARG_PAGES];
+    int argument_pages = 0;
+    size_t argument_used = 0;
     char *block = (char *)kmalloc(USER_ARG_BYTES);
     if (!block) {
         process_destroy_address_space(pml4_phys);
@@ -217,29 +217,29 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
             }
             header[aux_base + (size_t)i] = aux[i];
         }
-        arg_used = at;
+        argument_used = at;
     }
-    arg_pages = (int)((arg_used + PAGE_SIZE - 1) / PAGE_SIZE);
-    if (arg_pages < 1) {
-        arg_pages = 1;
+    argument_pages = (int)((argument_used + PAGE_SIZE - 1) / PAGE_SIZE);
+    if (argument_pages < 1) {
+        argument_pages = 1;
     }
-    for (int i = 0; i < arg_pages; i++) {
-        arg_frames[i] = pmm_try_alloc_frame();
-        if (arg_frames[i] == 0) {
+    for (int i = 0; i < argument_pages; i++) {
+        argument_frames[i] = physical_memory_try_alloc_frame();
+        if (argument_frames[i] == 0) {
             for (int j = 0; j < i; j++) {
-                pmm_free_frame(arg_frames[j]);
+                physical_memory_free_frame(argument_frames[j]);
             }
             kfree(block);
             process_destroy_address_space(pml4_phys);
             return 0;
         }
     }
-    for (int i = 0; i < arg_pages; i++) {
-        k_memcpy((void *)arg_frames[i], block + (size_t)i * PAGE_SIZE, PAGE_SIZE);
-        if (vmm_try_map_page_in(pml4_phys, USER_ARG_ADDR + (uint64_t)i * PAGE_SIZE,
-                                arg_frames[i], VMM_FLAG_WRITABLE | VMM_FLAG_USER) != 0) {
-            for (int j = i; j < arg_pages; j++) {
-                pmm_free_frame(arg_frames[j]);
+    for (int i = 0; i < argument_pages; i++) {
+        k_memcpy((void *)argument_frames[i], block + (size_t)i * PAGE_SIZE, PAGE_SIZE);
+        if (virtual_memory_try_map_page_in(pml4_phys, USER_ARG_ADDR + (uint64_t)i * PAGE_SIZE,
+                                argument_frames[i], VMM_FLAG_WRITABLE | VMM_FLAG_USER) != 0) {
+            for (int j = i; j < argument_pages; j++) {
+                physical_memory_free_frame(argument_frames[j]);
             }
             kfree(block);
             process_destroy_address_space(pml4_phys);
@@ -253,7 +253,7 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
 
 static task_t *spawn_common(const char *name, const uint8_t *image, size_t image_size,
                              const char *const *argv, const char *const *envp) {
-    if (!sched_has_free_task_slot()) {
+    if (!scheduler_has_free_task_slot()) {
         return (task_t *)0;
     }
 
@@ -263,19 +263,19 @@ static task_t *spawn_common(const char *name, const uint8_t *image, size_t image
         return (task_t *)0;
     }
 
-    user_launch_args_t *args = (user_launch_args_t *)kmalloc(sizeof(user_launch_args_t));
-    if (!args) {
+    user_launch_arguments_t *arguments = (user_launch_arguments_t *)kmalloc(sizeof(user_launch_arguments_t));
+    if (!arguments) {
         process_destroy_address_space(pml4_phys);
         return (task_t *)0;
     }
-    args->entry = entry;
-    args->user_stack_top = USER_STACK_TOP;
-    args->arg_ptr = USER_ARG_ADDR;
+    arguments->entry = entry;
+    arguments->user_stack_top = USER_STACK_TOP;
+    arguments->argument_pointer = USER_ARG_ADDR;
 
-    task_t *t = task_spawn_in(name, pml4_phys, user_task_launcher, args,
+    task_t *t = task_spawn_in(name, pml4_phys, user_task_launcher, arguments,
                                USER_HEAP_START, USER_SHM_BASE);
     if (!t) {
-        kfree(args);
+        kfree(arguments);
         process_destroy_address_space(pml4_phys);
         return (task_t *)0;
     }
@@ -295,18 +295,18 @@ task_t *process_spawnve(const char *name, const uint8_t *image, size_t image_siz
 
 task_t *process_spawnve_capped(const char *name, const uint8_t *image, size_t image_size,
                                const char *const *argv, const char *const *envp, uint32_t caps) {
-    task_t *self = sched_vm_owner(sched_current());
+    task_t *self = scheduler_vm_owner(scheduler_current());
     const char *inherited[USER_ENV_MAX_VARS + 1];
     const char *const *effective = envp;
-    uint32_t inherited_len = 0;
+    uint32_t inherited_length = 0;
     uint32_t inherited_count = 0;
 
     if (!envp && self && self->env_block && self->env_count) {
         uint32_t n = 0;
         uint32_t off = 0;
-        while (off < self->env_len && n < USER_ENV_MAX_VARS) {
+        while (off < self->env_length && n < USER_ENV_MAX_VARS) {
             inherited[n++] = self->env_block + off;
-            while (off < self->env_len && self->env_block[off]) {
+            while (off < self->env_length && self->env_block[off]) {
                 off++;
             }
             off++;
@@ -322,15 +322,15 @@ task_t *process_spawnve_capped(const char *name, const uint8_t *image, size_t im
             if (effective) {
                 for (int i = 0; effective[i] && inherited_count < USER_ENV_MAX_VARS; i++) {
                     uint32_t len = (uint32_t)k_strlen(effective[i]) + 1;
-                    if (inherited_len + len > USER_ENV_MAX_BYTES) {
+                    if (inherited_length + len > USER_ENV_MAX_BYTES) {
                         break;
                     }
-                    k_memcpy(packed + inherited_len, effective[i], len);
-                    inherited_len += len;
+                    k_memcpy(packed + inherited_length, effective[i], len);
+                    inherited_length += len;
                     inherited_count++;
                 }
             }
-            sched_set_env(t, packed, inherited_len, inherited_count);
+            scheduler_set_env(t, packed, inherited_length, inherited_count);
             kfree(packed);
         }
         t->caps &= caps;
@@ -340,21 +340,21 @@ task_t *process_spawnve_capped(const char *name, const uint8_t *image, size_t im
 
 task_t *process_spawn_thread(const char *name, uint64_t entry, uint64_t stack_top,
                               uint64_t arg) {
-    task_t *self = sched_current();
-    if (!self || self->pml4_phys == vmm_kernel_pml4_phys()) {
+    task_t *self = scheduler_current();
+    if (!self || self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return (task_t *)0;
     }
-    user_launch_args_t *args = (user_launch_args_t *)kmalloc(sizeof(user_launch_args_t));
-    if (!args) {
+    user_launch_arguments_t *arguments = (user_launch_arguments_t *)kmalloc(sizeof(user_launch_arguments_t));
+    if (!arguments) {
         return (task_t *)0;
     }
-    args->entry = entry;
-    args->user_stack_top = stack_top;
-    args->arg_ptr = arg;
+    arguments->entry = entry;
+    arguments->user_stack_top = stack_top;
+    arguments->argument_pointer = arg;
 
-    task_t *t = task_spawn_thread(name, self, user_task_launcher, args);
+    task_t *t = task_spawn_thread(name, self, user_task_launcher, arguments);
     if (!t) {
-        kfree(args);
+        kfree(arguments);
         return (task_t *)0;
     }
     return t;

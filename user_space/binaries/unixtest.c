@@ -18,7 +18,7 @@ union cmsg_one {
     char buf[CMSG_SPACE(sizeof(int))];
 };
 
-static int send_fd(int sock, int fd, const char *payload) {
+static int send_file_descriptor(int sock, int fd, const char *payload) {
     struct iovec iov;
     iov.iov_base = (void *)payload;
     iov.iov_len = strlen(payload);
@@ -38,7 +38,7 @@ static int send_fd(int sock, int fd, const char *payload) {
     return (int)sendmsg(sock, &msg, 0);
 }
 
-static int recv_fd(int sock, char *out, size_t outlen, int *msgflags) {
+static int receive_file_descriptor(int sock, char *out, size_t outlen, int *msgflags) {
     struct iovec iov;
     iov.iov_base = out;
     iov.iov_len = outlen;
@@ -141,7 +141,7 @@ static int test_pass_descriptors(void) {
         close(pipefd[1]);
         close(rf);
         char payload[16];
-        int got_pipe = recv_fd(sv[1], payload, sizeof(payload), NULL);
+        int got_pipe = receive_file_descriptor(sv[1], payload, sizeof(payload), NULL);
         if (got_pipe < 0) {
             sys_exit(7);
         }
@@ -149,7 +149,7 @@ static int test_pass_descriptors(void) {
             sys_exit(8);
         }
         close(got_pipe);
-        int got_file = recv_fd(sv[1], payload, sizeof(payload), NULL);
+        int got_file = receive_file_descriptor(sv[1], payload, sizeof(payload), NULL);
         if (got_file < 0) {
             sys_exit(7);
         }
@@ -163,11 +163,11 @@ static int test_pass_descriptors(void) {
         sys_exit(0);
     }
     close(sv[1]);
-    if (send_fd(sv[0], pipefd[1], "pipe") < 0) {
+    if (send_file_descriptor(sv[0], pipefd[1], "pipe") < 0) {
         FAIL(6);
     }
     close(pipefd[1]);
-    if (send_fd(sv[0], rf, "file") < 0) {
+    if (send_file_descriptor(sv[0], rf, "file") < 0) {
         FAIL(6);
     }
     close(rf);
@@ -203,7 +203,7 @@ static int test_pass_a_socket(void) {
         close(inner[0]);
         close(inner[1]);
         char payload[16];
-        int chan = recv_fd(sv[1], payload, sizeof(payload), NULL);
+        int chan = receive_file_descriptor(sv[1], payload, sizeof(payload), NULL);
         if (chan < 0) {
             sys_exit(10);
         }
@@ -214,7 +214,7 @@ static int test_pass_a_socket(void) {
         sys_exit(0);
     }
     close(sv[1]);
-    if (send_fd(sv[0], inner[1], "chan") < 0) {
+    if (send_file_descriptor(sv[0], inner[1], "chan") < 0) {
         FAIL(6);
     }
     close(inner[1]);
@@ -334,7 +334,7 @@ static int test_ctrunc(void) {
     if (pipe(pipefd) != 0) {
         FAIL(8);
     }
-    if (send_fd(sv[0], pipefd[1], "x") < 0) {
+    if (send_file_descriptor(sv[0], pipefd[1], "x") < 0) {
         FAIL(6);
     }
     close(pipefd[0]);
@@ -407,7 +407,7 @@ static int test_no_capability_needed(void) {
             sys_exit(18);
         }
         char payload[8];
-        int got = recv_fd(sv[1], payload, sizeof(payload), NULL);
+        int got = receive_file_descriptor(sv[1], payload, sizeof(payload), NULL);
         if (got < 0) {
             sys_exit(18);
         }
@@ -421,7 +421,7 @@ static int test_no_capability_needed(void) {
     if (pipe(pipefd) != 0) {
         FAIL(8);
     }
-    if (send_fd(sv[0], pipefd[1], "p") < 0) {
+    if (send_file_descriptor(sv[0], pipefd[1], "p") < 0) {
         FAIL(6);
     }
     close(pipefd[1]);

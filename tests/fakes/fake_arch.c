@@ -6,11 +6,11 @@
 
 void panic(const char *msg);
 
-static int cur_cpu;
+static int current_cpu;
 
-void fake_arch_set_cpu(int cpu) { cur_cpu = cpu; }
-int smp_current_cpu(void) { return cur_cpu; }
-int gdt_current_cpu(void) { return cur_cpu; }
+void fake_arch_set_cpu(int cpu) { current_cpu = cpu; }
+int smp_current_cpu(void) { return current_cpu; }
+int gdt_current_cpu(void) { return current_cpu; }
 
 int smp_cpu_count = 1;
 
@@ -58,15 +58,15 @@ unsigned long long cpu_stack_pointer(void) {
 }
 
 #define MSR_SLOTS 4
-static unsigned int msr_num[MSR_SLOTS];
-static unsigned long long msr_val[MSR_SLOTS];
+static unsigned int msr_number[MSR_SLOTS];
+static unsigned long long msr_value[MSR_SLOTS];
 
 void fake_cpu_record_msr(unsigned int msr, unsigned long long value);
 void fake_cpu_record_msr(unsigned int msr, unsigned long long value) {
     for (int i = 0; i < MSR_SLOTS; i++) {
-        if (msr_num[i] == msr || msr_num[i] == 0) {
-            msr_num[i] = msr;
-            msr_val[i] = value;
+        if (msr_number[i] == msr || msr_number[i] == 0) {
+            msr_number[i] = msr;
+            msr_value[i] = value;
             return;
         }
     }
@@ -75,8 +75,8 @@ void fake_cpu_record_msr(unsigned int msr, unsigned long long value) {
 unsigned long long fake_cpu_last_msr(unsigned int msr);
 unsigned long long fake_cpu_last_msr(unsigned int msr) {
     for (int i = 0; i < MSR_SLOTS; i++) {
-        if (msr_num[i] == msr) {
-            return msr_val[i];
+        if (msr_number[i] == msr) {
+            return msr_value[i];
         }
     }
     return 0;
@@ -101,7 +101,7 @@ void tss_set_rsp0(int cpu_id, uint64_t v) {
 uint64_t tss_get_rsp0(int cpu_id) {
     return (cpu_id >= 0 && cpu_id < FAKE_MAX_CPUS) ? rsp0[cpu_id] : 0;
 }
-void gdt_get_table_ptr(uint16_t *limit_out, uint64_t *base_out) {
+void gdt_get_table_pointer(uint16_t *limit_out, uint64_t *base_out) {
     if (limit_out) {
         *limit_out = 0;
     }
@@ -138,13 +138,13 @@ void fake_arch_fire_tick_hook(void) {
 }
 
 void fake_arch_reset(void) {
-    cur_cpu = 0;
+    current_cpu = 0;
     broadcasts = 0;
     switches = 0;
     sp_claimed = 0;
     claimed_sp = 0;
-    memset(msr_num, 0, sizeof(msr_num));
-    memset(msr_val, 0, sizeof(msr_val));
+    memset(msr_number, 0, sizeof(msr_number));
+    memset(msr_value, 0, sizeof(msr_value));
     memset(rsp0, 0, sizeof(rsp0));
     memset(fpu_scratch, 0, sizeof(fpu_scratch));
 }

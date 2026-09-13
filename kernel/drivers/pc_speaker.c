@@ -18,26 +18,26 @@ static uint64_t off_at_tick;
 static int playing;
 static int muted;
 
-void pcspk_init(void) {
-    pcspk_off();
+void pc_speaker_init(void) {
+    pc_speaker_off();
 }
 
-void pcspk_set_muted(int m) {
+void pc_speaker_set_muted(int m) {
     muted = m;
     if (muted) {
-        pcspk_off();
+        pc_speaker_off();
     }
 }
 
-void pcspk_off(void) {
+void pc_speaker_off(void) {
     outb(SPEAKER_PORT, (uint8_t)(inb(SPEAKER_PORT) & (uint8_t)~SPEAKER_GATE_BITS));
     playing = 0;
     off_at_tick = 0;
 }
 
-void pcspk_tone(uint32_t freq_hz, uint32_t ms) {
+void pc_speaker_tone(uint32_t freq_hz, uint32_t ms) {
     if (muted || freq_hz == 0 || ms == 0) {
-        pcspk_off();
+        pc_speaker_off();
         return;
     }
     uint32_t divisor = PIT_BASE_FREQ / freq_hz;
@@ -65,8 +65,8 @@ void pcspk_tone(uint32_t freq_hz, uint32_t ms) {
     playing = 1;
 }
 
-void pcspk_tick(void) {
+void pc_speaker_tick(void) {
     if (playing && pit_get_ticks() >= off_at_tick) {
-        pcspk_off();
+        pc_speaker_off();
     }
 }

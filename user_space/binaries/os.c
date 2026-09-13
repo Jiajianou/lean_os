@@ -252,7 +252,7 @@ static int load_index(void) {
         size_t slen = end - start;
         index_entry_t *e = &index_entries[index_count];
         memset(e, 0, sizeof(*e));
-        if (ospkg_parse_manifest(stanza, slen, &e->man) != OSP_OK) {
+        if (os_package_parse_manifest(stanza, slen, &e->man) != OSP_OK) {
             continue;
         }
         read_key(stanza, slen, "file", e->file, sizeof(e->file));
@@ -260,7 +260,7 @@ static int load_index(void) {
         char b[32];
         read_key(stanza, slen, "bytes", b, sizeof(b));
         e->bytes = strtoul(b, NULL, 10);
-        if (!e->file[0] || ospkg_check_path(e->file) != OSP_OK) {
+        if (!e->file[0] || os_package_check_path(e->file) != OSP_OK) {
             continue;
         }
         index_count++;
@@ -288,7 +288,7 @@ static int installed_version(const char *name, char *out, size_t cap) {
         return 0;
     }
     osp_manifest_t man;
-    int rc = ospkg_parse_manifest((const char *)text, len, &man);
+    int rc = os_package_parse_manifest((const char *)text, len, &man);
     free(text);
     if (rc != OSP_OK) {
         return 0;
@@ -305,7 +305,7 @@ static int read_installed(const char *name, osp_manifest_t *out) {
     if (!text) {
         return 0;
     }
-    int rc = ospkg_parse_manifest((const char *)text, len, out);
+    int rc = os_package_parse_manifest((const char *)text, len, out);
     free(text);
     return rc == OSP_OK;
 }
@@ -359,7 +359,7 @@ static int rewrite_registry(void) {
             continue;
         }
         int unknown = 0;
-        uint32_t caps = ospkg_caps_from_names(man.caps, &unknown) & (uint32_t)CAP_PKG_MAX;
+        uint32_t caps = os_package_caps_from_names(man.caps, &unknown) & (uint32_t)CAP_PKG_MAX;
         const char *p = man.provides;
         while (*p) {
             while (*p == ' ' || *p == '\t') {
@@ -493,7 +493,7 @@ static int install_one(const char *name, int depth) {
     }
 
     osp_t pkg;
-    int rc = ospkg_open(bytes, len, &pkg);
+    int rc = os_package_open(bytes, len, &pkg);
     if (rc != OSP_OK) {
         fprintf(stderr, "os: %s: %s\n", archive, osp_strerror(rc));
         free(bytes);
@@ -508,7 +508,7 @@ static int install_one(const char *name, int depth) {
     }
 
     int unknown = 0;
-    uint32_t caps = ospkg_caps_from_names(pkg.manifest.caps, &unknown);
+    uint32_t caps = os_package_caps_from_names(pkg.manifest.caps, &unknown);
     if (unknown) {
         fprintf(stderr, "os: %s asks for a capability this OS does not have "
                         "('%s'). Refused rather than ignored: a name this "
@@ -519,7 +519,7 @@ static int install_one(const char *name, int depth) {
     }
     if (caps & ~(uint32_t)CAP_PKG_MAX) {
         char names[OSP_MAX_TEXT];
-        ospkg_caps_to_names(caps & ~(uint32_t)CAP_PKG_MAX, names, sizeof(names));
+        os_package_caps_to_names(caps & ~(uint32_t)CAP_PKG_MAX, names, sizeof(names));
         fprintf(stderr, "os: %s asks for '%s', which no package on this "
                         "machine may hold. See CAP_PKG_MAX in "
                         "system_api/include/caps.h.\n", name, names);
@@ -569,7 +569,7 @@ static int install_one(const char *name, int depth) {
             }
         }
 
-        const uint8_t *data = ospkg_file_data(&pkg, i);
+        const uint8_t *data = os_package_file_data(&pkg, i);
         if (f->flags & OSP_F_SYMLINK) {
             char target[OSP_MAX_PATH + 1];
             memcpy(target, data, (size_t)f->size);
@@ -669,7 +669,7 @@ static int install_one(const char *name, int depth) {
     }
 
     char capnames[OSP_MAX_TEXT];
-    ospkg_caps_to_names(caps, capnames, sizeof(capnames));
+    os_package_caps_to_names(caps, capnames, sizeof(capnames));
     say("os: installed %s-%s (%u files) in %s\n",
         pkg.manifest.name, pkg.manifest.version, pkg.file_count, root);
     if (pkg.manifest.provides[0]) {
@@ -682,7 +682,7 @@ static int install_one(const char *name, int depth) {
     return 0;
 }
 
-static int cmd_remove(const char *name) {
+static int command_remove(const char *name) {
     osp_manifest_t man;
     if (!read_installed(name, &man)) {
         fprintf(stderr, "os: %s is not installed\n", name);
@@ -759,7 +759,7 @@ static int cmd_remove(const char *name) {
     return 0;
 }
 
-static int cmd_list(void) {
+static int command_list(void) {
     DIR *d = opendir(PKG_DB_INST);
     if (!d) {
         printf("os: nothing is installed. `os available` lists what this "
@@ -786,7 +786,7 @@ static int cmd_list(void) {
     return 0;
 }
 
-static int cmd_available(void) {
+static int command_available(void) {
     if (load_index() == 0) {
         printf("os: no repository on this machine (%s).\n", PKG_INDEX);
         return 1;
@@ -802,7 +802,7 @@ static int cmd_available(void) {
     return 0;
 }
 
-static int cmd_info(const char *name) {
+static int command_info(const char *name) {
     osp_manifest_t man;
     int inst = read_installed(name, &man);
     index_entry_t *e = find_in_index(name);
@@ -850,7 +850,7 @@ static int verify_one(const char *name) {
         return 1;
     }
     osp_t pkg;
-    int rc = ospkg_open(bytes, len, &pkg);
+    int rc = os_package_open(bytes, len, &pkg);
     if (rc != OSP_OK) {
         fprintf(stderr, "os: %s: %s\n", archive, osp_strerror(rc));
         free(bytes);
@@ -894,7 +894,7 @@ static int verify_one(const char *name) {
     return 0;
 }
 
-static int cmd_verify(const char *name) {
+static int command_verify(const char *name) {
     if (name) {
         return verify_one(name);
     }
@@ -940,7 +940,7 @@ static int list_has_line(const char *list, const char *name) {
     return 0;
 }
 
-static int cmd_preinstall(void) {
+static int command_preinstall(void) {
     size_t len = 0;
     char *list = (char *)read_whole(PKG_PREINSTALL, &len, 4096);
     if (!list) {
@@ -1010,14 +1010,14 @@ static void usage(void) {
     printf("See docs/packages.md.\n");
 }
 
-static int cmd_caps(void) {
+static int command_caps(void) {
     uint32_t mine = (uint32_t)sys_getcaps();
     char buf[OSP_MAX_TEXT];
-    ospkg_caps_to_names(mine, buf, sizeof(buf));
+    os_package_caps_to_names(mine, buf, sizeof(buf));
     printf("this process:      %s\n", buf[0] ? buf : "(none)");
-    ospkg_caps_to_names((uint32_t)CAP_PKG_MAX, buf, sizeof(buf));
+    os_package_caps_to_names((uint32_t)CAP_PKG_MAX, buf, sizeof(buf));
     printf("a package may ask: %s\n", buf);
-    ospkg_caps_to_names((uint32_t)CAP_ALL & ~(uint32_t)CAP_PKG_MAX, buf, sizeof(buf));
+    os_package_caps_to_names((uint32_t)CAP_ALL & ~(uint32_t)CAP_PKG_MAX, buf, sizeof(buf));
     printf("and never:         %s\n", buf);
     printf("an unlisted program under /pkg gets: %s\n",
            CAP_PKG_UNLISTED ? "something" : "nothing at all");
@@ -1048,25 +1048,25 @@ int main(int argc, char **argv) {
         return rc;
     }
     if (strcmp(cmd, "remove") == 0 && argc >= 3) {
-        return cmd_remove(argv[2]);
+        return command_remove(argv[2]);
     }
     if (strcmp(cmd, "list") == 0) {
-        return cmd_list();
+        return command_list();
     }
     if (strcmp(cmd, "available") == 0 || strcmp(cmd, "search") == 0) {
-        return cmd_available();
+        return command_available();
     }
     if (strcmp(cmd, "info") == 0 && argc >= 3) {
-        return cmd_info(argv[2]);
+        return command_info(argv[2]);
     }
     if (strcmp(cmd, "verify") == 0) {
-        return cmd_verify(argc >= 3 && argv[2][0] != '-' ? argv[2] : NULL);
+        return command_verify(argc >= 3 && argv[2][0] != '-' ? argv[2] : NULL);
     }
     if (strcmp(cmd, "caps") == 0) {
-        return cmd_caps();
+        return command_caps();
     }
     if (strcmp(cmd, "preinstall") == 0) {
-        return cmd_preinstall();
+        return command_preinstall();
     }
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "-h") == 0 ||
         strcmp(cmd, "--help") == 0) {

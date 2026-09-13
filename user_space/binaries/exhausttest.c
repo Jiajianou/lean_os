@@ -81,11 +81,11 @@ int main(void) {
         static void *addrs[TRY_HARD];
         int n = 0;
         for (; n < TRY_HARD; n++) {
-            ids[n] = sys_shm_create(4096);
+            ids[n] = sys_shared_memory_create(4096);
             if (ids[n] < 0) {
                 break;
             }
-            long va = sys_shm_map(ids[n]);
+            long va = sys_shared_memory_map(ids[n]);
             if (va == -1) {
                 break;
             }
@@ -93,22 +93,22 @@ int main(void) {
         }
         if (n >= TRY_HARD) {
             for (int i = 0; i < n; i++) {
-                sys_shm_free(ids[i], addrs[i]);
+                sys_shared_memory_free(ids[i], addrs[i]);
             }
             return 6;
         }
         AT_LEAST_ONE(n);
         printf("exhausttest: shm segments ran out after %d\n", n);
         for (int i = 0; i < n; i++) {
-            sys_shm_free(ids[i], addrs[i]);
+            sys_shared_memory_free(ids[i], addrs[i]);
         }
-        long again = sys_shm_create(4096);
+        long again = sys_shared_memory_create(4096);
         if (again < 0) {
             return 7;
         }
-        long va = sys_shm_map(again);
+        long va = sys_shared_memory_map(again);
         if (va != -1) {
-            sys_shm_free(again, (void *)va);
+            sys_shared_memory_free(again, (void *)va);
         }
     }
 

@@ -8,13 +8,13 @@
 #define FSUTIL_EXACT_MAX 16
 #define FSUTIL_DATE_MAX  12
 
-void fsutil_format_size(uint32_t bytes, char *out);
+void file_system_utilities_format_size(uint32_t bytes, char *out);
 
-void fsutil_format_exact(uint32_t n, char *out);
+void file_system_utilities_format_exact(uint32_t n, char *out);
 
-void fsutil_format_date(uint32_t mtime, char *out);
+void file_system_utilities_format_date(uint32_t mtime, char *out);
 
-int fsutil_name_ok(const char *name);
+int file_system_utilities_name_ok(const char *name);
 
 #define FSUTIL_MAX_DEPTH 16
 
@@ -24,8 +24,8 @@ typedef struct {
     uint32_t entries;
     uint32_t bytes;
     int      deep;
-} fsutil_tree_t;
+} file_system_utilities_tree_t;
 
-int fsutil_count_tree(const char *path, fsutil_tree_t *out);
+int file_system_utilities_count_tree(const char *path, file_system_utilities_tree_t *out);
 
-int fsutil_remove_tree(const char *path);
+int file_system_utilities_remove_tree(const char *path);

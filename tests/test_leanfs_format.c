@@ -24,7 +24,7 @@ _Static_assert(offsetof(leanfs_inode_t, direct) == 12, "");
 _Static_assert(sizeof(leanfs_dirent_t) == LEANFS_DIRENT_HDR,
                "the directory record header is eight bytes");
 _Static_assert(offsetof(leanfs_dirent_t, inode) == 0, "");
-_Static_assert(offsetof(leanfs_dirent_t, rec_len) == 4, "");
+_Static_assert(offsetof(leanfs_dirent_t, rec_length) == 4, "");
 _Static_assert(offsetof(leanfs_dirent_t, name_len) == 6, "");
 _Static_assert(offsetof(leanfs_dirent_t, type) == 7, "");
 

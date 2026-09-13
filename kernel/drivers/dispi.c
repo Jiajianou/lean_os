@@ -64,9 +64,9 @@ void dispi_init(void) {
 
     uint16_t id = dispi_read(DISPI_INDEX_ID);
     if (id < DISPI_ID0 || id > DISPI_ID5) {
-        klog_puts("[dispi] no Bochs/QEMU DISPI adapter (id register read 0x");
-        klog_put_hex32(id);
-        klog_puts(") - resolution stays whatever the firmware chose.\n");
+        kernel_log_puts("[dispi] no Bochs/QEMU DISPI adapter (id register read 0x");
+        kernel_log_put_hex32(id);
+        kernel_log_puts(") - resolution stays whatever the firmware chose.\n");
         return;
     }
     available = 1;
@@ -87,13 +87,13 @@ void dispi_init(void) {
         modes[mode_count++] = CANDIDATES[i];
     }
 
-    klog_puts("[dispi] Bochs/QEMU DISPI adapter id 0x");
-    klog_put_hex32(id);
-    klog_puts(", 0x");
-    klog_put_hex32(vram_bytes);
-    klog_puts(" bytes of video memory, 0x");
-    klog_put_hex32((uint32_t)mode_count);
-    klog_puts(" modes offered.\n");
+    kernel_log_puts("[dispi] Bochs/QEMU DISPI adapter id 0x");
+    kernel_log_put_hex32(id);
+    kernel_log_puts(", 0x");
+    kernel_log_put_hex32(vram_bytes);
+    kernel_log_puts(" bytes of video memory, 0x");
+    kernel_log_put_hex32((uint32_t)mode_count);
+    kernel_log_puts(" modes offered.\n");
 }
 
 int dispi_available(void) {

@@ -87,39 +87,39 @@ int main(int argc, char **argv) {
     unsigned long long region_base = here & ~((1ULL << 39) - 1ULL);
 
     const unsigned long long ARG_REGION_PAGES = 2;
-    unsigned long long arg_page =
+    unsigned long long argument_page =
         (unsigned long long)(void *)argv & ~(unsigned long long)(PAGE_SIZE - 1);
-    unsigned long long arg_region_last_page = arg_page + (ARG_REGION_PAGES - 1) * PAGE_SIZE;
+    unsigned long long argument_region_last_page = argument_page + (ARG_REGION_PAGES - 1) * PAGE_SIZE;
 
-    unsigned long long bad_ptr[BAD_COUNT];
-    unsigned long long bad_len[BAD_COUNT];
-    bad_ptr[BAD_NULL]     = 0;                              bad_len[BAD_NULL]     = 8;
-    bad_ptr[BAD_KERNEL]   = 0x100000ULL;                    bad_len[BAD_KERNEL]   = 8;
-    bad_ptr[BAD_BELOW]    = region_base - 1ULL;             bad_len[BAD_BELOW]    = 8;
-    bad_ptr[BAD_UNMAPPED] = region_base + (1ULL << 38);     bad_len[BAD_UNMAPPED] = 8;
-    bad_ptr[BAD_STRADDLE] = arg_region_last_page + PAGE_SIZE - 1ULL;
-                                                            bad_len[BAD_STRADDLE] = 2;
-    bad_ptr[BAD_OVERFLOW] = arg_page;                       bad_len[BAD_OVERFLOW] = ~0ULL;
+    unsigned long long bad_pointer[BAD_COUNT];
+    unsigned long long bad_length[BAD_COUNT];
+    bad_pointer[BAD_NULL]     = 0;                              bad_length[BAD_NULL]     = 8;
+    bad_pointer[BAD_KERNEL]   = 0x100000ULL;                    bad_length[BAD_KERNEL]   = 8;
+    bad_pointer[BAD_BELOW]    = region_base - 1ULL;             bad_length[BAD_BELOW]    = 8;
+    bad_pointer[BAD_UNMAPPED] = region_base + (1ULL << 38);     bad_length[BAD_UNMAPPED] = 8;
+    bad_pointer[BAD_STRADDLE] = argument_region_last_page + PAGE_SIZE - 1ULL;
+                                                            bad_length[BAD_STRADDLE] = 2;
+    bad_pointer[BAD_OVERFLOW] = argument_page;                       bad_length[BAD_OVERFLOW] = ~0ULL;
 
     int failures = 0;
     for (int r = 0; r < ROW_COUNT; r++) {
         for (int k = 0; k < BAD_COUNT; k++) {
-            int has_len = 0;
+            int has_length = 0;
             for (int i = 0; i < 3; i++) {
                 if (ROWS[r].a[i] == P_LEN) {
-                    has_len = 1;
+                    has_length = 1;
                 }
             }
-            if (!has_len && (k == BAD_STRADDLE || k == BAD_OVERFLOW)) {
+            if (!has_length && (k == BAD_STRADDLE || k == BAD_OVERFLOW)) {
                 continue;
             }
 
             unsigned long long a[3];
             for (int i = 0; i < 3; i++) {
                 if (ROWS[r].a[i] == P_PTR) {
-                    a[i] = bad_ptr[k];
+                    a[i] = bad_pointer[k];
                 } else if (ROWS[r].a[i] == P_LEN) {
-                    a[i] = bad_len[k];
+                    a[i] = bad_length[k];
                 } else {
                     a[i] = ROWS[r].a[i];
                 }

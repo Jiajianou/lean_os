@@ -131,12 +131,12 @@
 
 typedef struct {
     int32_t x, y, w, h;
-    int32_t buf_w, buf_h;
+    int32_t buffer_w, buffer_h;
     uint32_t *pixels;
     int32_t shm_id;
-    int evt_write_fd;
+    int evt_write_file_descriptor;
     uint8_t is_panel;
-    int32_t buf_y0;
+    int32_t buffer_y0;
     int32_t overhang;
     uint8_t translucent;
     uint8_t is_desktop;
@@ -197,15 +197,15 @@ static int resize_hit_mask(const window_t *win, int32_t px, int32_t py) {
     return mask;
 }
 
-static wm_fb_info_t fb_info;
-static uint32_t *real_fb;
-static uint32_t fb_pitch_pixels;
+static wm_fb_info_t framebuffer_info;
+static uint32_t *real_framebuffer;
+static uint32_t framebuffer_pitch_pixels;
 
-static uint32_t *back_buf;
+static uint32_t *back_buffer;
 static uint32_t back_pitch_pixels;
-static long back_shm_id = -1;
+static long back_shared_memory_id = -1;
 
-static uint32_t mode_prev_w, mode_prev_h;
+static uint32_t mode_previous_w, mode_previous_h;
 static long mode_revert_at_ms;
 
 #define ANIM_MS         140
@@ -257,9 +257,9 @@ static long launcher_fade_start_ms;
 static long snap_fade_start_ms;
 
 static int launcher_fading(void);
-static int32_t launcher_opacity_num(void);
+static int32_t launcher_opacity_number(void);
 static int snap_fading(void);
-static int32_t snap_preview_num(void);
+static int32_t snap_preview_number(void);
 
 static int32_t ease_out(int32_t t_permille) {
     if (t_permille <= 0) {
@@ -303,7 +303,7 @@ static void anim_window_close(int idx);
 static int32_t self_pid;
 
 static int32_t cursor_x, cursor_y;
-static uint8_t prev_buttons;
+static uint8_t previous_buttons;
 static int last_hovered_panel = -1;
 static int32_t last_drawn_cursor_x, last_drawn_cursor_y;
 
@@ -385,7 +385,7 @@ static int launcher_match_count;
 static int launcher_selected;
 static int launcher_scroll;
 static char launcher_query[LAUNCHER_QUERY_MAX];
-static int launcher_query_len;
+static int launcher_query_length;
 static int power_confirm = POWER_CONFIRM_NONE;
 static int shutdown_pending_mode = POWER_CONFIRM_NONE;
 static long shutdown_deadline_ms;
@@ -403,7 +403,7 @@ typedef struct {
 static toast_t toasts[TOAST_MAX];
 static int toast_count;
 
-static int drag_data_write_fd = -1;
+static int drag_data_write_file_descriptor = -1;
 
 static int client_drag_active;
 static char client_drag_payload[WM_DRAG_PAYLOAD_MAX];
@@ -506,7 +506,7 @@ static long read_exact(int fd, void *buf, size_t len) {
 }
 
 static inline void put_pixel(int32_t x, int32_t y, uint32_t color) {
-    back_buf[(uint32_t)y * back_pitch_pixels + (uint32_t)x] = color;
+    back_buffer[(uint32_t)y * back_pitch_pixels + (uint32_t)x] = color;
 }
 
 static inline void put_pixel_clipped(int32_t x, int32_t y, uint32_t color) {
@@ -517,8 +517,8 @@ static inline void put_pixel_clipped(int32_t x, int32_t y, uint32_t color) {
 
 static void present(void) {
     for (int32_t y = clip_y0; y < clip_y1; y++) {
-        memcpy(&real_fb[(uint32_t)y * fb_pitch_pixels + (uint32_t)clip_x0],
-               &back_buf[(uint32_t)y * back_pitch_pixels + (uint32_t)clip_x0],
+        memcpy(&real_framebuffer[(uint32_t)y * framebuffer_pitch_pixels + (uint32_t)clip_x0],
+               &back_buffer[(uint32_t)y * back_pitch_pixels + (uint32_t)clip_x0],
                (size_t)(clip_x1 - clip_x0) * sizeof(uint32_t));
     }
 }
@@ -529,7 +529,7 @@ static void fill_rect(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color
     int32_t x1 = min_i32(x + w, clip_x1);
     int32_t y1 = min_i32(y + h, clip_y1);
     for (int32_t row = y0; row < y1; row++) {
-        uint32_t *dst = back_buf + (uint32_t)row * back_pitch_pixels;
+        uint32_t *dst = back_buffer + (uint32_t)row * back_pitch_pixels;
         for (int32_t col = x0; col < x1; col++) {
             dst[col] = color;
         }
@@ -547,7 +547,7 @@ static void fill_rect_blend(int32_t x, int32_t y, int32_t w, int32_t h,
     uint32_t sb = color & 0xFF;
     for (int32_t row = y0; row < y1; row++) {
         for (int32_t col = x0; col < x1; col++) {
-            uint32_t existing = back_buf[(uint32_t)row * back_pitch_pixels + (uint32_t)col];
+            uint32_t existing = back_buffer[(uint32_t)row * back_pitch_pixels + (uint32_t)col];
             uint32_t r = (((existing >> 16) & 0xFF) * (den - num) + sr * num) / den;
             uint32_t g = (((existing >> 8) & 0xFF) * (den - num) + sg * num) / den;
             uint32_t b = ((existing & 0xFF) * (den - num) + sb * num) / den;
@@ -581,10 +581,10 @@ static void blit_window(const window_t *win) {
     }
     if (win->translucent) {
         for (int32_t row = y0; row < y1; row++) {
-            const uint32_t *src_row = win->pixels + (uint32_t)(row - win->y + win->buf_y0) * (uint32_t)win->buf_w;
-            uint32_t *dst = back_buf + (uint32_t)row * back_pitch_pixels;
+            const uint32_t *source_row = win->pixels + (uint32_t)(row - win->y + win->buffer_y0) * (uint32_t)win->buffer_w;
+            uint32_t *dst = back_buffer + (uint32_t)row * back_pitch_pixels;
             for (int32_t col = x0; col < x1; col++) {
-                uint32_t src = src_row[col - win->x];
+                uint32_t src = source_row[col - win->x];
                 uint32_t under = dst[col];
                 uint32_t r = (((under >> 16) & 0xFF) * (TRANSLUCENT_DEN - TRANSLUCENT_NUM) + ((src >> 16) & 0xFF) * TRANSLUCENT_NUM) / TRANSLUCENT_DEN;
                 uint32_t g = (((under >> 8) & 0xFF) * (TRANSLUCENT_DEN - TRANSLUCENT_NUM) + ((src >> 8) & 0xFF) * TRANSLUCENT_NUM) / TRANSLUCENT_DEN;
@@ -596,9 +596,9 @@ static void blit_window(const window_t *win) {
     }
     size_t row_bytes = (size_t)(x1 - x0) * sizeof(uint32_t);
     for (int32_t row = y0; row < y1; row++) {
-        const uint32_t *src_row = win->pixels + (uint32_t)(row - win->y + win->buf_y0) * (uint32_t)win->buf_w;
-        memcpy(back_buf + (uint32_t)row * back_pitch_pixels + (uint32_t)x0,
-               src_row + (x0 - win->x), row_bytes);
+        const uint32_t *source_row = win->pixels + (uint32_t)(row - win->y + win->buffer_y0) * (uint32_t)win->buffer_w;
+        memcpy(back_buffer + (uint32_t)row * back_pitch_pixels + (uint32_t)x0,
+               source_row + (x0 - win->x), row_bytes);
     }
 }
 
@@ -658,7 +658,7 @@ static int hit_region_matches(const window_t *win, int32_t px, int32_t py,
         for (int b = 0; b < BTN_COUNT; b++) {
             int32_t bx, by;
             titlebar_button_rect(win, (titlebar_button_t)b, &bx, &by);
-            if (gfx_point_in_rect(px, py, bx, by, BTN_SIZE, BTN_SIZE)) {
+            if (graphics_point_in_rect(px, py, bx, by, BTN_SIZE, BTN_SIZE)) {
                 if (out_detail) {
                     *out_detail = b;
                 }
@@ -718,7 +718,7 @@ static uint32_t lighten(uint32_t color, uint32_t num, uint32_t den) {
 
 static void fill_circle(int32_t x, int32_t y, uint32_t color) {
     for (int32_t row = 0; row < GFX_CIRCLE_D; row++) {
-        int32_t inset = gfx_circle_inset(row);
+        int32_t inset = graphics_circle_inset(row);
         fill_rect(x + inset, y + row, GFX_CIRCLE_D - 2 * inset, 1, color);
     }
 }
@@ -788,14 +788,14 @@ static void draw_char_clipped(int32_t x, int32_t y, char c, uint32_t color, int 
 }
 
 static int32_t text_width(const char *s) {
-    return gfx_text_width(&UI_FONT, s);
+    return graphics_text_width(&UI_FONT, s);
 }
 
 static void draw_text_clipped(int32_t x, int32_t y, const char *s, uint32_t color, int bold) {
     int32_t cx = x;
     for (const char *p = s; *p; p++) {
         draw_char_clipped(cx, y, *p, color, bold);
-        cx += gfx_char_advance(&UI_FONT, *p);
+        cx += graphics_char_advance(&UI_FONT, *p);
     }
 }
 
@@ -807,14 +807,14 @@ static void fit_title(const window_t *win, char *out) {
     if (avail < 0) {
         avail = 0;
     }
-    int32_t max_chars = gfx_text_fit(&UI_FONT, win->title, avail);
+    int32_t max_chars = graphics_text_fit(&UI_FONT, win->title, avail);
     int i = 0;
     for (; win->title[i] && i < max_chars && i < WM_TITLE_MAX - 2; i++) {
         out[i] = win->title[i];
     }
     if (win->title[i]) {
-        int32_t ell = gfx_char_advance(&UI_FONT, UI_G_ELLIPSIS);
-        while (i > 0 && gfx_text_width_n(&UI_FONT, out, i) + ell > avail) {
+        int32_t ell = graphics_char_advance(&UI_FONT, UI_G_ELLIPSIS);
+        while (i > 0 && graphics_text_width_n(&UI_FONT, out, i) + ell > avail) {
             i--;
         }
         out[i++] = UI_G_ELLIPSIS;
@@ -850,10 +850,10 @@ static void stroke_rect(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t col
 
 static int32_t rounded_row_inset(int32_t row, int32_t h) {
     if (row < GFX_CORNER_R) {
-        return gfx_corner_inset(row);
+        return graphics_corner_inset(row);
     }
     if (row >= h - GFX_CORNER_R) {
-        return gfx_corner_inset(h - 1 - row);
+        return graphics_corner_inset(h - 1 - row);
     }
     return 0;
 }
@@ -887,7 +887,7 @@ static void draw_frame_top_rounded(int32_t x, int32_t y, int32_t w, int32_t h, u
         return;
     }
     for (int32_t row = 0; row < GFX_CORNER_R; row++) {
-        int32_t inset = gfx_corner_inset(row);
+        int32_t inset = graphics_corner_inset(row);
         fill_rect(x + inset, y + row, w - 2 * inset, 1, color);
     }
     fill_rect(x, y + GFX_CORNER_R, w, h - GFX_CORNER_R, color);
@@ -919,8 +919,8 @@ static void stroke_rect_rounded(int32_t x, int32_t y, int32_t w, int32_t h, uint
 }
 
 static void launcher_rect(int32_t *out_x, int32_t *out_y) {
-    *out_x = ((int32_t)fb_info.width - LAUNCHER_W) / 2;
-    *out_y = ((int32_t)fb_info.height - LAUNCHER_H) / 3;
+    *out_x = ((int32_t)framebuffer_info.width - LAUNCHER_W) / 2;
+    *out_y = ((int32_t)framebuffer_info.height - LAUNCHER_H) / 3;
 }
 
 static int32_t launcher_row_y(int32_t launcher_y, int i) {
@@ -961,7 +961,7 @@ static void draw_launcher(void) {
     int32_t x, y;
     launcher_rect(&x, &y);
     fill_rect_rounded_blend(x, y, LAUNCHER_W, LAUNCHER_H, LAUNCHER_BG,
-                             launcher_opacity_num(), LAUNCHER_OPACITY_DEN);
+                             launcher_opacity_number(), LAUNCHER_OPACITY_DEN);
     stroke_rect_rounded(x, y, LAUNCHER_W, LAUNCHER_H, LAUNCHER_BORDER);
 
     int32_t input_x = x + LAUNCHER_PAD;
@@ -970,12 +970,12 @@ static void draw_launcher(void) {
     fill_rect_rounded(input_x, input_y, input_w, LAUNCHER_INPUT_H, LAUNCHER_INPUT_BG);
     stroke_rect_rounded(input_x, input_y, input_w, LAUNCHER_INPUT_H, LAUNCHER_BORDER);
     int32_t text_y = input_y + (LAUNCHER_INPUT_H - UI_FONT_HEIGHT) / 2;
-    if (launcher_query_len > 0) {
+    if (launcher_query_length > 0) {
         draw_text_clipped(input_x + 6, text_y, launcher_query, LAUNCHER_TEXT, 0);
     } else {
         draw_text_clipped(input_x + 6, text_y, "Type to search", LAUNCHER_HINT, 0);
     }
-    fill_rect(input_x + 6 + (launcher_query_len > 0 ? text_width(launcher_query) : 0),
+    fill_rect(input_x + 6 + (launcher_query_length > 0 ? text_width(launcher_query) : 0),
                text_y, 2, UI_FONT_HEIGHT, LAUNCHER_TEXT);
 
     if (launcher_match_count == 0) {
@@ -990,7 +990,7 @@ static void draw_launcher(void) {
             if (m == launcher_selected) {
                 fill_rect_rounded(x + LAUNCHER_PAD / 2, ry, LAUNCHER_W - LAUNCHER_PAD, LAUNCHER_ROW_H, LAUNCHER_SEL_BG);
             }
-            int32_t mark_w = gfx_char_advance(&UI_FONT, UI_G_ARROW_RIGHT);
+            int32_t mark_w = graphics_char_advance(&UI_FONT, UI_G_ARROW_RIGHT);
             if (m == launcher_selected) {
                 draw_text_clipped(x + LAUNCHER_PAD, ry + 2, UI_S_ARROW_RIGHT, LAUNCHER_TEXT, 0);
             }
@@ -1007,7 +1007,7 @@ static void draw_launcher(void) {
 }
 
 static void toast_rect(int i, int32_t *out_x, int32_t *out_y) {
-    *out_x = (int32_t)fb_info.width - TOAST_W - TOAST_MARGIN;
+    *out_x = (int32_t)framebuffer_info.width - TOAST_W - TOAST_MARGIN;
     *out_y = TOAST_MARGIN + i * (TOAST_H + TOAST_GAP);
 }
 
@@ -1078,7 +1078,7 @@ static void draw_animations(void) {
 }
 
 static int anim_step(long now, int32_t *out_x0, int32_t *out_y0, int32_t *out_x1, int32_t *out_y1) {
-    int32_t x0 = (int32_t)fb_info.width, y0 = (int32_t)fb_info.height, x1 = 0, y1 = 0;
+    int32_t x0 = (int32_t)framebuffer_info.width, y0 = (int32_t)framebuffer_info.height, x1 = 0, y1 = 0;
     int any = 0;
     for (int i = 0; i < ANIM_MAX; i++) {
         anim_t *a = &anims[i];
@@ -1120,13 +1120,13 @@ static int anim_step(long now, int32_t *out_x0, int32_t *out_y0, int32_t *out_x1
 static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
     clip_x0 = max_i32(x0, 0);
     clip_y0 = max_i32(y0, 0);
-    clip_x1 = min_i32(x1, (int32_t)fb_info.width);
-    clip_y1 = min_i32(y1, (int32_t)fb_info.height);
+    clip_x1 = min_i32(x1, (int32_t)framebuffer_info.width);
+    clip_y1 = min_i32(y1, (int32_t)framebuffer_info.height);
     if (clip_x0 >= clip_x1 || clip_y0 >= clip_y1) {
         return;
     }
 
-    fill_rect(0, 0, (int32_t)fb_info.width, (int32_t)fb_info.height, bg_color);
+    fill_rect(0, 0, (int32_t)framebuffer_info.width, (int32_t)framebuffer_info.height, bg_color);
     for (int z = 0; z < z_count; z++) {
         int i = zorder[z];
         const window_t *win = &windows[i];
@@ -1153,7 +1153,7 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
     }
     if (snap_preview_active) {
         fill_rect_blend(snap_preview_x, snap_preview_y, snap_preview_w, snap_preview_h,
-                         accent_color, snap_preview_num(), SNAP_FADE_DEN);
+                         accent_color, snap_preview_number(), SNAP_FADE_DEN);
         stroke_rect(snap_preview_x, snap_preview_y, snap_preview_w, snap_preview_h, accent_color);
     }
     for (int z = 0; z < z_count; z++) {
@@ -1172,8 +1172,8 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
     draw_toasts();
     if (client_drag_active) {
         int32_t lw = text_width(client_drag_payload) + 2 * DRAG_LABEL_PAD;
-        int32_t lx = min_i32(cursor_x + CURSOR_SIZE, (int32_t)fb_info.width - lw);
-        int32_t ly = min_i32(cursor_y + CURSOR_SIZE, (int32_t)fb_info.height - DRAG_LABEL_H);
+        int32_t lx = min_i32(cursor_x + CURSOR_SIZE, (int32_t)framebuffer_info.width - lw);
+        int32_t ly = min_i32(cursor_y + CURSOR_SIZE, (int32_t)framebuffer_info.height - DRAG_LABEL_H);
         fill_rect_rounded(lx, ly, lw, DRAG_LABEL_H, DRAG_LABEL_BG);
         stroke_rect_rounded(lx, ly, lw, DRAG_LABEL_H, DRAG_LABEL_BORDER);
         draw_text_clipped(lx + DRAG_LABEL_PAD, ly + (DRAG_LABEL_H - UI_FONT_HEIGHT) / 2,
@@ -1199,7 +1199,7 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
 }
 
 static void redraw(void) {
-    redraw_rect(0, 0, (int32_t)fb_info.width, (int32_t)fb_info.height);
+    redraw_rect(0, 0, (int32_t)framebuffer_info.width, (int32_t)framebuffer_info.height);
 }
 
 static int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi) {
@@ -1253,7 +1253,7 @@ static int cursor_over_titlebar(void) {
 }
 
 static void send_event(const window_t *win, const wm_event_t *ev) {
-    sys_write(win->evt_write_fd, ev, sizeof(*ev));
+    sys_write(win->evt_write_file_descriptor, ev, sizeof(*ev));
 }
 
 static void set_focus(int idx);
@@ -1359,7 +1359,7 @@ static int toast_click(int32_t px, int32_t py) {
     for (int i = 0; i < toast_count; i++) {
         int32_t x, y;
         toast_rect(i, &x, &y);
-        if (gfx_point_in_rect(px, py, x, y, TOAST_W, TOAST_H)) {
+        if (graphics_point_in_rect(px, py, x, y, TOAST_W, TOAST_H)) {
             for (int j = i + 1; j < toast_count; j++) {
                 toasts[j - 1] = toasts[j];
             }
@@ -1381,7 +1381,7 @@ static void reclaim_window(int idx) {
     }
     slot_w[idx] = -1;
     if (win->shm_id >= 0) {
-        sys_shm_free(win->shm_id, win->pixels);
+        sys_shared_memory_free(win->shm_id, win->pixels);
         win->shm_id = -1;
         win->pixels = (uint32_t *)0;
     }
@@ -1428,28 +1428,28 @@ static int32_t content_top_limit(void) {
 }
 
 static int32_t content_bottom_limit(void) {
-    return (int32_t)fb_info.height - connected_panel_height();
+    return (int32_t)framebuffer_info.height - connected_panel_height();
 }
 
 static void snap_rect(const window_t *win, uint32_t action,
                        int32_t *out_x, int32_t *out_y, int32_t *out_w, int32_t *out_h) {
-    int32_t half_w = max_i32((int32_t)fb_info.width / 2 - 2 * BORDER, MIN_WIN_W);
+    int32_t half_w = max_i32((int32_t)framebuffer_info.width / 2 - 2 * BORDER, MIN_WIN_W);
     int32_t avail_h = max_i32(content_bottom_limit() - content_top_limit() - BORDER, MIN_WIN_H);
-    *out_w = min_i32(win->buf_w, half_w);
-    *out_h = min_i32(win->buf_h, avail_h);
-    *out_x = (action == WM_ACTION_SNAP_LEFT) ? BORDER : (int32_t)fb_info.width / 2 + BORDER;
+    *out_w = min_i32(win->buffer_w, half_w);
+    *out_h = min_i32(win->buffer_h, avail_h);
+    *out_x = (action == WM_ACTION_SNAP_LEFT) ? BORDER : (int32_t)framebuffer_info.width / 2 + BORDER;
     *out_y = content_top_limit();
 }
 
-static void refuse_window(int resp_write_fd, int32_t client_pid, const char *reason) {
-    wm_create_response_t resp;
-    resp.window_id = -1;
-    resp.shm_id = -1;
-    resp.width = 0;
-    resp.height = 0;
-    resp.client_pid = client_pid;
-    resp.compositor_pid = self_pid;
-    sys_write(resp_write_fd, &resp, sizeof(resp));
+static void refuse_window(int response_write_file_descriptor, int32_t client_pid, const char *reason) {
+    wm_create_response_t response;
+    response.window_id = -1;
+    response.shm_id = -1;
+    response.width = 0;
+    response.height = 0;
+    response.client_pid = client_pid;
+    response.compositor_pid = self_pid;
+    sys_write(response_write_file_descriptor, &response, sizeof(response));
 
     toast_post(WM_NOTIFY_WARN, "Window refused", reason);
 
@@ -1467,24 +1467,24 @@ static void clamp_window_on_screen(int idx);
 
 static int rebuffer_window(int idx) {
     window_t *win = &windows[idx];
-    uint32_t width = (win->is_panel || win->is_desktop) ? fb_info.width : (uint32_t)win->buf_w;
-    uint32_t height = win->is_desktop ? fb_info.height : (uint32_t)win->buf_h;
+    uint32_t width = (win->is_panel || win->is_desktop) ? framebuffer_info.width : (uint32_t)win->buffer_w;
+    uint32_t height = win->is_desktop ? framebuffer_info.height : (uint32_t)win->buffer_h;
 
-    long id = sys_shm_create((size_t)width * height * sizeof(uint32_t));
-    long vaddr = id < 0 ? -1 : sys_shm_map(id);
+    long id = sys_shared_memory_create((size_t)width * height * sizeof(uint32_t));
+    long vaddr = id < 0 ? -1 : sys_shared_memory_map(id);
     if (vaddr < 0) {
         if (id >= 0) {
-            sys_shm_free(id, (void *)0);
+            sys_shared_memory_free(id, (void *)0);
         }
         return -1;
     }
     if (win->shm_id >= 0) {
-        sys_shm_free(win->shm_id, win->pixels);
+        sys_shared_memory_free(win->shm_id, win->pixels);
     }
     win->shm_id = (int32_t)id;
     win->pixels = (uint32_t *)vaddr;
-    win->buf_w = (int32_t)width;
-    win->buf_h = (int32_t)height;
+    win->buffer_w = (int32_t)width;
+    win->buffer_h = (int32_t)height;
     if (win->is_panel) {
         win->w = (int32_t)width;
     } else if (win->is_desktop) {
@@ -1505,15 +1505,15 @@ typedef struct {
 } session_entry_t;
 static session_entry_t *session_claim(int client_pid);
 
-static void accept_pending_window(int req_read_fd, int resp_write_fd) {
-    if (sys_pipe_poll(req_read_fd) < (long)sizeof(wm_create_request_t)) {
+static void accept_pending_window(int request_read_file_descriptor, int response_write_file_descriptor) {
+    if (sys_pipe_poll(request_read_file_descriptor) < (long)sizeof(wm_create_request_t)) {
         return;
     }
     wm_create_request_t req;
-    long n = read_exact(req_read_fd, &req, sizeof(req));
-    wm_create_response_t resp;
+    long n = read_exact(request_read_file_descriptor, &req, sizeof(req));
+    wm_create_response_t response;
     if (n != (long)sizeof(req)) {
-        refuse_window(resp_write_fd, -1, "short/torn create request");
+        refuse_window(response_write_file_descriptor, -1, "short/torn create request");
         return;
     }
 
@@ -1521,17 +1521,17 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
         for (int i = 0; i < window_count; i++) {
             if (windows[i].alive && windows[i].client_pid == req.client_pid) {
                 if (windows[i].needs_rebuffer && rebuffer_window(i) != 0) {
-                    refuse_window(resp_write_fd, req.client_pid,
+                    refuse_window(response_write_file_descriptor, req.client_pid,
                                    "could not reallocate this window's buffer for the new display size");
                     return;
                 }
-                resp.window_id = i;
-                resp.shm_id = windows[i].shm_id;
-                resp.width = (uint32_t)windows[i].buf_w;
-                resp.height = (uint32_t)windows[i].buf_h;
-                resp.compositor_pid = self_pid;
-                resp.client_pid = req.client_pid;
-                sys_write(resp_write_fd, &resp, sizeof(resp));
+                response.window_id = i;
+                response.shm_id = windows[i].shm_id;
+                response.width = (uint32_t)windows[i].buffer_w;
+                response.height = (uint32_t)windows[i].buffer_h;
+                response.compositor_pid = self_pid;
+                response.client_pid = req.client_pid;
+                sys_write(response_write_file_descriptor, &response, sizeof(response));
                 return;
             }
         }
@@ -1547,35 +1547,35 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     int reused_slot = (idx >= 0);
     if (idx < 0) {
         if (window_count >= MAX_WINDOWS) {
-            refuse_window(resp_write_fd, req.client_pid, "no free window slot (MAX_WINDOWS)");
+            refuse_window(response_write_file_descriptor, req.client_pid, "no free window slot (MAX_WINDOWS)");
             return;
         }
         idx = window_count;
     }
 
-    uint32_t width = (req.panel || req.desktop) ? fb_info.width : req.width;
-    uint32_t height = req.desktop ? fb_info.height : req.height;
+    uint32_t width = (req.panel || req.desktop) ? framebuffer_info.width : req.width;
+    uint32_t height = req.desktop ? framebuffer_info.height : req.height;
 
-    long shm_id = sys_shm_create((size_t)width * height * sizeof(uint32_t));
-    long vaddr = shm_id < 0 ? -1 : sys_shm_map(shm_id);
+    long shm_id = sys_shared_memory_create((size_t)width * height * sizeof(uint32_t));
+    long vaddr = shm_id < 0 ? -1 : sys_shared_memory_map(shm_id);
     if (shm_id < 0 || vaddr < 0) {
-        refuse_window(resp_write_fd, req.client_pid, "SYS_shm_create/SYS_shm_map failed (MAX_SHM_SEGMENTS, or out of memory)");
+        refuse_window(response_write_file_descriptor, req.client_pid, "SYS_shm_create/SYS_shm_map failed (MAX_SHM_SEGMENTS, or out of memory)");
         return;
     }
 
-    int evt_write_fd;
+    int evt_write_file_descriptor;
     if (reused_slot) {
-        evt_write_fd = windows[idx].evt_write_fd;
-        sys_pipe_reset(evt_write_fd);
+        evt_write_file_descriptor = windows[idx].evt_write_file_descriptor;
+        sys_pipe_reset(evt_write_file_descriptor);
     } else {
         char evt_name[WM_EVENT_PIPE_NAME_LEN];
         wm_event_pipe_name(idx, evt_name);
-        int evt_fds[2];
-        if (sys_pipe_open(evt_name, evt_fds) != 0) {
-            refuse_window(resp_write_fd, req.client_pid, "SYS_pipe_open for this window's event pipe failed (this process's MAX_FDS, or MAX_NAMED_PIPES)");
+        int evt_file_descriptors[2];
+        if (sys_pipe_open(evt_name, evt_file_descriptors) != 0) {
+            refuse_window(response_write_file_descriptor, req.client_pid, "SYS_pipe_open for this window's event pipe failed (this process's MAX_FDS, or MAX_NAMED_PIPES)");
             return;
         }
-        evt_write_fd = evt_fds[1];
+        evt_write_file_descriptor = evt_file_descriptors[1];
     }
 
     window_t *win = &windows[idx];
@@ -1587,7 +1587,7 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
     }
     if (req.panel) {
         win->x = 0;
-        win->y = (int32_t)fb_info.height - dock_h;
+        win->y = (int32_t)framebuffer_info.height - dock_h;
     } else if (req.desktop) {
         win->x = 0;
         win->y = 0;
@@ -1599,20 +1599,20 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
 
         restored = session_claim(req.client_pid);
         if (restored) {
-            win->x = max_i32(min_i32(restored->x, (int32_t)fb_info.width - 40), 0);
+            win->x = max_i32(min_i32(restored->x, (int32_t)framebuffer_info.width - 40), 0);
             int32_t rb = content_bottom_limit() - (int32_t)height;
             win->y = max_i32(min_i32(restored->y, rb), content_top_limit());
         }
     }
     win->w = (int32_t)width;
     win->h = req.panel ? dock_h : (int32_t)height;
-    win->buf_w = (int32_t)width;
-    win->buf_h = (int32_t)height;
-    win->buf_y0 = (int32_t)height - win->h;
+    win->buffer_w = (int32_t)width;
+    win->buffer_h = (int32_t)height;
+    win->buffer_y0 = (int32_t)height - win->h;
     win->overhang = 0;
     win->pixels = (uint32_t *)vaddr;
     win->shm_id = (int32_t)shm_id;
-    win->evt_write_fd = evt_write_fd;
+    win->evt_write_file_descriptor = evt_write_file_descriptor;
     win->translucent = req.translucent;
     win->is_desktop = req.desktop;
     win->minimized = 0;
@@ -1636,53 +1636,53 @@ static void accept_pending_window(int req_read_fd, int resp_write_fd) {
 
     z_insert_top_of_band(idx);
 
-    resp.window_id = idx;
-    resp.shm_id = (int32_t)shm_id;
-    resp.width = width;
-    resp.height = height;
-    resp.compositor_pid = self_pid;
-    resp.client_pid = req.client_pid;
+    response.window_id = idx;
+    response.shm_id = (int32_t)shm_id;
+    response.width = width;
+    response.height = height;
+    response.compositor_pid = self_pid;
+    response.client_pid = req.client_pid;
     if (!reused_slot) {
         window_count++;
     }
-    sys_write(resp_write_fd, &resp, sizeof(resp));
+    sys_write(response_write_file_descriptor, &response, sizeof(response));
     if (!win->is_panel) {
         set_focus(idx);
     }
 }
 
-static void accept_pending_query(int query_read_fd, int query_resp_write_fd) {
-    if (sys_pipe_poll(query_read_fd) < 1) {
+static void accept_pending_query(int query_read_file_descriptor, int query_response_write_file_descriptor) {
+    if (sys_pipe_poll(query_read_file_descriptor) < 1) {
         return;
     }
     uint8_t ping;
-    sys_read(query_read_fd, &ping, sizeof(ping));
+    sys_read(query_read_file_descriptor, &ping, sizeof(ping));
 
-    wm_query_response_t resp;
-    resp.count = 0;
-    resp.current_workspace = current_workspace;
+    wm_query_response_t response;
+    response.count = 0;
+    response.current_workspace = current_workspace;
     for (int i = 0; i < window_count; i++) {
         const window_t *win = &windows[i];
         if (!win->alive) {
             continue;
         }
-        int out = resp.count;
-        resp.windows[out].window_id = i;
-        resp.windows[out].x = win->x;
-        resp.windows[out].y = win->y;
-        resp.windows[out].w = win->w;
-        resp.windows[out].h = win->h;
-        resp.windows[out].focused = (i == focused_window);
-        resp.windows[out].minimized = win->minimized;
-        resp.windows[out].maximized = win->maximized;
-        resp.windows[out].is_panel = win->is_panel;
-        resp.windows[out].is_desktop = win->is_desktop;
-        resp.windows[out].z_index = z_position_of(i);
-        resp.windows[out].workspace = win->workspace;
-        memcpy(resp.windows[out].title, win->title, WM_TITLE_MAX);
-        resp.count++;
+        int out = response.count;
+        response.windows[out].window_id = i;
+        response.windows[out].x = win->x;
+        response.windows[out].y = win->y;
+        response.windows[out].w = win->w;
+        response.windows[out].h = win->h;
+        response.windows[out].focused = (i == focused_window);
+        response.windows[out].minimized = win->minimized;
+        response.windows[out].maximized = win->maximized;
+        response.windows[out].is_panel = win->is_panel;
+        response.windows[out].is_desktop = win->is_desktop;
+        response.windows[out].z_index = z_position_of(i);
+        response.windows[out].workspace = win->workspace;
+        memcpy(response.windows[out].title, win->title, WM_TITLE_MAX);
+        response.count++;
     }
-    sys_write(query_resp_write_fd, &resp, sizeof(resp));
+    sys_write(query_response_write_file_descriptor, &response, sizeof(response));
 }
 
 static void apply_window_action(int idx, uint32_t action, int32_t value) {
@@ -1724,8 +1724,8 @@ static void apply_window_action(int idx, uint32_t action, int32_t value) {
         if (want < 0) {
             want = 0;
         }
-        if (want > win->buf_y0) {
-            want = win->buf_y0;
+        if (want > win->buffer_y0) {
+            want = win->buffer_y0;
         }
         if (want != win->overhang) {
             win->overhang = want;
@@ -1737,12 +1737,12 @@ static void apply_window_action(int idx, uint32_t action, int32_t value) {
             win->saved_y = win->y;
             win->saved_w = win->w;
             win->saved_h = win->h;
-            int32_t avail_w = (int32_t)fb_info.width - 2 * BORDER;
+            int32_t avail_w = (int32_t)framebuffer_info.width - 2 * BORDER;
             int32_t avail_h = content_bottom_limit() - content_top_limit() - BORDER;
             win->x = BORDER;
             win->y = content_top_limit();
-            win->w = min_i32(win->buf_w, avail_w);
-            win->h = min_i32(win->buf_h, avail_h);
+            win->w = min_i32(win->buffer_w, avail_w);
+            win->h = min_i32(win->buffer_h, avail_h);
             win->maximized = 1;
             dirty = 1;
         }
@@ -1766,8 +1766,8 @@ static void wmenu_open_at(int idx, int32_t px, int32_t py) {
     wmenu_window = idx;
     wmenu_hover = -1;
     int32_t h = WMENU_ITEM_H * WMENU_COUNT;
-    wmenu_x = min_i32(px, (int32_t)fb_info.width - WMENU_W);
-    wmenu_y = min_i32(py, (int32_t)fb_info.height - h);
+    wmenu_x = min_i32(px, (int32_t)framebuffer_info.width - WMENU_W);
+    wmenu_y = min_i32(py, (int32_t)framebuffer_info.height - h);
     wmenu_x = max_i32(wmenu_x, 0);
     wmenu_y = max_i32(wmenu_y, 0);
     dirty = 1;
@@ -1782,7 +1782,7 @@ static void wmenu_close(void) {
 }
 
 static int wmenu_row_at(int32_t px, int32_t py) {
-    if (!gfx_point_in_rect(px, py, wmenu_x, wmenu_y, WMENU_W, WMENU_ITEM_H * WMENU_COUNT)) {
+    if (!graphics_point_in_rect(px, py, wmenu_x, wmenu_y, WMENU_W, WMENU_ITEM_H * WMENU_COUNT)) {
         return -1;
     }
     return (py - wmenu_y) / WMENU_ITEM_H;
@@ -1917,7 +1917,7 @@ static void launcher_set_open(int open) {
     power_hover = POWER_CONFIRM_NONE;
     if (open) {
         launcher_query[0] = '\0';
-        launcher_query_len = 0;
+        launcher_query_length = 0;
         launcher_reload();
         launcher_apply_filter();
     }
@@ -2025,13 +2025,13 @@ static void launcher_key(char ch) {
     } else if (ch == (char)KBD_KEY_DOWN) {
         launcher_selected++;
     } else if (ch == '\b' || ch == 0x7F) {
-        if (launcher_query_len > 0) {
-            launcher_query[--launcher_query_len] = '\0';
+        if (launcher_query_length > 0) {
+            launcher_query[--launcher_query_length] = '\0';
             launcher_apply_filter();
         }
-    } else if (ch >= 0x20 && ch < 0x7F && launcher_query_len < LAUNCHER_QUERY_MAX - 1) {
-        launcher_query[launcher_query_len++] = ch;
-        launcher_query[launcher_query_len] = '\0';
+    } else if (ch >= 0x20 && ch < 0x7F && launcher_query_length < LAUNCHER_QUERY_MAX - 1) {
+        launcher_query[launcher_query_length++] = ch;
+        launcher_query[launcher_query_length] = '\0';
         launcher_apply_filter();
     }
     launcher_clamp_scroll();
@@ -2041,10 +2041,10 @@ static void launcher_key(char ch) {
 static int power_button_at(int32_t px, int32_t py) {
     int32_t lx, ly;
     launcher_rect(&lx, &ly);
-    if (gfx_point_in_rect(px, py, lx + POWER_OFF_X, ly + POWER_BTN_Y, POWER_BTN_W, POWER_BTN_H)) {
+    if (graphics_point_in_rect(px, py, lx + POWER_OFF_X, ly + POWER_BTN_Y, POWER_BTN_W, POWER_BTN_H)) {
         return POWER_OFF;
     }
-    if (gfx_point_in_rect(px, py, lx + POWER_REBOOT_X, ly + POWER_BTN_Y, POWER_BTN_W, POWER_BTN_H)) {
+    if (graphics_point_in_rect(px, py, lx + POWER_REBOOT_X, ly + POWER_BTN_Y, POWER_BTN_W, POWER_BTN_H)) {
         return POWER_REBOOT;
     }
     return POWER_CONFIRM_NONE;
@@ -2058,7 +2058,7 @@ static int launcher_click(int32_t px, int32_t py) {
         dirty = 1;
         return 1;
     }
-    if (!gfx_point_in_rect(px, py, lx, ly, LAUNCHER_W, LAUNCHER_H)) {
+    if (!graphics_point_in_rect(px, py, lx, ly, LAUNCHER_W, LAUNCHER_H)) {
         launcher_set_open(0);
         return 1;
     }
@@ -2072,7 +2072,7 @@ static int launcher_click(int32_t px, int32_t py) {
         if (launcher_scroll + i >= launcher_match_count) {
             break;
         }
-        if (gfx_point_in_rect(px, py, lx + LAUNCHER_PAD / 2, launcher_row_y(ly, i),
+        if (graphics_point_in_rect(px, py, lx + LAUNCHER_PAD / 2, launcher_row_y(ly, i),
                                LAUNCHER_W - LAUNCHER_PAD, LAUNCHER_ROW_H)) {
             launcher_selected = launcher_scroll + i;
             launcher_launch_selected();
@@ -2103,7 +2103,7 @@ static void launcher_hover(int32_t px, int32_t py) {
         if (launcher_scroll + i >= launcher_match_count) {
             break;
         }
-        if (gfx_point_in_rect(px, py, lx + LAUNCHER_PAD / 2, launcher_row_y(ly, i),
+        if (graphics_point_in_rect(px, py, lx + LAUNCHER_PAD / 2, launcher_row_y(ly, i),
                                LAUNCHER_W - LAUNCHER_PAD, LAUNCHER_ROW_H)) {
             if (launcher_selected != launcher_scroll + i) {
                 launcher_selected = launcher_scroll + i;
@@ -2115,15 +2115,15 @@ static void launcher_hover(int32_t px, int32_t py) {
 }
 
 static int format_uint(uint32_t v, char *out) {
-    char tmp[12];
+    char temporary[12];
     int n = 0;
     do {
-        tmp[n++] = (char)('0' + (v % 10u));
+        temporary[n++] = (char)('0' + (v % 10u));
         v /= 10u;
     } while (v);
     int len = 0;
     while (n > 0) {
-        out[len++] = tmp[--n];
+        out[len++] = temporary[--n];
     }
     return len;
 }
@@ -2141,7 +2141,7 @@ static int snap_fading(void) {
     return snap_fade_start_ms != 0 && sys_uptime_ms() - snap_fade_start_ms < ANIM_MS;
 }
 
-static int32_t snap_preview_num(void) {
+static int32_t snap_preview_number(void) {
     if (!snap_fade_start_ms) {
         return SNAP_PREVIEW_NUM * 4;
     }
@@ -2159,7 +2159,7 @@ static int launcher_fading(void) {
            sys_uptime_ms() - launcher_fade_start_ms < ANIM_MS;
 }
 
-static int32_t launcher_opacity_num(void) {
+static int32_t launcher_opacity_number(void) {
     if (!launcher_fade_start_ms) {
         return LAUNCHER_OPACITY_NUM;
     }
@@ -2214,10 +2214,10 @@ static void taskbar_target(int idx, const window_t *win, int32_t *x, int32_t *y,
         *x = win->x + (win->w - *w) / 2;
     }
     *y = panel_top;
-    *h = (int32_t)fb_info.height - panel_top;
+    *h = (int32_t)framebuffer_info.height - panel_top;
     if (*h <= 0) {
         *h = 8;
-        *y = (int32_t)fb_info.height - 8;
+        *y = (int32_t)framebuffer_info.height - 8;
     }
 }
 
@@ -2252,41 +2252,41 @@ static void anim_window_close(int idx) {
 }
 
 static int apply_display_mode(uint32_t w, uint32_t h) {
-    if (w == fb_info.width && h == fb_info.height) {
+    if (w == framebuffer_info.width && h == framebuffer_info.height) {
         return 0;
     }
     if (sys_display_set_mode(w, h) != 0) {
         return -1;
     }
-    if (sys_fb_info(&fb_info) != 0) {
+    if (sys_framebuffer_info(&framebuffer_info) != 0) {
         return -1;
     }
-    long fb_vaddr = sys_fb_map();
-    if (fb_vaddr < 0) {
+    long framebuffer_vaddr = sys_framebuffer_map();
+    if (framebuffer_vaddr < 0) {
         return -1;
     }
-    real_fb = (uint32_t *)fb_vaddr;
-    fb_pitch_pixels = fb_info.pitch / (uint32_t)sizeof(uint32_t);
+    real_framebuffer = (uint32_t *)framebuffer_vaddr;
+    framebuffer_pitch_pixels = framebuffer_info.pitch / (uint32_t)sizeof(uint32_t);
 
-    long new_id = sys_shm_create((size_t)fb_info.width * fb_info.height * sizeof(uint32_t));
-    long new_vaddr = new_id < 0 ? -1 : sys_shm_map(new_id);
+    long new_id = sys_shared_memory_create((size_t)framebuffer_info.width * framebuffer_info.height * sizeof(uint32_t));
+    long new_vaddr = new_id < 0 ? -1 : sys_shared_memory_map(new_id);
     if (new_vaddr < 0) {
         if (new_id >= 0) {
-            sys_shm_free(new_id, (void *)0);
+            sys_shared_memory_free(new_id, (void *)0);
         }
-        sys_display_set_mode(mode_prev_w ? mode_prev_w : (uint32_t)back_pitch_pixels, h);
-        sys_fb_info(&fb_info);
+        sys_display_set_mode(mode_previous_w ? mode_previous_w : (uint32_t)back_pitch_pixels, h);
+        sys_framebuffer_info(&framebuffer_info);
         return -1;
     }
-    if (back_shm_id >= 0) {
-        sys_shm_free(back_shm_id, back_buf);
+    if (back_shared_memory_id >= 0) {
+        sys_shared_memory_free(back_shared_memory_id, back_buffer);
     }
-    back_shm_id = new_id;
-    back_buf = (uint32_t *)new_vaddr;
-    back_pitch_pixels = fb_info.width;
+    back_shared_memory_id = new_id;
+    back_buffer = (uint32_t *)new_vaddr;
+    back_pitch_pixels = framebuffer_info.width;
 
-    cursor_x = clamp_i32(cursor_x, 0, (int32_t)fb_info.width - 1);
-    cursor_y = clamp_i32(cursor_y, 0, (int32_t)fb_info.height - 1);
+    cursor_x = clamp_i32(cursor_x, 0, (int32_t)framebuffer_info.width - 1);
+    cursor_y = clamp_i32(cursor_y, 0, (int32_t)framebuffer_info.height - 1);
     last_drawn_cursor_x = cursor_x;
     last_drawn_cursor_y = cursor_y;
 
@@ -2308,7 +2308,7 @@ static void clamp_window_on_screen(int idx) {
     window_t *win = &windows[idx];
     if (win->is_panel) {
         win->x = 0;
-        win->y = (int32_t)fb_info.height - win->h;
+        win->y = (int32_t)framebuffer_info.height - win->h;
         return;
     }
     if (win->is_desktop) {
@@ -2321,7 +2321,7 @@ static void clamp_window_on_screen(int idx) {
         apply_window_action(idx, WM_ACTION_MAXIMIZE, 0);
         return;
     }
-    win->x = clamp_i32(win->x, 0, max_i32(0, (int32_t)fb_info.width - win->w));
+    win->x = clamp_i32(win->x, 0, max_i32(0, (int32_t)framebuffer_info.width - win->w));
     win->y = clamp_i32(win->y, content_top_limit(),
                         max_i32(content_top_limit(), content_bottom_limit() - win->h));
 }
@@ -2343,9 +2343,9 @@ static void present_window(int id) {
     present_y1 = max_i32(present_y1, y1);
 }
 
-static void accept_one_action(int action_read_fd) {
+static void accept_one_action(int action_read_file_descriptor) {
     wm_action_request_t req;
-    if (read_exact(action_read_fd, &req, sizeof(req)) != (long)sizeof(req)) {
+    if (read_exact(action_read_file_descriptor, &req, sizeof(req)) != (long)sizeof(req)) {
         return;
     }
     if (req.action == WM_ACTION_PRESENT) {
@@ -2366,15 +2366,15 @@ static void accept_one_action(int action_read_fd) {
         return;
     }
     if (req.action == WM_ACTION_SET_MODE) {
-        uint32_t prev_w = fb_info.width, prev_h = fb_info.height;
+        uint32_t previous_w = framebuffer_info.width, previous_h = framebuffer_info.height;
         if (apply_display_mode(wm_mode_width(req.value), wm_mode_height(req.value)) != 0) {
             toast_post(WM_NOTIFY_ERROR, "Display unchanged",
                         "The adapter refused that resolution");
             return;
         }
         if (mode_revert_at_ms == 0) {
-            mode_prev_w = prev_w;
-            mode_prev_h = prev_h;
+            mode_previous_w = previous_w;
+            mode_previous_h = previous_h;
         }
         mode_revert_at_ms = sys_uptime_ms() + WM_MODE_REVERT_MS;
         return;
@@ -2395,12 +2395,12 @@ static void accept_one_action(int action_read_fd) {
     apply_window_action(req.window_id, req.action, req.value);
 }
 
-static void accept_pending_action(int action_read_fd) {
+static void accept_pending_action(int action_read_file_descriptor) {
     for (int i = 0; i < 32; i++) {
-        if (sys_pipe_poll(action_read_fd) < (long)sizeof(wm_action_request_t)) {
+        if (sys_pipe_poll(action_read_file_descriptor) < (long)sizeof(wm_action_request_t)) {
             return;
         }
-        accept_one_action(action_read_fd);
+        accept_one_action(action_read_file_descriptor);
     }
 }
 
@@ -2422,12 +2422,12 @@ static int theme_is_readable(uint32_t bg, uint32_t accent) {
     return d_bg >= THEME_MIN_CONTRAST && d_ac >= THEME_MIN_CONTRAST;
 }
 
-static void accept_pending_settings(int settings_read_fd) {
-    if (sys_pipe_poll(settings_read_fd) < (long)sizeof(wm_settings_request_t)) {
+static void accept_pending_settings(int settings_read_file_descriptor) {
+    if (sys_pipe_poll(settings_read_file_descriptor) < (long)sizeof(wm_settings_request_t)) {
         return;
     }
     wm_settings_request_t req;
-    if (read_exact(settings_read_fd, &req, sizeof(req)) != (long)sizeof(req)) {
+    if (read_exact(settings_read_file_descriptor, &req, sizeof(req)) != (long)sizeof(req)) {
         return;
     }
     if (theme_is_readable(req.bg_color, req.accent_color)) {
@@ -2446,12 +2446,12 @@ static void accept_pending_settings(int settings_read_fd) {
     dirty = 1;
 }
 
-static void accept_pending_drag(int drag_read_fd) {
-    if (sys_pipe_poll(drag_read_fd) < (long)sizeof(wm_drag_request_t)) {
+static void accept_pending_drag(int drag_read_file_descriptor) {
+    if (sys_pipe_poll(drag_read_file_descriptor) < (long)sizeof(wm_drag_request_t)) {
         return;
     }
     wm_drag_request_t req;
-    if (read_exact(drag_read_fd, &req, sizeof(req)) != (long)sizeof(req)) {
+    if (read_exact(drag_read_file_descriptor, &req, sizeof(req)) != (long)sizeof(req)) {
         return;
     }
     req.payload[WM_DRAG_PAYLOAD_MAX - 1] = '\0';
@@ -2461,12 +2461,12 @@ static void accept_pending_drag(int drag_read_fd) {
     dirty = 1;
 }
 
-static void accept_pending_notify(int notify_read_fd) {
-    if (sys_pipe_poll(notify_read_fd) < (long)sizeof(wm_notify_request_t)) {
+static void accept_pending_notify(int notify_read_file_descriptor) {
+    if (sys_pipe_poll(notify_read_file_descriptor) < (long)sizeof(wm_notify_request_t)) {
         return;
     }
     wm_notify_request_t req;
-    if (read_exact(notify_read_fd, &req, sizeof(req)) != (long)sizeof(req)) {
+    if (read_exact(notify_read_file_descriptor, &req, sizeof(req)) != (long)sizeof(req)) {
         return;
     }
     req.title[WM_NOTIFY_TITLE_MAX - 1] = '\0';
@@ -2474,21 +2474,21 @@ static void accept_pending_notify(int notify_read_fd) {
     toast_post(req.level, req.title, req.body);
 }
 
-static void accept_pending_settings_query(int query_read_fd, int query_resp_write_fd) {
-    if (sys_pipe_poll(query_read_fd) < 1) {
+static void accept_pending_settings_query(int query_read_file_descriptor, int query_response_write_file_descriptor) {
+    if (sys_pipe_poll(query_read_file_descriptor) < 1) {
         return;
     }
     uint8_t ping;
-    if (read_exact(query_read_fd, &ping, sizeof(ping)) != (long)sizeof(ping)) {
+    if (read_exact(query_read_file_descriptor, &ping, sizeof(ping)) != (long)sizeof(ping)) {
         return;
     }
-    wm_settings_request_t resp;
-    resp.volume = audio_volume;
-    resp.animations = (uint32_t)animations_enabled;
-    resp.bg_color = bg_color;
-    resp.accent_color = accent_color;
-    resp.wallpaper = wallpaper_id;
-    sys_write(query_resp_write_fd, &resp, sizeof(resp));
+    wm_settings_request_t response;
+    response.volume = audio_volume;
+    response.animations = (uint32_t)animations_enabled;
+    response.bg_color = bg_color;
+    response.accent_color = accent_color;
+    response.wallpaper = wallpaper_id;
+    sys_write(query_response_write_file_descriptor, &response, sizeof(response));
 }
 
 static int window_under_cursor(void) {
@@ -2513,22 +2513,22 @@ static void handle_mouse(void) {
         if (cursor_y < 0) {
             cursor_y = 0;
         }
-        if (cursor_x >= (int32_t)fb_info.width) {
-            cursor_x = (int32_t)fb_info.width - 1;
+        if (cursor_x >= (int32_t)framebuffer_info.width) {
+            cursor_x = (int32_t)framebuffer_info.width - 1;
         }
-        if (cursor_y >= (int32_t)fb_info.height) {
-            cursor_y = (int32_t)fb_info.height - 1;
+        if (cursor_y >= (int32_t)framebuffer_info.height) {
+            cursor_y = (int32_t)framebuffer_info.height - 1;
         }
 
-        int left_down_edge = (mev.buttons & 1) && !(prev_buttons & 1);
-        int left_up_edge = !(mev.buttons & 1) && (prev_buttons & 1);
-        int right_down_edge = (mev.buttons & 2) && !(prev_buttons & 2);
+        int left_down_edge = (mev.buttons & 1) && !(previous_buttons & 1);
+        int left_up_edge = !(mev.buttons & 1) && (previous_buttons & 1);
+        int right_down_edge = (mev.buttons & 2) && !(previous_buttons & 2);
 
         {
             titlebar_button_t over_btn = BTN_CLOSE;
-            int over_idx = (drag_mode == DRAG_NONE) ? titlebar_button_at(cursor_x, cursor_y, &over_btn) : -1;
-            if (over_idx != hover_btn_window || (over_idx >= 0 && over_btn != hover_btn)) {
-                hover_btn_window = over_idx;
+            int over_index = (drag_mode == DRAG_NONE) ? titlebar_button_at(cursor_x, cursor_y, &over_btn) : -1;
+            if (over_index != hover_btn_window || (over_index >= 0 && over_btn != hover_btn)) {
+                hover_btn_window = over_index;
                 hover_btn = over_btn;
                 dirty = 1;
             }
@@ -2551,7 +2551,7 @@ static void handle_mouse(void) {
                     send_event(win, &ev);
                 }
             }
-            prev_buttons = mev.buttons;
+            previous_buttons = mev.buttons;
             continue;
         }
 
@@ -2564,7 +2564,7 @@ static void handle_mouse(void) {
                 if (target >= 0) {
                     wm_drag_request_t data;
                     memcpy(data.payload, client_drag_payload, WM_DRAG_PAYLOAD_MAX);
-                    sys_write(drag_data_write_fd, &data, sizeof(data));
+                    sys_write(drag_data_write_file_descriptor, &data, sizeof(data));
                     wm_event_t ev = {0};
                     ev.type = WM_EVENT_DROP;
                     ev.x = cursor_x - windows[target].x;
@@ -2589,12 +2589,12 @@ static void handle_mouse(void) {
                 }
                 dirty = 1;
             }
-            prev_buttons = mev.buttons;
+            previous_buttons = mev.buttons;
             continue;
         }
 
         if (left_down_edge && toast_click(cursor_x, cursor_y)) {
-            prev_buttons = mev.buttons;
+            previous_buttons = mev.buttons;
             continue;
         }
 
@@ -2604,7 +2604,7 @@ static void handle_mouse(void) {
             } else if (!(mev.buttons & 1)) {
                 launcher_hover(cursor_x, cursor_y);
             }
-            prev_buttons = mev.buttons;
+            previous_buttons = mev.buttons;
             continue;
         }
 
@@ -2621,7 +2621,7 @@ static void handle_mouse(void) {
                 }
             }
             if (!right_down_edge) {
-                prev_buttons = mev.buttons;
+                previous_buttons = mev.buttons;
                 continue;
             }
         }
@@ -2647,7 +2647,7 @@ static void handle_mouse(void) {
                 int32_t dy = cursor_y - drag_start_cursor_y;
                 if (drag_mode == DRAG_MOVE) {
                     int32_t min_x = -(win->w - MOVE_MIN_VISIBLE);
-                    int32_t max_x = (int32_t)fb_info.width - MOVE_MIN_VISIBLE;
+                    int32_t max_x = (int32_t)framebuffer_info.width - MOVE_MIN_VISIBLE;
                     int32_t min_y = content_top_limit();
                     int32_t max_y = content_bottom_limit();
                     win->x = clamp_i32(drag_start_x + dx, min_x, max_x);
@@ -2655,7 +2655,7 @@ static void handle_mouse(void) {
                     int hint = SNAP_NONE;
                     if (cursor_x <= SNAP_EDGE_MARGIN) {
                         hint = SNAP_LEFT;
-                    } else if (cursor_x >= (int32_t)fb_info.width - 1 - SNAP_EDGE_MARGIN) {
+                    } else if (cursor_x >= (int32_t)framebuffer_info.width - 1 - SNAP_EDGE_MARGIN) {
                         hint = SNAP_RIGHT;
                     }
                     if (hint != drag_snap_hint) {
@@ -2677,17 +2677,17 @@ static void handle_mouse(void) {
                     int32_t new_x = drag_start_x, new_y = drag_start_y;
                     int32_t new_w = drag_start_w, new_h = drag_start_h;
                     if (drag_resize_mask & RESIZE_RIGHT) {
-                        new_w = clamp_i32(drag_start_w + dx, MIN_WIN_W, win->buf_w);
+                        new_w = clamp_i32(drag_start_w + dx, MIN_WIN_W, win->buffer_w);
                     } else if (drag_resize_mask & RESIZE_LEFT) {
                         int32_t right_edge = drag_start_x + drag_start_w;
-                        new_w = clamp_i32(drag_start_w - dx, MIN_WIN_W, win->buf_w);
+                        new_w = clamp_i32(drag_start_w - dx, MIN_WIN_W, win->buffer_w);
                         new_x = right_edge - new_w;
                     }
                     if (drag_resize_mask & RESIZE_BOTTOM) {
-                        new_h = clamp_i32(drag_start_h + dy, MIN_WIN_H, win->buf_h);
+                        new_h = clamp_i32(drag_start_h + dy, MIN_WIN_H, win->buffer_h);
                     } else if (drag_resize_mask & RESIZE_TOP) {
                         int32_t bottom_edge = drag_start_y + drag_start_h;
-                        new_h = clamp_i32(drag_start_h - dy, MIN_WIN_H, win->buf_h);
+                        new_h = clamp_i32(drag_start_h - dy, MIN_WIN_H, win->buffer_h);
                         new_y = bottom_edge - new_h;
                     }
                     win->x = new_x;
@@ -2697,73 +2697,73 @@ static void handle_mouse(void) {
                 }
                 dirty = 1;
             }
-            prev_buttons = mev.buttons;
+            previous_buttons = mev.buttons;
             continue;
         }
 
         if (left_down_edge) {
             titlebar_button_t btn_hit = BTN_CLOSE;
-            int btn_hit_idx = titlebar_button_at(cursor_x, cursor_y, &btn_hit);
-            if (btn_hit_idx >= 0) {
+            int btn_hit_index = titlebar_button_at(cursor_x, cursor_y, &btn_hit);
+            if (btn_hit_index >= 0) {
                 if (btn_hit == BTN_CLOSE) {
-                    apply_window_action(btn_hit_idx, WM_ACTION_CLOSE, 0);
+                    apply_window_action(btn_hit_index, WM_ACTION_CLOSE, 0);
                 } else if (btn_hit == BTN_MINIMIZE) {
-                    apply_window_action(btn_hit_idx, WM_ACTION_TOGGLE_MINIMIZE, 0);
+                    apply_window_action(btn_hit_index, WM_ACTION_TOGGLE_MINIMIZE, 0);
                 } else {
-                    apply_window_action(btn_hit_idx, windows[btn_hit_idx].maximized ? WM_ACTION_RESTORE : WM_ACTION_MAXIMIZE, 0);
+                    apply_window_action(btn_hit_index, windows[btn_hit_index].maximized ? WM_ACTION_RESTORE : WM_ACTION_MAXIMIZE, 0);
                 }
-                prev_buttons = mev.buttons;
+                previous_buttons = mev.buttons;
                 continue;
             }
 
             int rz_mask = 0;
-            int rz_idx = z_hit_test(cursor_x, cursor_y, WCLASS_ORDINARY, HIT_RESIZE, &rz_mask);
-            if (rz_idx >= 0) {
+            int rz_index = z_hit_test(cursor_x, cursor_y, WCLASS_ORDINARY, HIT_RESIZE, &rz_mask);
+            if (rz_index >= 0) {
                 drag_mode = DRAG_RESIZE;
-                drag_window = rz_idx;
+                drag_window = rz_index;
                 drag_resize_mask = rz_mask;
                 drag_start_cursor_x = cursor_x;
                 drag_start_cursor_y = cursor_y;
-                drag_start_x = windows[rz_idx].x;
-                drag_start_y = windows[rz_idx].y;
-                drag_start_w = windows[rz_idx].w;
-                drag_start_h = windows[rz_idx].h;
-                set_focus(rz_idx);
-                prev_buttons = mev.buttons;
+                drag_start_x = windows[rz_index].x;
+                drag_start_y = windows[rz_index].y;
+                drag_start_w = windows[rz_index].w;
+                drag_start_h = windows[rz_index].h;
+                set_focus(rz_index);
+                previous_buttons = mev.buttons;
                 continue;
             }
 
-            int mv_idx = z_hit_test(cursor_x, cursor_y, WCLASS_ORDINARY, HIT_TITLEBAR, 0);
-            if (mv_idx >= 0) {
-                if (titlebar_last_click_window == mv_idx &&
+            int mv_index = z_hit_test(cursor_x, cursor_y, WCLASS_ORDINARY, HIT_TITLEBAR, 0);
+            if (mv_index >= 0) {
+                if (titlebar_last_click_window == mv_index &&
                     mev.time_ms - titlebar_last_click_ms <= TITLEBAR_DOUBLE_CLICK_MS) {
                     titlebar_last_click_window = -1;
-                    set_focus(mv_idx);
-                    apply_window_action(mv_idx,
-                                         windows[mv_idx].maximized ? WM_ACTION_RESTORE : WM_ACTION_MAXIMIZE, 0);
-                    prev_buttons = mev.buttons;
+                    set_focus(mv_index);
+                    apply_window_action(mv_index,
+                                         windows[mv_index].maximized ? WM_ACTION_RESTORE : WM_ACTION_MAXIMIZE, 0);
+                    previous_buttons = mev.buttons;
                     continue;
                 }
-                titlebar_last_click_window = mv_idx;
+                titlebar_last_click_window = mv_index;
                 titlebar_last_click_ms = mev.time_ms;
                 drag_mode = DRAG_MOVE;
-                drag_window = mv_idx;
+                drag_window = mv_index;
                 drag_start_cursor_x = cursor_x;
                 drag_start_cursor_y = cursor_y;
-                drag_start_x = windows[mv_idx].x;
-                drag_start_y = windows[mv_idx].y;
-                set_focus(mv_idx);
-                prev_buttons = mev.buttons;
+                drag_start_x = windows[mv_index].x;
+                drag_start_y = windows[mv_index].y;
+                set_focus(mv_index);
+                previous_buttons = mev.buttons;
                 continue;
             }
 
             focus_window_under_cursor();
         } else if (right_down_edge) {
-            int tb_idx = z_hit_test(cursor_x, cursor_y, WCLASS_ORDINARY, HIT_TITLEBAR, 0);
-            if (tb_idx >= 0) {
-                set_focus(tb_idx);
-                wmenu_open_at(tb_idx, cursor_x, cursor_y);
-                prev_buttons = mev.buttons;
+            int tb_index = z_hit_test(cursor_x, cursor_y, WCLASS_ORDINARY, HIT_TITLEBAR, 0);
+            if (tb_index >= 0) {
+                set_focus(tb_index);
+                wmenu_open_at(tb_index, cursor_x, cursor_y);
+                previous_buttons = mev.buttons;
                 continue;
             }
             focus_window_under_cursor();
@@ -2796,12 +2796,12 @@ static void handle_mouse(void) {
             ev.buttons = mev.buttons;
             ev.time_ms = mev.time_ms;
             send_event(win, &ev);
-            if (mev.buttons != prev_buttons) {
+            if (mev.buttons != previous_buttons) {
                 ev.type = WM_EVENT_MOUSE_BUTTON;
                 send_event(win, &ev);
             }
         }
-        prev_buttons = mev.buttons;
+        previous_buttons = mev.buttons;
     }
 }
 
@@ -2894,8 +2894,8 @@ static void run_shortcut(int id) {
 
 static void handle_keyboard(void) {
     char ch;
-    while (sys_kbd_read(&ch)) {
-        long mods = sys_kbd_modifiers();
+    while (sys_keyboard_read(&ch)) {
+        long mods = sys_keyboard_modifiers();
         int shortcut = shortcut_lookup(ch, (int)mods);
         if (shortcut != SHORTCUT_NONE) {
             run_shortcut(shortcut);
@@ -2942,13 +2942,13 @@ static int format_session_line(char *out, int cap, const char *prog,
             out[n++] = '-';
             v = -v;
         }
-        char tmp[12];
+        char temporary[12];
         int t = 0;
-        if (v == 0) { tmp[t++] = '0'; }
-        while (v > 0) { tmp[t++] = (char)('0' + v % 10); v /= 10; }
+        if (v == 0) { temporary[t++] = '0'; }
+        while (v > 0) { temporary[t++] = (char)('0' + v % 10); v /= 10; }
         while (t > 0) {
             if (n >= cap - 1) { return -1; }
-            out[n++] = tmp[--t];
+            out[n++] = temporary[--t];
         }
     }
     if (n >= cap - 1) { return -1; }
@@ -3154,43 +3154,43 @@ int main(void) {
         session_enabled = sess != 0;
         session_relaunch = sess != 0 && strcmp(sess, "reconnect") != 0;
     }
-    if (sys_fb_info(&fb_info) != 0) {
+    if (sys_framebuffer_info(&framebuffer_info) != 0) {
         sys_exit(1);
     }
-    long fb_vaddr = sys_fb_map();
-    if (fb_vaddr < 0) {
+    long framebuffer_vaddr = sys_framebuffer_map();
+    if (framebuffer_vaddr < 0) {
         sys_exit(1);
     }
-    real_fb = (uint32_t *)fb_vaddr;
-    fb_pitch_pixels = fb_info.pitch / sizeof(uint32_t);
+    real_framebuffer = (uint32_t *)framebuffer_vaddr;
+    framebuffer_pitch_pixels = framebuffer_info.pitch / sizeof(uint32_t);
 
     {
         uint32_t saved_w = 0, saved_h = 0;
         if (settings_file_load_display(&saved_w, &saved_h) &&
-            (saved_w != fb_info.width || saved_h != fb_info.height)) {
+            (saved_w != framebuffer_info.width || saved_h != framebuffer_info.height)) {
             if (sys_display_set_mode(saved_w, saved_h) == 0) {
-                sys_fb_info(&fb_info);
-                long remapped = sys_fb_map();
+                sys_framebuffer_info(&framebuffer_info);
+                long remapped = sys_framebuffer_map();
                 if (remapped >= 0) {
-                    real_fb = (uint32_t *)remapped;
+                    real_framebuffer = (uint32_t *)remapped;
                 }
-                fb_pitch_pixels = fb_info.pitch / (uint32_t)sizeof(uint32_t);
+                framebuffer_pitch_pixels = framebuffer_info.pitch / (uint32_t)sizeof(uint32_t);
             }
         }
     }
 
-    back_shm_id = sys_shm_create((size_t)fb_info.width * fb_info.height * sizeof(uint32_t));
-    long back_vaddr = back_shm_id < 0 ? -1 : sys_shm_map(back_shm_id);
+    back_shared_memory_id = sys_shared_memory_create((size_t)framebuffer_info.width * framebuffer_info.height * sizeof(uint32_t));
+    long back_vaddr = back_shared_memory_id < 0 ? -1 : sys_shared_memory_map(back_shared_memory_id);
     if (back_vaddr < 0) {
         sys_exit(1);
     }
-    back_buf = (uint32_t *)back_vaddr;
-    back_pitch_pixels = fb_info.width;
+    back_buffer = (uint32_t *)back_vaddr;
+    back_pitch_pixels = framebuffer_info.width;
 
     self_pid = (int32_t)sys_getpid();
 
-    cursor_x = (int32_t)(fb_info.width / 2);
-    cursor_y = (int32_t)(fb_info.height / 2);
+    cursor_x = (int32_t)(framebuffer_info.width / 2);
+    cursor_y = (int32_t)(framebuffer_info.height / 2);
 
     {
         wm_settings_request_t saved;
@@ -3212,42 +3212,42 @@ int main(void) {
         sys_audio_volume(audio_volume);
     }
 
-    int req_fds[2];
-    int resp_fds[2];
-    if (sys_pipe_open(WM_REQUEST_PIPE, req_fds) != 0 || sys_pipe_open(WM_RESPONSE_PIPE, resp_fds) != 0) {
+    int request_file_descriptors[2];
+    int response_file_descriptors[2];
+    if (sys_pipe_open(WM_REQUEST_PIPE, request_file_descriptors) != 0 || sys_pipe_open(WM_RESPONSE_PIPE, response_file_descriptors) != 0) {
         sys_exit(1);
     }
-    int query_fds[2];
-    int query_resp_fds[2];
-    int action_fds[2];
-    int settings_fds[2];
-    int settings_query_fds[2];
-    int settings_query_resp_fds[2];
-    int notify_fds[2];
-    int drag_fds[2];
-    int drag_data_fds[2];
-    if (sys_pipe_open(WM_QUERY_PIPE, query_fds) != 0 || sys_pipe_open(WM_QUERY_RESP_PIPE, query_resp_fds) != 0 ||
-        sys_pipe_open(WM_ACTION_PIPE, action_fds) != 0 || sys_pipe_open(WM_SETTINGS_PIPE, settings_fds) != 0 ||
-        sys_pipe_open(WM_SETTINGS_QUERY_PIPE, settings_query_fds) != 0 ||
-        sys_pipe_open(WM_SETTINGS_QUERY_RESP_PIPE, settings_query_resp_fds) != 0 ||
-        sys_pipe_open(WM_NOTIFY_PIPE, notify_fds) != 0 ||
-        sys_pipe_open(WM_DRAG_PIPE, drag_fds) != 0 ||
-        sys_pipe_open(WM_DRAG_DATA_PIPE, drag_data_fds) != 0) {
+    int query_file_descriptors[2];
+    int query_response_file_descriptors[2];
+    int action_file_descriptors[2];
+    int settings_file_descriptors[2];
+    int settings_query_file_descriptors[2];
+    int settings_query_response_file_descriptors[2];
+    int notify_file_descriptors[2];
+    int drag_file_descriptors[2];
+    int drag_data_file_descriptors[2];
+    if (sys_pipe_open(WM_QUERY_PIPE, query_file_descriptors) != 0 || sys_pipe_open(WM_QUERY_RESP_PIPE, query_response_file_descriptors) != 0 ||
+        sys_pipe_open(WM_ACTION_PIPE, action_file_descriptors) != 0 || sys_pipe_open(WM_SETTINGS_PIPE, settings_file_descriptors) != 0 ||
+        sys_pipe_open(WM_SETTINGS_QUERY_PIPE, settings_query_file_descriptors) != 0 ||
+        sys_pipe_open(WM_SETTINGS_QUERY_RESP_PIPE, settings_query_response_file_descriptors) != 0 ||
+        sys_pipe_open(WM_NOTIFY_PIPE, notify_file_descriptors) != 0 ||
+        sys_pipe_open(WM_DRAG_PIPE, drag_file_descriptors) != 0 ||
+        sys_pipe_open(WM_DRAG_DATA_PIPE, drag_data_file_descriptors) != 0) {
         sys_exit(1);
     }
-    drag_data_write_fd = drag_data_fds[1];
+    drag_data_write_file_descriptor = drag_data_file_descriptors[1];
 
-    sys_pipe_reset(req_fds[0]);
-    sys_pipe_reset(resp_fds[0]);
-    sys_pipe_reset(query_fds[0]);
-    sys_pipe_reset(query_resp_fds[0]);
-    sys_pipe_reset(action_fds[0]);
-    sys_pipe_reset(settings_fds[0]);
-    sys_pipe_reset(settings_query_fds[0]);
-    sys_pipe_reset(settings_query_resp_fds[0]);
-    sys_pipe_reset(notify_fds[0]);
-    sys_pipe_reset(drag_fds[0]);
-    sys_pipe_reset(drag_data_fds[0]);
+    sys_pipe_reset(request_file_descriptors[0]);
+    sys_pipe_reset(response_file_descriptors[0]);
+    sys_pipe_reset(query_file_descriptors[0]);
+    sys_pipe_reset(query_response_file_descriptors[0]);
+    sys_pipe_reset(action_file_descriptors[0]);
+    sys_pipe_reset(settings_file_descriptors[0]);
+    sys_pipe_reset(settings_query_file_descriptors[0]);
+    sys_pipe_reset(settings_query_response_file_descriptors[0]);
+    sys_pipe_reset(notify_file_descriptors[0]);
+    sys_pipe_reset(drag_file_descriptors[0]);
+    sys_pipe_reset(drag_data_file_descriptors[0]);
     session_restore();
 
     const char msg[] = "[compositor] framebuffer mapped, accepting windows.\n";
@@ -3260,13 +3260,13 @@ int main(void) {
 
     long last_redraw_ms = sys_uptime_ms();
     for (;;) {
-        accept_pending_window(req_fds[0], resp_fds[1]);
-        accept_pending_query(query_fds[0], query_resp_fds[1]);
-        accept_pending_action(action_fds[0]);
-        accept_pending_settings(settings_fds[0]);
-        accept_pending_settings_query(settings_query_fds[0], settings_query_resp_fds[1]);
-        accept_pending_notify(notify_fds[0]);
-        accept_pending_drag(drag_fds[0]);
+        accept_pending_window(request_file_descriptors[0], response_file_descriptors[1]);
+        accept_pending_query(query_file_descriptors[0], query_response_file_descriptors[1]);
+        accept_pending_action(action_file_descriptors[0]);
+        accept_pending_settings(settings_file_descriptors[0]);
+        accept_pending_settings_query(settings_query_file_descriptors[0], settings_query_response_file_descriptors[1]);
+        accept_pending_notify(notify_file_descriptors[0]);
+        accept_pending_drag(drag_file_descriptors[0]);
         reap_dead_clients();
         child_reap();
         handle_mouse();
@@ -3274,7 +3274,7 @@ int main(void) {
 
         long now = sys_uptime_ms();
         if (mode_revert_at_ms != 0 && now >= mode_revert_at_ms) {
-            uint32_t w = mode_prev_w, h = mode_prev_h;
+            uint32_t w = mode_previous_w, h = mode_previous_h;
             mode_revert_at_ms = 0;
             if (apply_display_mode(w, h) == 0) {
                 toast_post(WM_NOTIFY_WARN, "Display reverted",
@@ -3410,21 +3410,21 @@ int main(void) {
             last_drawn_cursor_y = cursor_y;
         }
 
-        int wait_fds[10];
+        int wait_file_descriptors[10];
         int nwait = 0;
-        wait_fds[nwait++] = 0;
-        wait_fds[nwait++] = req_fds[0];
-        wait_fds[nwait++] = query_fds[0];
-        wait_fds[nwait++] = action_fds[0];
-        wait_fds[nwait++] = settings_fds[0];
-        wait_fds[nwait++] = settings_query_fds[0];
-        wait_fds[nwait++] = notify_fds[0];
-        wait_fds[nwait++] = drag_fds[0];
+        wait_file_descriptors[nwait++] = 0;
+        wait_file_descriptors[nwait++] = request_file_descriptors[0];
+        wait_file_descriptors[nwait++] = query_file_descriptors[0];
+        wait_file_descriptors[nwait++] = action_file_descriptors[0];
+        wait_file_descriptors[nwait++] = settings_file_descriptors[0];
+        wait_file_descriptors[nwait++] = settings_query_file_descriptors[0];
+        wait_file_descriptors[nwait++] = notify_file_descriptors[0];
+        wait_file_descriptors[nwait++] = drag_file_descriptors[0];
         if (anim_any_active() || launcher_fading() || snap_fading()) {
             long remaining = frame_due_ms - sys_uptime_ms();
-            sys_waitfds(wait_fds, nwait, remaining > 0 ? (int)remaining : 0);
+            sys_waitfds(wait_file_descriptors, nwait, remaining > 0 ? (int)remaining : 0);
         } else {
-            sys_waitfds(wait_fds, nwait, 10);
+            sys_waitfds(wait_file_descriptors, nwait, 10);
         }
     }
 }

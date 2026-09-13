@@ -35,20 +35,20 @@ void power_init(void) {
 }
 
 static void acpi_enable_if_needed(void) {
-    if (!power_info_valid || power_info.smi_cmd == 0 || power_info.pm1a_cnt == 0) {
+    if (!power_info_valid || power_info.smi_command == 0 || power_info.pm1a_count == 0) {
         return;
     }
-    if (inw((uint16_t)power_info.pm1a_cnt) & PM1_SCI_EN) {
+    if (inw((uint16_t)power_info.pm1a_count) & PM1_SCI_EN) {
         return;
     }
-    outb((uint16_t)power_info.smi_cmd, power_info.acpi_enable);
+    outb((uint16_t)power_info.smi_command, power_info.acpi_enable);
     for (int i = 0; i < 300; i++) {
-        if (inw((uint16_t)power_info.pm1a_cnt) & PM1_SCI_EN) {
+        if (inw((uint16_t)power_info.pm1a_count) & PM1_SCI_EN) {
             return;
         }
         pit_sleep_ms(1);
     }
-    klog_puts("[power] the ACPI-enable handshake never set SCI_EN - trying S5 anyway.\n");
+    kernel_log_puts("[power] the ACPI-enable handshake never set SCI_EN - trying S5 anyway.\n");
 }
 
 static void write_sleep(uint16_t port, uint16_t slp_typ) {
@@ -58,35 +58,35 @@ static void write_sleep(uint16_t port, uint16_t slp_typ) {
 static void power_off_now(void) {
     acpi_enable_if_needed();
 
-    if (power_info_valid && power_info.pm1a_cnt != 0 && s5_from_aml) {
-        klog_puts("[power] S5 via the FADT's PM1a_CNT (port 0x");
-        klog_put_hex32(power_info.pm1a_cnt);
-        klog_puts(", SLP_TYP ");
-        klog_put_hex32(s5_slp_a);
-        klog_puts(" - read from the DSDT's own AML).\n");
-        write_sleep((uint16_t)power_info.pm1a_cnt, s5_slp_a);
-        if (power_info.pm1b_cnt != 0) {
-            write_sleep((uint16_t)power_info.pm1b_cnt, s5_slp_b);
+    if (power_info_valid && power_info.pm1a_count != 0 && s5_from_aml) {
+        kernel_log_puts("[power] S5 via the FADT's PM1a_CNT (port 0x");
+        kernel_log_put_hex32(power_info.pm1a_count);
+        kernel_log_puts(", SLP_TYP ");
+        kernel_log_put_hex32(s5_slp_a);
+        kernel_log_puts(" - read from the DSDT's own AML).\n");
+        write_sleep((uint16_t)power_info.pm1a_count, s5_slp_a);
+        if (power_info.pm1b_count != 0) {
+            write_sleep((uint16_t)power_info.pm1b_count, s5_slp_b);
         }
         pit_sleep_ms(50);
     }
 
-    if (power_info_valid && power_info.pm1a_cnt != 0) {
+    if (power_info_valid && power_info.pm1a_count != 0) {
         for (int i = 0; i < S5_SLEEP_TYPE_COUNT; i++) {
-            klog_puts("[power] S5 via the FADT's PM1a_CNT (port 0x");
-            klog_put_hex32(power_info.pm1a_cnt);
-            klog_puts(", SLP_TYP ");
-            klog_put_hex32(S5_SLEEP_TYPES[i]);
-            klog_puts(" - a well-known value, not read from AML).\n");
-            write_sleep((uint16_t)power_info.pm1a_cnt, S5_SLEEP_TYPES[i]);
-            if (power_info.pm1b_cnt != 0) {
-                write_sleep((uint16_t)power_info.pm1b_cnt, S5_SLEEP_TYPES[i]);
+            kernel_log_puts("[power] S5 via the FADT's PM1a_CNT (port 0x");
+            kernel_log_put_hex32(power_info.pm1a_count);
+            kernel_log_puts(", SLP_TYP ");
+            kernel_log_put_hex32(S5_SLEEP_TYPES[i]);
+            kernel_log_puts(" - a well-known value, not read from AML).\n");
+            write_sleep((uint16_t)power_info.pm1a_count, S5_SLEEP_TYPES[i]);
+            if (power_info.pm1b_count != 0) {
+                write_sleep((uint16_t)power_info.pm1b_count, S5_SLEEP_TYPES[i]);
             }
             pit_sleep_ms(50);
         }
     }
 
-    klog_puts("[power] the FADT path did not power the machine off - falling back to "
+    kernel_log_puts("[power] the FADT path did not power the machine off - falling back to "
               "QEMU's documented PM base (0x604), then Bochs's (0xB004).\n");
     write_sleep(QEMU_PM1A_CNT, 0);
     pit_sleep_ms(50);
@@ -96,20 +96,20 @@ static void power_off_now(void) {
 
 static void reboot_now(void) {
     if (power_info_valid && power_info.reset_port != 0) {
-        klog_puts("[power] reset via the FADT's reset register (port 0x");
-        klog_put_hex32(power_info.reset_port);
-        klog_puts(").\n");
+        kernel_log_puts("[power] reset via the FADT's reset register (port 0x");
+        kernel_log_put_hex32(power_info.reset_port);
+        kernel_log_puts(").\n");
         outb((uint16_t)power_info.reset_port, power_info.reset_value);
         pit_sleep_ms(50);
     }
 
-    klog_puts("[power] falling back to the 8042 reset pulse (0xFE to port 0x64).\n");
+    kernel_log_puts("[power] falling back to the 8042 reset pulse (0xFE to port 0x64).\n");
     for (int i = 0; i < 1000 && (inb(KBD_STATUS_PORT) & KBD_INPUT_FULL); i++) {
     }
     outb(KBD_STATUS_PORT, KBD_CMD_RESET);
     pit_sleep_ms(50);
 
-    klog_puts("[power] falling back to a triple fault.\n");
+    kernel_log_puts("[power] falling back to a triple fault.\n");
     struct __attribute__((packed)) {
         uint16_t limit;
         uint64_t base;
@@ -119,11 +119,11 @@ static void reboot_now(void) {
 }
 
 int power_orderly_stop(uint64_t grace_ticks) {
-    task_t *self = sched_current();
-    int total = sched_task_count();
+    task_t *self = scheduler_current();
+    int total = scheduler_task_count();
 
     for (int i = 0; i < total; i++) {
-        task_t *t = sched_task_by_slot(i);
+        task_t *t = scheduler_task_by_slot(i);
         if (!t || t == self || t->parent_id < 0 || t->state == TASK_TERMINATED) {
             continue;
         }
@@ -134,7 +134,7 @@ int power_orderly_stop(uint64_t grace_ticks) {
     for (;;) {
         int alive = 0;
         for (int i = 0; i < total; i++) {
-            task_t *t = sched_task_by_slot(i);
+            task_t *t = scheduler_task_by_slot(i);
             if (t && t != self && t->parent_id >= 0 && t->state != TASK_TERMINATED) {
                 alive++;
             }
@@ -147,7 +147,7 @@ int power_orderly_stop(uint64_t grace_ticks) {
 
     int killed = 0;
     for (int i = 0; i < total; i++) {
-        task_t *t = sched_task_by_slot(i);
+        task_t *t = scheduler_task_by_slot(i);
         if (!t || t == self || t->parent_id < 0 || t->state == TASK_TERMINATED) {
             continue;
         }
@@ -159,7 +159,7 @@ int power_orderly_stop(uint64_t grace_ticks) {
     while (pit_get_ticks() < kill_deadline) {
         int alive = 0;
         for (int i = 0; i < total; i++) {
-            task_t *t = sched_task_by_slot(i);
+            task_t *t = scheduler_task_by_slot(i);
             if (t && t != self && t->parent_id >= 0 && t->state != TASK_TERMINATED) {
                 alive++;
             }
@@ -173,14 +173,14 @@ int power_orderly_stop(uint64_t grace_ticks) {
 }
 
 void power_shutdown(int mode) {
-    klog_puts(mode == POWER_REBOOT ? "[power] restarting.\n" : "[power] shutting down.\n");
+    kernel_log_puts(mode == POWER_REBOOT ? "[power] restarting.\n" : "[power] shutting down.\n");
 
     int killed = power_orderly_stop(100);
-    klog_puts("[power] orderly stop complete (0x");
-    klog_put_hex32((uint32_t)killed);
-    klog_puts(" task(s) needed SIGKILL after the grace period).\n");
+    kernel_log_puts("[power] orderly stop complete (0x");
+    kernel_log_put_hex32((uint32_t)killed);
+    kernel_log_puts(" task(s) needed SIGKILL after the grace period).\n");
 
-    vfs_sync();
+    virtual_file_system_sync();
 
     smp_halt_other_cpus();
 
@@ -190,7 +190,7 @@ void power_shutdown(int mode) {
         power_off_now();
     }
 
-    klog_puts("[power] every tier failed - the machine is still on. Halting.\n");
+    kernel_log_puts("[power] every tier failed - the machine is still on. Halting.\n");
     for (;;) {
         __asm__ volatile("cli; hlt");
     }

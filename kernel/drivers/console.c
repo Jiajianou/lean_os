@@ -11,8 +11,8 @@
 
 static uint32_t cols;
 static uint32_t rows;
-static uint32_t cur_col;
-static uint32_t cur_row;
+static uint32_t current_col;
+static uint32_t current_row;
 
 static void draw_glyph(uint32_t col, uint32_t row, char c) {
     uint8_t code = (uint8_t)c;
@@ -27,26 +27,26 @@ static void draw_glyph(uint32_t col, uint32_t row, char c) {
         uint8_t bits = glyph[y];
         for (uint32_t x = 0; x < FONT_WIDTH; x++) {
             uint32_t rgb = (bits & (0x80 >> x)) ? CONSOLE_FG : CONSOLE_BG;
-            fb_put_pixel(base_x + x, base_y + y, rgb);
+            framebuffer_put_pixel(base_x + x, base_y + y, rgb);
         }
     }
 }
 
 static void newline(void) {
-    cur_col = 0;
-    cur_row++;
-    if (cur_row >= rows) {
-        fb_scroll_up(FONT_HEIGHT, CONSOLE_BG);
-        cur_row = rows - 1;
+    current_col = 0;
+    current_row++;
+    if (current_row >= rows) {
+        framebuffer_scroll_up(FONT_HEIGHT, CONSOLE_BG);
+        current_row = rows - 1;
     }
 }
 
 void console_init(void) {
-    cols = fb_width() / FONT_WIDTH;
-    rows = fb_height() / FONT_HEIGHT;
-    cur_col = 0;
-    cur_row = 0;
-    fb_clear(CONSOLE_BG);
+    cols = framebuffer_width() / FONT_WIDTH;
+    rows = framebuffer_height() / FONT_HEIGHT;
+    current_col = 0;
+    current_row = 0;
+    framebuffer_clear(CONSOLE_BG);
 }
 
 void console_putc(char c) {
@@ -55,31 +55,31 @@ void console_putc(char c) {
         return;
     }
     if (c == '\r') {
-        cur_col = 0;
+        current_col = 0;
         return;
     }
     if (c == '\b') {
-        if (cur_col > 0) {
-            cur_col--;
-            draw_glyph(cur_col, cur_row, ' ');
+        if (current_col > 0) {
+            current_col--;
+            draw_glyph(current_col, current_row, ' ');
         }
         return;
     }
     if (c == '\t') {
-        uint32_t next = ((cur_col / TAB_STOP) + 1) * TAB_STOP;
-        while (cur_col < next && cur_col < cols) {
-            draw_glyph(cur_col, cur_row, ' ');
-            cur_col++;
+        uint32_t next = ((current_col / TAB_STOP) + 1) * TAB_STOP;
+        while (current_col < next && current_col < cols) {
+            draw_glyph(current_col, current_row, ' ');
+            current_col++;
         }
-        if (cur_col >= cols) {
+        if (current_col >= cols) {
             newline();
         }
         return;
     }
 
-    draw_glyph(cur_col, cur_row, c);
-    cur_col++;
-    if (cur_col >= cols) {
+    draw_glyph(current_col, current_row, c);
+    current_col++;
+    if (current_col >= cols) {
         newline();
     }
 }

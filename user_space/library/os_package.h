@@ -89,14 +89,14 @@ enum {
 
 const char *osp_strerror(int err);
 
-int ospkg_check_path(const char *path);
+int os_package_check_path(const char *path);
 
-int ospkg_open(const uint8_t *bytes, size_t len, osp_t *out);
+int os_package_open(const uint8_t *bytes, size_t len, osp_t *out);
 
-const uint8_t *ospkg_file_data(const osp_t *pkg, uint32_t i);
+const uint8_t *os_package_file_data(const osp_t *pkg, uint32_t i);
 
-int ospkg_parse_manifest(const char *text, size_t len, osp_manifest_t *out);
+int os_package_parse_manifest(const char *text, size_t len, osp_manifest_t *out);
 
-uint32_t ospkg_caps_from_names(const char *names, int *unknown_out);
+uint32_t os_package_caps_from_names(const char *names, int *unknown_out);
 
-void ospkg_caps_to_names(uint32_t caps, char *out, size_t cap);
+void os_package_caps_to_names(uint32_t caps, char *out, size_t cap);

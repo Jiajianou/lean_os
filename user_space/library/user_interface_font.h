@@ -10,7 +10,7 @@ typedef struct {
     uint8_t cap_top;
     uint8_t x_top;
     uint8_t baseline;
-    uint8_t desc_last;
+    uint8_t descriptor_last;
     uint8_t max_advance;
     const uint16_t *rows;
     const uint16_t *rows_bold;

@@ -28,7 +28,7 @@
 #include "inter_process_communication/epoll.h"
 #include "inter_process_communication/memfd.h"
 #include "os_poll.h"
-#include "drivers/block.h"
+#include "drivers/block_device.h"
 #include "memory_management/file_mapping.h"
 #include "memory_management/heap.h"
 #include "memory_management/physical_memory.h"
@@ -56,14 +56,14 @@
 #include "network/tcp.h"
 #include "wm.h"
 
-typedef long (*syscall_fn_t)(uint64_t a1, uint64_t a2, uint64_t a3,
+typedef long (*syscall_function_t)(uint64_t a1, uint64_t a2, uint64_t a3,
                               uint64_t a4, uint64_t a5, uint64_t a6);
 
 static int user_range_ok(uint64_t addr, uint64_t len, int need_write) {
     if (addr == 0) {
         return 0;
     }
-    if (sched_current()->pml4_phys == vmm_kernel_pml4_phys()) {
+    if (scheduler_current()->pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return 1;
     }
     if (len == 0) {
@@ -76,8 +76,8 @@ static int user_range_ok(uint64_t addr, uint64_t len, int need_write) {
     if (end < addr || end > USER_REGION_LIMIT) {
         return 0;
     }
-    sched_prefault_range(addr, len, need_write);
-    return vmm_user_range_ok(sched_current()->pml4_phys, addr, len, need_write);
+    scheduler_prefault_range(addr, len, need_write);
+    return virtual_memory_user_range_ok(scheduler_current()->pml4_phys, addr, len, need_write);
 }
 
 static int copy_to_user(uint64_t dst, const void *src, uint64_t len) {
@@ -104,7 +104,7 @@ static int copy_from_user(void *dst, uint64_t src, uint64_t len) {
     return 0;
 }
 
-static int copy_str_from_user(char *dst, uint64_t src, uint64_t max) {
+static int copy_string_from_user(char *dst, uint64_t src, uint64_t max) {
     uint64_t checked_to = 0;
     for (uint64_t i = 0; i < max; i++) {
         uint64_t at = src + i;
@@ -147,12 +147,12 @@ static int path_normalize(char *out, const char *in) {
         while (in[i] && in[i] != '/') {
             i++;
         }
-        int c_len = i - c_start;
+        int c_length = i - c_start;
 
-        if (c_len == 1 && in[c_start] == '.') {
+        if (c_length == 1 && in[c_start] == '.') {
             continue;
         }
-        if (c_len == 2 && in[c_start] == '.' && in[c_start + 1] == '.') {
+        if (c_length == 2 && in[c_start] == '.' && in[c_start + 1] == '.') {
             if (depth > 0) {
                 n = starts[--depth];
                 if (n > 1) {
@@ -161,7 +161,7 @@ static int path_normalize(char *out, const char *in) {
             }
             continue;
         }
-        if (c_len > LEANFS_MAX_NAME) {
+        if (c_length > LEANFS_MAX_NAME) {
             return -1;
         }
         if (depth >= (int)(sizeof(starts) / sizeof(starts[0]))) {
@@ -174,10 +174,10 @@ static int path_normalize(char *out, const char *in) {
             out[n++] = '/';
         }
         starts[depth++] = n;
-        if (n + c_len >= LEANFS_MAX_PATH) {
+        if (n + c_length >= LEANFS_MAX_PATH) {
             return -1;
         }
-        for (int k = 0; k < c_len; k++) {
+        for (int k = 0; k < c_length; k++) {
             out[n++] = in[c_start + k];
         }
     }
@@ -187,14 +187,14 @@ static int path_normalize(char *out, const char *in) {
 
 static int copy_path_from_user(char *out, uint64_t src) {
     char raw[LEANFS_MAX_PATH];
-    if (copy_str_from_user(raw, src, sizeof(raw)) != 0) {
+    if (copy_string_from_user(raw, src, sizeof(raw)) != 0) {
         return -1;
     }
     if (raw[0] == '/') {
         return path_normalize(out, raw);
     }
     char joined[LEANFS_MAX_PATH];
-    task_t *self = sched_vm_owner(sched_current());
+    task_t *self = scheduler_vm_owner(scheduler_current());
     const char *cwd = (self->cwd[0] == '/') ? self->cwd : "/";
     int n = 0;
     while (cwd[n] && n < LEANFS_MAX_PATH) {
@@ -217,23 +217,23 @@ static int copy_path_from_user(char *out, uint64_t src) {
 static uint32_t cap_denials_logged[MAX_TASKS];
 
 static int has_cap(uint32_t cap) {
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (self->caps & cap) {
         return 1;
     }
     int slot = PID_SLOT(self->id);
     if (slot >= 0 && slot < MAX_TASKS && !(cap_denials_logged[slot] & cap)) {
         cap_denials_logged[slot] |= cap;
-        klog_puts("[caps] ");
-        klog_puts(self->name);
-        klog_puts(" was refused '");
+        kernel_log_puts("[caps] ");
+        kernel_log_puts(self->name);
+        kernel_log_puts(" was refused '");
         for (int i = 0; i < CAP_NAME_COUNT; i++) {
             if (CAP_NAMES[i].bit == cap) {
-                klog_puts(CAP_NAMES[i].name);
+                kernel_log_puts(CAP_NAMES[i].name);
                 break;
             }
         }
-        klog_puts("' - see system_api/include/caps.h\n");
+        kernel_log_puts("' - see system_api/include/caps.h\n");
     }
     return 0;
 }
@@ -272,11 +272,11 @@ static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint
     if (fd >= MAX_FDS || !user_range_ok(buf, len, 0)) {
         return -1;
     }
-    fd_slot_t *slot = &sched_current()->fds[fd];
+    file_descriptor_slot_t *slot = &scheduler_current()->fds[fd];
     const char *s = (const char *)buf;
     if (slot->type == FD_STDOUT) {
         for (uint64_t i = 0; i < len; i++) {
-            klog_putc(s[i]);
+            kernel_log_putc(s[i]);
         }
         return (long)len;
     }
@@ -292,7 +292,7 @@ static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint
             return -1;
         }
         for (;;) {
-            uint64_t seq = sched_event_seq();
+            uint64_t seq = scheduler_event_sequence();
             int rc = eventfd_write(slot->event, v);
             if (rc == 0) {
                 return (long)sizeof(v);
@@ -303,10 +303,10 @@ static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint
             if (slot->nonblock) {
                 return -OS_ERR_AGAIN;
             }
-            if (sched_signal_pending()) {
+            if (scheduler_signal_pending()) {
                 return -OS_ERR_INTR;
             }
-            sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
+            scheduler_block_on_sequence(SCHED_POLL_CHAN, 0, seq);
         }
     }
     if (slot->type == FD_UNIX) {
@@ -317,8 +317,8 @@ static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint
             if (copy_from_user(staging, buf + sent, chunk) != 0) {
                 return sent ? (long)sent : -1;
             }
-            uint64_t seq = sched_event_seq();
-            long m = unixsock_send(slot->un, staging, chunk, (const fd_slot_t *)0, 0);
+            uint64_t seq = scheduler_event_sequence();
+            long m = unix_socket_send(slot->un, staging, chunk, (const file_descriptor_slot_t *)0, 0);
             if (m < 0) {
                 return sent ? (long)sent : -1;
             }
@@ -326,10 +326,10 @@ static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint
                 if (slot->nonblock) {
                     return sent ? (long)sent : -OS_ERR_AGAIN;
                 }
-                if (sched_signal_pending()) {
+                if (scheduler_signal_pending()) {
                     return sent ? (long)sent : -OS_ERR_INTR;
                 }
-                sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
+                scheduler_block_on_sequence(SCHED_POLL_CHAN, 0, seq);
                 continue;
             }
             sent += (uint64_t)m;
@@ -348,7 +348,7 @@ static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint
             if (copy_from_user(staging, buf + sent, chunk) != 0) {
                 return sent ? (long)sent : -1;
             }
-            uint64_t seq = sched_event_seq();
+            uint64_t seq = scheduler_event_sequence();
             net_lock_acquire();
             int m = tcp_send(tcb, staging, chunk);
             net_lock_release();
@@ -359,10 +359,10 @@ static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint
                 if (slot->nonblock) {
                     return sent ? (long)sent : -OS_ERR_AGAIN;
                 }
-                if (sched_signal_pending()) {
+                if (scheduler_signal_pending()) {
                     return sent ? (long)sent : -OS_ERR_INTR;
                 }
-                sched_block_on_seq(SCHED_POLL_CHAN, pit_get_ticks() * (1000 / PIT_HZ) + 10, seq);
+                scheduler_block_on_sequence(SCHED_POLL_CHAN, pit_get_ticks() * (1000 / PIT_HZ) + 10, seq);
                 continue;
             }
             sent += (uint64_t)m;
@@ -373,7 +373,7 @@ static long sys_write(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint
         if (!slot->file->writable) {
             return -1;
         }
-        int64_t n = vfs_handle_write(slot->file->handle, s, (size_t)len, slot->file->offset);
+        int64_t n = virtual_file_system_handle_write(slot->file->handle, s, (size_t)len, slot->file->offset);
         if (n < 0) {
             return -1;
         }
@@ -390,19 +390,19 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
     if (fd >= MAX_FDS || !user_range_ok(buf, len, 1)) {
         return -1;
     }
-    fd_slot_t *slot = &sched_current()->fds[fd];
+    file_descriptor_slot_t *slot = &scheduler_current()->fds[fd];
     char *dst = (char *)buf;
     if (slot->type == FD_STDIN) {
         uint64_t n = 0;
         while (n < len) {
-            uint64_t seq = sched_event_seq();
+            uint64_t seq = scheduler_event_sequence();
             int c = keyboard_read();
             if (c == -1) {
                 if (n > 0) {
                     break;
                 }
-                sched_block_on_seq(SCHED_KEYBOARD_CHAN, 0, seq);
-                if (sched_signal_pending()) {
+                scheduler_block_on_sequence(SCHED_KEYBOARD_CHAN, 0, seq);
+                if (scheduler_signal_pending()) {
                     return n ? (long)n : -OS_ERR_INTR;
                 }
                 continue;
@@ -419,7 +419,7 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
             return -1;
         }
         for (;;) {
-            uint64_t seq = sched_event_seq();
+            uint64_t seq = scheduler_event_sequence();
             uint64_t value = 0;
             int got = (slot->type == FD_EVENT)
                           ? eventfd_read(slot->event, &value)
@@ -432,7 +432,7 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
             if (slot->nonblock) {
                 return -OS_ERR_AGAIN;
             }
-            if (sched_signal_pending()) {
+            if (scheduler_signal_pending()) {
                 return -OS_ERR_INTR;
             }
             uint64_t deadline = 0;
@@ -444,15 +444,15 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
                     deadline = pit_get_ticks() * (1000 / PIT_HZ) + (uint64_t)ms;
                 }
             }
-            sched_block_on_seq(SCHED_POLL_CHAN, deadline, seq);
+            scheduler_block_on_sequence(SCHED_POLL_CHAN, deadline, seq);
         }
     }
     if (slot->type == FD_UNIX) {
         uint32_t want = len > UNIX_BUF_SIZE ? UNIX_BUF_SIZE : (uint32_t)len;
         uint8_t staging[UNIX_BUF_SIZE];
         for (;;) {
-            uint64_t seq = sched_event_seq();
-            long n = unixsock_recv(slot->un, staging, want, (fd_slot_t *)0, 0,
+            uint64_t seq = scheduler_event_sequence();
+            long n = unix_socket_receive(slot->un, staging, want, (file_descriptor_slot_t *)0, 0,
                                    (int *)0, (int *)0);
             if (n > 0) {
                 return copy_to_user(buf, staging, (size_t)n) == 0 ? n : -1;
@@ -463,10 +463,10 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
             if (slot->nonblock) {
                 return -OS_ERR_AGAIN;
             }
-            if (sched_signal_pending()) {
+            if (scheduler_signal_pending()) {
                 return -OS_ERR_INTR;
             }
-            sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
+            scheduler_block_on_sequence(SCHED_POLL_CHAN, 0, seq);
         }
     }
     if (slot->type == FD_SOCKET) {
@@ -477,9 +477,9 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
         uint16_t want = len > TCP_MAX_MSS ? TCP_MAX_MSS : (uint16_t)len;
         uint8_t staging[TCP_MAX_MSS];
         for (;;) {
-            uint64_t seq = sched_event_seq();
+            uint64_t seq = scheduler_event_sequence();
             net_lock_acquire();
-            int n = tcp_recv(tcb, staging, want);
+            int n = tcp_receive(tcb, staging, want);
             net_lock_release();
             if (n > 0) {
                 return copy_to_user(buf, staging, (size_t)n) == 0 ? n : -1;
@@ -490,27 +490,27 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
             if (slot->nonblock) {
                 return -OS_ERR_AGAIN;
             }
-            if (sched_signal_pending()) {
+            if (scheduler_signal_pending()) {
                 return -OS_ERR_INTR;
             }
-            sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
+            scheduler_block_on_sequence(SCHED_POLL_CHAN, 0, seq);
         }
     }
     if (slot->type == FD_FILE) {
         if (slot->file->is_dir) {
             return -1;
         }
-        while (!vfs_handle_readable(slot->file->handle)) {
-            uint64_t seq = sched_event_seq();
-            if (vfs_handle_readable(slot->file->handle)) {
+        while (!virtual_file_system_handle_readable(slot->file->handle)) {
+            uint64_t seq = scheduler_event_sequence();
+            if (virtual_file_system_handle_readable(slot->file->handle)) {
                 break;
             }
-            sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
-            if (sched_signal_pending()) {
+            scheduler_block_on_sequence(SCHED_POLL_CHAN, 0, seq);
+            if (scheduler_signal_pending()) {
                 return -OS_ERR_INTR;
             }
         }
-        int64_t n = vfs_handle_read(slot->file->handle, dst, (size_t)len, slot->file->offset);
+        int64_t n = virtual_file_system_handle_read(slot->file->handle, dst, (size_t)len, slot->file->offset);
         if (n < 0) {
             return -1;
         }
@@ -521,14 +521,14 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
 }
 
 static long pfile_slot(uint64_t fd, uint64_t buf, uint64_t len,
-                       int64_t offset, int write, fd_slot_t **out_slot) {
+                       int64_t offset, int write, file_descriptor_slot_t **out_slot) {
     if (fd >= MAX_FDS || !user_range_ok(buf, len, write ? 0 : 1)) {
         return -1;
     }
     if (offset < 0) {
         return -1;
     }
-    fd_slot_t *slot = &sched_current()->fds[fd];
+    file_descriptor_slot_t *slot = &scheduler_current()->fds[fd];
     if (slot->type != FD_FILE) {
         return slot->type == FD_NONE ? -1 : -OS_ERR_SPIPE;
     }
@@ -543,12 +543,12 @@ static long sys_pread(uint64_t fd, uint64_t buf, uint64_t len, uint64_t offset,
                       uint64_t a5, uint64_t a6) {
     (void)a5;
     (void)a6;
-    fd_slot_t *slot = NULL;
+    file_descriptor_slot_t *slot = NULL;
     long err = pfile_slot(fd, buf, len, (int64_t)offset, 0, &slot);
     if (err != 0) {
         return err;
     }
-    int64_t n = vfs_handle_read(slot->file->handle, (char *)buf, (size_t)len,
+    int64_t n = virtual_file_system_handle_read(slot->file->handle, (char *)buf, (size_t)len,
                                 (uint32_t)offset);
     return n < 0 ? -1 : (long)n;
 }
@@ -557,7 +557,7 @@ static long sys_pwrite(uint64_t fd, uint64_t buf, uint64_t len, uint64_t offset,
                        uint64_t a5, uint64_t a6) {
     (void)a5;
     (void)a6;
-    fd_slot_t *slot = NULL;
+    file_descriptor_slot_t *slot = NULL;
     long err = pfile_slot(fd, buf, len, (int64_t)offset, 1, &slot);
     if (err != 0) {
         return err;
@@ -565,7 +565,7 @@ static long sys_pwrite(uint64_t fd, uint64_t buf, uint64_t len, uint64_t offset,
     if (!slot->file->writable) {
         return -1;
     }
-    int64_t n = vfs_handle_write(slot->file->handle, (const char *)buf,
+    int64_t n = virtual_file_system_handle_write(slot->file->handle, (const char *)buf,
                                  (size_t)len, (uint32_t)offset);
     return n < 0 ? -1 : (long)n;
 }
@@ -576,7 +576,7 @@ static long sys_exit(uint64_t code, uint64_t a2, uint64_t a3, uint64_t a4, uint6
     (void)a4;
     (void)a5;
     (void)a6;
-    sched_kill_thread_group(sched_current());
+    scheduler_kill_thread_group(scheduler_current());
     task_exit_with_code((int)code);
 }
 
@@ -587,7 +587,7 @@ static long sys_getpid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint6
     (void)a4;
     (void)a5;
     (void)a6;
-    return sched_current()->tgid;
+    return scheduler_current()->tgid;
 }
 
 static long sys_gettid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
@@ -598,7 +598,7 @@ static long sys_gettid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
     (void)a4;
     (void)a5;
     (void)a6;
-    return sched_current()->id;
+    return scheduler_current()->id;
 }
 
 static long sys_thread_create(uint64_t entry, uint64_t arg, uint64_t stack_top,
@@ -616,10 +616,10 @@ static long sys_thread_create(uint64_t entry, uint64_t arg, uint64_t stack_top,
         return -1;
     }
     uint64_t entry_rsp = stack_top - 8;
-    if (!sched_has_free_task_slot()) {
+    if (!scheduler_has_free_task_slot()) {
         return -1;
     }
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     task_t *t = process_spawn_thread(self->name, entry, entry_rsp, arg);
     return t ? (long)t->id : -1;
 }
@@ -650,8 +650,8 @@ static void free_vectors(user_vectors_t *v) {
     v->envbuf = (char *)0;
 }
 
-static int copy_vectors_from_user(const char *path, uint64_t arg_ptr,
-                                  uint64_t envp_ptr, int path_is_argv0,
+static int copy_vectors_from_user(const char *path, uint64_t argument_pointer,
+                                  uint64_t envp_pointer, int path_is_argv0,
                                   user_vectors_t *v) {
     v->argbuf = (char *)kmalloc(PAGE_SIZE);
     v->envbuf = (char *)0;
@@ -668,18 +668,18 @@ static int copy_vectors_from_user(const char *path, uint64_t arg_ptr,
         v->argv[v->argc++] = v->argbuf;
         used = len;
     }
-    if (arg_ptr) {
+    if (argument_pointer) {
         for (int i = 0; v->argc < SPAWN_MAX_ARGS; i++) {
-            if (!user_range_ok(arg_ptr + (uint64_t)i * sizeof(uint64_t), sizeof(uint64_t), 0)) {
+            if (!user_range_ok(argument_pointer + (uint64_t)i * sizeof(uint64_t), sizeof(uint64_t), 0)) {
                 break;
             }
-            uint64_t slot = ((const uint64_t *)arg_ptr)[i];
+            uint64_t slot = ((const uint64_t *)argument_pointer)[i];
             if (slot == 0) {
                 break;
             }
             char *dst = v->argbuf + used;
             size_t room = PAGE_SIZE - used;
-            if (room < 2 || copy_str_from_user(dst, slot, room) != 0) {
+            if (room < 2 || copy_string_from_user(dst, slot, room) != 0) {
                 break;
             }
             v->argv[v->argc++] = dst;
@@ -688,7 +688,7 @@ static int copy_vectors_from_user(const char *path, uint64_t arg_ptr,
     }
     v->argv[v->argc] = (const char *)0;
 
-    if (envp_ptr) {
+    if (envp_pointer) {
         v->envbuf = (char *)kmalloc(USER_ENV_MAX_BYTES);
         if (!v->envbuf) {
             free_vectors(v);
@@ -697,16 +697,16 @@ static int copy_vectors_from_user(const char *path, uint64_t arg_ptr,
         int envc = 0;
         size_t eused = 0;
         for (int i = 0; envc < USER_ENV_MAX_VARS; i++) {
-            if (!user_range_ok(envp_ptr + (uint64_t)i * sizeof(uint64_t), sizeof(uint64_t), 0)) {
+            if (!user_range_ok(envp_pointer + (uint64_t)i * sizeof(uint64_t), sizeof(uint64_t), 0)) {
                 break;
             }
-            uint64_t slot = ((const uint64_t *)envp_ptr)[i];
+            uint64_t slot = ((const uint64_t *)envp_pointer)[i];
             if (slot == 0) {
                 break;
             }
             char *dst = v->envbuf + eused;
             size_t room = USER_ENV_MAX_BYTES - eused;
-            if (room < 2 || copy_str_from_user(dst, slot, room) != 0) {
+            if (room < 2 || copy_string_from_user(dst, slot, room) != 0) {
                 break;
             }
             v->envv[envc++] = dst;
@@ -718,12 +718,12 @@ static int copy_vectors_from_user(const char *path, uint64_t arg_ptr,
     return 0;
 }
 
-static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_spawn(uint64_t path_pointer, uint64_t argument_pointer, uint64_t envp_pointer, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, path_ptr) != 0) {
+    if (copy_path_from_user(path, path_pointer) != 0) {
         return SPAWN_ERR_NOT_FOUND;
     }
     char *arg = (char *)kmalloc(USER_ARG_BYTES);
@@ -739,19 +739,19 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, ui
         argv[argc++] = arg;
         used = len;
     }
-    if (arg_ptr) {
+    if (argument_pointer) {
         for (int i = 0; argc < SPAWN_MAX_ARGS; i++) {
             uint64_t slot;
-            if (!user_range_ok(arg_ptr + (uint64_t)i * sizeof(uint64_t), sizeof(uint64_t), 0)) {
+            if (!user_range_ok(argument_pointer + (uint64_t)i * sizeof(uint64_t), sizeof(uint64_t), 0)) {
                 break;
             }
-            slot = ((const uint64_t *)arg_ptr)[i];
+            slot = ((const uint64_t *)argument_pointer)[i];
             if (slot == 0) {
                 break;
             }
             char *dst = arg + used;
             size_t room = USER_ARG_BYTES - used;
-            if (room < 2 || copy_str_from_user(dst, slot, room) != 0) {
+            if (room < 2 || copy_string_from_user(dst, slot, room) != 0) {
                 break;
             }
             argv[argc++] = dst;
@@ -763,7 +763,7 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, ui
     char *envbuf = (char *)0;
     const char *envv[USER_ENV_MAX_VARS + 1];
     const char *const *envp = (const char *const *)0;
-    if (envp_ptr) {
+    if (envp_pointer) {
         envbuf = (char *)kmalloc(USER_ENV_MAX_BYTES);
         if (!envbuf) {
             kfree(arg);
@@ -772,16 +772,16 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, ui
         int envc = 0;
         size_t eused = 0;
         for (int i = 0; envc < USER_ENV_MAX_VARS; i++) {
-            if (!user_range_ok(envp_ptr + (uint64_t)i * sizeof(uint64_t), sizeof(uint64_t), 0)) {
+            if (!user_range_ok(envp_pointer + (uint64_t)i * sizeof(uint64_t), sizeof(uint64_t), 0)) {
                 break;
             }
-            uint64_t slot = ((const uint64_t *)envp_ptr)[i];
+            uint64_t slot = ((const uint64_t *)envp_pointer)[i];
             if (slot == 0) {
                 break;
             }
             char *dst = envbuf + eused;
             size_t room = USER_ENV_MAX_BYTES - eused;
-            if (room < 2 || copy_str_from_user(dst, slot, room) != 0) {
+            if (room < 2 || copy_string_from_user(dst, slot, room) != 0) {
                 break;
             }
             envv[envc++] = dst;
@@ -792,7 +792,7 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, ui
     }
 
     leanfs_stat_t st;
-    if (vfs_stat(path, &st) != 0 || st.is_dir) {
+    if (virtual_file_system_stat(path, &st) != 0 || st.is_dir) {
         kfree(arg);
         kfree(envbuf);
         return SPAWN_ERR_NOT_FOUND;
@@ -803,7 +803,7 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, ui
         kfree(envbuf);
         return SPAWN_ERR_NO_MEMORY;
     }
-    int64_t size = vfs_read(path, image, st.size);
+    int64_t size = virtual_file_system_read(path, image, st.size);
     if (size < 0) {
         kfree(image);
         kfree(arg);
@@ -841,7 +841,7 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, ui
         shifted[sc] = (const char *)0;
 
         leanfs_stat_t ist;
-        if (vfs_stat(interp, &ist) != 0 || ist.is_dir) {
+        if (virtual_file_system_stat(interp, &ist) != 0 || ist.is_dir) {
             kfree(arg);
             kfree(envbuf);
             return SPAWN_ERR_NOT_FOUND;
@@ -852,7 +852,7 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, ui
             kfree(envbuf);
             return SPAWN_ERR_NO_MEMORY;
         }
-        int64_t isize = vfs_read(interp, iimage, ist.size);
+        int64_t isize = virtual_file_system_read(interp, iimage, ist.size);
         if (isize < 2 || (iimage[0] == '#' && iimage[1] == '!') ||
             !elf_validate(iimage, (size_t)isize)) {
             kfree(iimage);
@@ -860,7 +860,7 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, ui
             kfree(envbuf);
             return SPAWN_ERR_BAD_IMAGE;
         }
-        if (!sched_has_free_task_slot()) {
+        if (!scheduler_has_free_task_slot()) {
             kfree(iimage);
             kfree(arg);
             kfree(envbuf);
@@ -890,7 +890,7 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, ui
         kfree(envbuf);
         return SPAWN_ERR_BAD_IMAGE;
     }
-    if (!sched_has_free_task_slot()) {
+    if (!scheduler_has_free_task_slot()) {
         kfree(image);
         kfree(arg);
         kfree(envbuf);
@@ -914,21 +914,21 @@ static long sys_spawn(uint64_t path_ptr, uint64_t arg_ptr, uint64_t envp_ptr, ui
     return t->id;
 }
 
-static long sys_wait(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_wait(uint64_t pid_argument, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
 
-    if ((int64_t)pid_arg == -1) {
+    if ((int64_t)pid_argument == -1) {
         for (;;) {
             int any_children = 0;
-            uint64_t seq = sched_event_seq();
-            int total = sched_task_count();
+            uint64_t seq = scheduler_event_sequence();
+            int total = scheduler_task_count();
             for (int i = 0; i < total; i++) {
-                task_t *t = sched_task_by_slot(i);
+                task_t *t = scheduler_task_by_slot(i);
                 if (!t || t->parent_id != self->id || t->reaped) {
                     continue;
                 }
@@ -936,130 +936,130 @@ static long sys_wait(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4, ui
                 if (t->state == TASK_TERMINATED) {
                     t->reaped = 1;
                     int pid = t->id;
-                    sched_reap_slot(t);
+                    scheduler_reap_slot(t);
                     return pid;
                 }
             }
             if (!any_children) {
                 return -1;
             }
-            sched_block_on_seq(SCHED_POLL_CHAN, pit_get_ticks() * (1000 / PIT_HZ) + 50, seq);
+            scheduler_block_on_sequence(SCHED_POLL_CHAN, pit_get_ticks() * (1000 / PIT_HZ) + 50, seq);
         }
     }
 
-    task_t *t = sched_task_by_id((int)pid_arg);
+    task_t *t = scheduler_task_by_id((int)pid_argument);
     if (!t) {
         return -1;
     }
     while (t->state != TASK_TERMINATED) {
-        uint64_t seq = sched_event_seq();
+        uint64_t seq = scheduler_event_sequence();
         if (t->state == TASK_TERMINATED) {
             break;
         }
-        sched_block_on_seq((const void *)t, pit_get_ticks() * (1000 / PIT_HZ) + 200, seq);
+        scheduler_block_on_sequence((const void *)t, pit_get_ticks() * (1000 / PIT_HZ) + 200, seq);
     }
     t->reaped = 1;
     int code = t->exit_code;
-    sched_reap_slot(t);
+    scheduler_reap_slot(t);
     return code;
 }
 
-static long sys_readfile(uint64_t name_ptr, uint64_t buf, uint64_t maxlen, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_readfile(uint64_t name_pointer, uint64_t buf, uint64_t maxlen, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, name_ptr) != 0 ||
+    if (copy_path_from_user(path, name_pointer) != 0 ||
         !user_range_ok(buf, maxlen, 1)) {
         return -1;
     }
-    return (long)vfs_read(path, (void *)buf, (size_t)maxlen);
+    return (long)virtual_file_system_read(path, (void *)buf, (size_t)maxlen);
 }
 
-static long sys_writefile(uint64_t name_ptr, uint64_t buf, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_writefile(uint64_t name_pointer, uint64_t buf, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_write_path_from_user(path, name_ptr) != 0 ||
+    if (copy_write_path_from_user(path, name_pointer) != 0 ||
         !user_range_ok(buf, len, 0)) {
         return -1;
     }
-    long r = vfs_write(path, (const void *)buf, (size_t)len);
+    long r = virtual_file_system_write(path, (const void *)buf, (size_t)len);
     pkg_note_write(path, r);
     return r;
 }
 
-static long sys_unlink(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_unlink(uint64_t path_pointer, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_write_path_from_user(path, path_ptr) != 0) {
+    if (copy_write_path_from_user(path, path_pointer) != 0) {
         return -1;
     }
-    long r = vfs_unlink(path);
+    long r = virtual_file_system_unlink(path);
     pkg_note_write(path, r);
     return r;
 }
 
-static long sys_rename(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_rename(uint64_t old_pointer, uint64_t new_pointer, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char old_path[LEANFS_MAX_PATH];
     char new_path[LEANFS_MAX_PATH];
-    if (copy_write_path_from_user(old_path, old_ptr) != 0 ||
-        copy_write_path_from_user(new_path, new_ptr) != 0) {
+    if (copy_write_path_from_user(old_path, old_pointer) != 0 ||
+        copy_write_path_from_user(new_path, new_pointer) != 0) {
         return -1;
     }
-    long r = vfs_rename(old_path, new_path);
+    long r = virtual_file_system_rename(old_path, new_path);
     pkg_note_write(old_path, r);
     pkg_note_write(new_path, r);
     return r;
 }
 
-static long sys_listdir(uint64_t path_ptr, uint64_t buf, uint64_t maxlen, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_listdir(uint64_t path_pointer, uint64_t buf, uint64_t maxlen, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, path_ptr) != 0 ||
+    if (copy_path_from_user(path, path_pointer) != 0 ||
         !user_range_ok(buf, maxlen, 1)) {
         return -1;
     }
-    if (!vfs_is_dir(path)) {
+    if (!virtual_file_system_is_directory(path)) {
         return -1;
     }
-    return (long)vfs_list(path, (char *)buf, (size_t)maxlen);
+    return (long)virtual_file_system_list(path, (char *)buf, (size_t)maxlen);
 }
 
-static long sys_getdents(uint64_t path_ptr, uint64_t cookie_ptr, uint64_t buf,
+static long sys_getdents(uint64_t path_pointer, uint64_t cookie_pointer, uint64_t buf,
                          uint64_t buflen, uint64_t a5, uint64_t a6) {
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, path_ptr) != 0 ||
-        !user_range_ok(cookie_ptr, sizeof(uint32_t), 1) ||
+    if (copy_path_from_user(path, path_pointer) != 0 ||
+        !user_range_ok(cookie_pointer, sizeof(uint32_t), 1) ||
         !user_range_ok(buf, buflen, 1)) {
         return -1;
     }
-    int dir = vfs_dir_open(path);
+    int dir = virtual_file_system_directory_open(path);
 
     uint32_t cookie;
-    if (copy_from_user(&cookie, cookie_ptr, sizeof(cookie)) != 0) {
+    if (copy_from_user(&cookie, cookie_pointer, sizeof(cookie)) != 0) {
         return -1;
     }
 
     size_t written = 0;
     for (;;) {
-        leanfs_dir_entry_t e;
+        leanfs_directory_entry_t e;
         uint32_t next = cookie;
-        int rc = (dir >= 0) ? vfs_readdir_at(dir, &next, &e)
-                            : vfs_readdir(path, &next, &e);
+        int rc = (dir >= 0) ? virtual_file_system_readdir_at(dir, &next, &e)
+                            : virtual_file_system_readdir(path, &next, &e);
         if (rc < 0) {
             return -1;
         }
@@ -1086,23 +1086,23 @@ static long sys_getdents(uint64_t path_ptr, uint64_t cookie_ptr, uint64_t buf,
         cookie = next;
     }
 
-    if (copy_to_user(cookie_ptr, &cookie, sizeof(cookie)) != 0) {
+    if (copy_to_user(cookie_pointer, &cookie, sizeof(cookie)) != 0) {
         return -1;
     }
     return (long)written;
 }
 
-static long sys_mkdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_mkdir(uint64_t path_pointer, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_write_path_from_user(path, path_ptr) != 0) {
+    if (copy_write_path_from_user(path, path_pointer) != 0) {
         return -1;
     }
-    long r = vfs_mkdir(path);
+    long r = virtual_file_system_mkdir(path);
     pkg_note_write(path, r);
     return r;
 }
@@ -1116,7 +1116,7 @@ static int may_signal(task_t *self, task_t *t) {
         if (up->parent_id == self->id) {
             return 1;
         }
-        up = up->parent_id >= 0 ? sched_task_by_id(up->parent_id) : (task_t *)0;
+        up = up->parent_id >= 0 ? scheduler_task_by_id(up->parent_id) : (task_t *)0;
     }
     return has_cap(CAP_KILL_ANY);
 }
@@ -1131,12 +1131,12 @@ static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint6
     }
 
     if ((long)pid <= 0) {
-        task_t *self_g = sched_current();
+        task_t *self_g = scheduler_current();
         int target_pgid = ((long)pid == 0) ? self_g->pgid : (int)(-(long)pid);
         int delivered = 0;
-        int total = sched_task_count();
+        int total = scheduler_task_count();
         for (int i = 0; i < total; i++) {
-            task_t *m = sched_task_by_slot(i);
+            task_t *m = scheduler_task_by_slot(i);
             if (!m || m->pgid != target_pgid || m->state == TASK_TERMINATED ||
                 m->state == TASK_FREE) {
                 continue;
@@ -1146,50 +1146,50 @@ static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint6
             }
             delivered++;
             if (sig != 0) {
-                sched_raise_signal(m, (int)sig);
+                scheduler_raise_signal(m, (int)sig);
             }
         }
         return delivered > 0 ? 0 : -1;
     }
 
-    task_t *t = sched_task_by_id((int)pid);
+    task_t *t = scheduler_task_by_id((int)pid);
     if (!t || t->state == TASK_TERMINATED) {
         return -1;
     }
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (!may_signal(self, t)) {
         return -1;
     }
     if (sig == 0) {
         return 0;
     }
-    sched_raise_signal(t, (int)sig);
+    scheduler_raise_signal(t, (int)sig);
     return 0;
 }
 
-static long sys_pipe(uint64_t fds_out_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_pipe(uint64_t file_descriptors_out_pointer, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     int out[2];
-    if (!user_range_ok(fds_out_ptr, sizeof(out), 1)) {
+    if (!user_range_ok(file_descriptors_out_pointer, sizeof(out), 1)) {
         return -1;
     }
-    task_t *self = sched_current();
-    int read_fd = -1, write_fd = -1;
+    task_t *self = scheduler_current();
+    int read_file_descriptor = -1, write_file_descriptor = -1;
     for (int i = 0; i < MAX_FDS; i++) {
         if (self->fds[i].type == FD_NONE) {
-            if (read_fd < 0) {
-                read_fd = i;
+            if (read_file_descriptor < 0) {
+                read_file_descriptor = i;
             } else {
-                write_fd = i;
+                write_file_descriptor = i;
                 break;
             }
         }
     }
-    if (read_fd < 0 || write_fd < 0) {
+    if (read_file_descriptor < 0 || write_file_descriptor < 0) {
         return -1;
     }
 
@@ -1197,38 +1197,38 @@ static long sys_pipe(uint64_t fds_out_ptr, uint64_t a2, uint64_t a3, uint64_t a4
     if (!p) {
         return -1;
     }
-    self->fds[read_fd].type = FD_PIPE_READ;
-    self->fds[read_fd].cloexec = 0;
-    self->fds[read_fd].pipe = p;
-    self->fds[write_fd].type = FD_PIPE_WRITE;
-    self->fds[write_fd].cloexec = 0;
-    self->fds[write_fd].pipe = p;
+    self->fds[read_file_descriptor].type = FD_PIPE_READ;
+    self->fds[read_file_descriptor].cloexec = 0;
+    self->fds[read_file_descriptor].pipe = p;
+    self->fds[write_file_descriptor].type = FD_PIPE_WRITE;
+    self->fds[write_file_descriptor].cloexec = 0;
+    self->fds[write_file_descriptor].pipe = p;
 
-    out[0] = read_fd;
-    out[1] = write_fd;
-    return copy_to_user(fds_out_ptr, out, sizeof(out));
+    out[0] = read_file_descriptor;
+    out[1] = write_file_descriptor;
+    return copy_to_user(file_descriptors_out_pointer, out, sizeof(out));
 }
 
-static long sys_symlink(uint64_t target_ptr, uint64_t path_ptr, uint64_t a3,
+static long sys_symlink(uint64_t target_pointer, uint64_t path_pointer, uint64_t a3,
                         uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_write_path_from_user(path, path_ptr) != 0) {
+    if (copy_write_path_from_user(path, path_pointer) != 0) {
         return -1;
     }
     char target[LEANFS_MAX_PATH];
-    if (copy_str_from_user(target, target_ptr, sizeof(target)) != 0) {
+    if (copy_string_from_user(target, target_pointer, sizeof(target)) != 0) {
         return -1;
     }
-    long r = vfs_symlink(path, target);
+    long r = virtual_file_system_symlink(path, target);
     pkg_note_write(path, r);
     return r;
 }
 
-static long sys_link(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3,
+static long sys_link(uint64_t old_pointer, uint64_t new_pointer, uint64_t a3,
                      uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
@@ -1236,11 +1236,11 @@ static long sys_link(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3,
     (void)a6;
     char old_path[LEANFS_MAX_PATH];
     char new_path[LEANFS_MAX_PATH];
-    if (copy_write_path_from_user(old_path, old_ptr) != 0 ||
-        copy_write_path_from_user(new_path, new_ptr) != 0) {
+    if (copy_write_path_from_user(old_path, old_pointer) != 0 ||
+        copy_write_path_from_user(new_path, new_pointer) != 0) {
         return -1;
     }
-    long r = vfs_link(old_path, new_path);
+    long r = virtual_file_system_link(old_path, new_path);
     pkg_note_write(new_path, r);
     return r;
 }
@@ -1255,11 +1255,11 @@ static long sys_fsync(uint64_t fd, uint64_t a2, uint64_t a3,
     if (fd >= MAX_FDS) {
         return -1;
     }
-    if (sched_current()->fds[fd].type != FD_FILE) {
+    if (scheduler_current()->fds[fd].type != FD_FILE) {
         return -1;
     }
-    vfs_sync();
-    blk_flush();
+    virtual_file_system_sync();
+    block_device_flush();
     return 0;
 }
 
@@ -1273,10 +1273,10 @@ static long sys_alarm(uint64_t seconds, uint64_t a2, uint64_t a3,
     if (seconds > 0xffffffffu) {
         seconds = 0xffffffffu;
     }
-    return (long)sched_set_alarm(sched_current(), (unsigned int)seconds);
+    return (long)scheduler_set_alarm(scheduler_current(), (unsigned int)seconds);
 }
 
-static long sys_meminfo(uint64_t out_ptr, uint64_t a2, uint64_t a3,
+static long sys_meminfo(uint64_t out_pointer, uint64_t a2, uint64_t a3,
                         uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
@@ -1284,10 +1284,10 @@ static long sys_meminfo(uint64_t out_ptr, uint64_t a2, uint64_t a3,
     (void)a5;
     (void)a6;
     os_meminfo_t info;
-    info.total_frames = pmm_total_frame_count();
-    info.free_frames = pmm_free_frame_count();
+    info.total_frames = physical_memory_total_frame_count();
+    info.free_frames = physical_memory_free_frame_count();
     info.page_size = PAGE_SIZE;
-    if (copy_to_user(out_ptr, &info, sizeof(info)) != 0) {
+    if (copy_to_user(out_pointer, &info, sizeof(info)) != 0) {
         return -1;
     }
     return 0;
@@ -1301,7 +1301,7 @@ static long sys_sync(uint64_t a1, uint64_t a2, uint64_t a3,
     (void)a4;
     (void)a5;
     (void)a6;
-    vfs_sync();
+    virtual_file_system_sync();
     return 0;
 }
 
@@ -1311,7 +1311,7 @@ static long sys_arch_prctl(uint64_t code, uint64_t addr, uint64_t a3,
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     switch (code) {
     case ARCH_SET_FS:
         if (addr != 0 && !user_range_ok(addr, 1, 0)) {
@@ -1344,7 +1344,7 @@ static long sys_futex(uint64_t addr, uint64_t op, uint64_t val,
     }
     if (op == FUTEX_WAKE) {
         int max = (val > (uint64_t)(unsigned)MAX_TASKS) ? MAX_TASKS : (int)val;
-        return sched_wake_n((const void *)addr, max);
+        return scheduler_wake_n((const void *)addr, max);
     }
     if (op != FUTEX_WAIT) {
         return -1;
@@ -1360,7 +1360,7 @@ static long sys_futex(uint64_t addr, uint64_t op, uint64_t val,
     if (timeout_ms > 0) {
         deadline = pit_get_ticks() * (1000 / PIT_HZ) + timeout_ms;
     }
-    sched_block_on((const void *)addr, deadline, &futex_lock, &flags);
+    scheduler_block_on((const void *)addr, deadline, &futex_lock, &flags);
     spin_unlock_irqrestore(&futex_lock, flags);
     if (deadline != 0 && pit_get_ticks() * (1000 / PIT_HZ) >= deadline) {
         return -2;
@@ -1376,10 +1376,10 @@ static long sys_getppid(uint64_t a1, uint64_t a2, uint64_t a3,
     (void)a4;
     (void)a5;
     (void)a6;
-    return sched_current()->parent_id;
+    return scheduler_current()->parent_id;
 }
 
-static long sys_fdpath(uint64_t fd, uint64_t out_ptr, uint64_t out_len,
+static long sys_fdpath(uint64_t fd, uint64_t out_pointer, uint64_t out_len,
                        uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
@@ -1387,7 +1387,7 @@ static long sys_fdpath(uint64_t fd, uint64_t out_ptr, uint64_t out_len,
     if (fd >= MAX_FDS) {
         return -1;
     }
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (self->fds[fd].type != FD_FILE || !self->fds[fd].file) {
         return -1;
     }
@@ -1402,27 +1402,27 @@ static long sys_fdpath(uint64_t fd, uint64_t out_ptr, uint64_t out_len,
     if (out_len < n + 1) {
         return -1;
     }
-    if (copy_to_user(out_ptr, p, n + 1) != 0) {
+    if (copy_to_user(out_pointer, p, n + 1) != 0) {
         return -1;
     }
     return (long)n;
 }
 
-static long sys_rusage(uint64_t who, uint64_t out_ptr, uint64_t a3,
+static long sys_rusage(uint64_t who, uint64_t out_pointer, uint64_t a3,
                        uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
-    if (!user_range_ok(out_ptr, sizeof(os_rusage_t), 1)) {
+    if (!user_range_ok(out_pointer, sizeof(os_rusage_t), 1)) {
         return -1;
     }
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     os_rusage_t r;
     if (who == OS_RUSAGE_SELF) {
         r.user_ticks = self->user_ticks;
         r.sys_ticks = self->sys_ticks;
-        uint64_t peak = vmm_rss_peak_pages(self->pml4_phys);
+        uint64_t peak = virtual_memory_rss_peak_pages(self->pml4_phys);
         r.max_rss_pages = (peak > self->max_rss_pages) ? peak : self->max_rss_pages;
     } else if (who == OS_RUSAGE_CHILDREN) {
         r.user_ticks = self->child_user_ticks;
@@ -1431,26 +1431,26 @@ static long sys_rusage(uint64_t who, uint64_t out_ptr, uint64_t a3,
     } else {
         return -1;
     }
-    *(os_rusage_t *)out_ptr = r;
+    *(os_rusage_t *)out_pointer = r;
     return 0;
 }
 
-static long sys_statvfs(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3,
+static long sys_statvfs(uint64_t path_pointer, uint64_t out_pointer, uint64_t a3,
                         uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, path_ptr) != 0 ||
-        !user_range_ok(out_ptr, sizeof(os_statvfs_t), 1)) {
+    if (copy_path_from_user(path, path_pointer) != 0 ||
+        !user_range_ok(out_pointer, sizeof(os_statvfs_t), 1)) {
         return -1;
     }
-    vfs_statvfs_t st;
-    if (vfs_statvfs(path, &st) != 0) {
+    virtual_file_system_statvfs_t st;
+    if (virtual_file_system_statvfs(path, &st) != 0) {
         return -1;
     }
-    os_statvfs_t *out = (os_statvfs_t *)out_ptr;
+    os_statvfs_t *out = (os_statvfs_t *)out_pointer;
     out->block_size = st.block_size;
     out->total_blocks = st.total_blocks;
     out->free_blocks = st.free_blocks;
@@ -1460,44 +1460,44 @@ static long sys_statvfs(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3,
     return 0;
 }
 
-static long sys_utime(uint64_t path_ptr, uint64_t mtime, uint64_t a3,
+static long sys_utime(uint64_t path_pointer, uint64_t mtime, uint64_t a3,
                       uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_write_path_from_user(path, path_ptr) != 0) {
+    if (copy_write_path_from_user(path, path_pointer) != 0) {
         return -1;
     }
-    return vfs_utime(path, (uint32_t)mtime);
+    return virtual_file_system_utime(path, (uint32_t)mtime);
 }
 
-static long sys_readlink(uint64_t path_ptr, uint64_t buf, uint64_t len,
+static long sys_readlink(uint64_t path_pointer, uint64_t buf, uint64_t len,
                          uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, path_ptr) != 0 || !user_range_ok(buf, len, 1)) {
+    if (copy_path_from_user(path, path_pointer) != 0 || !user_range_ok(buf, len, 1)) {
         return -1;
     }
-    return (long)vfs_readlink(path, (char *)buf, (size_t)len);
+    return (long)virtual_file_system_readlink(path, (char *)buf, (size_t)len);
 }
 
-static long sys_lstat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3,
+static long sys_lstat(uint64_t path_pointer, uint64_t out_pointer, uint64_t a3,
                       uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, path_ptr) != 0 ||
-        !user_range_ok(out_ptr, sizeof(os_stat_t), 1)) {
+    if (copy_path_from_user(path, path_pointer) != 0 ||
+        !user_range_ok(out_pointer, sizeof(os_stat_t), 1)) {
         return -OS_ERR_FAULT;
     }
     leanfs_stat_t st;
-    if (vfs_lstat(path, &st) != 0) {
+    if (virtual_file_system_lstat(path, &st) != 0) {
         return -OS_ERR_NOENT;
     }
     os_stat_t out;
@@ -1508,7 +1508,7 @@ static long sys_lstat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3,
     out.is_link = st.is_link;
     out.kind = st.is_dir ? OS_STAT_DIR : OS_STAT_FILE;
     out.inode = st.inode;
-    return copy_to_user(out_ptr, &out, sizeof(out));
+    return copy_to_user(out_pointer, &out, sizeof(out));
 }
 
 static long sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a3, uint64_t a4,
@@ -1517,7 +1517,7 @@ static long sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a3, uint64_t a4
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (fd < MAX_FDS && self->fds[fd].type == FD_MEMFD) {
         return memfd_truncate(self->fds[fd].memfd, length);
     }
@@ -1527,27 +1527,27 @@ static long sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a3, uint64_t a4
     if (fd >= MAX_FDS || self->fds[fd].type != FD_FILE) {
         return -1;
     }
-    openfile_t *of = self->fds[fd].file;
+    open_file_t *of = self->fds[fd].file;
     if (!of || !of->writable) {
         return -1;
     }
     if (length > (uint64_t)LEANFS_MAX_FILE_SIZE) {
         return -1;
     }
-    return vfs_handle_truncate_to(of->handle, (uint32_t)length);
+    return virtual_file_system_handle_truncate_to(of->handle, (uint32_t)length);
 }
 
-static tty_t *tty_for_fd(task_t *self, uint64_t fd, int *pty_number) {
+static tty_t *tty_for_file_descriptor(task_t *self, uint64_t fd, int *pty_number) {
     *pty_number = -1;
     if (fd >= MAX_FDS) {
         return NULL;
     }
-    fd_slot_t *slot = &self->fds[fd];
+    file_descriptor_slot_t *slot = &self->fds[fd];
     if (slot->type == FD_STDIN || slot->type == FD_STDOUT) {
         return tty_console();
     }
     if (slot->type == FD_FILE) {
-        return (tty_t *)vfs_handle_tty(slot->file->handle, pty_number);
+        return (tty_t *)virtual_file_system_handle_tty(slot->file->handle, pty_number);
     }
     return NULL;
 }
@@ -1557,9 +1557,9 @@ static long sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     int pty_number = -1;
-    tty_t *t = tty_for_fd(self, fd, &pty_number);
+    tty_t *t = tty_for_file_descriptor(self, fd, &pty_number);
     if (!t) {
         return -1;
     }
@@ -1653,17 +1653,17 @@ static long sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     }
 }
 
-static long sys_setpgid(uint64_t pid_arg, uint64_t pgid_arg, uint64_t a3,
+static long sys_setpgid(uint64_t pid_argument, uint64_t pgid_argument, uint64_t a3,
                         uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *self = sched_current();
-    int pid = (int)pid_arg;
-    int pgid = (int)pgid_arg;
+    task_t *self = scheduler_current();
+    int pid = (int)pid_argument;
+    int pgid = (int)pgid_argument;
 
-    task_t *t = (pid == 0) ? self : sched_task_by_id(pid);
+    task_t *t = (pid == 0) ? self : scheduler_task_by_id(pid);
     if (!t || t->state == TASK_TERMINATED || t->state == TASK_FREE) {
         return -1;
     }
@@ -1674,7 +1674,7 @@ static long sys_setpgid(uint64_t pid_arg, uint64_t pgid_arg, uint64_t a3,
         pgid = t->id;
     }
     if (pgid != t->id) {
-        task_t *leader = sched_task_by_id(pgid);
+        task_t *leader = scheduler_task_by_id(pgid);
         if (!leader || leader->sid != t->sid) {
             return -1;
         }
@@ -1691,7 +1691,7 @@ static long sys_setsid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (self->pgid == self->id) {
         return -1;
     }
@@ -1707,7 +1707,7 @@ static long sys_getsid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4,
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *t = (pid == 0) ? sched_current() : sched_task_by_id((int)pid);
+    task_t *t = (pid == 0) ? scheduler_current() : scheduler_task_by_id((int)pid);
     if (!t) {
         return -1;
     }
@@ -1720,7 +1720,7 @@ static long sys_getpgid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4, uin
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *t = sched_task_by_id((int)pid);
+    task_t *t = scheduler_task_by_id((int)pid);
     if (!t) {
         return -1;
     }
@@ -1737,20 +1737,20 @@ static long sys_sbrk(uint64_t increment_u, uint64_t a2, uint64_t a3, uint64_t a4
     if (increment < 0) {
         return -1;
     }
-    task_t *cur = sched_vm_owner(sched_current());
+    task_t *cur = scheduler_vm_owner(scheduler_current());
     uint64_t old_brk = cur->heap_brk;
     uint64_t new_brk = old_brk + (uint64_t)increment;
     if (new_brk > USER_HEAP_LIMIT || new_brk < old_brk  ) {
         return -1;
     }
     while (cur->heap_mapped_end < new_brk) {
-        uint64_t phys = pmm_try_alloc_frame();
+        uint64_t phys = physical_memory_try_alloc_frame();
         if (phys == 0) {
             return -1;
         }
-        if (vmm_try_map_page_in(cur->pml4_phys, cur->heap_mapped_end, phys,
+        if (virtual_memory_try_map_page_in(cur->pml4_phys, cur->heap_mapped_end, phys,
                                 VMM_FLAG_WRITABLE | VMM_FLAG_USER) != 0) {
-            pmm_free_frame(phys);
+            physical_memory_free_frame(phys);
             return -1;
         }
         cur->heap_mapped_end += PAGE_SIZE;
@@ -1759,16 +1759,16 @@ static long sys_sbrk(uint64_t increment_u, uint64_t a2, uint64_t a3, uint64_t a4
     return (long)old_brk;
 }
 
-static long sys_shm_create(uint64_t size, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_shared_memory_create(uint64_t size, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
-    return shm_create((size_t)size, sched_current()->id);
+    return shared_memory_create((size_t)size, scheduler_current()->id);
 }
 
-static long sys_shm_unmap(uint64_t vaddr, uint64_t bytes, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_shared_memory_unmap(uint64_t vaddr, uint64_t bytes, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
     (void)a5;
@@ -1781,39 +1781,39 @@ static long sys_shm_unmap(uint64_t vaddr, uint64_t bytes, uint64_t a3, uint64_t 
     if (end < vaddr || vaddr < USER_SHM_BASE || end > USER_FB_BASE) {
         return -1;
     }
-    uint64_t pml4 = sched_current()->pml4_phys;
+    uint64_t pml4 = scheduler_current()->pml4_phys;
     for (uint64_t i = 0; i < pages; i++) {
-        (void)vmm_unmap_page_in(pml4, vaddr + i * PAGE_SIZE);
+        (void)virtual_memory_unmap_page_in(pml4, vaddr + i * PAGE_SIZE);
     }
     return 0;
 }
 
-static long sys_shm_map(uint64_t id, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_shared_memory_map(uint64_t id, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
-    int64_t size = shm_get_size((int)id);
+    int64_t size = shared_memory_get_size((int)id);
     if (size < 0) {
         return -1;
     }
-    task_t *cur = sched_vm_owner(sched_current());
-    uint64_t vaddr = cur->shm_next_vaddr;
-    if (shm_map_into((int)id, cur->pml4_phys, vaddr, VMM_FLAG_WRITABLE | VMM_FLAG_USER) != 0) {
+    task_t *cur = scheduler_vm_owner(scheduler_current());
+    uint64_t vaddr = cur->shared_memory_next_vaddr;
+    if (shared_memory_map_into((int)id, cur->pml4_phys, vaddr, VMM_FLAG_WRITABLE | VMM_FLAG_USER) != 0) {
         return -1;
     }
     uint64_t pages = ((uint64_t)size + PAGE_SIZE - 1) / PAGE_SIZE;
-    cur->shm_next_vaddr += pages * PAGE_SIZE;
+    cur->shared_memory_next_vaddr += pages * PAGE_SIZE;
     return (long)vaddr;
 }
 
-static long sys_shm_free(uint64_t id, uint64_t vaddr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_shared_memory_free(uint64_t id, uint64_t vaddr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
-    int64_t pages = shm_page_count((int)id);
+    int64_t pages = shared_memory_page_count((int)id);
     if (pages < 0) {
         return -1;
     }
@@ -1825,29 +1825,29 @@ static long sys_shm_free(uint64_t id, uint64_t vaddr, uint64_t a3, uint64_t a4, 
         if (vaddr < USER_REGION_BASE || last > USER_REGION_LIMIT || last < vaddr) {
             return -1;
         }
-        uint64_t pml4 = sched_current()->pml4_phys;
+        uint64_t pml4 = scheduler_current()->pml4_phys;
         for (int64_t i = 0; i < pages; i++) {
-            (void)vmm_unmap_page_in(pml4, vaddr + (uint64_t)i * PAGE_SIZE);
+            (void)virtual_memory_unmap_page_in(pml4, vaddr + (uint64_t)i * PAGE_SIZE);
         }
     }
-    return shm_free((int)id, sched_current()->id);
+    return shared_memory_free((int)id, scheduler_current()->id);
 }
 
-static long sys_fb_info(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_framebuffer_info(uint64_t out_pointer, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     wm_fb_info_t out;
-    out.width = fb_width();
-    out.height = fb_height();
-    out.pitch = fb_pitch_bytes();
+    out.width = framebuffer_width();
+    out.height = framebuffer_height();
+    out.pitch = framebuffer_pitch_bytes();
     out.bpp = 32;
-    return copy_to_user(out_ptr, &out, sizeof(out));
+    return copy_to_user(out_pointer, &out, sizeof(out));
 }
 
-static long sys_fb_map(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_framebuffer_map(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     if (!has_cap(CAP_FRAMEBUFFER)) {
         return (long)(uint64_t)-1;
     }
@@ -1857,61 +1857,61 @@ static long sys_fb_map(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint6
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *cur = sched_current();
-    uint64_t phys_base = fb_phys_addr();
-    uint64_t size = fb_mapped_bytes();
+    task_t *cur = scheduler_current();
+    uint64_t phys_base = framebuffer_phys_address();
+    uint64_t size = framebuffer_mapped_bytes();
     uint64_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     for (uint64_t i = 0; i < pages; i++) {
-        if (vmm_try_map_page_in(cur->pml4_phys, USER_FB_BASE + i * PAGE_SIZE,
+        if (virtual_memory_try_map_page_in(cur->pml4_phys, USER_FB_BASE + i * PAGE_SIZE,
                                 phys_base + i * PAGE_SIZE,
                                 VMM_FLAG_WRITABLE | VMM_FLAG_USER) != 0) {
             return (long)(uint64_t)-1;
         }
     }
-    klog_release_console();
+    kernel_log_release_console();
     return (long)USER_FB_BASE;
 }
 
-static long sys_mouse_read(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_mouse_read(uint64_t out_pointer, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     mouse_event_t ev;
-    if (!user_range_ok(out_ptr, sizeof(ev), 1)) {
+    if (!user_range_ok(out_pointer, sizeof(ev), 1)) {
         return -1;
     }
     if (!mouse_read(&ev)) {
         return 0;
     }
-    return copy_to_user(out_ptr, &ev, sizeof(ev)) == 0 ? 1 : -1;
+    return copy_to_user(out_pointer, &ev, sizeof(ev)) == 0 ? 1 : -1;
 }
 
-static long sys_pipe_open(uint64_t name_ptr, uint64_t fds_out_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_pipe_open(uint64_t name_pointer, uint64_t file_descriptors_out_pointer, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char name[NAMED_PIPE_NAME_LEN];
     int out[2];
-    if (copy_str_from_user(name, name_ptr, sizeof(name)) != 0 ||
-        !user_range_ok(fds_out_ptr, sizeof(out), 1)) {
+    if (copy_string_from_user(name, name_pointer, sizeof(name)) != 0 ||
+        !user_range_ok(file_descriptors_out_pointer, sizeof(out), 1)) {
         return -1;
     }
-    task_t *self = sched_current();
-    int read_fd = -1, write_fd = -1;
+    task_t *self = scheduler_current();
+    int read_file_descriptor = -1, write_file_descriptor = -1;
     for (int i = 0; i < MAX_FDS; i++) {
         if (self->fds[i].type == FD_NONE) {
-            if (read_fd < 0) {
-                read_fd = i;
+            if (read_file_descriptor < 0) {
+                read_file_descriptor = i;
             } else {
-                write_fd = i;
+                write_file_descriptor = i;
                 break;
             }
         }
     }
-    if (read_fd < 0 || write_fd < 0) {
+    if (read_file_descriptor < 0 || write_file_descriptor < 0) {
         return -1;
     }
 
@@ -1919,25 +1919,25 @@ static long sys_pipe_open(uint64_t name_ptr, uint64_t fds_out_ptr, uint64_t a3, 
     if (!p) {
         return -1;
     }
-    self->fds[read_fd].type = FD_PIPE_READ;
-    self->fds[read_fd].cloexec = 0;
-    self->fds[read_fd].pipe = p;
-    self->fds[write_fd].type = FD_PIPE_WRITE;
-    self->fds[write_fd].cloexec = 0;
-    self->fds[write_fd].pipe = p;
+    self->fds[read_file_descriptor].type = FD_PIPE_READ;
+    self->fds[read_file_descriptor].cloexec = 0;
+    self->fds[read_file_descriptor].pipe = p;
+    self->fds[write_file_descriptor].type = FD_PIPE_WRITE;
+    self->fds[write_file_descriptor].cloexec = 0;
+    self->fds[write_file_descriptor].pipe = p;
 
-    out[0] = read_fd;
-    out[1] = write_fd;
-    return copy_to_user(fds_out_ptr, out, sizeof(out));
+    out[0] = read_file_descriptor;
+    out[1] = write_file_descriptor;
+    return copy_to_user(file_descriptors_out_pointer, out, sizeof(out));
 }
 
-static long sys_kbd_read(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_keyboard_read(uint64_t out_pointer, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
-    if (!user_range_ok(out_ptr, sizeof(char), 1)) {
+    if (!user_range_ok(out_pointer, sizeof(char), 1)) {
         return -1;
     }
     int c = keyboard_read();
@@ -1945,7 +1945,7 @@ static long sys_kbd_read(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4
         return 0;
     }
     char ch = (char)c;
-    return copy_to_user(out_ptr, &ch, sizeof(ch)) == 0 ? 1 : -1;
+    return copy_to_user(out_pointer, &ch, sizeof(ch)) == 0 ? 1 : -1;
 }
 
 static long sys_pipe_poll(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -1957,7 +1957,7 @@ static long sys_pipe_poll(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, ui
     if (fd >= MAX_FDS) {
         return -1;
     }
-    fd_slot_t *slot = &sched_current()->fds[fd];
+    file_descriptor_slot_t *slot = &scheduler_current()->fds[fd];
     if (slot->type != FD_PIPE_READ) {
         return -1;
     }
@@ -1974,21 +1974,21 @@ static long sys_uptime_ms(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, ui
     return (long)(pit_get_ticks() * (1000 / PIT_HZ));
 }
 
-static uint32_t slot_inode(const fd_slot_t *slot) {
+static uint32_t slot_inode(const file_descriptor_slot_t *slot) {
     leanfs_stat_t st;
-    if (slot->type != FD_FILE || vfs_handle_stat(slot->file->handle, &st) != 0) {
+    if (slot->type != FD_FILE || virtual_file_system_handle_stat(slot->file->handle, &st) != 0) {
         return 0;
     }
     return st.inode;
 }
 
-static void drop_record_locks(task_t *self, const fd_slot_t *slot) {
+static void drop_record_locks(task_t *self, const file_descriptor_slot_t *slot) {
     if (slot->type != FD_FILE || flock_count() == 0) {
         return;
     }
     uint32_t ino = slot_inode(slot);
     if (ino && flock_release_file(ino, self->id) > 0) {
-        sched_wake_all(FLOCK_CHAN);
+        scheduler_wake_all(FLOCK_CHAN);
     }
 }
 
@@ -2000,7 +2000,7 @@ static long sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4, u
     if (oldfd >= MAX_FDS || newfd >= MAX_FDS) {
         return -1;
     }
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (self->fds[oldfd].type == FD_NONE) {
         return -1;
     }
@@ -2008,9 +2008,9 @@ static long sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4, u
         return (long)newfd;
     }
     drop_record_locks(self, &self->fds[newfd]);
-    fd_release(&self->fds[newfd]);
+    file_descriptor_release(&self->fds[newfd]);
     self->fds[newfd] = self->fds[oldfd];
-    fd_retain(&self->fds[newfd]);
+    file_descriptor_retain(&self->fds[newfd]);
     return (long)newfd;
 }
 
@@ -2023,12 +2023,12 @@ static long sys_close(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64
     if (fd >= MAX_FDS) {
         return -1;
     }
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (self->fds[fd].type == FD_NONE) {
         return -1;
     }
     drop_record_locks(self, &self->fds[fd]);
-    fd_release(&self->fds[fd]);
+    file_descriptor_release(&self->fds[fd]);
     return 0;
 }
 
@@ -2052,7 +2052,7 @@ static long sys_profile(uint64_t op, uint64_t arg1, uint64_t arg2, uint64_t a4, 
         return 0;
     case PROFILE_OP_STATS: {
         prof_stats_t st;
-        profile_get_stats(&st);
+        profile_get_statistics(&st);
         return copy_to_user(arg1, &st, sizeof(st)) == 0 ? 0 : -1;
     }
     case PROFILE_OP_SAMPLES: {
@@ -2069,30 +2069,30 @@ static long sys_profile(uint64_t op, uint64_t arg1, uint64_t arg2, uint64_t a4, 
         }
         prof_syscount_t *out = (prof_syscount_t *)arg1;
         for (uint64_t i = 0; i < arg2; i++) {
-            syscount_entry_t e;
-            syscount_get((int)i, &e);
+            syscall_counters_entry_t e;
+            syscall_counters_get((int)i, &e);
             out[i].calls = e.calls;
             out[i].cycles = e.cycles;
         }
         return (long)arg2;
     }
     case PROFILE_OP_SYSRESET:
-        syscount_reset();
+        syscall_counters_reset();
         return 0;
     case PROFILE_OP_TIMING:
-        return syscount_set_timing(arg1 ? 1 : 0);
+        return syscall_counters_set_timing(arg1 ? 1 : 0);
     default:
         return -1;
     }
 }
 
-static long sys_wait_nb(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_wait_nb(uint64_t pid_argument, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *t = sched_task_by_id((int)pid_arg);
+    task_t *t = scheduler_task_by_id((int)pid_argument);
     if (!t) {
         return -1;
     }
@@ -2101,7 +2101,7 @@ static long sys_wait_nb(uint64_t pid_arg, uint64_t a2, uint64_t a3, uint64_t a4,
     }
     t->reaped = 1;
     int code = t->exit_code;
-    sched_reap_slot(t);
+    scheduler_reap_slot(t);
     return code;
 }
 
@@ -2122,7 +2122,7 @@ static long sys_task_alive(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4, 
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *t = sched_task_by_id((int)pid);
+    task_t *t = scheduler_task_by_id((int)pid);
     if (!t) {
         return -1;
     }
@@ -2141,7 +2141,7 @@ static long sys_pipe_reset(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, u
     if (fd >= MAX_FDS) {
         return -1;
     }
-    fd_slot_t *slot = &sched_current()->fds[fd];
+    file_descriptor_slot_t *slot = &scheduler_current()->fds[fd];
     if (slot->type != FD_PIPE_READ && slot->type != FD_PIPE_WRITE) {
         return -1;
     }
@@ -2149,7 +2149,7 @@ static long sys_pipe_reset(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, u
     return 0;
 }
 
-static long sys_kbd_modifiers(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_keyboard_modifiers(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a1;
     (void)a2;
     (void)a3;
@@ -2172,10 +2172,10 @@ static long sys_taskinfo(uint64_t buf, uint64_t max_entries, uint64_t a3, uint64
         return -1;
     }
     task_info_t *out = (task_info_t *)buf;
-    int total = sched_task_count();
+    int total = scheduler_task_count();
     uint64_t written = 0;
     for (int i = 0; i < total && written < max_entries; i++) {
-        task_t *t = sched_task_by_slot(i);
+        task_t *t = scheduler_task_by_slot(i);
         if (!t) {
             continue;
         }
@@ -2195,7 +2195,7 @@ static long sys_taskinfo(uint64_t buf, uint64_t max_entries, uint64_t a3, uint64
             }
         }
         e->open_fds = fds;
-        e->shm_segments = shm_count_by_owner(t->id);
+        e->shm_segments = shared_memory_count_by_owner(t->id);
         int n = 0;
         for (; t->name[n] && n < TASK_INFO_NAME_MAX - 1; n++) {
             e->name[n] = t->name[n];
@@ -2250,7 +2250,7 @@ static long sys_shutdown(uint64_t mode, uint64_t a2, uint64_t a3, uint64_t a4, u
     power_shutdown((int)mode);
 }
 
-static int alloc_fd(task_t *t) {
+static int alloc_file_descriptor(task_t *t) {
     for (int i = 2; i < MAX_FDS; i++) {
         if (t->fds[i].type == FD_NONE) {
             return i;
@@ -2259,13 +2259,13 @@ static int alloc_fd(task_t *t) {
     return -1;
 }
 
-static long sys_open(uint64_t path_ptr, uint64_t flags, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_open(uint64_t path_pointer, uint64_t flags, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, path_ptr) != 0) {
+    if (copy_path_from_user(path, path_pointer) != 0) {
         return -1;
     }
     int writable = (flags & OPEN_WRITE) != 0;
@@ -2279,36 +2279,36 @@ static long sys_open(uint64_t path_ptr, uint64_t flags, uint64_t a3, uint64_t a4
     }
     if (flags & OPEN_NOFOLLOW) {
         leanfs_stat_t st;
-        if (vfs_lstat(path, &st) == 0 && st.is_link) {
+        if (virtual_file_system_lstat(path, &st) == 0 && st.is_link) {
             return -1;
         }
     }
-    int handle = vfs_open(path, create_flags);
+    int handle = virtual_file_system_open(path, create_flags);
     if (handle < 0) {
         return -1;
     }
     if (flags & (OPEN_CREATE | OPEN_TRUNCATE | OPEN_WRITE)) {
         pkg_note_write(path, 0);
     }
-    int opening_dir = vfs_is_dir(path);
-    if (opening_dir &&
+    int opening_directory = virtual_file_system_is_directory(path);
+    if (opening_directory &&
         (flags & (OPEN_WRITE | OPEN_TRUNCATE | OPEN_APPEND | OPEN_CREATE))) {
         return -1;
     }
-    if ((flags & OPEN_TRUNCATE) && writable && vfs_handle_truncate(handle) != 0) {
+    if ((flags & OPEN_TRUNCATE) && writable && virtual_file_system_handle_truncate(handle) != 0) {
         return -1;
     }
-    task_t *self = sched_current();
-    int fd = alloc_fd(self);
+    task_t *self = scheduler_current();
+    int fd = alloc_file_descriptor(self);
     if (fd < 0) {
         return -1;
     }
-    openfile_t *of = openfile_alloc(handle, writable, path, opening_dir);
+    open_file_t *of = open_file_alloc(handle, writable, path, opening_directory);
     if (!of) {
         return -1;
     }
     if (flags & OPEN_APPEND) {
-        of->offset = vfs_handle_size(handle);
+        of->offset = virtual_file_system_handle_size(handle);
     }
     self->fds[fd].type = FD_FILE;
     self->fds[fd].cloexec = (flags & OPEN_CLOEXEC) ? 1 : 0;
@@ -2323,7 +2323,7 @@ static long sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence, uint64_t a4
     if (fd >= MAX_FDS) {
         return -1;
     }
-    fd_slot_t *slot = &sched_current()->fds[fd];
+    file_descriptor_slot_t *slot = &scheduler_current()->fds[fd];
     if (slot->type != FD_FILE) {
         return -1;
     }
@@ -2331,7 +2331,7 @@ static long sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence, uint64_t a4
     switch (whence) {
     case SEEK_SET: base = 0; break;
     case SEEK_CUR: base = (int64_t)slot->file->offset; break;
-    case SEEK_END: base = (int64_t)vfs_handle_size(slot->file->handle); break;
+    case SEEK_END: base = (int64_t)virtual_file_system_handle_size(slot->file->handle); break;
     default: return -1;
     }
     int64_t target = base + (int64_t)(int32_t)offset;
@@ -2342,17 +2342,17 @@ static long sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence, uint64_t a4
     return (long)target;
 }
 
-static long sys_stat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_stat(uint64_t path_pointer, uint64_t out_pointer, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, path_ptr) != 0) {
+    if (copy_path_from_user(path, path_pointer) != 0) {
         return -OS_ERR_FAULT;
     }
     leanfs_stat_t st;
-    if (vfs_stat(path, &st) != 0) {
+    if (virtual_file_system_stat(path, &st) != 0) {
         return -OS_ERR_NOENT;
     }
     os_stat_t out;
@@ -2363,7 +2363,7 @@ static long sys_stat(uint64_t path_ptr, uint64_t out_ptr, uint64_t a3, uint64_t 
     out.kind = st.is_dir ? OS_STAT_DIR : OS_STAT_FILE;
     out.is_link = 0;
     out.inode = st.inode;
-    return copy_to_user(out_ptr, &out, sizeof(out));
+    return copy_to_user(out_pointer, &out, sizeof(out));
 }
 
 static void mmap_slot_remove(task_t *t, int index);
@@ -2374,11 +2374,11 @@ static int mmap_mergeable(const mmap_region_t *r, uint32_t prot, int handle,
            !r->shared && !shared && r->prot == prot;
 }
 
-static void region_tag_ref(uint8_t memfd_id, uint16_t memfd_gen) {
+static void region_tag_reference(uint8_t memfd_id, uint16_t memfd_gen) {
     if (!memfd_id) {
         return;
     }
-    memfd_region_ref(memfd_by_tag((uint8_t)(memfd_id - 1), memfd_gen));
+    memfd_region_reference(memfd_by_tag((uint8_t)(memfd_id - 1), memfd_gen));
 }
 
 static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32_t prot,
@@ -2442,7 +2442,7 @@ static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32
 }
 
 static void mmap_slot_remove(task_t *t, int index) {
-    sched_region_forget_memfd(&t->mmaps[index]);
+    scheduler_region_forget_memfd(&t->mmaps[index]);
     for (int i = index; i < MAX_MMAP_REGIONS - 1; i++) {
         t->mmaps[i] = t->mmaps[i + 1];
     }
@@ -2519,7 +2519,7 @@ static long sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
         if ((offset & (PAGE_SIZE - 1)) != 0) {
             return -1;
         }
-        task_t *cur = sched_current();
+        task_t *cur = scheduler_current();
         if (cur->fds[fd].type == FD_MEMFD) {
             struct memfd *m = cur->fds[fd].memfd;
             if (!shared) {
@@ -2533,7 +2533,7 @@ static long sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
             if ((prot & PROT_WRITE) && !memfd_may_write(m)) {
                 return -1;
             }
-            memfd_region_ref(m);
+            memfd_region_reference(m);
             memfd_id = (uint8_t)(memfd_slot(m) + 1);
             memfd_gen = memfd_generation(m);
             file_page = (uint32_t)(offset / PAGE_SIZE);
@@ -2567,8 +2567,8 @@ have_backing:
         return -1;
     }
 
-    task_t *self = sched_vm_owner(sched_current());
-    if (self->pml4_phys == vmm_kernel_pml4_phys()) {
+    task_t *self = scheduler_vm_owner(scheduler_current());
+    if (self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return -1;
     }
 
@@ -2625,7 +2625,7 @@ static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
     if (addr < USER_MMAP_BASE || end > USER_MMAP_LIMIT) {
         return -1;
     }
-    task_t *self = sched_vm_owner(sched_current());
+    task_t *self = scheduler_vm_owner(scheduler_current());
 
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         if (self->mmaps[i].pages == 0) {
@@ -2639,9 +2639,9 @@ static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
             continue;
         }
         if (self->mmaps[i].shared) {
-            sched_release_shared_range(self, cut_start, cut_end);
+            scheduler_release_shared_range(self, cut_start, cut_end);
         } else {
-            vmm_unmap_range_free(self->pml4_phys, cut_start, cut_end);
+            virtual_memory_unmap_range_free(self->pml4_phys, cut_start, cut_end);
         }
         if (cut_start == rstart && cut_end == rend) {
             mmap_slot_remove(self, i);
@@ -2654,7 +2654,7 @@ static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
             self->mmaps[i].pages = (uint32_t)((cut_start - rstart) / PAGE_SIZE);
         } else {
             self->mmaps[i].pages = (uint32_t)((cut_start - rstart) / PAGE_SIZE);
-            region_tag_ref(self->mmaps[i].memfd_id, self->mmaps[i].memfd_gen);
+            region_tag_reference(self->mmaps[i].memfd_id, self->mmaps[i].memfd_gen);
             if (mmap_slot_cmp_insert(self, cut_end,
                                       (uint32_t)((rend - cut_end) / PAGE_SIZE),
                                       self->mmaps[i].prot, self->mmaps[i].handle,
@@ -2663,7 +2663,7 @@ static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
                                       self->mmaps[i].shared, 0,
                                       self->mmaps[i].memfd_id,
                                       self->mmaps[i].memfd_gen) != 0) {
-                sched_region_forget_memfd(&self->mmaps[i]);
+                scheduler_region_forget_memfd(&self->mmaps[i]);
                 return -1;
             }
             i = -1;
@@ -2693,7 +2693,7 @@ static long sys_msync(uint64_t addr, uint64_t len, uint64_t flags, uint64_t a4,
     if (end <= addr || addr < USER_MMAP_BASE || end > USER_MMAP_LIMIT) {
         return -1;
     }
-    task_t *self = sched_vm_owner(sched_current());
+    task_t *self = scheduler_vm_owner(scheduler_current());
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         if (self->mmaps[i].pages == 0) {
             break;
@@ -2704,7 +2704,7 @@ static long sys_msync(uint64_t addr, uint64_t len, uint64_t flags, uint64_t a4,
             continue;
         }
         if (self->mmaps[i].shared && self->mmaps[i].handle >= 0) {
-            filemap_sync(self->mmaps[i].handle);
+            file_mapping_sync(self->mmaps[i].handle);
         }
     }
     return 0;
@@ -2733,7 +2733,7 @@ static int mmap_split_for(task_t *t, uint64_t addr, uint64_t end) {
         uint8_t mid = t->mmaps[i].memfd_id;
         uint16_t mgen = t->mmaps[i].memfd_gen;
         t->mmaps[i].pages = (uint32_t)((cut - rstart) / PAGE_SIZE);
-        region_tag_ref(mid, mgen);
+        region_tag_reference(mid, mgen);
         if (mmap_slot_cmp_insert(t, cut, (uint32_t)((rend - cut) / PAGE_SIZE), prot,
                                  handle, fp, shared, 0, mid, mgen) != 0) {
             t->mmaps[i].pages = (uint32_t)((rend - rstart) / PAGE_SIZE);
@@ -2765,8 +2765,8 @@ static long sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot, uint64_t a4
     if (addr < USER_MMAP_BASE || end > USER_MMAP_LIMIT) {
         return -1;
     }
-    task_t *self = sched_vm_owner(sched_current());
-    if (self->pml4_phys == vmm_kernel_pml4_phys()) {
+    task_t *self = scheduler_vm_owner(scheduler_current());
+    if (self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return -1;
     }
     uint64_t covered = 0;
@@ -2805,7 +2805,7 @@ static long sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot, uint64_t a4
     if (prot & PROT_EXEC) {
         flags |= VMM_FLAG_EXEC;
     }
-    vmm_protect_range_in(self->pml4_phys, addr, end, flags);
+    virtual_memory_protect_range_in(self->pml4_phys, addr, end, flags);
     return 0;
 }
 
@@ -2827,15 +2827,15 @@ static long sys_madvise(uint64_t addr, uint64_t len, uint64_t advice, uint64_t a
     if (advice != MADV_DONTNEED) {
         return 0;
     }
-    task_t *self = sched_vm_owner(sched_current());
-    if (self->pml4_phys == vmm_kernel_pml4_phys()) {
+    task_t *self = scheduler_vm_owner(scheduler_current());
+    if (self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return -1;
     }
-    vmm_unmap_range_free(self->pml4_phys, addr, end);
+    virtual_memory_unmap_range_free(self->pml4_phys, addr, end);
     return 0;
 }
 
-static long sys_fstat(uint64_t fd, uint64_t out_ptr, uint64_t a3, uint64_t a4,
+static long sys_fstat(uint64_t fd, uint64_t out_pointer, uint64_t a3, uint64_t a4,
                        uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
@@ -2844,14 +2844,14 @@ static long sys_fstat(uint64_t fd, uint64_t out_ptr, uint64_t a3, uint64_t a4,
     if (fd >= MAX_FDS) {
         return -1;
     }
-    fd_slot_t *slot = &sched_current()->fds[fd];
+    file_descriptor_slot_t *slot = &scheduler_current()->fds[fd];
     os_stat_t out;
     k_memset(&out, 0, sizeof(out));
 
     switch (slot->type) {
     case FD_FILE: {
         leanfs_stat_t st;
-        if (vfs_handle_stat(slot->file->handle, &st) != 0) {
+        if (virtual_file_system_handle_stat(slot->file->handle, &st) != 0) {
             return -1;
         }
         out.size = st.size;
@@ -2886,25 +2886,25 @@ static long sys_fstat(uint64_t fd, uint64_t out_ptr, uint64_t a3, uint64_t a4,
     default:
         return -1;
     }
-    return copy_to_user(out_ptr, &out, sizeof(out)) == 0 ? 0 : -1;
+    return copy_to_user(out_pointer, &out, sizeof(out)) == 0 ? 0 : -1;
 }
 
-static long sys_rmdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_rmdir(uint64_t path_pointer, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_write_path_from_user(path, path_ptr) != 0) {
+    if (copy_write_path_from_user(path, path_pointer) != 0) {
         return -1;
     }
-    long r = vfs_rmdir(path);
+    long r = virtual_file_system_rmdir(path);
     pkg_note_write(path, r);
     return r;
 }
 
-static long sys_time(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_time(uint64_t out_pointer, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
     (void)a4;
@@ -2912,7 +2912,7 @@ static long sys_time(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4, ui
     (void)a6;
     os_datetime_t now;
     rtc_read(&now);
-    if (out_ptr != 0 && copy_to_user(out_ptr, &now, sizeof(now)) != 0) {
+    if (out_pointer != 0 && copy_to_user(out_pointer, &now, sizeof(now)) != 0) {
         return -1;
     }
     return now.valid ? (long)os_unix_time(&now) : 0;
@@ -2920,27 +2920,27 @@ static long sys_time(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4, ui
 
 static long sys_getcaps(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-    return (long)sched_current()->caps;
+    return (long)scheduler_current()->caps;
 }
 
 static long sys_dropcaps(uint64_t keep, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     self->caps &= (uint32_t)keep;
     return (long)self->caps;
 }
 
-static struct socket *socket_for_fd(uint64_t fd) {
-    task_t *self = sched_current();
+static struct socket *socket_for_file_descriptor(uint64_t fd) {
+    task_t *self = scheduler_current();
     if (fd >= MAX_FDS || self->fds[fd].type != FD_SOCKET) {
         return (struct socket *)0;
     }
     return self->fds[fd].sock;
 }
 
-static long install_socket_fd(struct socket *s) {
-    task_t *self = sched_current();
-    int fd = alloc_fd(self);
+static long install_socket_file_descriptor(struct socket *s) {
+    task_t *self = scheduler_current();
+    int fd = alloc_file_descriptor(self);
     if (fd < 0) {
         socket_unref(s);
         return -1;
@@ -2951,11 +2951,11 @@ static long install_socket_fd(struct socket *s) {
     return fd;
 }
 
-static long install_unix_fd(struct unixsock *u) {
-    task_t *self = sched_current();
-    int fd = alloc_fd(self);
+static long install_unix_file_descriptor(struct unix_socket *u) {
+    task_t *self = scheduler_current();
+    int fd = alloc_file_descriptor(self);
     if (fd < 0) {
-        unixsock_unref(u);
+        unix_socket_unref(u);
         return -1;
     }
     self->fds[fd].type = FD_UNIX;
@@ -2965,10 +2965,10 @@ static long install_unix_fd(struct unixsock *u) {
     return fd;
 }
 
-static struct unixsock *unix_for_fd(uint64_t fd) {
-    task_t *self = sched_current();
+static struct unix_socket *unix_for_file_descriptor(uint64_t fd) {
+    task_t *self = scheduler_current();
     if (fd >= MAX_FDS || self->fds[fd].type != FD_UNIX) {
-        return (struct unixsock *)0;
+        return (struct unix_socket *)0;
     }
     return self->fds[fd].un;
 }
@@ -2979,8 +2979,8 @@ static long sys_socket(uint64_t type, uint64_t domain, uint64_t a3, uint64_t a4,
         if (type != UNIX_SOCK_STREAM && type != UNIX_SOCK_SEQPACKET) {
             return -1;
         }
-        struct unixsock *u = unixsock_alloc((int)type);
-        return u ? install_unix_fd(u) : -1;
+        struct unix_socket *u = unix_socket_alloc((int)type);
+        return u ? install_unix_file_descriptor(u) : -1;
     }
     if (domain != OS_AF_INET) {
         return -1;
@@ -2995,45 +2995,45 @@ static long sys_socket(uint64_t type, uint64_t domain, uint64_t a3, uint64_t a4,
     if (!s) {
         return -1;
     }
-    return install_socket_fd(s);
+    return install_socket_file_descriptor(s);
 }
 
-static long sys_socketpair(uint64_t type, uint64_t fds_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_socketpair(uint64_t type, uint64_t file_descriptors_pointer, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3; (void)a4; (void)a5; (void)a6;
-    if (!user_range_ok(fds_ptr, 2 * sizeof(int), 1)) {
+    if (!user_range_ok(file_descriptors_pointer, 2 * sizeof(int), 1)) {
         return -1;
     }
-    struct unixsock *a = (struct unixsock *)0;
-    struct unixsock *b = (struct unixsock *)0;
-    if (unixsock_pair((int)type, &a, &b) != 0) {
+    struct unix_socket *a = (struct unix_socket *)0;
+    struct unix_socket *b = (struct unix_socket *)0;
+    if (unix_socket_pair((int)type, &a, &b) != 0) {
         return -1;
     }
-    task_t *self = sched_current();
-    int fa = alloc_fd(self);
+    task_t *self = scheduler_current();
+    int fa = alloc_file_descriptor(self);
     if (fa >= 0) {
         self->fds[fa].type = FD_UNIX;
         self->fds[fa].cloexec = 0;
         self->fds[fa].nonblock = 0;
         self->fds[fa].un = a;
     }
-    int fb = fa >= 0 ? alloc_fd(self) : -1;
-    if (fb < 0) {
+    int framebuffer = fa >= 0 ? alloc_file_descriptor(self) : -1;
+    if (framebuffer < 0) {
         if (fa >= 0) {
-            fd_release(&self->fds[fa]);
+            file_descriptor_release(&self->fds[fa]);
         } else {
-            unixsock_unref(a);
+            unix_socket_unref(a);
         }
-        unixsock_unref(b);
+        unix_socket_unref(b);
         return -1;
     }
-    self->fds[fb].type = FD_UNIX;
-    self->fds[fb].cloexec = 0;
-    self->fds[fb].nonblock = 0;
-    self->fds[fb].un = b;
-    int out[2] = {fa, fb};
-    if (copy_to_user(fds_ptr, out, sizeof(out)) != 0) {
-        fd_release(&self->fds[fa]);
-        fd_release(&self->fds[fb]);
+    self->fds[framebuffer].type = FD_UNIX;
+    self->fds[framebuffer].cloexec = 0;
+    self->fds[framebuffer].nonblock = 0;
+    self->fds[framebuffer].un = b;
+    int out[2] = {fa, framebuffer};
+    if (copy_to_user(file_descriptors_pointer, out, sizeof(out)) != 0) {
+        file_descriptor_release(&self->fds[fa]);
+        file_descriptor_release(&self->fds[framebuffer]);
         return -1;
     }
     return 0;
@@ -3046,36 +3046,36 @@ static int copy_un_name(char *out, uint64_t src, uint64_t len) {
     return copy_from_user(out, src, (size_t)len) == 0 ? 0 : -1;
 }
 
-static long sys_bindun(uint64_t fd, uint64_t name_ptr, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_bindun(uint64_t fd, uint64_t name_pointer, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4; (void)a5; (void)a6;
     char name[UNIX_PATH_MAX];
-    if (copy_un_name(name, name_ptr, len) != 0) {
+    if (copy_un_name(name, name_pointer, len) != 0) {
         return -1;
     }
-    struct unixsock *u = unix_for_fd(fd);
-    return u ? unixsock_bind(u, name, (int)len) : -1;
+    struct unix_socket *u = unix_for_file_descriptor(fd);
+    return u ? unix_socket_bind(u, name, (int)len) : -1;
 }
 
-static long sys_connectun(uint64_t fd, uint64_t name_ptr, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_connectun(uint64_t fd, uint64_t name_pointer, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4; (void)a5; (void)a6;
     char name[UNIX_PATH_MAX];
-    if (copy_un_name(name, name_ptr, len) != 0) {
+    if (copy_un_name(name, name_pointer, len) != 0) {
         return -1;
     }
-    struct unixsock *u = unix_for_fd(fd);
-    return u ? unixsock_connect(u, name, (int)len) : -1;
+    struct unix_socket *u = unix_for_file_descriptor(fd);
+    return u ? unix_socket_connect(u, name, (int)len) : -1;
 }
 
 #define UNIX_MSG_STAGING UNIX_BUF_SIZE
 
-static long sys_sendmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_sendmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)flags; (void)a4; (void)a5; (void)a6;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     os_msg_t msg;
-    if (copy_from_user(&msg, msg_ptr, sizeof(msg)) != 0) {
+    if (copy_from_user(&msg, message_pointer, sizeof(msg)) != 0) {
         return -1;
     }
-    struct unixsock *u = unix_for_fd(fd);
+    struct unix_socket *u = unix_for_file_descriptor(fd);
     if (!u) {
         return -1;
     }
@@ -3084,12 +3084,12 @@ static long sys_sendmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags, uint64_t 
     }
     uint32_t len = msg.len;
     if (len > UNIX_MSG_STAGING) {
-        if (unixsock_type(u) == UNIX_SOCK_SEQPACKET) {
+        if (unix_socket_type(u) == UNIX_SOCK_SEQPACKET) {
             return -1;
         }
         len = UNIX_MSG_STAGING;
     }
-    fd_slot_t slots[UNIX_MAX_FDS];
+    file_descriptor_slot_t slots[UNIX_MAX_FDS];
     int nfds = (int)msg.nfds;
     if (nfds > 0) {
         int nums[UNIX_MAX_FDS];
@@ -3109,29 +3109,29 @@ static long sys_sendmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags, uint64_t 
         return -1;
     }
     for (;;) {
-        uint64_t seq = sched_event_seq();
-        long n = unixsock_send(u, staging, len, slots, nfds);
+        uint64_t seq = scheduler_event_sequence();
+        long n = unix_socket_send(u, staging, len, slots, nfds);
         if (n != 0 || (len == 0 && nfds == 0)) {
             return n;
         }
         if (self->fds[fd].nonblock) {
             return -OS_ERR_AGAIN;
         }
-        if (sched_signal_pending()) {
+        if (scheduler_signal_pending()) {
             return -OS_ERR_INTR;
         }
-        sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
+        scheduler_block_on_sequence(SCHED_POLL_CHAN, 0, seq);
     }
 }
 
-static long sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_recvmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)flags; (void)a4; (void)a5; (void)a6;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     os_msg_t msg;
-    if (copy_from_user(&msg, msg_ptr, sizeof(msg)) != 0) {
+    if (copy_from_user(&msg, message_pointer, sizeof(msg)) != 0) {
         return -1;
     }
-    struct unixsock *u = unix_for_fd(fd);
+    struct unix_socket *u = unix_for_file_descriptor(fd);
     if (!u) {
         return -1;
     }
@@ -3143,25 +3143,25 @@ static long sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags, uint64_t 
     }
     uint32_t want = msg.len > UNIX_MSG_STAGING ? UNIX_MSG_STAGING : msg.len;
     uint8_t staging[UNIX_MSG_STAGING];
-    fd_slot_t slots[UNIX_MAX_FDS];
+    file_descriptor_slot_t slots[UNIX_MAX_FDS];
     for (;;) {
-        uint64_t seq = sched_event_seq();
+        uint64_t seq = scheduler_event_sequence();
         int nfds = 0;
         int rflags = 0;
-        long n = unixsock_recv(u, staging, want, slots, (int)msg.nfds, &nfds, &rflags);
+        long n = unix_socket_receive(u, staging, want, slots, (int)msg.nfds, &nfds, &rflags);
         if (n < 0) {
             msg.nfds = 0;
             msg.flags = 0;
-            copy_to_user(msg_ptr, &msg, sizeof(msg));
+            copy_to_user(message_pointer, &msg, sizeof(msg));
             return 0;
         }
         if (n > 0 || nfds > 0) {
             int nums[UNIX_MAX_FDS];
             int installed = 0;
             for (int i = 0; i < nfds; i++) {
-                int nfd = alloc_fd(self);
+                int nfd = alloc_file_descriptor(self);
                 if (nfd < 0) {
-                    fd_release(&slots[i]);
+                    file_descriptor_release(&slots[i]);
                     rflags |= OS_MSG_CTRUNC;
                     continue;
                 }
@@ -3176,10 +3176,10 @@ static long sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags, uint64_t 
                 (installed == 0 ||
                  copy_to_user(msg.fds, nums, (size_t)installed * sizeof(int)) == 0) &&
                 (n == 0 || copy_to_user(msg.data, staging, (size_t)n) == 0) &&
-                copy_to_user(msg_ptr, &msg, sizeof(msg)) == 0;
+                copy_to_user(message_pointer, &msg, sizeof(msg)) == 0;
             if (!copied) {
                 for (int i = 0; i < installed; i++) {
-                    fd_release(&self->fds[nums[i]]);
+                    file_descriptor_release(&self->fds[nums[i]]);
                 }
                 return -1;
             }
@@ -3188,35 +3188,35 @@ static long sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags, uint64_t 
         if (self->fds[fd].nonblock) {
             return -OS_ERR_AGAIN;
         }
-        if (sched_signal_pending()) {
+        if (scheduler_signal_pending()) {
             return -OS_ERR_INTR;
         }
-        sched_block_on_seq(SCHED_POLL_CHAN, 0, seq);
+        scheduler_block_on_sequence(SCHED_POLL_CHAN, 0, seq);
     }
 }
 
-static long sys_memfd_create(uint64_t name_ptr, uint64_t flags, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_memfd_create(uint64_t name_pointer, uint64_t flags, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3; (void)a4; (void)a5; (void)a6;
     if (flags & ~(uint64_t)(OS_MFD_CLOEXEC | OS_MFD_ALLOW_SEALING)) {
         return -1;
     }
     char name[MEMFD_NAME_MAX];
     name[0] = '\0';
-    if (name_ptr) {
-        if (copy_from_user(name, name_ptr, sizeof(name)) != 0) {
+    if (name_pointer) {
+        if (copy_from_user(name, name_pointer, sizeof(name)) != 0) {
             return -1;
         }
         name[sizeof(name) - 1] = '\0';
     }
-    struct memfd *m = memfd_create_obj(name_ptr ? name : (const char *)0);
+    struct memfd *m = memfd_create_object(name_pointer ? name : (const char *)0);
     if (!m) {
         return -1;
     }
     if (!(flags & OS_MFD_ALLOW_SEALING)) {
         memfd_add_seals(m, MEMFD_SEAL_SEAL);
     }
-    task_t *self = sched_current();
-    int fd = alloc_fd(self);
+    task_t *self = scheduler_current();
+    int fd = alloc_file_descriptor(self);
     if (fd < 0) {
         memfd_unref(m);
         return -1;
@@ -3230,7 +3230,7 @@ static long sys_memfd_create(uint64_t name_ptr, uint64_t flags, uint64_t a3, uin
 
 static long sys_memfd_seal(uint64_t fd, uint64_t add, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3; (void)a4; (void)a5; (void)a6;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (fd >= MAX_FDS || self->fds[fd].type != FD_MEMFD) {
         return -1;
     }
@@ -3243,26 +3243,26 @@ static long sys_memfd_seal(uint64_t fd, uint64_t add, uint64_t a3, uint64_t a4, 
 
 static long sys_sockshut(uint64_t fd, uint64_t how, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3; (void)a4; (void)a5; (void)a6;
-    struct unixsock *u = unix_for_fd(fd);
+    struct unix_socket *u = unix_for_file_descriptor(fd);
     if (!u) {
         return -1;
     }
-    return unixsock_shutdown(u, (int)how);
+    return unix_socket_shutdown(u, (int)how);
 }
 
 static long sys_listen(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-    struct unixsock *u = unix_for_fd(fd);
+    struct unix_socket *u = unix_for_file_descriptor(fd);
     if (u) {
-        return unixsock_listen(u);
+        return unix_socket_listen(u);
     }
-    struct socket *s = socket_for_fd(fd);
+    struct socket *s = socket_for_file_descriptor(fd);
     return s ? socket_listen(s) : -1;
 }
 
 static long sys_connect(uint64_t fd, uint64_t ip, uint64_t port, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4; (void)a5; (void)a6;
-    struct socket *s = socket_for_fd(fd);
+    struct socket *s = socket_for_file_descriptor(fd);
     if (!s || port == 0 || port > 0xFFFF) {
         return -1;
     }
@@ -3271,7 +3271,7 @@ static long sys_connect(uint64_t fd, uint64_t ip, uint64_t port, uint64_t a4, ui
 
 static long sys_connstat(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-    struct socket *s = socket_for_fd(fd);
+    struct socket *s = socket_for_file_descriptor(fd);
     struct tcpcb *tcb = s ? socket_tcb(s) : (struct tcpcb *)0;
     if (!tcb) {
         return -1;
@@ -3282,24 +3282,24 @@ static long sys_connstat(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uin
     return tcp_state(tcb) == TCP_ESTABLISHED ? 1 : -1;
 }
 
-static long sys_accept(uint64_t fd, uint64_t from_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_accept(uint64_t fd, uint64_t from_pointer, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3; (void)a4; (void)a5; (void)a6;
-    struct unixsock *ulistener = unix_for_fd(fd);
+    struct unix_socket *ulistener = unix_for_file_descriptor(fd);
     if (ulistener) {
-        struct unixsock *uconn = unixsock_accept(ulistener);
+        struct unix_socket *uconn = unix_socket_accept(ulistener);
         if (!uconn) {
             return -1;
         }
-        if (from_ptr) {
+        if (from_pointer) {
             os_sockaddr_t none = {0, 0, 0};
-            if (copy_to_user(from_ptr, &none, sizeof(none)) != 0) {
-                unixsock_unref(uconn);
+            if (copy_to_user(from_pointer, &none, sizeof(none)) != 0) {
+                unix_socket_unref(uconn);
                 return -1;
             }
         }
-        return install_unix_fd(uconn);
+        return install_unix_file_descriptor(uconn);
     }
-    struct socket *listener = socket_for_fd(fd);
+    struct socket *listener = socket_for_file_descriptor(fd);
     if (!listener) {
         return -1;
     }
@@ -3307,20 +3307,20 @@ static long sys_accept(uint64_t fd, uint64_t from_ptr, uint64_t a3, uint64_t a4,
     if (!conn) {
         return -1;
     }
-    if (from_ptr) {
+    if (from_pointer) {
         struct tcpcb *tcb = socket_tcb(conn);
         os_sockaddr_t from = {tcp_remote_ip(tcb), tcp_remote_port(tcb), 0};
-        if (copy_to_user(from_ptr, &from, sizeof(from)) != 0) {
+        if (copy_to_user(from_pointer, &from, sizeof(from)) != 0) {
             socket_unref(conn);
             return -1;
         }
     }
-    return install_socket_fd(conn);
+    return install_socket_file_descriptor(conn);
 }
 
 static long sys_send(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4; (void)a5; (void)a6;
-    struct socket *s = socket_for_fd(fd);
+    struct socket *s = socket_for_file_descriptor(fd);
     struct tcpcb *tcb = s ? socket_tcb(s) : (struct tcpcb *)0;
     if (!tcb || len > TCP_MAX_MSS) {
         if (!tcb) {
@@ -3337,7 +3337,7 @@ static long sys_send(uint64_t fd, uint64_t buf, uint64_t len, uint64_t a4, uint6
 
 static long sys_recv(uint64_t fd, uint64_t buf, uint64_t max, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4; (void)a5; (void)a6;
-    struct socket *s = socket_for_fd(fd);
+    struct socket *s = socket_for_file_descriptor(fd);
     struct tcpcb *tcb = s ? socket_tcb(s) : (struct tcpcb *)0;
     if (!tcb) {
         return -1;
@@ -3346,7 +3346,7 @@ static long sys_recv(uint64_t fd, uint64_t buf, uint64_t max, uint64_t a4, uint6
         max = TCP_MAX_MSS;
     }
     static uint8_t staging[TCP_MAX_MSS];
-    int n = tcp_recv(tcb, staging, (uint16_t)max);
+    int n = tcp_receive(tcb, staging, (uint16_t)max);
     if (n <= 0) {
         return n;
     }
@@ -3355,7 +3355,7 @@ static long sys_recv(uint64_t fd, uint64_t buf, uint64_t max, uint64_t a4, uint6
 
 static long sys_bind(uint64_t fd, uint64_t port, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3; (void)a4; (void)a5; (void)a6;
-    struct socket *s = socket_for_fd(fd);
+    struct socket *s = socket_for_file_descriptor(fd);
     if (!s || port > 0xFFFF) {
         return -1;
     }
@@ -3364,7 +3364,7 @@ static long sys_bind(uint64_t fd, uint64_t port, uint64_t a3, uint64_t a4, uint6
 
 static long sys_sendto(uint64_t fd, uint64_t ip, uint64_t port, uint64_t buf, uint64_t len, uint64_t a6) {
     (void)a6;
-    struct socket *s = socket_for_fd(fd);
+    struct socket *s = socket_for_file_descriptor(fd);
     if (!s || port > 0xFFFF || len > UDP_MAX_PAYLOAD) {
         return -1;
     }
@@ -3375,9 +3375,9 @@ static long sys_sendto(uint64_t fd, uint64_t ip, uint64_t port, uint64_t buf, ui
     return socket_sendto(s, (uint32_t)ip, (uint16_t)port, staging, (uint16_t)len);
 }
 
-static long sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t max, uint64_t from_ptr, uint64_t a5, uint64_t a6) {
+static long sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t max, uint64_t from_pointer, uint64_t a5, uint64_t a6) {
     (void)a5; (void)a6;
-    struct socket *s = socket_for_fd(fd);
+    struct socket *s = socket_for_file_descriptor(fd);
     if (!s || max > SOCKET_MAX_DATAGRAM) {
         return -1;
     }
@@ -3390,7 +3390,7 @@ static long sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t max, uint64_t from_
     if (n && copy_to_user(buf, staging, (size_t)n) != 0) {
         return -1;
     }
-    if (from_ptr && copy_to_user(from_ptr, &from, sizeof(from)) != 0) {
+    if (from_pointer && copy_to_user(from_pointer, &from, sizeof(from)) != 0) {
         return -1;
     }
     return n;
@@ -3398,11 +3398,11 @@ static long sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t max, uint64_t from_
 
 static long sys_sockpoll(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-    struct socket *s = socket_for_fd(fd);
+    struct socket *s = socket_for_file_descriptor(fd);
     return s ? socket_pending(s) : -1;
 }
 
-static long sys_netconf(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_netconf(uint64_t out_pointer, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
     if (!net_have_nic()) {
         return -1;
@@ -3413,7 +3413,7 @@ static long sys_netconf(uint64_t out_ptr, uint64_t a2, uint64_t a3, uint64_t a4,
     conf.gateway = net_gateway_ip();
     conf.dns = net_dns_ip();
     conf.leased = net_config_is_leased();
-    return copy_to_user(out_ptr, &conf, sizeof(conf)) == 0 ? 0 : -1;
+    return copy_to_user(out_pointer, &conf, sizeof(conf)) == 0 ? 0 : -1;
 }
 
 static long sys_settime(uint64_t seconds, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -3430,14 +3430,14 @@ static long sys_settime(uint64_t seconds, uint64_t a2, uint64_t a3, uint64_t a4,
 static int audio_owner = -1;
 
 static int audio_owner_is_caller(void) {
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (audio_owner < 0) {
         return 0;
     }
     if (audio_owner == self->id) {
         return 1;
     }
-    task_t *owner = sched_task_by_id(audio_owner);
+    task_t *owner = scheduler_task_by_id(audio_owner);
     if (!owner || owner->state == TASK_TERMINATED) {
         audio_owner = -1;
     }
@@ -3454,7 +3454,7 @@ static long sys_audio_claim(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, 
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (audio_owner_is_caller()) {
         return 0;
     }
@@ -3475,7 +3475,7 @@ static long sys_audio_release(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4
     if (!audio_owner_is_caller()) {
         return -1;
     }
-    pcspk_off();
+    pc_speaker_off();
     audio_owner = -1;
     return 0;
 }
@@ -3491,7 +3491,7 @@ static long sys_beep(uint64_t freq_hz, uint64_t ms, uint64_t a3, uint64_t a4, ui
     if (ms > 1000) {
         ms = 1000;
     }
-    pcspk_tone((uint32_t)freq_hz, (uint32_t)ms);
+    pc_speaker_tone((uint32_t)freq_hz, (uint32_t)ms);
     return 0;
 }
 
@@ -3508,7 +3508,7 @@ static long sys_audio_volume(uint64_t percent, uint64_t a2, uint64_t a3, uint64_
         percent = 100;
     }
     ac97_set_volume((uint32_t)percent);
-    pcspk_set_muted(percent == 0);
+    pc_speaker_set_muted(percent == 0);
     return 0;
 }
 
@@ -3529,7 +3529,7 @@ static long sys_audio_play(uint64_t buf, uint64_t frames, uint64_t a3, uint64_t 
     return ac97_play((const int16_t *)buf, (uint32_t)frames);
 }
 
-static long sys_display_modes(uint64_t out_ptr, uint64_t max_entries, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_display_modes(uint64_t out_pointer, uint64_t max_entries, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
     (void)a5;
@@ -3540,7 +3540,7 @@ static long sys_display_modes(uint64_t out_ptr, uint64_t max_entries, uint64_t a
     display_mode_t modes[DISPLAY_MAX_MODES];
     int total = dispi_get_modes(modes, (int)max_entries);
     int n = total < (int)max_entries ? total : (int)max_entries;
-    if (n > 0 && copy_to_user(out_ptr, modes, (size_t)n * sizeof(modes[0])) != 0) {
+    if (n > 0 && copy_to_user(out_pointer, modes, (size_t)n * sizeof(modes[0])) != 0) {
         return -1;
     }
     return total;
@@ -3558,15 +3558,15 @@ static long sys_display_set_mode(uint64_t width, uint64_t height, uint64_t a3, u
     if (dispi_set_mode((uint32_t)width, (uint32_t)height, &pitch) != 0) {
         return -1;
     }
-    fb_remap(pitch, (uint32_t)width, (uint32_t)height);
+    framebuffer_remap(pitch, (uint32_t)width, (uint32_t)height);
     return 0;
 }
 
-static int fd_is_ready(task_t *self, int fd) {
+static int file_descriptor_is_ready(task_t *self, int fd) {
     if (fd < 0 || fd >= MAX_FDS) {
         return 0;
     }
-    fd_slot_t *slot = &self->fds[fd];
+    file_descriptor_slot_t *slot = &self->fds[fd];
     switch (slot->type) {
     case FD_STDIN:
         return keyboard_peek() ? 1 : 0;
@@ -3575,7 +3575,7 @@ static int fd_is_ready(task_t *self, int fd) {
     case FD_SOCKET:
         return socket_pending(slot->sock) > 0 ? 1 : 0;
     case FD_UNIX:
-        return unixsock_pending(slot->un);
+        return unix_socket_pending(slot->un);
     case FD_EVENT:
         return eventfd_readable(slot->event) ? 1 : 0;
     case FD_TIMER:
@@ -3583,25 +3583,25 @@ static int fd_is_ready(task_t *self, int fd) {
     case FD_EPOLL:
         return 0;
     case FD_FILE:
-        return vfs_handle_readable(slot->file->handle);
+        return virtual_file_system_handle_readable(slot->file->handle);
     default:
         return 0;
     }
 }
 
-static uint32_t fd_epoll_mask_for(task_t *self, int fd, const void *obj) {
+static uint32_t file_descriptor_epoll_mask_for(task_t *self, int fd, const void *object) {
     if (fd < 0 || fd >= MAX_FDS) {
         return EPOLL_STALE;
     }
-    fd_slot_t *slot = &self->fds[fd];
+    file_descriptor_slot_t *slot = &self->fds[fd];
     if (slot->type == FD_NONE) {
         return EPOLL_STALE;
     }
-    if (obj && slot->pipe != (struct pipe *)obj) {
+    if (object && slot->pipe != (struct pipe *)object) {
         return EPOLL_STALE;
     }
     uint32_t m = 0;
-    if (fd_is_ready(self, fd)) {
+    if (file_descriptor_is_ready(self, fd)) {
         m |= EPOLLIN;
     }
     switch (slot->type) {
@@ -3642,12 +3642,12 @@ static uint32_t fd_epoll_mask_for(task_t *self, int fd, const void *obj) {
         break;
     }
     case FD_UNIX:
-        if (unixsock_writable(slot->un)) {
+        if (unix_socket_writable(slot->un)) {
             m |= EPOLLOUT;
         }
-        if (unixsock_hup(slot->un)) {
+        if (unix_socket_hup(slot->un)) {
             m |= EPOLLHUP;
-        } else if (unixsock_rdhup(slot->un)) {
+        } else if (unix_socket_rdhup(slot->un)) {
             m |= EPOLLRDHUP;
         }
         break;
@@ -3665,24 +3665,24 @@ static uint32_t fd_epoll_mask_for(task_t *self, int fd, const void *obj) {
     return m;
 }
 
-static uint32_t epoll_mask_cb(void *ctx, int fd, const void *obj) {
-    return fd_epoll_mask_for((task_t *)ctx, fd, obj);
+static uint32_t epoll_mask_callback(void *context, int fd, const void *object) {
+    return file_descriptor_epoll_mask_for((task_t *)context, fd, object);
 }
 
-static long install_fd_of(fd_type_t type, void *obj, uint64_t flags) {
-    task_t *self = sched_current();
-    int fd = alloc_fd(self);
+static long install_file_descriptor_of(file_descriptor_type_t type, void *object, uint64_t flags) {
+    task_t *self = scheduler_current();
+    int fd = alloc_file_descriptor(self);
     if (fd < 0) {
         switch (type) {
-        case FD_EVENT: eventfd_unref((struct eventfd *)obj); break;
-        case FD_TIMER: timerfd_unref((struct timerfd *)obj); break;
-        case FD_EPOLL: epoll_unref((struct epoll *)obj); break;
+        case FD_EVENT: eventfd_unref((struct eventfd *)object); break;
+        case FD_TIMER: timerfd_unref((struct timerfd *)object); break;
+        case FD_EPOLL: epoll_unref((struct epoll *)object); break;
         default: break;
         }
         return -1;
     }
     self->fds[fd].type = type;
-    self->fds[fd].event = (struct eventfd *)obj;
+    self->fds[fd].event = (struct eventfd *)object;
     self->fds[fd].cloexec = (flags & OS_FD_CLOEXEC) ? 1 : 0;
     self->fds[fd].nonblock = (flags & OS_FD_NONBLOCK) ? 1 : 0;
     return fd;
@@ -3694,7 +3694,7 @@ static long sys_eventfd(uint64_t initval, uint64_t flags, uint64_t a3, uint64_t 
         return -1;
     }
     struct eventfd *e = eventfd_create(initval, (flags & OS_EFD_SEMAPHORE) != 0);
-    return e ? install_fd_of(FD_EVENT, e, flags) : -1;
+    return e ? install_file_descriptor_of(FD_EVENT, e, flags) : -1;
 }
 
 static long sys_timerfd_create(uint64_t clockid, uint64_t flags, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -3703,7 +3703,7 @@ static long sys_timerfd_create(uint64_t clockid, uint64_t flags, uint64_t a3, ui
         return -1;
     }
     struct timerfd *t = timerfd_create((int)clockid);
-    return t ? install_fd_of(FD_TIMER, t, flags) : -1;
+    return t ? install_file_descriptor_of(FD_TIMER, t, flags) : -1;
 }
 
 static uint64_t realtime_now_ns(void) {
@@ -3722,13 +3722,13 @@ static uint64_t timer_clock_ns(struct timerfd *t, int absolute) {
     return clock_now_ns();
 }
 
-static long sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_ptr, uint64_t old_ptr, uint64_t a5, uint64_t a6) {
+static long sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_pointer, uint64_t old_pointer, uint64_t a5, uint64_t a6) {
     (void)a5; (void)a6;
     os_itimer_t want;
-    if (copy_from_user(&want, new_ptr, sizeof(want)) != 0) {
+    if (copy_from_user(&want, new_pointer, sizeof(want)) != 0) {
         return -1;
     }
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (fd >= MAX_FDS || self->fds[fd].type != FD_TIMER) {
         return -1;
     }
@@ -3742,24 +3742,24 @@ static long sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_ptr, u
                         want.interval_ns, &had.value_ns, &had.interval_ns) != 0) {
         return -1;
     }
-    if (old_ptr && copy_to_user(old_ptr, &had, sizeof(had)) != 0) {
+    if (old_pointer && copy_to_user(old_pointer, &had, sizeof(had)) != 0) {
         return -1;
     }
     return 0;
 }
 
-static long sys_timerfd_gettime(uint64_t fd, uint64_t out_ptr, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_timerfd_gettime(uint64_t fd, uint64_t out_pointer, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3; (void)a4; (void)a5; (void)a6;
-    if (!user_range_ok(out_ptr, sizeof(os_itimer_t), 1)) {
+    if (!user_range_ok(out_pointer, sizeof(os_itimer_t), 1)) {
         return -1;
     }
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (fd >= MAX_FDS || self->fds[fd].type != FD_TIMER) {
         return -1;
     }
     os_itimer_t out = {0, 0};
     timerfd_gettime(self->fds[fd].timer, clock_now_ns(), &out.value_ns, &out.interval_ns);
-    return copy_to_user(out_ptr, &out, sizeof(out)) == 0 ? 0 : -1;
+    return copy_to_user(out_pointer, &out, sizeof(out)) == 0 ? 0 : -1;
 }
 
 static long sys_epoll_create(uint64_t flags, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -3768,14 +3768,14 @@ static long sys_epoll_create(uint64_t flags, uint64_t a2, uint64_t a3, uint64_t 
         return -1;
     }
     struct epoll *ep = epoll_create_set();
-    return ep ? install_fd_of(FD_EPOLL, ep, flags) : -1;
+    return ep ? install_file_descriptor_of(FD_EPOLL, ep, flags) : -1;
 }
 
-static long sys_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd, uint64_t ev_ptr, uint64_t a5, uint64_t a6) {
+static long sys_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd, uint64_t ev_pointer, uint64_t a5, uint64_t a6) {
     (void)a5; (void)a6;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     os_epoll_event_t ev = {0, 0, 0};
-    if (op != EPOLL_CTL_DEL && copy_from_user(&ev, ev_ptr, sizeof(ev)) != 0) {
+    if (op != EPOLL_CTL_DEL && copy_from_user(&ev, ev_pointer, sizeof(ev)) != 0) {
         return -1;
     }
     if (epfd >= MAX_FDS || self->fds[epfd].type != FD_EPOLL) {
@@ -3787,18 +3787,18 @@ static long sys_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd, uint64_t ev_p
     if (self->fds[fd].type == FD_EPOLL) {
         return -1;
     }
-    const void *obj = (const void *)self->fds[fd].pipe;
-    return epoll_ctl_set(self->fds[epfd].epoll, (int)op, (int)fd, obj,
+    const void *object = (const void *)self->fds[fd].pipe;
+    return epoll_control_set(self->fds[epfd].epoll, (int)op, (int)fd, object,
                          ev.events, ev.data);
 }
 
-static long sys_epoll_wait(uint64_t epfd, uint64_t out_ptr, uint64_t maxevents, uint64_t timeout_ms, uint64_t a5, uint64_t a6) {
+static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxevents, uint64_t timeout_ms, uint64_t a5, uint64_t a6) {
     (void)a5; (void)a6;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (maxevents == 0 || maxevents > EPOLL_MAX_WATCH) {
         return -1;
     }
-    if (!user_range_ok(out_ptr, maxevents * sizeof(os_epoll_event_t), 1)) {
+    if (!user_range_ok(out_pointer, maxevents * sizeof(os_epoll_event_t), 1)) {
         return -1;
     }
     if (epfd >= MAX_FDS || self->fds[epfd].type != FD_EPOLL) {
@@ -3810,10 +3810,10 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_ptr, uint64_t maxevents, 
     uint64_t deadline = (timeout < 0) ? 0 : now + (uint64_t)timeout;
     epoll_ev_t evs[EPOLL_MAX_WATCH];
     for (;;) {
-        uint64_t seq = sched_event_seq();
-        int n = epoll_scan(ep, epoll_mask_cb, self, evs, (int)maxevents);
+        uint64_t seq = scheduler_event_sequence();
+        int n = epoll_scan(ep, epoll_mask_callback, self, evs, (int)maxevents);
         if (n > 0) {
-            if (copy_to_user(out_ptr, evs, (size_t)n * sizeof(epoll_ev_t)) != 0) {
+            if (copy_to_user(out_pointer, evs, (size_t)n * sizeof(epoll_ev_t)) != 0) {
                 return -1;
             }
             return n;
@@ -3821,7 +3821,7 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_ptr, uint64_t maxevents, 
         if (timeout == 0) {
             return 0;
         }
-        if (sched_signal_pending()) {
+        if (scheduler_signal_pending()) {
             return -OS_ERR_INTR;
         }
         now = pit_get_ticks() * (1000 / PIT_HZ);
@@ -3842,11 +3842,11 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_ptr, uint64_t maxevents, 
                 park_until = when;
             }
         }
-        sched_block_on_seq(SCHED_POLL_CHAN, park_until, seq);
+        scheduler_block_on_sequence(SCHED_POLL_CHAN, park_until, seq);
     }
 }
 
-static long sys_waitfds(uint64_t fds_ptr, uint64_t count, uint64_t timeout_ms,
+static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint64_t timeout_ms,
                          uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
@@ -3854,20 +3854,20 @@ static long sys_waitfds(uint64_t fds_ptr, uint64_t count, uint64_t timeout_ms,
     if (count > MAX_FDS) {
         return -1;
     }
-    if (count > 0 && !user_range_ok(fds_ptr, count * sizeof(int), 0)) {
+    if (count > 0 && !user_range_ok(file_descriptors_pointer, count * sizeof(int), 0)) {
         return -1;
     }
-    const int *fds = (const int *)fds_ptr;
-    task_t *self = sched_current();
+    const int *fds = (const int *)file_descriptors_pointer;
+    task_t *self = scheduler_current();
 
     long timeout = (long)timeout_ms;
     uint64_t now = pit_get_ticks() * (1000 / PIT_HZ);
     uint64_t deadline = (timeout < 0) ? 0 : now + (uint64_t)timeout;
 
     for (;;) {
-        uint64_t seq = sched_event_seq();
+        uint64_t seq = scheduler_event_sequence();
         for (uint64_t i = 0; i < count; i++) {
-            if (fd_is_ready(self, fds[i])) {
+            if (file_descriptor_is_ready(self, fds[i])) {
                 return (long)i;
             }
         }
@@ -3878,8 +3878,8 @@ static long sys_waitfds(uint64_t fds_ptr, uint64_t count, uint64_t timeout_ms,
             return -2;
         }
 
-        sched_block_on_seq(SCHED_POLL_CHAN, deadline, seq);
-        if (sched_signal_pending()) {
+        scheduler_block_on_sequence(SCHED_POLL_CHAN, deadline, seq);
+        if (scheduler_signal_pending()) {
             return -2;
         }
     }
@@ -3894,7 +3894,7 @@ static long sys_idle_ticks(uint64_t cpu, uint64_t a2, uint64_t a3, uint64_t a4, 
     if (cpu >= MAX_CPUS) {
         return -1;
     }
-    return (long)sched_idle_ticks((int)cpu);
+    return (long)scheduler_idle_ticks((int)cpu);
 }
 
 static long sys_klog(uint64_t from, uint64_t buf, uint64_t max, uint64_t next_out,
@@ -3911,7 +3911,7 @@ static long sys_klog(uint64_t from, uint64_t buf, uint64_t max, uint64_t next_ou
         return -1;
     }
     uint64_t next = 0;
-    size_t n = klog_read(from, (char *)buf, (size_t)max, &next);
+    size_t n = kernel_log_read(from, (char *)buf, (size_t)max, &next);
     if (next_out) {
         *(uint64_t *)next_out = next;
     }
@@ -3926,7 +3926,7 @@ static long sys_klog_total(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
     (void)a4;
     (void)a5;
     (void)a6;
-    return (long)klog_written_total();
+    return (long)kernel_log_written_total();
 }
 
 static long sys_sigaction(uint64_t signo, uint64_t handler, uint64_t restorer,
@@ -3936,7 +3936,7 @@ static long sys_sigaction(uint64_t signo, uint64_t handler, uint64_t restorer,
     if (!SIG_IS_CATCHABLE((int)signo)) {
         return -1;
     }
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (handler != SIG_DFL_ADDR && handler != SIG_IGN_ADDR) {
         if (handler < USER_REGION_BASE || handler >= USER_REGION_LIMIT) {
             return -1;
@@ -3962,7 +3962,7 @@ static long sys_sigaction(uint64_t signo, uint64_t handler, uint64_t restorer,
 #define USER_RFLAGS_MASK 0x0000000000000CD5ULL
 #define RFLAGS_IF        0x0000000000000200ULL
 
-static long sys_sigreturn(uint64_t frame_ptr, uint64_t a2, uint64_t a3,
+static long sys_sigreturn(uint64_t frame_pointer, uint64_t a2, uint64_t a3,
                            uint64_t a4, uint64_t a5, uint64_t a6);
 
 static long sys_sigprocmask(uint64_t how, uint64_t mask, uint64_t old_out,
@@ -3970,7 +3970,7 @@ static long sys_sigprocmask(uint64_t how, uint64_t mask, uint64_t old_out,
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     uint32_t previous = self->sig_blocked;
     uint32_t want = (uint32_t)mask;
     if (how != SIG_UNBLOCK) {
@@ -3996,7 +3996,7 @@ static long sys_sigprocmask(uint64_t how, uint64_t mask, uint64_t old_out,
     return 0;
 }
 
-static long sys_chdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4,
+static long sys_chdir(uint64_t path_pointer, uint64_t a2, uint64_t a3, uint64_t a4,
                        uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
@@ -4004,13 +4004,13 @@ static long sys_chdir(uint64_t path_ptr, uint64_t a2, uint64_t a3, uint64_t a4,
     (void)a5;
     (void)a6;
     char path[LEANFS_MAX_PATH];
-    if (copy_path_from_user(path, path_ptr) != 0) {
+    if (copy_path_from_user(path, path_pointer) != 0) {
         return -1;
     }
-    if (!vfs_is_dir(path)) {
+    if (!virtual_file_system_is_directory(path)) {
         return -1;
     }
-    task_t *self = sched_vm_owner(sched_current());
+    task_t *self = scheduler_vm_owner(scheduler_current());
     int i = 0;
     for (; path[i] && i < PATH_MAX_LEN - 1; i++) {
         self->cwd[i] = path[i];
@@ -4025,7 +4025,7 @@ static long sys_getcwd(uint64_t buf, uint64_t maxlen, uint64_t a3, uint64_t a4,
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *self = sched_vm_owner(sched_current());
+    task_t *self = scheduler_vm_owner(scheduler_current());
     const char *cwd = (self->cwd[0] == '/') ? self->cwd : "/";
     uint64_t len = 0;
     while (cwd[len]) {
@@ -4040,7 +4040,7 @@ static long sys_getcwd(uint64_t buf, uint64_t maxlen, uint64_t a3, uint64_t a4,
     return (long)len;
 }
 
-static long sys_rename_replace(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3,
+static long sys_rename_replace(uint64_t old_pointer, uint64_t new_pointer, uint64_t a3,
                                 uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
@@ -4048,27 +4048,27 @@ static long sys_rename_replace(uint64_t old_ptr, uint64_t new_ptr, uint64_t a3,
     (void)a6;
     char old_path[LEANFS_MAX_PATH];
     char new_path[LEANFS_MAX_PATH];
-    if (copy_write_path_from_user(old_path, old_ptr) != 0 ||
-        copy_write_path_from_user(new_path, new_ptr) != 0) {
+    if (copy_write_path_from_user(old_path, old_pointer) != 0 ||
+        copy_write_path_from_user(new_path, new_pointer) != 0) {
         return -1;
     }
-    long r = vfs_rename_replace(old_path, new_path);
+    long r = virtual_file_system_rename_replace(old_path, new_path);
     pkg_note_write(old_path, r);
     pkg_note_write(new_path, r);
     return r;
 }
 
 static long sys_fork(isr_regs_t *regs) {
-    task_t *parent = sched_current();
-    if (!parent || parent->pml4_phys == vmm_kernel_pml4_phys()) {
+    task_t *parent = scheduler_current();
+    if (!parent || parent->pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return -1;
     }
 
-    if (sched_count_sharing_address_space(parent->pml4_phys) > 1) {
+    if (scheduler_count_sharing_address_space(parent->pml4_phys) > 1) {
         return -1;
     }
 
-    sched_release_shared_range(parent, USER_MMAP_BASE, USER_MMAP_LIMIT);
+    scheduler_release_shared_range(parent, USER_MMAP_BASE, USER_MMAP_LIMIT);
 
     uint64_t child_pml4 = process_fork_address_space(parent->pml4_phys);
     if (child_pml4 == 0) {
@@ -4081,10 +4081,10 @@ static long sys_fork(isr_regs_t *regs) {
         return -1;
     }
 
-    task_t *owner = sched_vm_owner(parent);
-    if (owner->env_block && owner->env_len && owner->env_count) {
-        if (sched_set_env(child, owner->env_block, owner->env_len, owner->env_count) != 0) {
-            sched_raise_signal(child, SIGKILL);
+    task_t *owner = scheduler_vm_owner(parent);
+    if (owner->env_block && owner->env_length && owner->env_count) {
+        if (scheduler_set_env(child, owner->env_block, owner->env_length, owner->env_count) != 0) {
+            scheduler_raise_signal(child, SIGKILL);
             return -1;
         }
     }
@@ -4097,7 +4097,7 @@ static long sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (fd >= MAX_FDS || self->fds[fd].type == FD_NONE) {
         return -1;
     }
@@ -4147,7 +4147,7 @@ static long sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
         if (req.whence == 1) {
             start += (int64_t)self->fds[fd].file->offset;
         } else if (req.whence == 2) {
-            start += (int64_t)vfs_handle_size(self->fds[fd].file->handle);
+            start += (int64_t)virtual_file_system_handle_size(self->fds[fd].file->handle);
         } else if (req.whence != 0) {
             return -1;
         }
@@ -4165,18 +4165,18 @@ static long sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
             return copy_to_user(arg, &ans, sizeof(ans)) == 0 ? 0 : -1;
         }
         for (;;) {
-            uint64_t seq = sched_event_seq();
+            uint64_t seq = scheduler_event_sequence();
             int r = flock_set(ino, self->id, req.type, (uint64_t)start, (uint64_t)len);
             if (r == 0) {
                 if (req.type == OS_FLOCK_UNLCK) {
-                    sched_wake_all(FLOCK_CHAN);
+                    scheduler_wake_all(FLOCK_CHAN);
                 }
                 return 0;
             }
             if (r != FLOCK_CONFLICT || cmd == F_SETLK_CMD) {
                 return r;
             }
-            sched_block_on_seq(FLOCK_CHAN, 0, seq);
+            scheduler_block_on_sequence(FLOCK_CHAN, 0, seq);
         }
     }
     default:
@@ -4199,30 +4199,30 @@ static int stop_to_report(task_t *t, uint64_t options) {
     return (options & WUNTRACED) && t->state == TASK_STOPPED && !t->stop_reported;
 }
 
-static long sys_waitpid(uint64_t pid_arg, uint64_t status_ptr, uint64_t options,
+static long sys_waitpid(uint64_t pid_argument, uint64_t status_pointer, uint64_t options,
                         uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *self = sched_current();
-    int64_t want = (int64_t)pid_arg;
+    task_t *self = scheduler_current();
+    int64_t want = (int64_t)pid_argument;
     int want_pgid = 0;
     if (want < -1) {
         want_pgid = (int)(-want);
     } else if (want == 0) {
         want_pgid = self->pgid;
     }
-    if (status_ptr && !user_range_ok(status_ptr, sizeof(int), 1)) {
+    if (status_pointer && !user_range_ok(status_pointer, sizeof(int), 1)) {
         return -1;
     }
 
     for (;;) {
         int any_children = 0;
-        uint64_t seq = sched_event_seq();
+        uint64_t seq = scheduler_event_sequence();
         task_t *only = (task_t *)0;
 
         if (want > 0) {
-            task_t *t = sched_task_by_id((int)want);
+            task_t *t = scheduler_task_by_id((int)want);
             if (!t || t->reaped || t->parent_id != self->id) {
                 return -1;
             }
@@ -4232,24 +4232,24 @@ static long sys_waitpid(uint64_t pid_arg, uint64_t status_ptr, uint64_t options,
                 int pid = t->id;
                 int status = wait_status_of(t);
                 t->reaped = 1;
-                sched_reap_slot(t);
-                if (status_ptr) {
-                    (void)copy_to_user(status_ptr, &status, sizeof(status));
+                scheduler_reap_slot(t);
+                if (status_pointer) {
+                    (void)copy_to_user(status_pointer, &status, sizeof(status));
                 }
                 return pid;
             }
             if (stop_to_report(t, options)) {
                 int status = stop_status_of(t);
                 t->stop_reported = 1;
-                if (status_ptr) {
-                    (void)copy_to_user(status_ptr, &status, sizeof(status));
+                if (status_pointer) {
+                    (void)copy_to_user(status_pointer, &status, sizeof(status));
                 }
                 return t->id;
             }
         } else {
-            int total = sched_task_count();
+            int total = scheduler_task_count();
             for (int i = 0; i < total; i++) {
-                task_t *t = sched_task_by_slot(i);
+                task_t *t = scheduler_task_by_slot(i);
                 if (!t || t->parent_id != self->id || t->reaped) {
                     continue;
                 }
@@ -4261,17 +4261,17 @@ static long sys_waitpid(uint64_t pid_arg, uint64_t status_ptr, uint64_t options,
                     int pid = t->id;
                     int status = wait_status_of(t);
                     t->reaped = 1;
-                    sched_reap_slot(t);
-                    if (status_ptr) {
-                        (void)copy_to_user(status_ptr, &status, sizeof(status));
+                    scheduler_reap_slot(t);
+                    if (status_pointer) {
+                        (void)copy_to_user(status_pointer, &status, sizeof(status));
                     }
                     return pid;
                 }
                 if (stop_to_report(t, options)) {
                     int status = stop_status_of(t);
                     t->stop_reported = 1;
-                    if (status_ptr) {
-                        (void)copy_to_user(status_ptr, &status, sizeof(status));
+                    if (status_pointer) {
+                        (void)copy_to_user(status_pointer, &status, sizeof(status));
                     }
                     return t->id;
                 }
@@ -4285,21 +4285,21 @@ static long sys_waitpid(uint64_t pid_arg, uint64_t status_ptr, uint64_t options,
             return 0;
         }
         if (only) {
-            sched_block_on_seq((const void *)only,
+            scheduler_block_on_sequence((const void *)only,
                                pit_get_ticks() * (1000 / PIT_HZ) + 200, seq);
         } else {
-            sched_block_on_seq(SCHED_POLL_CHAN,
+            scheduler_block_on_sequence(SCHED_POLL_CHAN,
                                pit_get_ticks() * (1000 / PIT_HZ) + 50, seq);
         }
     }
 }
 
 static long sys_execve(isr_regs_t *regs) {
-    task_t *self = sched_current();
-    if (!self || self->pml4_phys == vmm_kernel_pml4_phys()) {
+    task_t *self = scheduler_current();
+    if (!self || self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return -1;
     }
-    if (sched_count_sharing_address_space(self->pml4_phys) > 1) {
+    if (scheduler_count_sharing_address_space(self->pml4_phys) > 1) {
         return -1;
     }
 
@@ -4321,7 +4321,7 @@ static long sys_execve(isr_regs_t *regs) {
     }
 
     leanfs_stat_t st;
-    if (vfs_stat(path, &st) != 0 || st.is_dir) {
+    if (virtual_file_system_stat(path, &st) != 0 || st.is_dir) {
         free_vectors(&v);
         return -1;
     }
@@ -4330,7 +4330,7 @@ static long sys_execve(isr_regs_t *regs) {
         free_vectors(&v);
         return -1;
     }
-    int64_t size = vfs_read(path, image, st.size);
+    int64_t size = virtual_file_system_read(path, image, st.size);
     if (size < 2 || (image[0] == '#' && image[1] == '!') ||
         !elf_validate(image, (size_t)size)) {
         kfree(image);
@@ -4340,13 +4340,13 @@ static long sys_execve(isr_regs_t *regs) {
 
     const char *inherited[USER_ENV_MAX_VARS + 1];
     const char *const *effective = v.envp;
-    task_t *owner = sched_vm_owner(self);
+    task_t *owner = scheduler_vm_owner(self);
     if (!effective && owner && owner->env_block && owner->env_count) {
         uint32_t n = 0;
         uint32_t off = 0;
-        while (off < owner->env_len && n < USER_ENV_MAX_VARS) {
+        while (off < owner->env_length && n < USER_ENV_MAX_VARS) {
             inherited[n++] = owner->env_block + off;
-            while (off < owner->env_len && owner->env_block[off]) {
+            while (off < owner->env_length && owner->env_block[off]) {
                 off++;
             }
             off++;
@@ -4365,18 +4365,18 @@ static long sys_execve(isr_regs_t *regs) {
     }
 
     uint64_t old_pml4 = self->pml4_phys;
-    uint64_t peak = vmm_rss_peak_pages(old_pml4);
+    uint64_t peak = virtual_memory_rss_peak_pages(old_pml4);
     if (peak > self->max_rss_pages) {
         self->max_rss_pages = peak;
     }
     self->pml4_phys = new_pml4;
-    vmm_switch_address_space(new_pml4);
+    virtual_memory_switch_address_space(new_pml4);
     process_destroy_address_space(old_pml4);
 
     self->heap_brk = USER_HEAP_START;
     self->heap_mapped_end = USER_HEAP_START;
-    self->shm_next_vaddr = USER_SHM_BASE;
-    sched_regions_forget_memfds(self);
+    self->shared_memory_next_vaddr = USER_SHM_BASE;
+    scheduler_regions_forget_memfds(self);
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         self->mmaps[i].base = 0;
         self->mmaps[i].pages = 0;
@@ -4392,7 +4392,7 @@ static long sys_execve(isr_regs_t *regs) {
     for (int i = 0; i < MAX_FDS; i++) {
         if (self->fds[i].cloexec) {
             drop_record_locks(self, &self->fds[i]);
-            fd_release(&self->fds[i]);
+            file_descriptor_release(&self->fds[i]);
             self->fds[i].type = FD_NONE;
         }
     }
@@ -4414,7 +4414,7 @@ static long sys_execve(isr_regs_t *regs) {
             base = c + 1;
         }
     }
-    sched_set_task_name(self, base);
+    scheduler_set_task_name(self, base);
 
     self->caps &= caps_for_spawn_path(path);
 
@@ -4432,7 +4432,7 @@ static long sys_execve(isr_regs_t *regs) {
                 len += n;
                 count++;
             }
-            sched_set_env(self, packed, len, count);
+            scheduler_set_env(self, packed, len, count);
             kfree(packed);
         }
     }
@@ -4476,7 +4476,7 @@ static long sys_getrandom(uint64_t buf, uint64_t len, uint64_t flags,
     return (long)done;
 }
 
-static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
+static const syscall_function_t syscall_table[SYSCALL_COUNT] = {
     [SYS_write] = sys_write,
     [SYS_exit] = sys_exit,
     [SYS_getpid] = sys_getpid,
@@ -4489,13 +4489,13 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_pipe] = sys_pipe,
     [SYS_getpgid] = sys_getpgid,
     [SYS_sbrk] = sys_sbrk,
-    [SYS_shm_create] = sys_shm_create,
-    [SYS_shm_map] = sys_shm_map,
-    [SYS_fb_info] = sys_fb_info,
-    [SYS_fb_map] = sys_fb_map,
+    [SYS_shm_create] = sys_shared_memory_create,
+    [SYS_shm_map] = sys_shared_memory_map,
+    [SYS_fb_info] = sys_framebuffer_info,
+    [SYS_fb_map] = sys_framebuffer_map,
     [SYS_mouse_read] = sys_mouse_read,
     [SYS_pipe_open] = sys_pipe_open,
-    [SYS_kbd_read] = sys_kbd_read,
+    [SYS_kbd_read] = sys_keyboard_read,
     [SYS_pipe_poll] = sys_pipe_poll,
     [SYS_uptime_ms] = sys_uptime_ms,
     [SYS_dup2] = sys_dup2,
@@ -4503,16 +4503,16 @@ static const syscall_fn_t syscall_table[SYSCALL_COUNT] = {
     [SYS_yield] = sys_yield,
     [SYS_task_alive] = sys_task_alive,
     [SYS_pipe_reset] = sys_pipe_reset,
-    [SYS_kbd_modifiers] = sys_kbd_modifiers,
+    [SYS_kbd_modifiers] = sys_keyboard_modifiers,
     [SYS_clipboard_set] = sys_clipboard_set,
     [SYS_clipboard_get] = sys_clipboard_get,
     [SYS_writefile] = sys_writefile,
     [SYS_taskinfo] = sys_taskinfo,
     [SYS_shutdown] = sys_shutdown,
     [SYS_close] = sys_close,
-    [SYS_shm_free] = sys_shm_free,
+    [SYS_shm_free] = sys_shared_memory_free,
     [SYS_mkdir] = sys_mkdir,
-    [SYS_shm_unmap] = sys_shm_unmap,
+    [SYS_shm_unmap] = sys_shared_memory_unmap,
     [SYS_unlink] = sys_unlink,
     [SYS_rename] = sys_rename,
     [SYS_open] = sys_open,
@@ -4625,9 +4625,9 @@ static int syscall_touches_net(uint64_t num) {
     }
 }
 
-static long sys_sigreturn(uint64_t frame_ptr, uint64_t a2, uint64_t a3,
+static long sys_sigreturn(uint64_t frame_pointer, uint64_t a2, uint64_t a3,
                            uint64_t a4, uint64_t a5, uint64_t a6) {
-    (void)frame_ptr;
+    (void)frame_pointer;
     (void)a2;
     (void)a3;
     (void)a4;
@@ -4637,7 +4637,7 @@ static long sys_sigreturn(uint64_t frame_ptr, uint64_t a2, uint64_t a3,
 }
 
 static int signal_deliver(isr_regs_t *regs) {
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     uint32_t ready = self->sig_pending & ~self->sig_blocked;
     if (ready == 0) {
         return 0;
@@ -4688,10 +4688,10 @@ static int signal_deliver(isr_regs_t *regs) {
         sp -= sizeof(siginfo_t);
         sp &= ~15ULL;
     }
-    uint64_t info_addr = sp;
+    uint64_t info_address = sp;
     sp -= sizeof(sig_frame_t);
     sp &= ~15ULL;
-    uint64_t frame_addr = sp;
+    uint64_t frame_address = sp;
     uint64_t new_rsp = sp - 8;
 
     sig_frame_t frame;
@@ -4716,17 +4716,17 @@ static int signal_deliver(isr_regs_t *regs) {
     frame.saved_blocked = self->sig_blocked;
     frame.signo = (uint32_t)signo;
 
-    if (copy_to_user(frame_addr, &frame, sizeof(frame)) != 0) {
+    if (copy_to_user(frame_address, &frame, sizeof(frame)) != 0) {
         self->sig_pending &= ~(1u << signo);
         return 0;
     }
-    uint64_t ret_addr = self->sig_restorer;
-    if (copy_to_user(new_rsp, &ret_addr, sizeof(ret_addr)) != 0) {
+    uint64_t ret_address = self->sig_restorer;
+    if (copy_to_user(new_rsp, &ret_address, sizeof(ret_address)) != 0) {
         self->sig_pending &= ~(1u << signo);
         return 0;
     }
 
-    if (want_info && copy_to_user(info_addr, &info, sizeof(info)) != 0) {
+    if (want_info && copy_to_user(info_address, &info, sizeof(info)) != 0) {
         self->sig_pending &= ~(1u << signo);
         return 0;
     }
@@ -4737,14 +4737,14 @@ static int signal_deliver(isr_regs_t *regs) {
     regs->rsp = new_rsp;
     regs->rip = handler;
     regs->rdi = (uint64_t)signo;
-    regs->rsi = want_info ? info_addr : 0;
+    regs->rsi = want_info ? info_address : 0;
     regs->rdx = 0;
     regs->rax = 0;
     return 1;
 }
 
-int signal_deliver_fault(isr_regs_t *regs, int signo, uint64_t fault_addr) {
-    task_t *self = sched_current();
+int signal_deliver_fault(isr_regs_t *regs, int signo, uint64_t fault_address) {
+    task_t *self = scheduler_current();
     if (!self || (regs->cs & 3) != 3) {
         return 0;
     }
@@ -4758,19 +4758,19 @@ int signal_deliver_fault(isr_regs_t *regs, int signo, uint64_t fault_addr) {
     if (self->sig_blocked & (1u << signo)) {
         return 0;
     }
-    self->si_addr = fault_addr;
+    self->si_addr = fault_address;
     self->sig_pending |= (1u << signo);
     return signal_deliver(regs);
 }
 
 static int signal_return(isr_regs_t *regs) {
-    task_t *self = sched_current();
-    uint64_t frame_addr = regs->rdi;
+    task_t *self = scheduler_current();
+    uint64_t frame_address = regs->rdi;
     sig_frame_t frame;
     if ((regs->cs & 3) != 3) {
         return -1;
     }
-    if (copy_from_user(&frame, frame_addr, sizeof(frame)) != 0) {
+    if (copy_from_user(&frame, frame_address, sizeof(frame)) != 0) {
         return -1;
     }
     if (frame.rip < USER_REGION_BASE || frame.rip >= USER_REGION_LIMIT) {
@@ -4805,22 +4805,22 @@ static void syscall_dispatch(isr_regs_t *regs);
 
 void syscall_handler(isr_regs_t *regs) {
     uint64_t num = regs->rax;
-    int timing = syscount_timing_enabled();
+    int timing = syscall_counters_timing_enabled();
     uint64_t started = timing ? tsc_read() : 0;
 
     syscall_dispatch(regs);
 
-    syscount_record((int)num, timing ? (tsc_read() - started) : 0);
+    syscall_counters_record((int)num, timing ? (tsc_read() - started) : 0);
 }
 
 static void syscall_dispatch(isr_regs_t *regs) {
-    task_t *self = sched_current();
+    task_t *self = scheduler_current();
     if (self->pending_signal != 0) {
         int sig = self->pending_signal;
         self->pending_signal = 0;
         task_exit_with_code(128 + sig);
     }
-    sched_take_pending_stop_if_any(self);
+    scheduler_take_pending_stop_if_any(self);
 
     uint64_t num = regs->rax;
     if (num >= SYSCALL_COUNT) {

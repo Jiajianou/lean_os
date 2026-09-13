@@ -4,10 +4,10 @@
 
 #define FILEMAP_MAX_PAGES 8192
 
-uint64_t filemap_get(int handle, uint32_t index, int writable);
+uint64_t file_mapping_get(int handle, uint32_t index, int writable);
 
-void filemap_put(int handle, uint32_t index);
+void file_mapping_put(int handle, uint32_t index);
 
-void filemap_sync(int handle);
+void file_mapping_sync(int handle);
 
-int filemap_in_use(void);
+int file_mapping_in_use(void);

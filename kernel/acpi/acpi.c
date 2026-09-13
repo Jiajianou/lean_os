@@ -28,8 +28,8 @@ typedef struct __attribute__((packed)) {
     uint32_t creator_revision;
 } acpi_sdt_header_t;
 
-static int acpi_addr_readable(uint64_t phys, uint64_t len) {
-    return phys != 0 && vmm_identity_covers(phys, len);
+static int acpi_address_readable(uint64_t phys, uint64_t len) {
+    return phys != 0 && virtual_memory_identity_covers(phys, len);
 }
 
 static int sig_eq(const void *a, const char *b, int len) {
@@ -49,15 +49,15 @@ void acpi_set_rsdp(uint64_t phys) {
 }
 
 static const acpi_rsdp_t *find_rsdp(void) {
-    if (acpi_addr_readable(handoff_rsdp_phys, sizeof(acpi_rsdp_t)) &&
+    if (acpi_address_readable(handoff_rsdp_phys, sizeof(acpi_rsdp_t)) &&
         sig_eq((const void *)(uintptr_t)handoff_rsdp_phys, "RSD PTR ", 8)) {
         return (const acpi_rsdp_t *)(uintptr_t)handoff_rsdp_phys;
     }
 
     uint16_t ebda_seg = *(const uint16_t *)(uintptr_t)0x40EUL;
-    uint64_t ebda_addr = (uint64_t)ebda_seg << 4;
-    if (ebda_addr != 0) {
-        for (uint64_t addr = ebda_addr; addr < ebda_addr + 1024; addr += 16) {
+    uint64_t ebda_address = (uint64_t)ebda_seg << 4;
+    if (ebda_address != 0) {
+        for (uint64_t addr = ebda_address; addr < ebda_address + 1024; addr += 16) {
             if (sig_eq((const void *)(uintptr_t)addr, "RSD PTR ", 8)) {
                 return (const acpi_rsdp_t *)(uintptr_t)addr;
             }
@@ -72,7 +72,7 @@ static const acpi_rsdp_t *find_rsdp(void) {
 }
 
 static const acpi_sdt_header_t *table_at(uint64_t phys) {
-    if (!acpi_addr_readable(phys, sizeof(acpi_sdt_header_t))) {
+    if (!acpi_address_readable(phys, sizeof(acpi_sdt_header_t))) {
         return (const acpi_sdt_header_t *)0;
     }
     return (const acpi_sdt_header_t *)(uintptr_t)phys;
@@ -94,9 +94,9 @@ static const acpi_sdt_header_t *find_table(const char *sig) {
     for (int i = 0; i < entry_count; i++) {
         uint64_t table_phys = use_xsdt ? *(const uint64_t *)(entries + i * 8)
                                         : (uint64_t) * (const uint32_t *)(entries + i * 4);
-        const acpi_sdt_header_t *hdr = table_at(table_phys);
-        if (hdr && sig_eq(hdr->signature, sig, 4)) {
-            return hdr;
+        const acpi_sdt_header_t *header = table_at(table_phys);
+        if (header && sig_eq(header->signature, sig, 4)) {
+            return header;
         }
     }
     return (const acpi_sdt_header_t *)0;
@@ -115,25 +115,25 @@ static const acpi_sdt_header_t *find_table(const char *sig) {
 int acpi_find_power(acpi_power_info_t *out) {
     const acpi_sdt_header_t *fadt = find_table("FACP");
     if (!fadt) {
-        klog_puts("[acpi] no FADT found - power off/reset will use their fallback tiers.\n");
+        kernel_log_puts("[acpi] no FADT found - power off/reset will use their fallback tiers.\n");
         return 0;
     }
     const uint8_t *t = (const uint8_t *)fadt;
-    out->pm1a_cnt = 0;
-    out->pm1b_cnt = 0;
-    out->smi_cmd = 0;
+    out->pm1a_count = 0;
+    out->pm1b_count = 0;
+    out->smi_command = 0;
     out->acpi_enable = 0;
     out->reset_port = 0;
     out->reset_value = 0;
 
     if (fadt->length > FADT_PM1A_CNT_BLK + 4) {
-        out->pm1a_cnt = *(const uint32_t *)(t + FADT_PM1A_CNT_BLK);
+        out->pm1a_count = *(const uint32_t *)(t + FADT_PM1A_CNT_BLK);
     }
     if (fadt->length > FADT_PM1B_CNT_BLK + 4) {
-        out->pm1b_cnt = *(const uint32_t *)(t + FADT_PM1B_CNT_BLK);
+        out->pm1b_count = *(const uint32_t *)(t + FADT_PM1B_CNT_BLK);
     }
     if (fadt->length > FADT_ACPI_ENABLE) {
-        out->smi_cmd = *(const uint32_t *)(t + FADT_SMI_CMD);
+        out->smi_command = *(const uint32_t *)(t + FADT_SMI_CMD);
         out->acpi_enable = t[FADT_ACPI_ENABLE];
     }
     if (fadt->length > FADT_RESET_VALUE) {
@@ -147,13 +147,13 @@ int acpi_find_power(acpi_power_info_t *out) {
         }
     }
 
-    klog_puts("[acpi] FADT found: PM1a_CNT=0x");
-    klog_put_hex32(out->pm1a_cnt);
-    klog_puts(", PM1b_CNT=0x");
-    klog_put_hex32(out->pm1b_cnt);
-    klog_puts(", reset port=0x");
-    klog_put_hex32(out->reset_port);
-    klog_puts(".\n");
+    kernel_log_puts("[acpi] FADT found: PM1a_CNT=0x");
+    kernel_log_put_hex32(out->pm1a_count);
+    kernel_log_puts(", PM1b_CNT=0x");
+    kernel_log_put_hex32(out->pm1b_count);
+    kernel_log_puts(", reset port=0x");
+    kernel_log_put_hex32(out->reset_port);
+    kernel_log_puts(".\n");
     return 1;
 }
 
@@ -252,21 +252,21 @@ int acpi_find_s5(uint8_t *slp_a, uint8_t *slp_b) {
         }
         *slp_a = (uint8_t)(a & 0x07);
         *slp_b = (uint8_t)(b & 0x07);
-        klog_puts("[acpi] \\_S5 read from the DSDT: SLP_TYPa=0x");
-        klog_put_hex32(*slp_a);
-        klog_puts(", SLP_TYPb=0x");
-        klog_put_hex32(*slp_b);
-        klog_puts(" - no longer a guess.\n");
+        kernel_log_puts("[acpi] \\_S5 read from the DSDT: SLP_TYPa=0x");
+        kernel_log_put_hex32(*slp_a);
+        kernel_log_puts(", SLP_TYPb=0x");
+        kernel_log_put_hex32(*slp_b);
+        kernel_log_puts(" - no longer a guess.\n");
         return 1;
     }
-    klog_puts("[acpi] no readable \\_S5 in the DSDT - power off will try the well-known values.\n");
+    kernel_log_puts("[acpi] no readable \\_S5 in the DSDT - power off will try the well-known values.\n");
     return 0;
 }
 
 int acpi_find_madt(acpi_madt_info_t *out) {
     const acpi_sdt_header_t *madt = find_table("APIC");
     if (!madt) {
-        klog_puts("[acpi] no MADT (APIC table) found - continuing single-core.\n");
+        kernel_log_puts("[acpi] no MADT (APIC table) found - continuing single-core.\n");
         return 0;
     }
 
@@ -310,14 +310,14 @@ int acpi_find_madt(acpi_madt_info_t *out) {
         p += len;
     }
 
-    klog_puts("[acpi] MADT found: lapic_base=0x");
-    klog_put_hex64(out->lapic_base);
-    klog_puts(", ");
-    klog_put_hex32((uint32_t)out->cpu_count);
-    klog_puts(" enabled CPU(s), ");
-    klog_put_hex32((uint32_t)out->ioapic_count);
-    klog_puts(" I/O APIC(s), ");
-    klog_put_hex32((uint32_t)out->override_count);
-    klog_puts(" interrupt source override(s).\n");
+    kernel_log_puts("[acpi] MADT found: lapic_base=0x");
+    kernel_log_put_hex64(out->lapic_base);
+    kernel_log_puts(", ");
+    kernel_log_put_hex32((uint32_t)out->cpu_count);
+    kernel_log_puts(" enabled CPU(s), ");
+    kernel_log_put_hex32((uint32_t)out->ioapic_count);
+    kernel_log_puts(" I/O APIC(s), ");
+    kernel_log_put_hex32((uint32_t)out->override_count);
+    kernel_log_puts(" interrupt source override(s).\n");
     return 1;
 }

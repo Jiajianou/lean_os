@@ -8,7 +8,7 @@
 #include "architecture/x86_64/pic.h"
 #include "architecture/x86_64/symmetric_multiprocessing.h"
 #include "architecture/x86_64/timestamp_counter.h"
-#include "drivers/block.h"
+#include "drivers/block_device.h"
 #include "drivers/console.h"
 #include "drivers/cursor.h"
 #include "display.h"
@@ -91,7 +91,7 @@
     X(memtest)                       \
     X(fonttest)                      \
     X(compositor)                    \
-    X(wm_demo)                       \
+    X(window_manager_demo)                       \
     X(gui_clock)                     \
     X(gui_paint)                     \
     X(desktop_shell)                 \
@@ -101,10 +101,10 @@
     X(file_manager)                  \
     X(settings)                    \
     X(task_manager)                \
-    X(wm_stubborn)                 \
-    X(wm_zorder)                   \
-    X(wm_faulter)                  \
-    X(wm_crash)                    \
+    X(window_manager_stubborn)                 \
+    X(window_manager_zorder)                   \
+    X(window_manager_faulter)                  \
+    X(window_manager_crash)                    \
     X(badptr)                      \
     X(shutdown)                    \
     X(reboot)                      \
@@ -180,28 +180,28 @@ static long do_syscall4(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, uin
 
 static uint8_t *read_program(const char *path, size_t *out_size) {
     leanfs_stat_t st;
-    if (vfs_stat(path, &st) != 0 || st.is_dir || st.size == 0) {
+    if (virtual_file_system_stat(path, &st) != 0 || st.is_dir || st.size == 0) {
         panic("read_program: a program this kernel just seeded is missing or empty");
     }
     uint8_t *image = (uint8_t *)kmalloc(st.size);
     if (!image) {
         panic("read_program: out of memory reading a program back from disk");
     }
-    if (vfs_read(path, image, st.size) < 0) {
+    if (virtual_file_system_read(path, image, st.size) < 0) {
         panic("read_program: vfs_read failed on a program that stat succeeded on");
     }
     *out_size = st.size;
     return image;
 }
 
-static void klog_perf(const char *name, uint64_t value, const char *unit) {
-    klog_puts("[perf] ");
-    klog_puts(name);
-    klog_putc(' ');
-    klog_put_dec(value > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)value);
-    klog_putc(' ');
-    klog_puts(unit);
-    klog_putc('\n');
+static void kernel_log_perf(const char *name, uint64_t value, const char *unit) {
+    kernel_log_puts("[perf] ");
+    kernel_log_puts(name);
+    kernel_log_putc(' ');
+    kernel_log_put_dec(value > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)value);
+    kernel_log_putc(' ');
+    kernel_log_puts(unit);
+    kernel_log_putc('\n');
 }
 
 #define LATENCY_SAMPLES 16
@@ -218,7 +218,7 @@ static void latency_sort(uint64_t *a, int n) {
     }
 }
 
-static void klog_perf_distribution(const char *base, uint64_t *samples, int n) {
+static void kernel_log_perf_distribution(const char *base, uint64_t *samples, int n) {
     uint64_t good[LATENCY_SAMPLES];
     int k = 0;
     for (int i = 0; i < n && k < LATENCY_SAMPLES; i++) {
@@ -232,20 +232,20 @@ static void klog_perf_distribution(const char *base, uint64_t *samples, int n) {
     latency_sort(good, k);
 
     char name[64];
-    int base_len = 0;
-    while (base[base_len] && base_len < 40) {
-        name[base_len] = base[base_len];
-        base_len++;
+    int base_length = 0;
+    while (base[base_length] && base_length < 40) {
+        name[base_length] = base[base_length];
+        base_length++;
     }
     static const char *suffix[3] = {"_best_us", "_med_us", "_worst_us"};
     uint64_t value[3] = {good[0], good[k / 2], good[k - 1]};
     for (int s = 0; s < 3; s++) {
-        int m = base_len;
+        int m = base_length;
         for (int c = 0; suffix[s][c] && m < 62; c++) {
             name[m++] = suffix[s][c];
         }
         name[m] = '\0';
-        klog_perf(name, value[s], "us");
+        kernel_log_perf(name, value[s], "us");
     }
 }
 
@@ -276,17 +276,17 @@ static void selftest_reap(task_t *t) {
 
 #define SELFTEST_POLL_MS 10
 
-static int selftest_wait_until(int (*probe)(void *ctx), void *ctx, uint32_t timeout_ms,
+static int selftest_wait_until(int (*probe)(void *context), void *context, uint32_t timeout_ms,
                                 const char *what) {
     uint64_t deadline = pit_get_ticks() + (timeout_ms + 9) / 10;
     for (;;) {
-        if (probe(ctx)) {
+        if (probe(context)) {
             return 1;
         }
         if (pit_get_ticks() >= deadline) {
-            klog_puts("[selftest] timed out waiting for: ");
-            klog_puts(what);
-            klog_putc('\n');
+            kernel_log_puts("[selftest] timed out waiting for: ");
+            kernel_log_puts(what);
+            kernel_log_putc('\n');
             return 0;
         }
         pit_sleep_ms(SELFTEST_POLL_MS);
@@ -297,9 +297,9 @@ typedef struct {
     uint32_t x, y, expected;
 } pixel_probe_t;
 
-static int pixel_matches(void *ctx) {
-    pixel_probe_t *p = (pixel_probe_t *)ctx;
-    return fb_get_pixel(p->x, p->y) == p->expected;
+static int pixel_matches(void *context) {
+    pixel_probe_t *p = (pixel_probe_t *)context;
+    return framebuffer_get_pixel(p->x, p->y) == p->expected;
 }
 
 static int selftest_wait_for_pixel(uint32_t x, uint32_t y, uint32_t expected,
@@ -315,7 +315,7 @@ static uint32_t selftest_pixel_settled(uint32_t x, uint32_t y, uint32_t expected
     uint64_t deadline = pit_get_ticks() + (SELFTEST_PAINT_MS + 9) / 10;
     int agreed = 0;
     for (;;) {
-        if (fb_get_pixel(x, y) == expected) {
+        if (framebuffer_get_pixel(x, y) == expected) {
             if (++agreed >= 2) {
                 return expected;
             }
@@ -323,10 +323,10 @@ static uint32_t selftest_pixel_settled(uint32_t x, uint32_t y, uint32_t expected
             agreed = 0;
         }
         if (pit_get_ticks() >= deadline) {
-            klog_puts("[selftest] timed out waiting for: ");
-            klog_puts(what);
-            klog_putc('\n');
-            return fb_get_pixel(x, y);
+            kernel_log_puts("[selftest] timed out waiting for: ");
+            kernel_log_puts(what);
+            kernel_log_putc('\n');
+            return framebuffer_get_pixel(x, y);
         }
         pit_sleep_ms(SELFTEST_POLL_MS);
     }
@@ -338,7 +338,7 @@ static void selftest_title_counts(int until_bright, int *out_bright, int *out_di
         int bright = 0, dim = 0;
         for (int32_t ty = 82; ty < 98; ty++) {
             for (int32_t tx = 106; tx < 150; tx++) {
-                uint32_t c = fb_get_pixel(tx, ty);
+                uint32_t c = framebuffer_get_pixel(tx, ty);
                 if (c == 0x00F0F0F0u) {
                     bright++;
                 } else if (c == 0x009AA4B0u) {
@@ -349,7 +349,7 @@ static void selftest_title_counts(int until_bright, int *out_bright, int *out_di
         int found = until_bright ? bright : dim;
         if (found > 0 || pit_get_ticks() >= deadline) {
             if (found == 0) {
-                klog_puts("[selftest] timed out waiting for: the window title to be drawn\n");
+                kernel_log_puts("[selftest] timed out waiting for: the window title to be drawn\n");
             }
             *out_bright = bright;
             *out_dim = dim;
@@ -365,8 +365,8 @@ static void selftest_wait_for_compositor(void) {
 
 static int selftest_column_lit(uint32_t x, uint32_t bg) {
     int lit = 0;
-    for (uint32_t y = 240; y < fb_height(); y += 4) {
-        if (fb_get_pixel(x, y) != bg) {
+    for (uint32_t y = 240; y < framebuffer_height(); y += 4) {
+        if (framebuffer_get_pixel(x, y) != bg) {
             lit++;
         }
     }
@@ -424,7 +424,7 @@ static int selftest_term_top_lit(void) {
     int lit = 0;
     for (int32_t ty = 100; ty < 116; ty++) {
         for (int32_t tx = 100; tx < 660; tx++) {
-            if (fb_get_pixel((uint32_t)tx, (uint32_t)ty) == 0x00D0D0D0u) {
+            if (framebuffer_get_pixel((uint32_t)tx, (uint32_t)ty) == 0x00D0D0D0u) {
                 lit++;
             }
         }
@@ -459,26 +459,26 @@ static int selftest_term_top_settled(int differs_from, uint32_t timeout_ms) {
 }
 
 static int selftest_wait_for_animations_setting(int want, uint32_t timeout_ms) {
-    int sq_fds[2];
-    int sqr_fds[2];
-    if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_PIPE, (uint64_t)sq_fds, 0) != 0 ||
-        do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_RESP_PIPE, (uint64_t)sqr_fds, 0) != 0) {
+    int sq_file_descriptors[2];
+    int sqr_file_descriptors[2];
+    if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_PIPE, (uint64_t)sq_file_descriptors, 0) != 0 ||
+        do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_RESP_PIPE, (uint64_t)sqr_file_descriptors, 0) != 0) {
         return 0;
     }
     uint64_t deadline = pit_get_ticks() + (timeout_ms + 9) / 10;
     for (;;) {
-        do_syscall(SYS_pipe_reset, (uint64_t)sqr_fds[0], 0, 0);
+        do_syscall(SYS_pipe_reset, (uint64_t)sqr_file_descriptors[0], 0, 0);
         uint8_t ping = 1;
-        do_syscall(SYS_write, (uint64_t)sq_fds[1], (uint64_t)&ping, sizeof(ping));
+        do_syscall(SYS_write, (uint64_t)sq_file_descriptors[1], (uint64_t)&ping, sizeof(ping));
         pit_sleep_ms(SELFTEST_POLL_MS);
         wm_settings_request_t got;
         k_memset(&got, 0, sizeof(got));
-        if (do_syscall(SYS_read, (uint64_t)sqr_fds[0], (uint64_t)&got, sizeof(got)) == (long)sizeof(got) &&
+        if (do_syscall(SYS_read, (uint64_t)sqr_file_descriptors[0], (uint64_t)&got, sizeof(got)) == (long)sizeof(got) &&
             (int)(got.animations != 0) == (want != 0)) {
             return 1;
         }
         if (pit_get_ticks() >= deadline) {
-            klog_puts("[selftest] timed out waiting for: the compositor to take the animations setting\n");
+            kernel_log_puts("[selftest] timed out waiting for: the compositor to take the animations setting\n");
             return 0;
         }
         pit_sleep_ms(SELFTEST_POLL_MS);
@@ -490,13 +490,13 @@ static uint64_t selftest_input_to_photon_us(int32_t target_x, int32_t target_y,
     mouse_inject(-5000, -5000, 0, 0);
     pit_sleep_ms(120);
 
-    uint32_t before = fb_get_pixel((uint32_t)target_x + 2, (uint32_t)target_y + 2);
+    uint32_t before = framebuffer_get_pixel((uint32_t)target_x + 2, (uint32_t)target_y + 2);
 
     uint64_t deadline = pit_get_ticks() + (timeout_ms + 9) / 10;
     uint64_t t0 = tsc_read();
     mouse_inject(target_x, target_y, 0, 0);
     for (;;) {
-        if (fb_get_pixel((uint32_t)target_x + 2, (uint32_t)target_y + 2) != before) {
+        if (framebuffer_get_pixel((uint32_t)target_x + 2, (uint32_t)target_y + 2) != before) {
             return tsc_to_us(tsc_read() - t0);
         }
         if (pit_get_ticks() >= deadline) {
@@ -507,7 +507,7 @@ static uint64_t selftest_input_to_photon_us(int32_t target_x, int32_t target_y,
 }
 
 static char saved_user_settings[256];
-static int64_t saved_user_settings_len = -1;
+static int64_t saved_user_settings_length = -1;
 
 static const char SELFTEST_SETTINGS_CONF[] =
     "bg=0x001a1a2e\n"
@@ -522,29 +522,29 @@ static const char SELFTEST_SETTINGS_NO_ANIM[] =
     "animations=0x00000000\n";
 
 static void selftest_settings_install_defaults(void) {
-    saved_user_settings_len = vfs_read(PATH_SETTINGS, saved_user_settings, sizeof(saved_user_settings));
-    if (saved_user_settings_len > (int64_t)sizeof(saved_user_settings)) {
-        saved_user_settings_len = -1;
+    saved_user_settings_length = virtual_file_system_read(PATH_SETTINGS, saved_user_settings, sizeof(saved_user_settings));
+    if (saved_user_settings_length > (int64_t)sizeof(saved_user_settings)) {
+        saved_user_settings_length = -1;
     }
-    vfs_write(PATH_SETTINGS, SELFTEST_SETTINGS_CONF, sizeof(SELFTEST_SETTINGS_CONF) - 1);
+    virtual_file_system_write(PATH_SETTINGS, SELFTEST_SETTINGS_CONF, sizeof(SELFTEST_SETTINGS_CONF) - 1);
 }
 
 static void selftest_settings_restore(void) {
-    if (saved_user_settings_len >= 0) {
-        vfs_write(PATH_SETTINGS, saved_user_settings, (size_t)saved_user_settings_len);
+    if (saved_user_settings_length >= 0) {
+        virtual_file_system_write(PATH_SETTINGS, saved_user_settings, (size_t)saved_user_settings_length);
     } else {
-        vfs_write(PATH_SETTINGS, SELFTEST_SETTINGS_CONF, sizeof(SELFTEST_SETTINGS_CONF) - 1);
+        virtual_file_system_write(PATH_SETTINGS, SELFTEST_SETTINGS_CONF, sizeof(SELFTEST_SETTINGS_CONF) - 1);
     }
 }
 
 static void demo_task(void *arg) {
     const char *name = (const char *)arg;
     for (int i = 0; i < 5; i++) {
-        klog_puts("[task ");
-        klog_puts(name);
-        klog_puts("] iteration ");
-        klog_put_hex32((uint32_t)i);
-        klog_putc('\n');
+        kernel_log_puts("[task ");
+        kernel_log_puts(name);
+        kernel_log_puts("] iteration ");
+        kernel_log_put_hex32((uint32_t)i);
+        kernel_log_putc('\n');
 
         uint64_t target = pit_get_ticks() + 3;
         while (pit_get_ticks() < target) {
@@ -569,9 +569,9 @@ static void smp_probe_task(void *arg) {
 static void syscall_exit_task(void *arg) {
     (void)arg;
     long pid = do_syscall(SYS_getpid, 0, 0, 0);
-    klog_puts("[task C] getpid() via syscall = ");
-    klog_put_hex64((uint64_t)pid);
-    klog_puts(", exiting via SYS_exit...\n");
+    kernel_log_puts("[task C] getpid() via syscall = ");
+    kernel_log_put_hex64((uint64_t)pid);
+    kernel_log_puts(", exiting via SYS_exit...\n");
     do_syscall(SYS_exit, 0, 0, 0);
     panic("syscall_exit_task: resumed after SYS_exit");
 }
@@ -596,13 +596,13 @@ static void pipe_consumer_task(void *arg) {
         }
         total += (size_t)n;
     }
-    klog_puts("[pipe] consumer received ");
-    klog_put_hex64((uint64_t)total);
-    klog_puts(" bytes: \"");
+    kernel_log_puts("[pipe] consumer received ");
+    kernel_log_put_hex64((uint64_t)total);
+    kernel_log_puts(" bytes: \"");
     for (size_t i = 0; i < total; i++) {
-        klog_putc(buf[i]);
+        kernel_log_putc(buf[i]);
     }
-    klog_puts("\"\n");
+    kernel_log_puts("\"\n");
     buf[total] = '\0';
     if (total != 12 || k_strcmp(buf, "pingpingping") != 0) {
         panic("pipe self-test: consumer received unexpected data");
@@ -660,29 +660,29 @@ static void boot_selftests_desktop(void) {
             pit_sleep_ms(10);
             demo_status = do_syscall(SYS_task_alive, (uint64_t)demo_task->id, 0, 0);
         }
-        klog_puts("[wm_demo] connect+draw+exit took ");
-        klog_put_dec((uint32_t)((pit_get_ticks() - demo_t0) * (1000 / PIT_HZ)));
-        klog_puts(" ms\n");
+        kernel_log_puts("[wm_demo] connect+draw+exit took ");
+        kernel_log_put_dec((uint32_t)((pit_get_ticks() - demo_t0) * (1000 / PIT_HZ)));
+        kernel_log_puts(" ms\n");
         if (demo_status != 2) {
-            klog_puts("[wm_demo] SYS_task_alive = ");
-            klog_put_dec((uint32_t)(demo_status & 0xFF));
-            klog_puts(" (1=still running past the budget, 0=exited non-zero, 255=no such task)\n");
-            sched_debug_dump("wm_demo overran its budget");
+            kernel_log_puts("[wm_demo] SYS_task_alive = ");
+            kernel_log_put_dec((uint32_t)(demo_status & 0xFF));
+            kernel_log_puts(" (1=still running past the budget, 0=exited non-zero, 255=no such task)\n");
+            scheduler_debug_dump("wm_demo overran its budget");
             {
                 int probe[2];
                 if (do_syscall(SYS_pipe_open, (uint64_t)WM_REQUEST_PIPE, (uint64_t)probe, 0) == 0) {
-                    klog_puts("[wm_demo] WM_REQUEST_PIPE holds ");
-                    klog_put_dec((uint32_t)do_syscall(SYS_pipe_poll, (uint64_t)probe[0], 0, 0));
-                    klog_puts(" byte(s), a request is ");
-                    klog_put_dec((uint32_t)sizeof(wm_create_request_t));
-                    klog_putc('\n');
+                    kernel_log_puts("[wm_demo] WM_REQUEST_PIPE holds ");
+                    kernel_log_put_dec((uint32_t)do_syscall(SYS_pipe_poll, (uint64_t)probe[0], 0, 0));
+                    kernel_log_puts(" byte(s), a request is ");
+                    kernel_log_put_dec((uint32_t)sizeof(wm_create_request_t));
+                    kernel_log_putc('\n');
                 }
                 if (do_syscall(SYS_pipe_open, (uint64_t)WM_RESPONSE_PIPE, (uint64_t)probe, 0) == 0) {
-                    klog_puts("[wm_demo] WM_RESPONSE_PIPE holds ");
-                    klog_put_dec((uint32_t)do_syscall(SYS_pipe_poll, (uint64_t)probe[0], 0, 0));
-                    klog_puts(" byte(s), a response is ");
-                    klog_put_dec((uint32_t)sizeof(wm_create_response_t));
-                    klog_putc('\n');
+                    kernel_log_puts("[wm_demo] WM_RESPONSE_PIPE holds ");
+                    kernel_log_put_dec((uint32_t)do_syscall(SYS_pipe_poll, (uint64_t)probe[0], 0, 0));
+                    kernel_log_puts(" byte(s), a response is ");
+                    kernel_log_put_dec((uint32_t)sizeof(wm_create_response_t));
+                    kernel_log_putc('\n');
                 }
             }
             panic("wm_demo self-test: did not exit cleanly - window creation failed");
@@ -699,30 +699,30 @@ static void boot_selftests_desktop(void) {
         };
         uint32_t got[sizeof(checks) / sizeof(checks[0])];
         for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
-            got[i] = fb_get_pixel(checks[i].x, checks[i].y);
+            got[i] = framebuffer_get_pixel(checks[i].x, checks[i].y);
         }
 
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         int all_ok = 1;
         for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
             if (got[i] != checks[i].expected) {
-                klog_puts("[wm] pixel check failed: ");
-                klog_puts(checks[i].what);
-                klog_puts(" - expected 0x");
-                klog_put_hex32(checks[i].expected);
-                klog_puts(" got 0x");
-                klog_put_hex32(got[i]);
-                klog_putc('\n');
+                kernel_log_puts("[wm] pixel check failed: ");
+                kernel_log_puts(checks[i].what);
+                kernel_log_puts(" - expected 0x");
+                kernel_log_put_hex32(checks[i].expected);
+                kernel_log_puts(" got 0x");
+                kernel_log_put_hex32(got[i]);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
         if (!all_ok) {
             panic("compositor self-test: framebuffer content did not match");
         }
-        klog_puts("[wm] compositor + client self-test passed (5/5 pixel checks matched).\n\n");
+        kernel_log_puts("[wm] compositor + client self-test passed (5/5 pixel checks matched).\n\n");
     }
 
     {
@@ -764,32 +764,32 @@ static void boot_selftests_desktop(void) {
         };
         uint32_t got[sizeof(checks) / sizeof(checks[0])];
         for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
-            got[i] = fb_get_pixel(checks[i].x, checks[i].y);
+            got[i] = framebuffer_get_pixel(checks[i].x, checks[i].y);
         }
 
         selftest_reap(paint_task);
         selftest_reap(clock_task);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         int all_ok = 1;
         for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
             if (got[i] != checks[i].expected) {
-                klog_puts("[wm21] pixel check failed: ");
-                klog_puts(checks[i].what);
-                klog_puts(" - expected 0x");
-                klog_put_hex32(checks[i].expected);
-                klog_puts(" got 0x");
-                klog_put_hex32(got[i]);
-                klog_putc('\n');
+                kernel_log_puts("[wm21] pixel check failed: ");
+                kernel_log_puts(checks[i].what);
+                kernel_log_puts(" - expected 0x");
+                kernel_log_put_hex32(checks[i].expected);
+                kernel_log_puts(" got 0x");
+                kernel_log_put_hex32(got[i]);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
         if (!all_ok) {
             panic("M21 multi-window self-test: framebuffer content did not match");
         }
-        klog_puts("[wm21] multi-window compositor + focus-routing self-test passed "
+        kernel_log_puts("[wm21] multi-window compositor + focus-routing self-test passed "
                   "(12/12 pixel checks matched).\n\n");
     }
 
@@ -825,32 +825,32 @@ static void boot_selftests_desktop(void) {
         };
         uint32_t got[sizeof(checks) / sizeof(checks[0])];
         for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
-            got[i] = fb_get_pixel(checks[i].x, checks[i].y);
+            got[i] = framebuffer_get_pixel(checks[i].x, checks[i].y);
         }
 
         selftest_reap(clock_task);
         selftest_reap(shell_task);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         int all_ok = 1;
         for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
             if (got[i] != checks[i].expected) {
-                klog_puts("[wm22] pixel check failed: ");
-                klog_puts(checks[i].what);
-                klog_puts(" - expected 0x");
-                klog_put_hex32(checks[i].expected);
-                klog_puts(" got 0x");
-                klog_put_hex32(got[i]);
-                klog_putc('\n');
+                kernel_log_puts("[wm22] pixel check failed: ");
+                kernel_log_puts(checks[i].what);
+                kernel_log_puts(" - expected 0x");
+                kernel_log_put_hex32(checks[i].expected);
+                kernel_log_puts(" got 0x");
+                kernel_log_put_hex32(got[i]);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
         if (!all_ok) {
             panic("M22 desktop shell self-test: framebuffer content did not match");
         }
-        klog_puts("[wm22] desktop shell (panel + taskbar query, no launcher) self-test passed "
+        kernel_log_puts("[wm22] desktop shell (panel + taskbar query, no launcher) self-test passed "
                   "(5/5 pixel checks matched).\n\n");
     }
 
@@ -870,8 +870,8 @@ static void boot_selftests_desktop(void) {
         kfree(clock_image);
         pit_sleep_ms(500);
 
-        int action_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
+        int action_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
             panic("M30 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
 
@@ -883,87 +883,87 @@ static void boot_selftests_desktop(void) {
         req.window_id = 0;
 
         req.action = WM_ACTION_MAXIMIZE;
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         uint32_t after_maximize = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
                                                           desktop_bg, "the maximize to leave the home position");
 
         req.action = WM_ACTION_RESTORE;
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         uint32_t after_restore = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
                                                          clock_bg, "the restore to put the window back");
 
         req.action = WM_ACTION_TOGGLE_MINIMIZE;
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         uint32_t after_minimize = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
                                                           desktop_bg, "the minimize to clear the home position");
 
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         uint32_t after_unminimize = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
                                                             clock_bg, "the window to come back");
 
         req.action = WM_ACTION_CLOSE;
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         uint32_t after_close = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
                                                        desktop_bg, "the closed window's slot to be reclaimed");
         long clock_exit = do_syscall(SYS_wait, (uint64_t)clock_task->id, 0, 0);
 
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         int all_ok = 1;
         if (after_maximize != desktop_bg) {
-            klog_puts("[wm30] pixel check failed: after WM_ACTION_MAXIMIZE, home position should be empty desktop - expected 0x");
-            klog_put_hex32(desktop_bg);
-            klog_puts(" got 0x");
-            klog_put_hex32(after_maximize);
-            klog_putc('\n');
+            kernel_log_puts("[wm30] pixel check failed: after WM_ACTION_MAXIMIZE, home position should be empty desktop - expected 0x");
+            kernel_log_put_hex32(desktop_bg);
+            kernel_log_puts(" got 0x");
+            kernel_log_put_hex32(after_maximize);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (after_restore != clock_bg) {
-            klog_puts("[wm30] pixel check failed: after WM_ACTION_RESTORE, home position should show the window again - expected 0x");
-            klog_put_hex32(clock_bg);
-            klog_puts(" got 0x");
-            klog_put_hex32(after_restore);
-            klog_putc('\n');
+            kernel_log_puts("[wm30] pixel check failed: after WM_ACTION_RESTORE, home position should show the window again - expected 0x");
+            kernel_log_put_hex32(clock_bg);
+            kernel_log_puts(" got 0x");
+            kernel_log_put_hex32(after_restore);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (after_minimize != desktop_bg) {
-            klog_puts("[wm30] pixel check failed: after WM_ACTION_TOGGLE_MINIMIZE, home position should be empty desktop - expected 0x");
-            klog_put_hex32(desktop_bg);
-            klog_puts(" got 0x");
-            klog_put_hex32(after_minimize);
-            klog_putc('\n');
+            kernel_log_puts("[wm30] pixel check failed: after WM_ACTION_TOGGLE_MINIMIZE, home position should be empty desktop - expected 0x");
+            kernel_log_put_hex32(desktop_bg);
+            kernel_log_puts(" got 0x");
+            kernel_log_put_hex32(after_minimize);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (after_unminimize != clock_bg) {
-            klog_puts("[wm30] pixel check failed: after toggling minimize back off, home position should show the window again - expected 0x");
-            klog_put_hex32(clock_bg);
-            klog_puts(" got 0x");
-            klog_put_hex32(after_unminimize);
-            klog_putc('\n');
+            kernel_log_puts("[wm30] pixel check failed: after toggling minimize back off, home position should show the window again - expected 0x");
+            kernel_log_put_hex32(clock_bg);
+            kernel_log_puts(" got 0x");
+            kernel_log_put_hex32(after_unminimize);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (after_close != desktop_bg) {
-            klog_puts("[wm30] pixel check failed: after WM_ACTION_CLOSE, home position should be empty desktop (window slot reclaimed) - expected 0x");
-            klog_put_hex32(desktop_bg);
-            klog_puts(" got 0x");
-            klog_put_hex32(after_close);
-            klog_putc('\n');
+            kernel_log_puts("[wm30] pixel check failed: after WM_ACTION_CLOSE, home position should be empty desktop (window slot reclaimed) - expected 0x");
+            kernel_log_put_hex32(desktop_bg);
+            kernel_log_puts(" got 0x");
+            kernel_log_put_hex32(after_close);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (clock_exit != 128 + SIGTERM) {
-            klog_puts("[wm30] WM_ACTION_CLOSE self-test: gui_clock's exit code did not match a SIGTERM death - expected 0x");
-            klog_put_hex32((uint32_t)(128 + SIGTERM));
-            klog_puts(" got 0x");
-            klog_put_hex32((uint32_t)clock_exit);
-            klog_putc('\n');
+            kernel_log_puts("[wm30] WM_ACTION_CLOSE self-test: gui_clock's exit code did not match a SIGTERM death - expected 0x");
+            kernel_log_put_hex32((uint32_t)(128 + SIGTERM));
+            kernel_log_puts(" got 0x");
+            kernel_log_put_hex32((uint32_t)clock_exit);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (!all_ok) {
             panic("M30 window chrome self-test: maximize/restore/minimize/close did not behave as expected");
         }
-        klog_puts("[wm30] window chrome (maximize/restore/minimize/close via WM_ACTION_PIPE) self-test passed (6/6 checks matched).\n\n");
+        kernel_log_puts("[wm30] window chrome (maximize/restore/minimize/close via WM_ACTION_PIPE) self-test passed (6/6 checks matched).\n\n");
     }
 
     {
@@ -980,7 +980,7 @@ static void boot_selftests_desktop(void) {
         if (mismatch) {
             panic("M32 clipboard self-test: SYS_clipboard_get did not return what SYS_clipboard_set stored");
         }
-        klog_puts("[clipboard] SYS_clipboard_set/get self-test passed.\n\n");
+        kernel_log_puts("[clipboard] SYS_clipboard_set/get self-test passed.\n\n");
     }
 
     {
@@ -1000,42 +1000,42 @@ static void boot_selftests_desktop(void) {
         if (mismatch) {
             panic("M33 self-test: SYS_writefile/SYS_readfile round trip mismatch");
         }
-        klog_puts("[vfs] SYS_writefile/SYS_readfile self-test passed.\n\n");
+        kernel_log_puts("[vfs] SYS_writefile/SYS_readfile self-test passed.\n\n");
 
     {
         const char *FDT = PATH_TMP_DIR "fdcycle";
-        int fd_ok = 1;
+        int file_descriptor_ok = 1;
         for (int round = 0; round < 2; round++) {
             long saved = do_syscall(SYS_dup2, 1, 9, 0);
             long fd = do_syscall(SYS_open, (uint64_t)FDT,
                                   round == 0 ? (OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE)
                                              : (OPEN_WRITE | OPEN_CREATE | OPEN_APPEND), 0);
             if (saved < 0 || fd < 0 || fd == saved) {
-                fd_ok = 0;
+                file_descriptor_ok = 0;
                 break;
             }
             do_syscall(SYS_dup2, (uint64_t)fd, 1, 0);
             if (do_syscall(SYS_write, 1, (uint64_t)(round == 0 ? "AAAA\n" : "BBBB\n"), 5) != 5) {
-                fd_ok = 0;
+                file_descriptor_ok = 0;
             }
             do_syscall(SYS_dup2, (uint64_t)saved, 1, 0);
             do_syscall(SYS_close, (uint64_t)saved, 0, 0);
             do_syscall(SYS_close, (uint64_t)fd, 0, 0);
         }
-        static char fdt_buf[64];
-        k_memset(fdt_buf, 0, sizeof(fdt_buf));
-        int64_t fdt_n = vfs_read(FDT, fdt_buf, sizeof(fdt_buf) - 1);
-        if (fdt_n != 10 || k_strcmp(fdt_buf, "AAAA\nBBBB\n") != 0) {
-            klog_puts("[fd] a second redirect in one process did not reach its file - got ");
-            klog_put_dec((uint32_t)(fdt_n < 0 ? 0 : fdt_n));
-            klog_puts(" byte(s)\n");
-            fd_ok = 0;
+        static char fdt_buffer[64];
+        k_memset(fdt_buffer, 0, sizeof(fdt_buffer));
+        int64_t fdt_n = virtual_file_system_read(FDT, fdt_buffer, sizeof(fdt_buffer) - 1);
+        if (fdt_n != 10 || k_strcmp(fdt_buffer, "AAAA\nBBBB\n") != 0) {
+            kernel_log_puts("[fd] a second redirect in one process did not reach its file - got ");
+            kernel_log_put_dec((uint32_t)(fdt_n < 0 ? 0 : fdt_n));
+            kernel_log_puts(" byte(s)\n");
+            file_descriptor_ok = 0;
         }
         do_syscall(SYS_unlink, (uint64_t)FDT, 0, 0);
-        if (!fd_ok) {
+        if (!file_descriptor_ok) {
             panic("fd self-test: the dup2 redirect cycle does not survive being repeated");
         }
-        klog_puts("[fd] the redirect cycle (park stdout, point fd 1 at a file, write, restore) "
+        kernel_log_puts("[fd] the redirect cycle (park stdout, point fd 1 at a file, write, restore) "
                    "survives being done twice, and both rounds' bytes are in the file - "
                    "self-test passed.\n\n");
     }
@@ -1049,8 +1049,8 @@ static void boot_selftests_desktop(void) {
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        int settings_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_fds, 0) != 0) {
+        int settings_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_file_descriptors, 0) != 0) {
             panic("M33 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
         }
         wm_settings_request_t req;
@@ -1059,23 +1059,23 @@ static void boot_selftests_desktop(void) {
         req.wallpaper = 0;
         req.bg_color = 0x00123456u;
         req.accent_color = 0;
-        do_syscall(SYS_write, (uint64_t)settings_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)settings_file_descriptors[1], (uint64_t)&req, sizeof(req));
         pit_sleep_ms(300);
-        uint32_t got = fb_get_pixel(500, 500);
+        uint32_t got = framebuffer_get_pixel(500, 500);
 
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         if (got != req.bg_color) {
-            klog_puts("[settings] pixel check failed: desktop background did not change - expected 0x");
-            klog_put_hex32(req.bg_color);
-            klog_puts(" got 0x");
-            klog_put_hex32(got);
-            klog_putc('\n');
+            kernel_log_puts("[settings] pixel check failed: desktop background did not change - expected 0x");
+            kernel_log_put_hex32(req.bg_color);
+            kernel_log_puts(" got 0x");
+            kernel_log_put_hex32(got);
+            kernel_log_putc('\n');
             panic("M33 settings self-test: WM_SETTINGS_PIPE did not change the desktop background color");
         }
-        klog_puts("[settings] WM_SETTINGS_PIPE background-color self-test passed.\n\n");
+        kernel_log_puts("[settings] WM_SETTINGS_PIPE background-color self-test passed.\n\n");
     }
 
     {
@@ -1094,8 +1094,8 @@ static void boot_selftests_desktop(void) {
         kfree(editor_image);
         pit_sleep_ms(500);
 
-        int action_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
+        int action_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
             panic("M36 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
 
@@ -1103,47 +1103,47 @@ static void boot_selftests_desktop(void) {
         const uint32_t editor_bg = 0x00141414u;
         const uint32_t desktop_bg = 0x001A1A2Eu;
 
-        uint32_t before_close = fb_get_pixel((uint32_t)probe_x, (uint32_t)probe_y);
+        uint32_t before_close = framebuffer_get_pixel((uint32_t)probe_x, (uint32_t)probe_y);
 
         wm_action_request_t req;
         req.window_id = 0;
         req.action = WM_ACTION_CLOSE;
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         uint32_t after_close = selftest_pixel_settled((uint32_t)probe_x, (uint32_t)probe_y,
                                                        desktop_bg, "the editor's window to go away");
         long editor_exit = do_syscall(SYS_wait, (uint64_t)editor_task->id, 0, 0);
 
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         int all_ok = 1;
         if (before_close != editor_bg) {
-            klog_puts("[wm36] pixel check failed: before close, probe point should show text_editor's own background - expected 0x");
-            klog_put_hex32(editor_bg);
-            klog_puts(" got 0x");
-            klog_put_hex32(before_close);
-            klog_putc('\n');
+            kernel_log_puts("[wm36] pixel check failed: before close, probe point should show text_editor's own background - expected 0x");
+            kernel_log_put_hex32(editor_bg);
+            kernel_log_puts(" got 0x");
+            kernel_log_put_hex32(before_close);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (after_close != desktop_bg) {
-            klog_puts("[wm36] pixel check failed: after close, window slot should be reclaimed (empty desktop) - expected 0x");
-            klog_put_hex32(desktop_bg);
-            klog_puts(" got 0x");
-            klog_put_hex32(after_close);
-            klog_putc('\n');
+            kernel_log_puts("[wm36] pixel check failed: after close, window slot should be reclaimed (empty desktop) - expected 0x");
+            kernel_log_put_hex32(desktop_bg);
+            kernel_log_puts(" got 0x");
+            kernel_log_put_hex32(after_close);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (editor_exit != 1) {
-            klog_puts("[wm36] WM_EVENT_CLOSE_REQUEST self-test: text_editor's exit code did not match its own sys_exit(1) - expected 0x1 got 0x");
-            klog_put_hex32((uint32_t)editor_exit);
-            klog_putc('\n');
+            kernel_log_puts("[wm36] WM_EVENT_CLOSE_REQUEST self-test: text_editor's exit code did not match its own sys_exit(1) - expected 0x1 got 0x");
+            kernel_log_put_hex32((uint32_t)editor_exit);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (!all_ok) {
             panic("M36 close-request self-test: WM_EVENT_CLOSE_REQUEST did not behave as expected");
         }
-        klog_puts("[wm36] confirm_close opt-in (WM_EVENT_CLOSE_REQUEST via WM_ACTION_PIPE) self-test passed (3/3 checks matched).\n\n");
+        kernel_log_puts("[wm36] confirm_close opt-in (WM_EVENT_CLOSE_REQUEST via WM_ACTION_PIPE) self-test passed (3/3 checks matched).\n\n");
     }
 
     {
@@ -1166,8 +1166,8 @@ static void boot_selftests_desktop(void) {
         uint32_t shadow_pixel = selftest_pixel_settled(304, 150, expected_shadow,
                                                         "the window's drop shadow to be drawn");
 
-        int settings_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_fds, 0) != 0) {
+        int settings_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_file_descriptors, 0) != 0) {
             panic("M38 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
         }
         wm_settings_request_t req;
@@ -1176,36 +1176,36 @@ static void boot_selftests_desktop(void) {
         req.wallpaper = 0;
         req.bg_color = 0x001A1A2Eu;
         req.accent_color = 0x00AA5500u;
-        do_syscall(SYS_write, (uint64_t)settings_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)settings_file_descriptors[1], (uint64_t)&req, sizeof(req));
         pit_sleep_ms(300);
-        uint32_t titlebar_pixel = fb_get_pixel(200, 88);
+        uint32_t titlebar_pixel = framebuffer_get_pixel(200, 88);
 
         selftest_reap(clock_task);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         int all_ok = 1;
         if (shadow_pixel != expected_shadow) {
-            klog_puts("[wm38] pixel check failed: drop-shadow blend did not match - expected 0x");
-            klog_put_hex32(expected_shadow);
-            klog_puts(" got 0x");
-            klog_put_hex32(shadow_pixel);
-            klog_putc('\n');
+            kernel_log_puts("[wm38] pixel check failed: drop-shadow blend did not match - expected 0x");
+            kernel_log_put_hex32(expected_shadow);
+            kernel_log_puts(" got 0x");
+            kernel_log_put_hex32(shadow_pixel);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (titlebar_pixel != req.accent_color) {
-            klog_puts("[wm38] pixel check failed: focused titlebar did not pick up the new accent color - expected 0x");
-            klog_put_hex32(req.accent_color);
-            klog_puts(" got 0x");
-            klog_put_hex32(titlebar_pixel);
-            klog_putc('\n');
+            kernel_log_puts("[wm38] pixel check failed: focused titlebar did not pick up the new accent color - expected 0x");
+            kernel_log_put_hex32(req.accent_color);
+            kernel_log_puts(" got 0x");
+            kernel_log_put_hex32(titlebar_pixel);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (!all_ok) {
             panic("M38 visual-polish self-test: drop shadow and/or accent color did not behave as expected");
         }
-        klog_puts("[wm38] drop shadow + WM_SETTINGS_PIPE accent-color self-test passed (2/2 checks matched).\n\n");
+        kernel_log_puts("[wm38] drop shadow + WM_SETTINGS_PIPE accent-color self-test passed (2/2 checks matched).\n\n");
     }
 }
 
@@ -1213,7 +1213,7 @@ static void boot_selftests_desktop(void) {
 #define MANIFEST_MAX    1024u
 #define MANIFEST_DEPTH  48
 
-static int manifest_num(const char *text, const char *key, uint64_t *out) {
+static int manifest_number(const char *text, const char *key, uint64_t *out) {
     char needle[32];
     needle[0] = '\n';
     k_strlcpy(needle + 1, key, sizeof(needle) - 3);
@@ -1241,12 +1241,12 @@ static int manifest_num(const char *text, const char *key, uint64_t *out) {
 typedef struct {
     int      handle;
     uint32_t cookie;
-    uint32_t path_len;
+    uint32_t path_length;
 } manifest_frame_t;
 
 static void selftest_image_manifest(void) {
-    if (!vfs_exists(MANIFEST_PATH)) {
-        klog_puts("[m93] no " MANIFEST_PATH " on this disk - nothing was built into this "
+    if (!virtual_file_system_exists(MANIFEST_PATH)) {
+        kernel_log_puts("[m93] no " MANIFEST_PATH " on this disk - nothing was built into this "
                   "image by a host tool, so the image-manifest check does not apply to "
                   "this boot.\n\n");
         return;
@@ -1263,7 +1263,7 @@ static void selftest_image_manifest(void) {
         panic("M93 image-manifest self-test: out of memory before it could start");
     }
 
-    int64_t got = vfs_read(MANIFEST_PATH, text, MANIFEST_MAX - 1);
+    int64_t got = virtual_file_system_read(MANIFEST_PATH, text, MANIFEST_MAX - 1);
     if (got <= 0 || (uint64_t)got >= MANIFEST_MAX - 1) {
         panic("M93 image-manifest self-test: " MANIFEST_PATH " is unreadable or too large");
     }
@@ -1274,57 +1274,57 @@ static void selftest_image_manifest(void) {
         panic("M93 image-manifest self-test: the manifest names no tree");
     }
     tree_at += 6;
-    size_t tree_len = 0;
-    while (tree_at[tree_len] && tree_at[tree_len] != '\n') {
-        tree_len++;
+    size_t tree_length = 0;
+    while (tree_at[tree_length] && tree_at[tree_length] != '\n') {
+        tree_length++;
     }
-    if (tree_len == 0 || tree_len >= LEANFS_MAX_PATH) {
+    if (tree_length == 0 || tree_length >= LEANFS_MAX_PATH) {
         panic("M93 image-manifest self-test: the manifest's tree path is unusable");
     }
-    k_memcpy(path, tree_at, tree_len);
-    path[tree_len] = '\0';
+    k_memcpy(path, tree_at, tree_length);
+    path[tree_length] = '\0';
 
     uint64_t want_dirs = 0, want_names = 0, want_links = 0;
     uint64_t want_bytes = 0, want_depth = 0, want_hash = 0;
-    if (!manifest_num(text, "dirs", &want_dirs) ||
-        !manifest_num(text, "names", &want_names) ||
-        !manifest_num(text, "links", &want_links) ||
-        !manifest_num(text, "bytes", &want_bytes) ||
-        !manifest_num(text, "depth", &want_depth) ||
-        !manifest_num(text, "hash", &want_hash)) {
+    if (!manifest_number(text, "dirs", &want_dirs) ||
+        !manifest_number(text, "names", &want_names) ||
+        !manifest_number(text, "links", &want_links) ||
+        !manifest_number(text, "bytes", &want_bytes) ||
+        !manifest_number(text, "depth", &want_depth) ||
+        !manifest_number(text, "hash", &want_hash)) {
         panic("M93 image-manifest self-test: the manifest is missing a field this build needs");
     }
 
-    uint32_t root_len = (uint32_t)tree_len;
-    if (root_len == 1) {
-        root_len = 0;
+    uint32_t root_length = (uint32_t)tree_length;
+    if (root_length == 1) {
+        root_length = 0;
     }
 
     uint64_t dirs = 0, names = 0, links = 0, bytes = 0;
     uint32_t deepest = 0, hash = 0;
     int depth = 0;
 
-    int root = vfs_dir_open(path);
+    int root = virtual_file_system_directory_open(path);
     if (root < 0) {
         panic("M93 image-manifest self-test: the tree the manifest names is not a directory");
     }
     stack[0].handle = root;
     stack[0].cookie = 0;
-    stack[0].path_len = (uint32_t)tree_len;
+    stack[0].path_length = (uint32_t)tree_length;
     depth = 1;
     dirs = 1;
 
     while (depth > 0) {
         manifest_frame_t *f = &stack[depth - 1];
-        path[f->path_len] = '\0';
+        path[f->path_length] = '\0';
 
-        leanfs_dir_entry_t entry;
-        if (vfs_readdir_at(f->handle, &f->cookie, &entry) != 1) {
+        leanfs_directory_entry_t entry;
+        if (virtual_file_system_readdir_at(f->handle, &f->cookie, &entry) != 1) {
             depth--;
             continue;
         }
 
-        uint32_t at = f->path_len;
+        uint32_t at = f->path_length;
         if (at + 1 + k_strlen(entry.name) >= LEANFS_MAX_PATH) {
             panic("M93 image-manifest self-test: a path in this tree is longer than PATH_MAX");
         }
@@ -1334,7 +1334,7 @@ static void selftest_image_manifest(void) {
         path[at] = '\0';
 
         leanfs_stat_t st;
-        if (vfs_lstat(path, &st) != 0) {
+        if (virtual_file_system_lstat(path, &st) != 0) {
             panic("M93 image-manifest self-test: a name in this tree does not resolve");
         }
 
@@ -1343,13 +1343,13 @@ static void selftest_image_manifest(void) {
             if (depth >= MANIFEST_DEPTH) {
                 panic("M93 image-manifest self-test: this tree is deeper than the walk allows");
             }
-            int h = vfs_dir_open(path);
+            int h = virtual_file_system_directory_open(path);
             if (h < 0) {
                 panic("M93 image-manifest self-test: a directory in this tree would not open");
             }
             stack[depth].handle = h;
             stack[depth].cookie = 0;
-            stack[depth].path_len = at;
+            stack[depth].path_length = at;
             depth++;
             if ((uint32_t)depth > deepest) {
                 deepest = (uint32_t)depth;
@@ -1357,11 +1357,11 @@ static void selftest_image_manifest(void) {
             continue;
         }
 
-        const char *rel = path + root_len + 1;
+        const char *rel = path + root_length + 1;
         uint32_t h = leanfs_fnv1a(LEANFS_FNV1A_INIT, rel, k_strlen(rel));
 
         if (st.is_link) {
-            int64_t n = vfs_readlink(path, (char *)buf, LEANFS_BLOCK_SIZE * 8);
+            int64_t n = virtual_file_system_readlink(path, (char *)buf, LEANFS_BLOCK_SIZE * 8);
             if (n < 0) {
                 panic("M93 image-manifest self-test: a symlink in this tree would not read");
             }
@@ -1370,7 +1370,7 @@ static void selftest_image_manifest(void) {
             continue;
         }
 
-        int fh = vfs_open(path, 0);
+        int fh = virtual_file_system_open(path, 0);
         if (fh < 0) {
             panic("M93 image-manifest self-test: a file in this tree would not open");
         }
@@ -1380,7 +1380,7 @@ static void selftest_image_manifest(void) {
             if (chunk > LEANFS_BLOCK_SIZE * 8) {
                 chunk = LEANFS_BLOCK_SIZE * 8;
             }
-            int64_t n = vfs_handle_read(fh, buf, chunk, off);
+            int64_t n = virtual_file_system_handle_read(fh, buf, chunk, off);
             if (n != (int64_t)chunk) {
                 panic("M93 image-manifest self-test: a file in this tree read short");
             }
@@ -1396,38 +1396,38 @@ static void selftest_image_manifest(void) {
                  bytes == want_bytes && (uint64_t)deepest == want_depth &&
                  (uint64_t)hash == want_hash);
     if (!agree) {
-        klog_puts("[m93] the tree on this disk is not the tree the host wrote. want/got: dirs ");
-        klog_put_dec((uint32_t)want_dirs);
-        klog_puts("/");
-        klog_put_dec((uint32_t)dirs);
-        klog_puts(", names ");
-        klog_put_dec((uint32_t)want_names);
-        klog_puts("/");
-        klog_put_dec((uint32_t)names);
-        klog_puts(", links ");
-        klog_put_dec((uint32_t)want_links);
-        klog_puts("/");
-        klog_put_dec((uint32_t)links);
-        klog_puts(", bytes ");
-        klog_put_dec((uint32_t)want_bytes);
-        klog_puts("/");
-        klog_put_dec((uint32_t)bytes);
-        klog_puts(", depth ");
-        klog_put_dec((uint32_t)want_depth);
-        klog_puts("/");
-        klog_put_dec(deepest);
-        klog_puts(", hash 0x");
-        klog_put_hex32((uint32_t)want_hash);
-        klog_puts("/0x");
-        klog_put_hex32(hash);
-        klog_puts("\n");
+        kernel_log_puts("[m93] the tree on this disk is not the tree the host wrote. want/got: dirs ");
+        kernel_log_put_dec((uint32_t)want_dirs);
+        kernel_log_puts("/");
+        kernel_log_put_dec((uint32_t)dirs);
+        kernel_log_puts(", names ");
+        kernel_log_put_dec((uint32_t)want_names);
+        kernel_log_puts("/");
+        kernel_log_put_dec((uint32_t)names);
+        kernel_log_puts(", links ");
+        kernel_log_put_dec((uint32_t)want_links);
+        kernel_log_puts("/");
+        kernel_log_put_dec((uint32_t)links);
+        kernel_log_puts(", bytes ");
+        kernel_log_put_dec((uint32_t)want_bytes);
+        kernel_log_puts("/");
+        kernel_log_put_dec((uint32_t)bytes);
+        kernel_log_puts(", depth ");
+        kernel_log_put_dec((uint32_t)want_depth);
+        kernel_log_puts("/");
+        kernel_log_put_dec(deepest);
+        kernel_log_puts(", hash 0x");
+        kernel_log_put_hex32((uint32_t)want_hash);
+        kernel_log_puts("/0x");
+        kernel_log_put_hex32(hash);
+        kernel_log_puts("\n");
         panic("M93 image-manifest self-test: this image is not what the host built");
     }
 
     uint32_t took_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms;
 
     uint32_t check_started = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
-    vfs_check();
+    virtual_file_system_check();
     uint32_t check_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - check_started;
 
     kfree(stack);
@@ -1435,29 +1435,29 @@ static void selftest_image_manifest(void) {
     kfree(path);
     kfree(text);
 
-    klog_puts("[m93] a tree a host tool built into this image, read back from inside the "
+    kernel_log_puts("[m93] a tree a host tool built into this image, read back from inside the "
               "machine: ");
-    klog_put_dec((uint32_t)names);
-    klog_puts(" file names in ");
-    klog_put_dec((uint32_t)dirs);
-    klog_puts(" directories, ");
-    klog_put_dec((uint32_t)links);
-    klog_puts(" symlinks, ");
-    klog_put_dec((uint32_t)bytes);
-    klog_puts(" bytes, ");
-    klog_put_dec(deepest);
-    klog_puts(" deep, and every byte of it hashing to the 0x");
-    klog_put_hex32(hash);
-    klog_puts(" the host wrote down - image-manifest self-test passed (");
-    klog_put_dec(took_ms);
-    klog_puts(" ms).\n");
-    klog_puts("[m93] full-scan mount check (leanfs_check) over this filesystem: ");
-    klog_put_dec(check_ms);
-    klog_puts(" ms, with ");
-    klog_put_dec((uint32_t)names);
-    klog_puts(" file names in the tree and ");
-    klog_put_dec(vfs_free_blocks());
-    klog_puts(" data blocks still free - the journal measurement M71 and M81 both "
+    kernel_log_put_dec((uint32_t)names);
+    kernel_log_puts(" file names in ");
+    kernel_log_put_dec((uint32_t)dirs);
+    kernel_log_puts(" directories, ");
+    kernel_log_put_dec((uint32_t)links);
+    kernel_log_puts(" symlinks, ");
+    kernel_log_put_dec((uint32_t)bytes);
+    kernel_log_puts(" bytes, ");
+    kernel_log_put_dec(deepest);
+    kernel_log_puts(" deep, and every byte of it hashing to the 0x");
+    kernel_log_put_hex32(hash);
+    kernel_log_puts(" the host wrote down - image-manifest self-test passed (");
+    kernel_log_put_dec(took_ms);
+    kernel_log_puts(" ms).\n");
+    kernel_log_puts("[m93] full-scan mount check (leanfs_check) over this filesystem: ");
+    kernel_log_put_dec(check_ms);
+    kernel_log_puts(" ms, with ");
+    kernel_log_put_dec((uint32_t)names);
+    kernel_log_puts(" file names in the tree and ");
+    kernel_log_put_dec(virtual_file_system_free_blocks());
+    kernel_log_puts(" data blocks still free - the journal measurement M71 and M81 both "
               "deferred, reported rather than graded.\n\n");
 }
 
@@ -1505,16 +1505,16 @@ static uint64_t smp_bench_round(int k) {
     }
     uint64_t t1 = tsc_read();
     for (int i = 0; i < k; i++) {
-        task_t *t = sched_task_by_id(ids[i]);
+        task_t *t = scheduler_task_by_id(ids[i]);
         uint64_t rd = pit_get_ticks() + 1000;
         while (t && t->state != TASK_TERMINATED) {
             if (pit_get_ticks() > rd) {
                 panic("M106 self-test: a finished benchmark worker never terminated");
             }
             pit_sleep_ms(1);
-            t = sched_task_by_id(ids[i]);
+            t = scheduler_task_by_id(ids[i]);
         }
-        sched_reap_slot(t);
+        scheduler_reap_slot(t);
     }
     return tsc_to_us(t1 - t0);
 }
@@ -1533,20 +1533,20 @@ static void selftest_profile(void) {
     profile_stop();
 
     prof_stats_t st;
-    profile_get_stats(&st);
-    klog_puts("[m101] profile: samples=");
-    klog_put_dec((uint32_t)st.samples);
-    klog_puts(" kernel=");
-    klog_put_dec((uint32_t)st.kernel);
-    klog_puts(" user=");
-    klog_put_dec((uint32_t)st.user);
-    klog_puts(" idle=");
-    klog_put_dec((uint32_t)st.idle);
-    klog_puts(" distinct=");
-    klog_put_dec((uint32_t)st.distinct);
-    klog_puts(" overflow=");
-    klog_put_dec((uint32_t)st.overflow);
-    klog_putc('\n');
+    profile_get_statistics(&st);
+    kernel_log_puts("[m101] profile: samples=");
+    kernel_log_put_dec((uint32_t)st.samples);
+    kernel_log_puts(" kernel=");
+    kernel_log_put_dec((uint32_t)st.kernel);
+    kernel_log_puts(" user=");
+    kernel_log_put_dec((uint32_t)st.user);
+    kernel_log_puts(" idle=");
+    kernel_log_put_dec((uint32_t)st.idle);
+    kernel_log_puts(" distinct=");
+    kernel_log_put_dec((uint32_t)st.distinct);
+    kernel_log_puts(" overflow=");
+    kernel_log_put_dec((uint32_t)st.overflow);
+    kernel_log_putc('\n');
     if (st.samples == 0) {
         panic("m101: the profiler ran for 200 ms and recorded nothing");
     }
@@ -1576,9 +1576,9 @@ static void selftest_profile(void) {
             }
             kernel_seen++;
             if (got[i].rip < text_lo || got[i].rip >= text_hi) {
-                klog_puts("[m101] a kernel sample landed outside the kernel at 0x");
-                klog_put_hex64(got[i].rip);
-                klog_putc('\n');
+                kernel_log_puts("[m101] a kernel sample landed outside the kernel at 0x");
+                kernel_log_put_hex64(got[i].rip);
+                kernel_log_putc('\n');
                 panic("m101: a sampled kernel address is not in this kernel");
             }
         }
@@ -1589,41 +1589,41 @@ static void selftest_profile(void) {
 
     {
         prof_stats_t before;
-        profile_get_stats(&before);
+        profile_get_statistics(&before);
         uint64_t target = pit_get_ticks() + 10;
         while (pit_get_ticks() < target) {
         }
         prof_stats_t after;
-        profile_get_stats(&after);
+        profile_get_statistics(&after);
         if (after.samples != before.samples) {
             panic("m101: the profiler kept sampling after being stopped");
         }
     }
 
-    klog_puts("[m101] sampling profiler: ");
-    klog_put_dec((uint32_t)st.samples);
-    klog_puts(" samples in 200 ms across ");
-    klog_put_dec((uint32_t)st.distinct);
-    klog_puts(" distinct addresses, every kernel one inside .text.\n");
+    kernel_log_puts("[m101] sampling profiler: ");
+    kernel_log_put_dec((uint32_t)st.samples);
+    kernel_log_puts(" samples in 200 ms across ");
+    kernel_log_put_dec((uint32_t)st.distinct);
+    kernel_log_puts(" distinct addresses, every kernel one inside .text.\n");
     profile_reset();
 
     {
-        syscount_entry_t before_pid, before_uptime, after_pid, after_uptime;
-        syscount_get(SYS_getpid, &before_pid);
-        syscount_get(SYS_uptime_ms, &before_uptime);
+        syscall_counters_entry_t before_pid, before_uptime, after_pid, after_uptime;
+        syscall_counters_get(SYS_getpid, &before_pid);
+        syscall_counters_get(SYS_uptime_ms, &before_uptime);
 
         for (int i = 0; i < 100; i++) {
             do_syscall(SYS_getpid, 0, 0, 0);
         }
 
-        syscount_get(SYS_getpid, &after_pid);
-        syscount_get(SYS_uptime_ms, &after_uptime);
+        syscall_counters_get(SYS_getpid, &after_pid);
+        syscall_counters_get(SYS_uptime_ms, &after_uptime);
 
         uint64_t moved = after_pid.calls - before_pid.calls;
         if (moved < 100) {
-            klog_puts("[m101] 100 getpid calls moved the counter by ");
-            klog_put_dec((uint32_t)moved);
-            klog_putc('\n');
+            kernel_log_puts("[m101] 100 getpid calls moved the counter by ");
+            kernel_log_put_dec((uint32_t)moved);
+            kernel_log_putc('\n');
             panic("m101: syscall accounting lost calls");
         }
         if (after_uptime.calls - before_uptime.calls >= 100) {
@@ -1635,30 +1635,30 @@ static void selftest_profile(void) {
     }
 
     {
-        if (syscount_timing_enabled()) {
+        if (syscall_counters_timing_enabled()) {
             panic("m101: syscall timing is on by default");
         }
-        int was = syscount_set_timing(1);
+        int was = syscall_counters_set_timing(1);
         if (was != 0) {
             panic("m101: syscount_set_timing did not report the previous setting");
         }
-        syscount_entry_t before, after;
-        syscount_get(SYS_getpid, &before);
+        syscall_counters_entry_t before, after;
+        syscall_counters_get(SYS_getpid, &before);
         for (int i = 0; i < 100; i++) {
             do_syscall(SYS_getpid, 0, 0, 0);
         }
-        syscount_get(SYS_getpid, &after);
-        syscount_set_timing(0);
+        syscall_counters_get(SYS_getpid, &after);
+        syscall_counters_set_timing(0);
 
         if (after.cycles <= before.cycles) {
             panic("m101: timing was on and no cycles were recorded");
         }
         uint64_t per = (after.cycles - before.cycles) / (after.calls - before.calls);
-        klog_puts("[m101] per-syscall accounting: getpid costs ");
-        klog_put_dec((uint32_t)per);
-        klog_puts(" cycles through int 0x80, timed only when asked.\n");
+        kernel_log_puts("[m101] per-syscall accounting: getpid costs ");
+        kernel_log_put_dec((uint32_t)per);
+        kernel_log_puts(" cycles through int 0x80, timed only when asked.\n");
 
-        klog_perf("syscall_null_cycles", per, "cycles");
+        kernel_log_perf("syscall_null_cycles", per, "cycles");
     }
 
     {
@@ -1674,9 +1674,9 @@ static void selftest_profile(void) {
         for (int i = 0; i < 24; i++) {
             int fd = (int)do_syscall(SYS_open, (uint64_t)"/proc/self/status", 0, 0);
             if (fd < 0) {
-                klog_puts("[m101] /proc/self/status could not be opened on attempt ");
-                klog_put_dec((uint32_t)(i + 1));
-                klog_putc('\n');
+                kernel_log_puts("[m101] /proc/self/status could not be opened on attempt ");
+                kernel_log_put_dec((uint32_t)(i + 1));
+                kernel_log_putc('\n');
                 panic("m101: procfs runs out of handles - the close path is broken");
             }
             char buf[64];
@@ -1685,7 +1685,7 @@ static void selftest_profile(void) {
             }
             do_syscall(SYS_close, (uint64_t)fd, 0, 0);
         }
-        klog_puts("[m101] /proc survived 24 open/close cycles through a 16-entry "
+        kernel_log_puts("[m101] /proc survived 24 open/close cycles through a 16-entry "
                   "table - the close path M101 added to the VFS works.\n");
     }
 
@@ -1699,7 +1699,7 @@ static void selftest_profile(void) {
         if (n <= 0) {
             panic("m101: /proc/profile reported nothing");
         }
-        klog_puts("[m101] /proc/profile and /proc/syscalls both answer.\n");
+        kernel_log_puts("[m101] /proc/profile and /proc/syscalls both answer.\n");
     }
 
     {
@@ -1715,12 +1715,12 @@ static void selftest_profile(void) {
         }
         long code = do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
         if (code != 0) {
-            klog_puts("[m101] proftest reported 0x");
-            klog_put_hex32((uint32_t)code);
-            klog_puts(" failed check(s) - see the proftest lines above\n");
+            kernel_log_puts("[m101] proftest reported 0x");
+            kernel_log_put_hex32((uint32_t)code);
+            kernel_log_puts(" failed check(s) - see the proftest lines above\n");
             panic("m101: the profiler's ring-3 behaviour is wrong");
         }
-        klog_puts("[m101] ring-3 half passed: the capability gate admits a holder, "
+        kernel_log_puts("[m101] ring-3 half passed: the capability gate admits a holder, "
                   "every bad pointer is refused, a user busy loop is sampled as user "
                   "time against its own pid.\n\n");
     }
@@ -1752,14 +1752,14 @@ static void selftest_profile(void) {
         if (code != 0) {
             panic("m101: /bin/profile could not produce a report");
         }
-        klog_puts("[m101] the report above is /bin/profile's, produced on this "
+        kernel_log_puts("[m101] the report above is /bin/profile's, produced on this "
                   "machine from the histogram this boot filled.\n\n");
         profile_reset();
     }
 }
 
 static void selftest_oom(void) {
-    uint64_t before = pmm_free_frame_count();
+    uint64_t before = physical_memory_free_frame_count();
 
     size_t image_bytes = 0;
     uint8_t *image = read_program("/bin/oomtest", &image_bytes);
@@ -1773,9 +1773,9 @@ static void selftest_oom(void) {
     for (int round = 0; round < 2; round++) {
         task_t *t = process_spawn("oomtest", image, image_bytes, "");
         if (!t) {
-            klog_puts("[m102] round ");
-            klog_put_dec((uint32_t)round);
-            klog_puts(": the spawn itself was refused, which is the other "
+            kernel_log_puts("[m102] round ");
+            kernel_log_put_dec((uint32_t)round);
+            kernel_log_puts(": the spawn itself was refused, which is the other "
                       "half of this milestone working.\n");
             continue;
         }
@@ -1786,9 +1786,9 @@ static void selftest_oom(void) {
         } else if (code == 0) {
             refused_rounds++;
         } else {
-            klog_puts("[m102] oomtest exited with 0x");
-            klog_put_hex32((uint32_t)code);
-            klog_putc('\n');
+            kernel_log_puts("[m102] oomtest exited with 0x");
+            kernel_log_put_hex32((uint32_t)code);
+            kernel_log_putc('\n');
             if (code == 128 + SIGSEGV) {
                 panic("m102: an out-of-memory kill was reported as a segfault");
             }
@@ -1802,29 +1802,29 @@ static void selftest_oom(void) {
         panic("m102: nothing was exhausted - this machine did not run out of memory");
     }
 
-    uint64_t after = pmm_free_frame_count();
+    uint64_t after = physical_memory_free_frame_count();
     if (after + 512 < before) {
-        klog_puts("[m102] free frames before 0x");
-        klog_put_hex32((uint32_t)before);
-        klog_puts(", after 0x");
-        klog_put_hex32((uint32_t)after);
-        klog_putc('\n');
+        kernel_log_puts("[m102] free frames before 0x");
+        kernel_log_put_hex32((uint32_t)before);
+        kernel_log_puts(", after 0x");
+        kernel_log_put_hex32((uint32_t)after);
+        kernel_log_putc('\n');
         panic("m102: the machine survived running out of memory but did not get it back");
     }
 
-    klog_puts("[m102] out of memory, twice: ");
-    klog_put_dec((uint32_t)killed_rounds);
-    klog_puts(" round(s) ended in an OOM kill and ");
-    klog_put_dec((uint32_t)refused_rounds);
-    klog_puts(" in a refused allocation. The machine is still running and ");
-    klog_put_dec((uint32_t)after);
-    klog_puts(" of its ");
-    klog_put_dec((uint32_t)before);
-    klog_puts(" free frames came back.\n");
+    kernel_log_puts("[m102] out of memory, twice: ");
+    kernel_log_put_dec((uint32_t)killed_rounds);
+    kernel_log_puts(" round(s) ended in an OOM kill and ");
+    kernel_log_put_dec((uint32_t)refused_rounds);
+    kernel_log_puts(" in a refused allocation. The machine is still running and ");
+    kernel_log_put_dec((uint32_t)after);
+    kernel_log_puts(" of its ");
+    kernel_log_put_dec((uint32_t)before);
+    kernel_log_puts(" free frames came back.\n");
 
-    klog_puts("[m102] this machine tracks ");
-    klog_put_dec((uint32_t)(pmm_total_frame_count() * 4 / 1024));
-    klog_puts(" MiB of physical memory and a single process was able to take "
+    kernel_log_puts("[m102] this machine tracks ");
+    kernel_log_put_dec((uint32_t)(physical_memory_total_frame_count() * 4 / 1024));
+    kernel_log_puts(" MiB of physical memory and a single process was able to take "
               "it to exhaustion - the swap decision needs M98's peak, not "
               "this one.\n\n");
 }
@@ -1844,11 +1844,11 @@ static void boot_selftests_system(void) {
                 distinct++;
             }
         }
-        klog_puts("[smp] probe tasks observed running on ");
-        klog_put_hex32((uint32_t)distinct);
-        klog_puts(" distinct CPU(s) (");
-        klog_put_hex32((uint32_t)smp_cpu_count);
-        klog_puts(" online).\n");
+        kernel_log_puts("[smp] probe tasks observed running on ");
+        kernel_log_put_hex32((uint32_t)distinct);
+        kernel_log_puts(" distinct CPU(s) (");
+        kernel_log_put_hex32((uint32_t)smp_cpu_count);
+        kernel_log_puts(" online).\n");
         if (smp_cpu_count > 1 && distinct < 2) {
             panic("smp self-test: multiple CPUs online but probe tasks only ever ran on one");
         }
@@ -1856,13 +1856,13 @@ static void boot_selftests_system(void) {
         for (int i = 0; i < 4; i++) {
             do_syscall(SYS_wait, (uint64_t)probe_tasks[i]->id, 0, 0);
         }
-        klog_puts("[smp] self-test passed.\n\n");
+        kernel_log_puts("[smp] self-test passed.\n\n");
     }
 
     {
         os_stat_t ct;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/cxxtest", (uint64_t)&ct, 0) != 0) {
-            klog_puts("[m97] /bin/cxxtest is not on this image - skipped. "
+            kernel_log_puts("[m97] /bin/cxxtest is not on this image - skipped. "
                        "tools/build-toolchain.sh builds the C++ runtime and "
                        "tools/cxx-test.sh installs what it produces.\n\n");
         } else {
@@ -1879,7 +1879,7 @@ static void boot_selftests_system(void) {
             }
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m97] the C++ program could not be spawned\n");
+                kernel_log_puts("[m97] the C++ program could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
@@ -1887,16 +1887,16 @@ static void boot_selftests_system(void) {
 
             static char produced[512];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m97] the C++ program produced no output at all - a throw "
+                kernel_log_puts("[m97] the C++ program produced no output at all - a throw "
                            "with no unwind tables reaches std::terminate before main "
                            "can print anything\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
                 if (!selftest_contains(produced, "code 0")) {
-                    klog_puts("[m97] the fixture did not exit 0 - see "
+                    kernel_log_puts("[m97] the fixture did not exit 0 - see "
                                "tests/cxx/exceptions.cpp for what each code means\n");
                     all_ok = 0;
                 }
@@ -1909,9 +1909,9 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m97] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m97] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
@@ -1921,9 +1921,9 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
 
             if (!all_ok) {
-                klog_puts("[m97] what the C++ program actually wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m97] ---- end\n");
+                kernel_log_puts("[m97] what the C++ program actually wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m97] ---- end\n");
                 panic("M97 self-test: an exception does not unwind on this machine");
             }
 
@@ -1942,21 +1942,21 @@ static void boot_selftests_system(void) {
                 }
                 long lpid = do_syscall(SYS_spawn, (uint64_t)lscript, 0, 0);
                 if (lpid < 0) {
-                    klog_puts("[m97] the libstdc++ program could not be spawned\n");
+                    kernel_log_puts("[m97] the libstdc++ program could not be spawned\n");
                     lib_ok = 0;
                 } else {
                     do_syscall(SYS_wait, (uint64_t)lpid, 0, 0);
                 }
                 static char lproduced[512];
                 k_memset(lproduced, 0, sizeof(lproduced));
-                int64_t ln = vfs_read(lresult, lproduced, sizeof(lproduced) - 1);
+                int64_t ln = virtual_file_system_read(lresult, lproduced, sizeof(lproduced) - 1);
                 if (ln <= 0) {
-                    klog_puts("[m97] the libstdc++ program produced no output\n");
+                    kernel_log_puts("[m97] the libstdc++ program produced no output\n");
                     lib_ok = 0;
                 } else {
                     lproduced[ln] = '\0';
                     if (!selftest_contains(lproduced, "code 0")) {
-                        klog_puts("[m97] the library fixture did not exit 0 - see "
+                        kernel_log_puts("[m97] the library fixture did not exit 0 - see "
                                    "tests/cxx/library.cpp for what each code means\n");
                         lib_ok = 0;
                     }
@@ -1971,9 +1971,9 @@ static void boot_selftests_system(void) {
                     };
                     for (unsigned i = 0; i < sizeof(LEXPECT) / sizeof(LEXPECT[0]); i++) {
                         if (!selftest_contains(lproduced, LEXPECT[i])) {
-                            klog_puts("[m97] the library fixture did not report: ");
-                            klog_puts(LEXPECT[i]);
-                            klog_putc('\n');
+                            kernel_log_puts("[m97] the library fixture did not report: ");
+                            kernel_log_puts(LEXPECT[i]);
+                            kernel_log_putc('\n');
                             lib_ok = 0;
                         }
                     }
@@ -1981,12 +1981,12 @@ static void boot_selftests_system(void) {
                 do_syscall(SYS_unlink, (uint64_t)lscript, 0, 0);
                 do_syscall(SYS_unlink, (uint64_t)lresult, 0, 0);
                 if (!lib_ok) {
-                    klog_puts("[m97] what the libstdc++ program actually wrote:\n");
-                    klog_puts(lproduced);
-                    klog_puts("[m97] ---- end\n");
+                    kernel_log_puts("[m97] what the libstdc++ program actually wrote:\n");
+                    kernel_log_puts(lproduced);
+                    kernel_log_puts("[m97] ---- end\n");
                     panic("M97 self-test: the C++ standard library does not work here");
                 }
-                klog_puts("[m97] and the standard library on top of it: a sorted vector, "
+                kernel_log_puts("[m97] and the standard library on top of it: a sorted vector, "
                            "a map iterated in key order out of libstdc++'s own compiled "
                            "tree code, a string across the small-string boundary, "
                            "iostreams round-tripped through a stringstream, dynamic_cast "
@@ -1994,7 +1994,7 @@ static void boot_selftests_system(void) {
                            "INSIDE libstdc++ caught here by type, and a std::thread over "
                            "M79's tasks joined - self-test passed.\n");
             } else {
-                klog_puts("[m97] /bin/cxxlib is not on this image - the standard-library "
+                kernel_log_puts("[m97] /bin/cxxlib is not on this image - the standard-library "
                            "half is skipped.\n");
             }
 
@@ -2013,26 +2013,26 @@ static void boot_selftests_system(void) {
                 }
                 long bpid = do_syscall(SYS_spawn, (uint64_t)bscript, 0, 0);
                 if (bpid < 0) {
-                    klog_puts("[m97] the cross-object program could not be spawned\n");
+                    kernel_log_puts("[m97] the cross-object program could not be spawned\n");
                     b_ok = 0;
                 } else {
                     do_syscall(SYS_wait, (uint64_t)bpid, 0, 0);
                 }
                 static char bproduced[512];
                 k_memset(bproduced, 0, sizeof(bproduced));
-                int64_t bn = vfs_read(bresult, bproduced, sizeof(bproduced) - 1);
+                int64_t bn = virtual_file_system_read(bresult, bproduced, sizeof(bproduced) - 1);
                 if (bn <= 0) {
-                    klog_puts("[m97] the cross-object program produced no output\n");
+                    kernel_log_puts("[m97] the cross-object program produced no output\n");
                     b_ok = 0;
                 } else {
                     bproduced[bn] = '\0';
                     if (!selftest_contains(bproduced, "code 0")) {
-                        klog_puts("[m97] the cross-object fixture did not exit 0 - see "
+                        kernel_log_puts("[m97] the cross-object fixture did not exit 0 - see "
                                    "tests/cxx/throwmain.cpp for what each code means\n");
                         b_ok = 0;
                     }
                     if (!selftest_contains(bproduced, "caught by exact type and by base")) {
-                        klog_puts("[m97] the cross-object fixture did not report a "
+                        kernel_log_puts("[m97] the cross-object fixture did not report a "
                                    "successful boundary crossing\n");
                         b_ok = 0;
                     }
@@ -2040,20 +2040,20 @@ static void boot_selftests_system(void) {
                 do_syscall(SYS_unlink, (uint64_t)bscript, 0, 0);
                 do_syscall(SYS_unlink, (uint64_t)bresult, 0, 0);
                 if (!b_ok) {
-                    klog_puts("[m97] what the cross-object program actually wrote:\n");
-                    klog_puts(bproduced);
-                    klog_puts("[m97] ---- end\n");
+                    kernel_log_puts("[m97] what the cross-object program actually wrote:\n");
+                    kernel_log_puts(bproduced);
+                    kernel_log_puts("[m97] ---- end\n");
                     panic("M97 self-test: an exception does not cross a shared-object "
                           "boundary on this machine");
                 }
-                klog_puts("[m97] and across a shared object: an exception thrown inside "
+                kernel_log_puts("[m97] and across a shared object: an exception thrown inside "
                            "a library this program dlopen'd - one it never named on its "
                            "link line - caught in the executable by its exact type and "
                            "again by its base, with both of the library's own frame "
                            "destructors run on the way out, and one thrown here caught "
                            "inside the library - self-test passed.\n");
             } else {
-                klog_puts("[m97] /bin/throwmain is not on this image - the "
+                kernel_log_puts("[m97] /bin/throwmain is not on this image - the "
                            "shared-object half is skipped.\n");
             }
 
@@ -2070,19 +2070,19 @@ static void boot_selftests_system(void) {
                     theirs_ran++;
                     long gp = do_syscall(SYS_spawn, (uint64_t)prog, 0, 0);
                     if (gp < 0) {
-                        klog_puts("[m97] could not spawn ");
-                        klog_puts(prog);
-                        klog_putc('\n');
+                        kernel_log_puts("[m97] could not spawn ");
+                        kernel_log_puts(prog);
+                        kernel_log_putc('\n');
                         theirs_failed++;
                         continue;
                     }
                     long code = do_syscall(SYS_wait, (uint64_t)gp, 0, 0);
                     if (code != 0) {
-                        klog_puts("[m97] ");
-                        klog_puts(prog);
-                        klog_puts(" (one of GCC's own libstdc++ tests) exited ");
-                        klog_put_dec((uint32_t)code);
-                        klog_putc('\n');
+                        kernel_log_puts("[m97] ");
+                        kernel_log_puts(prog);
+                        kernel_log_puts(" (one of GCC's own libstdc++ tests) exited ");
+                        kernel_log_put_dec((uint32_t)code);
+                        kernel_log_putc('\n');
                         theirs_failed++;
                     }
                 }
@@ -2091,9 +2091,9 @@ static void boot_selftests_system(void) {
                           "somebody else does not pass here");
                 }
                 if (theirs_ran) {
-                    klog_puts("[m97] and C++ nobody here wrote: ");
-                    klog_put_dec((uint32_t)theirs_ran);
-                    klog_puts(" of GCC's own libstdc++ regression tests - vectors, a "
+                    kernel_log_puts("[m97] and C++ nobody here wrote: ");
+                    kernel_log_put_dec((uint32_t)theirs_ran);
+                    kernel_log_puts(" of GCC's own libstdc++ regression tests - vectors, a "
                                "map behind threads, sets, strings, algorithms, "
                                "stringstreams, tuples and complex arithmetic - "
                                "compiled with no edits of any kind and every one of "
@@ -2101,7 +2101,7 @@ static void boot_selftests_system(void) {
                 }
             }
 
-            klog_puts("[m97] C++ that throws: a throw three frames deep caught by type "
+            kernel_log_puts("[m97] C++ that throws: a throw three frames deep caught by type "
                        "in main with a destructor run for every frame in between, "
                        "counted and ordered rather than assumed; a derived object "
                        "caught by its base; a rethrow that kept the object it was "
@@ -2135,42 +2135,42 @@ static void boot_selftests_system(void) {
             panic("M106 self-test: the parallel benchmark measured nothing");
         }
 
-        int fd_task = -1;
-        int fd_peak = sched_fd_high_water(&fd_task);
-        int task_peak = sched_peak_live_tasks();
+        int file_descriptor_task = -1;
+        int file_descriptor_peak = scheduler_file_descriptor_high_water(&file_descriptor_task);
+        int task_peak = scheduler_peak_live_tasks();
 
-        klog_perf("smp_one_task_us", one_us, "us");
-        klog_perf("smp_n_tasks_us", many_us, "us");
-        klog_perf("smp_parallel_cost_pct", cost_pct, "pct");
-        klog_perf("peak_live_tasks", (uint64_t)task_peak, "tasks");
-        klog_perf("peak_fds_one_task", (uint64_t)fd_peak, "fds");
+        kernel_log_perf("smp_one_task_us", one_us, "us");
+        kernel_log_perf("smp_n_tasks_us", many_us, "us");
+        kernel_log_perf("smp_parallel_cost_pct", cost_pct, "pct");
+        kernel_log_perf("peak_live_tasks", (uint64_t)task_peak, "tasks");
+        kernel_log_perf("peak_fds_one_task", (uint64_t)file_descriptor_peak, "fds");
 
-        klog_puts("[m106] cores this machine can use: ");
-        klog_put_dec((uint32_t)cpus);
-        klog_puts(" online, one task of fixed work in ");
-        klog_put_dec((uint32_t)one_us);
-        klog_puts(" us and ");
-        klog_put_dec((uint32_t)cpus);
-        klog_puts(" of them in ");
-        klog_put_dec((uint32_t)many_us);
-        klog_puts(" us - ");
-        klog_put_dec(cost_pct);
-        klog_puts("% of one task's cost for ");
-        klog_put_dec((uint32_t)cpus);
-        klog_puts(" times the work, where 100 means it went wide and ");
-        klog_put_dec((uint32_t)cpus * 100u);
-        klog_puts(" means one core did all of it. The two ceilings this milestone was "
+        kernel_log_puts("[m106] cores this machine can use: ");
+        kernel_log_put_dec((uint32_t)cpus);
+        kernel_log_puts(" online, one task of fixed work in ");
+        kernel_log_put_dec((uint32_t)one_us);
+        kernel_log_puts(" us and ");
+        kernel_log_put_dec((uint32_t)cpus);
+        kernel_log_puts(" of them in ");
+        kernel_log_put_dec((uint32_t)many_us);
+        kernel_log_puts(" us - ");
+        kernel_log_put_dec(cost_pct);
+        kernel_log_puts("% of one task's cost for ");
+        kernel_log_put_dec((uint32_t)cpus);
+        kernel_log_puts(" times the work, where 100 means it went wide and ");
+        kernel_log_put_dec((uint32_t)cpus * 100u);
+        kernel_log_puts(" means one core did all of it. The two ceilings this milestone was "
                    "also going to raise, reported rather than rounded up: ");
-        klog_put_dec((uint32_t)task_peak);
-        klog_puts(" of ");
-        klog_put_dec((uint32_t)MAX_TASKS);
-        klog_puts(" task slots ever live at once, and ");
-        klog_put_dec((uint32_t)fd_peak);
-        klog_puts(" of ");
-        klog_put_dec((uint32_t)MAX_FDS);
-        klog_puts(" descriptors in the hungriest task (pid 0x");
-        klog_put_hex32((uint32_t)fd_task);
-        klog_puts(") - self-test passed.\n\n");
+        kernel_log_put_dec((uint32_t)task_peak);
+        kernel_log_puts(" of ");
+        kernel_log_put_dec((uint32_t)MAX_TASKS);
+        kernel_log_puts(" task slots ever live at once, and ");
+        kernel_log_put_dec((uint32_t)file_descriptor_peak);
+        kernel_log_puts(" of ");
+        kernel_log_put_dec((uint32_t)MAX_FDS);
+        kernel_log_puts(" descriptors in the hungriest task (pid 0x");
+        kernel_log_put_hex32((uint32_t)file_descriptor_task);
+        kernel_log_puts(") - self-test passed.\n\n");
     }
 
     selftest_oom();
@@ -2180,13 +2180,13 @@ static void boot_selftests_system(void) {
     if (net_have_nic()) {
         uint8_t ping_payload[4] = {0xDE, 0xAD, 0xBE, 0xEF};
         uint16_t ping_id = 0x1EA5;
-        uint16_t ping_seq = 1;
-        icmp_send_echo_request(net_gateway_ip(), ping_id, ping_seq, ping_payload, sizeof(ping_payload));
+        uint16_t ping_sequence = 1;
+        icmp_send_echo_request(net_gateway_ip(), ping_id, ping_sequence, ping_payload, sizeof(ping_payload));
 
         int got_reply = 0;
         uint64_t deadline = pit_get_ticks() + 3 * PIT_HZ;
         while (pit_get_ticks() < deadline) {
-            if (icmp_echo_reply_seen(ping_id, ping_seq)) {
+            if (icmp_echo_reply_seen(ping_id, ping_sequence)) {
                 got_reply = 1;
                 break;
             }
@@ -2195,11 +2195,11 @@ static void boot_selftests_system(void) {
         if (!got_reply) {
             panic("net self-test: no ICMP echo reply from the gateway within 3s");
         }
-        klog_puts("[net] ICMP echo request/reply self-test passed (ping to gateway 0x");
-        klog_put_hex32(net_gateway_ip());
-        klog_puts(" round-tripped).\n\n");
+        kernel_log_puts("[net] ICMP echo request/reply self-test passed (ping to gateway 0x");
+        kernel_log_put_hex32(net_gateway_ip());
+        kernel_log_puts(" round-tripped).\n\n");
     } else {
-        klog_puts("[net] no NIC - the ICMP round-trip self-test was skipped "
+        kernel_log_puts("[net] no NIC - the ICMP round-trip self-test was skipped "
                    "(expected on real hardware; see docs/real-hardware.md).\n\n");
     }
 
@@ -2226,21 +2226,21 @@ static void boot_selftests_system(void) {
         kfree(clock_image);
         pit_sleep_ms(1000);
 
-        uint32_t panel_bg_px = fb_get_pixel(512, 738);
-        uint32_t above_panel_px = fb_get_pixel(512, 700);
-        uint32_t start_btn_px = fb_get_pixel(71, 742);
-        uint32_t running_slot_px = fb_get_pixel(168, 752);
-        uint32_t tray_sep_px = fb_get_pixel(912, 750);
+        uint32_t panel_bg_px = framebuffer_get_pixel(512, 738);
+        uint32_t above_panel_px = framebuffer_get_pixel(512, 700);
+        uint32_t start_btn_px = framebuffer_get_pixel(71, 742);
+        uint32_t running_slot_px = framebuffer_get_pixel(168, 752);
+        uint32_t tray_sep_px = framebuffer_get_pixel(912, 750);
 
-        int action_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
+        int action_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
             panic("M42 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
         wm_action_request_t req;
         k_memset(&req, 0, sizeof(req));
         req.window_id = 1;
         req.action = WM_ACTION_MAXIMIZE;
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         uint32_t maximized_titlebar = selftest_pixel_settled(100, 12, 0x004C99E6u,
                                                               "the maximized window's titlebar");
         uint32_t panel_over_maximized = selftest_pixel_settled(512, 738, 0x00181829u,
@@ -2249,10 +2249,10 @@ static void boot_selftests_system(void) {
         k_memset(&req, 0, sizeof(req));
         req.window_id = -1;
         req.action = WM_ACTION_TOGGLE_LAUNCHER;
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         uint32_t launcher_open_px = selftest_pixel_settled(512, 309, 0x001B2032u,
                                                             "the launcher overlay to finish fading in");
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         uint32_t launcher_closed_px = selftest_pixel_settled(512, 309, 0x001A1A2Eu,
                                                               "the launcher overlay to go away again");
 
@@ -2260,7 +2260,7 @@ static void boot_selftests_system(void) {
         selftest_reap(shell_task);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         static const struct { const char *what; uint32_t expected; } names[] = {
             {"taskbar background, docked at the screen's bottom edge (desktop_shell.c PANEL_BG, translucent)", 0x00181829u},
@@ -2280,20 +2280,20 @@ static void boot_selftests_system(void) {
         int all_ok = 1;
         for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
             if (got[i] != names[i].expected) {
-                klog_puts("[m42] pixel check failed: ");
-                klog_puts(names[i].what);
-                klog_puts(" - expected 0x");
-                klog_put_hex32(names[i].expected);
-                klog_puts(" got 0x");
-                klog_put_hex32(got[i]);
-                klog_putc('\n');
+                kernel_log_puts("[m42] pixel check failed: ");
+                kernel_log_puts(names[i].what);
+                kernel_log_puts(" - expected 0x");
+                kernel_log_put_hex32(names[i].expected);
+                kernel_log_puts(" got 0x");
+                kernel_log_put_hex32(got[i]);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
         if (!all_ok) {
             panic("M42 taskbar self-test: the bottom taskbar did not behave as expected");
         }
-        klog_puts("[m42] bottom taskbar (Start button, running-app button, tray, "
+        kernel_log_puts("[m42] bottom taskbar (Start button, running-app button, tray, "
                    "maximize clamp, launcher toggle) self-test passed (9/9 checks matched).\n\n");
     }
 
@@ -2318,8 +2318,8 @@ static void boot_selftests_system(void) {
         kfree(editor_image);
         pit_sleep_ms(700);
 
-        int action_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
+        int action_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
             panic("M43 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
         wm_action_request_t req;
@@ -2327,14 +2327,14 @@ static void boot_selftests_system(void) {
         req.window_id = 1;
 
         req.action = WM_ACTION_SNAP_RIGHT;
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         uint32_t right_titlebar = selftest_pixel_settled(700, 12, 0x004C99E6u,
                                                           "the window to snap to the right half");
         uint32_t right_left_half = selftest_pixel_settled(200, 12, 0x001A1A2Eu,
                                                            "the left half to be empty");
 
         req.action = WM_ACTION_SNAP_LEFT;
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         uint32_t left_titlebar = selftest_pixel_settled(200, 12, 0x004C99E6u,
                                                          "the window to snap to the left half");
         uint32_t left_right_half = selftest_pixel_settled(700, 12, 0x001A1A2Eu,
@@ -2343,12 +2343,12 @@ static void boot_selftests_system(void) {
         k_memset(&req, 0, sizeof(req));
         req.window_id = -1;
         req.action = WM_ACTION_TOGGLE_LAUNCHER;
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         uint32_t launcher_bg = selftest_pixel_settled(700, 309, 0x001B2032u,
                                                        "the launcher overlay to finish fading in");
         uint32_t launcher_selected_row = selftest_pixel_settled(700, 205, 0x00335577u,
                                                                  "the launcher's first result to be drawn selected");
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         uint32_t launcher_closed = selftest_pixel_settled(700, 309, 0x001A1A2Eu,
                                                            "the launcher overlay to go away again");
 
@@ -2356,7 +2356,7 @@ static void boot_selftests_system(void) {
         selftest_reap(shell_task);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         static const struct { const char *what; uint32_t expected; } names[] = {
             {"a right-snapped window's titlebar filling the screen's right half (compositor.c TITLEBAR_FOCUS_COLOR)", 0x004C99E6u},
@@ -2374,20 +2374,20 @@ static void boot_selftests_system(void) {
         int all_ok = 1;
         for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
             if (got[i] != names[i].expected) {
-                klog_puts("[m43] pixel check failed: ");
-                klog_puts(names[i].what);
-                klog_puts(" - expected 0x");
-                klog_put_hex32(names[i].expected);
-                klog_puts(" got 0x");
-                klog_put_hex32(got[i]);
-                klog_putc('\n');
+                kernel_log_puts("[m43] pixel check failed: ");
+                kernel_log_puts(names[i].what);
+                kernel_log_puts(" - expected 0x");
+                kernel_log_put_hex32(names[i].expected);
+                kernel_log_puts(" got 0x");
+                kernel_log_put_hex32(got[i]);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
         if (!all_ok) {
             panic("M43 snap/launcher self-test: the compositor did not behave as expected");
         }
-        klog_puts("[m43] window snapping (left/right half, buffer-clamped) and the "
+        kernel_log_puts("[m43] window snapping (left/right half, buffer-clamped) and the "
                    "launcher overlay self-test passed (7/7 checks matched).\n\n");
     }
 
@@ -2412,44 +2412,44 @@ static void boot_selftests_system(void) {
         kfree(shell_image);
         pit_sleep_ms(700);
 
-        uint32_t grad_high = fb_get_pixel(600, 100);
-        uint32_t grad_low = fb_get_pixel(600, 600);
-        uint32_t taskbar_over_grad = fb_get_pixel(500, 738);
+        uint32_t grad_high = framebuffer_get_pixel(600, 100);
+        uint32_t grad_low = framebuffer_get_pixel(600, 600);
+        uint32_t taskbar_over_grad = framebuffer_get_pixel(500, 738);
 
-        int settings_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_fds, 0) != 0) {
+        int settings_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_file_descriptors, 0) != 0) {
             panic("M44 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
         }
-        wm_settings_request_t set_req;
-        k_memset(&set_req, 0, sizeof(set_req));
-        set_req.animations = 1;
-        set_req.bg_color = 0x001A1A2Eu;
-        set_req.accent_color = 0x004C99E6u;
-        set_req.wallpaper = 0;
-        do_syscall(SYS_write, (uint64_t)settings_fds[1], (uint64_t)&set_req, sizeof(set_req));
+        wm_settings_request_t set_request;
+        k_memset(&set_request, 0, sizeof(set_request));
+        set_request.animations = 1;
+        set_request.bg_color = 0x001A1A2Eu;
+        set_request.accent_color = 0x004C99E6u;
+        set_request.wallpaper = 0;
+        do_syscall(SYS_write, (uint64_t)settings_file_descriptors[1], (uint64_t)&set_request, sizeof(set_request));
         pit_sleep_ms(900);
-        uint32_t flat_high = fb_get_pixel(600, 100);
-        uint32_t flat_low = fb_get_pixel(600, 600);
+        uint32_t flat_high = framebuffer_get_pixel(600, 100);
+        uint32_t flat_low = framebuffer_get_pixel(600, 600);
 
-        int sq_fds[2];
-        int sqr_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_PIPE, (uint64_t)sq_fds, 0) != 0 ||
-            do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_RESP_PIPE, (uint64_t)sqr_fds, 0) != 0) {
+        int sq_file_descriptors[2];
+        int sqr_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_PIPE, (uint64_t)sq_file_descriptors, 0) != 0 ||
+            do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_QUERY_RESP_PIPE, (uint64_t)sqr_file_descriptors, 0) != 0) {
             panic("M44 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_QUERY_*) failed");
         }
-        do_syscall(SYS_pipe_reset, (uint64_t)sqr_fds[0], 0, 0);
+        do_syscall(SYS_pipe_reset, (uint64_t)sqr_file_descriptors[0], 0, 0);
         uint8_t ping = 1;
-        do_syscall(SYS_write, (uint64_t)sq_fds[1], (uint64_t)&ping, sizeof(ping));
+        do_syscall(SYS_write, (uint64_t)sq_file_descriptors[1], (uint64_t)&ping, sizeof(ping));
         pit_sleep_ms(300);
         wm_settings_request_t queried;
         k_memset(&queried, 0, sizeof(queried));
-        long settings_read = do_syscall(SYS_read, (uint64_t)sqr_fds[0], (uint64_t)&queried, sizeof(queried));
+        long settings_read = do_syscall(SYS_read, (uint64_t)sqr_file_descriptors[0], (uint64_t)&queried, sizeof(queried));
 
         selftest_reap(shell_task);
         selftest_reap(icons_task);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         static const struct { const char *what; uint32_t expected; } names[] = {
             {"the wallpaper gradient near the top of the desktop (155% of 0x1A1A2E, ramped to row 100)", 0x00252542u},
@@ -2462,29 +2462,29 @@ static void boot_selftests_system(void) {
         int all_ok = 1;
         for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
             if (got[i] != names[i].expected) {
-                klog_puts("[m44] pixel check failed: ");
-                klog_puts(names[i].what);
-                klog_puts(" - expected 0x");
-                klog_put_hex32(names[i].expected);
-                klog_puts(" got 0x");
-                klog_put_hex32(got[i]);
-                klog_putc('\n');
+                kernel_log_puts("[m44] pixel check failed: ");
+                kernel_log_puts(names[i].what);
+                kernel_log_puts(" - expected 0x");
+                kernel_log_put_hex32(names[i].expected);
+                kernel_log_puts(" got 0x");
+                kernel_log_put_hex32(got[i]);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
         if (settings_read != (long)sizeof(queried) || queried.wallpaper != 0 ||
             queried.bg_color != 0x001A1A2Eu || queried.accent_color != 0x004C99E6u) {
-            klog_puts("[m44] the settings query did not round-trip what was just set (wallpaper 0x");
-            klog_put_hex32(queried.wallpaper);
-            klog_puts(", bg 0x");
-            klog_put_hex32(queried.bg_color);
-            klog_puts(")\n");
+            kernel_log_puts("[m44] the settings query did not round-trip what was just set (wallpaper 0x");
+            kernel_log_put_hex32(queried.wallpaper);
+            kernel_log_puts(", bg 0x");
+            kernel_log_put_hex32(queried.bg_color);
+            kernel_log_puts(")\n");
             all_ok = 0;
         }
         if (!all_ok) {
             panic("M44 wallpaper/translucency self-test: the desktop did not look as computed");
         }
-        klog_puts("[m44] wallpaper gradient, taskbar translucency over it, and the "
+        kernel_log_puts("[m44] wallpaper gradient, taskbar translucency over it, and the "
                    "settings query round trip self-test passed (6/6 checks matched).\n\n");
     }
 
@@ -2500,27 +2500,27 @@ static void boot_selftests_system(void) {
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        uint64_t frames_before_victim = pmm_free_frame_count();
+        uint64_t frames_before_victim = physical_memory_free_frame_count();
         task_t *victim = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
         uint32_t victim_pixel = selftest_pixel_settled(200, 150, 0x00B03040u,
                                                         "the stubborn client's window to be drawn");
-        uint64_t frames_with_victim = pmm_free_frame_count();
+        uint64_t frames_with_victim = physical_memory_free_frame_count();
 
         static task_info_t infos[MAX_TASKS];
         long info_count = do_syscall(SYS_taskinfo, (uint64_t)infos, MAX_TASKS, 0);
-        int found_comp = 0, found_victim = 0, victim_shm = -1;
+        int found_comp = 0, found_victim = 0, victim_shared_memory = -1;
         for (long i = 0; i < info_count; i++) {
             if (infos[i].pid == comp_task->id && k_strcmp(infos[i].name, "compositor") == 0) {
                 found_comp = 1;
             }
             if (infos[i].pid == victim->id && k_strcmp(infos[i].name, "wm_stubborn") == 0) {
                 found_victim = 1;
-                victim_shm = infos[i].shm_segments;
+                victim_shared_memory = infos[i].shm_segments;
             }
         }
 
-        int action_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
+        int action_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
             panic("M45 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
         wm_action_request_t req;
@@ -2528,13 +2528,13 @@ static void boot_selftests_system(void) {
         req.window_id = 0;
 
         req.action = WM_ACTION_CLOSE;
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         pit_sleep_ms(600);
-        uint32_t after_close_pixel = fb_get_pixel(200, 150);
+        uint32_t after_close_pixel = framebuffer_get_pixel(200, 150);
         long alive_after_close = do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
 
         req.action = WM_ACTION_KILL;
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         long alive_after_kill = 1;
         for (int spin = 0; spin < 200 && alive_after_kill == 1; spin++) {
             pit_sleep_ms(10);
@@ -2543,7 +2543,7 @@ static void boot_selftests_system(void) {
         uint32_t after_kill_pixel = selftest_pixel_settled(200, 150, 0x001A1A2Eu,
                                                             "the killed client's window to be taken down");
         do_syscall(SYS_wait, (uint64_t)victim->id, 0, 0);
-        uint64_t frames_after_kill = pmm_free_frame_count();
+        uint64_t frames_after_kill = physical_memory_free_frame_count();
 
         task_t *victim2 = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
         kfree(stub_image);
@@ -2553,23 +2553,23 @@ static void boot_selftests_system(void) {
         selftest_reap(victim2);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         int all_ok = 1;
         if (info_count <= 0 || !found_comp || !found_victim) {
-            klog_puts("[m45] SYS_taskinfo did not report the tasks this test spawned (count 0x");
-            klog_put_hex32((uint32_t)info_count);
-            klog_puts(", compositor found 0x");
-            klog_put_hex32((uint32_t)found_comp);
-            klog_puts(", wm_stubborn found 0x");
-            klog_put_hex32((uint32_t)found_victim);
-            klog_puts(")\n");
+            kernel_log_puts("[m45] SYS_taskinfo did not report the tasks this test spawned (count 0x");
+            kernel_log_put_hex32((uint32_t)info_count);
+            kernel_log_puts(", compositor found 0x");
+            kernel_log_put_hex32((uint32_t)found_comp);
+            kernel_log_puts(", wm_stubborn found 0x");
+            kernel_log_put_hex32((uint32_t)found_victim);
+            kernel_log_puts(")\n");
             all_ok = 0;
         }
-        if (victim_shm != 1) {
-            klog_puts("[m45] SYS_taskinfo reported the wrong shm-segment count for a task holding exactly one: 0x");
-            klog_put_hex32((uint32_t)victim_shm);
-            klog_putc('\n');
+        if (victim_shared_memory != 1) {
+            kernel_log_puts("[m45] SYS_taskinfo reported the wrong shm-segment count for a task holding exactly one: 0x");
+            kernel_log_put_hex32((uint32_t)victim_shared_memory);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         static const struct { const char *what; uint32_t expected; } names[] = {
@@ -2581,42 +2581,42 @@ static void boot_selftests_system(void) {
         const uint32_t got[] = {victim_pixel, after_close_pixel, after_kill_pixel, reused_slot_pixel};
         for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
             if (got[i] != names[i].expected) {
-                klog_puts("[m45] pixel check failed: ");
-                klog_puts(names[i].what);
-                klog_puts(" - expected 0x");
-                klog_put_hex32(names[i].expected);
-                klog_puts(" got 0x");
-                klog_put_hex32(got[i]);
-                klog_putc('\n');
+                kernel_log_puts("[m45] pixel check failed: ");
+                kernel_log_puts(names[i].what);
+                kernel_log_puts(" - expected 0x");
+                kernel_log_put_hex32(names[i].expected);
+                kernel_log_puts(" got 0x");
+                kernel_log_put_hex32(got[i]);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
         if (alive_after_close != 1) {
-            klog_puts("[m45] WM_ACTION_CLOSE terminated a client that never answered WM_EVENT_CLOSE_REQUEST - the two verbs have collapsed into one (SYS_task_alive 0x");
-            klog_put_hex32((uint32_t)alive_after_close);
-            klog_puts(")\n");
+            kernel_log_puts("[m45] WM_ACTION_CLOSE terminated a client that never answered WM_EVENT_CLOSE_REQUEST - the two verbs have collapsed into one (SYS_task_alive 0x");
+            kernel_log_put_hex32((uint32_t)alive_after_close);
+            kernel_log_puts(")\n");
             all_ok = 0;
         }
         if (alive_after_kill != 0) {
-            klog_puts("[m45] WM_ACTION_KILL did not terminate the client (SYS_task_alive 0x");
-            klog_put_hex32((uint32_t)alive_after_kill);
-            klog_puts(")\n");
+            kernel_log_puts("[m45] WM_ACTION_KILL did not terminate the client (SYS_task_alive 0x");
+            kernel_log_put_hex32((uint32_t)alive_after_kill);
+            kernel_log_puts(")\n");
             all_ok = 0;
         }
         if (frames_after_kill < frames_with_victim + 16) {
-            klog_puts("[m45] killing a task that owned an shm segment did not hand its frames back: 0x");
-            klog_put_hex64(frames_before_victim);
-            klog_puts(" free before, 0x");
-            klog_put_hex64(frames_with_victim);
-            klog_puts(" with it running, 0x");
-            klog_put_hex64(frames_after_kill);
-            klog_puts(" after the kill\n");
+            kernel_log_puts("[m45] killing a task that owned an shm segment did not hand its frames back: 0x");
+            kernel_log_put_hex64(frames_before_victim);
+            kernel_log_puts(" free before, 0x");
+            kernel_log_put_hex64(frames_with_victim);
+            kernel_log_puts(" with it running, 0x");
+            kernel_log_put_hex64(frames_after_kill);
+            kernel_log_puts(" after the kill\n");
             all_ok = 0;
         }
         if (!all_ok) {
             panic("M45 process-control self-test: force quit did not behave as specified");
         }
-        klog_puts("[m45] SYS_taskinfo naming, WM_ACTION_KILL forcing a confirm_close client "
+        kernel_log_puts("[m45] SYS_taskinfo naming, WM_ACTION_KILL forcing a confirm_close client "
                    "WM_ACTION_CLOSE cannot, and the window slot/event pipe/shm reclaim after it "
                    "self-test passed (8/8 checks).\n\n");
     }
@@ -2665,7 +2665,7 @@ static void boot_selftests_system(void) {
         selftest_reap(clock_task);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         static const struct { const char *what; uint32_t expected; } names[] = {
             {"the close button's bounding-box corner on a focused window - titlebar color, which is what says a circle got drawn and not a square", 0x004C99E6u},
@@ -2683,32 +2683,32 @@ static void boot_selftests_system(void) {
         int all_ok = 1;
         for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
             if (got[i] != names[i].expected) {
-                klog_puts("[m46] pixel check failed: ");
-                klog_puts(names[i].what);
-                klog_puts(" - expected 0x");
-                klog_put_hex32(names[i].expected);
-                klog_puts(" got 0x");
-                klog_put_hex32(got[i]);
-                klog_putc('\n');
+                kernel_log_puts("[m46] pixel check failed: ");
+                kernel_log_puts(names[i].what);
+                kernel_log_puts(" - expected 0x");
+                kernel_log_put_hex32(names[i].expected);
+                kernel_log_puts(" got 0x");
+                kernel_log_put_hex32(got[i]);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
         if (focused_bright == 0 || focused_dim != 0 || unfocused_dim == 0 || unfocused_bright != 0) {
-            klog_puts("[m46] the title text did not dim when the window lost focus (focused: 0x");
-            klog_put_hex32((uint32_t)focused_bright);
-            klog_puts(" bright / 0x");
-            klog_put_hex32((uint32_t)focused_dim);
-            klog_puts(" dim, unfocused: 0x");
-            klog_put_hex32((uint32_t)unfocused_bright);
-            klog_puts(" bright / 0x");
-            klog_put_hex32((uint32_t)unfocused_dim);
-            klog_puts(" dim)\n");
+            kernel_log_puts("[m46] the title text did not dim when the window lost focus (focused: 0x");
+            kernel_log_put_hex32((uint32_t)focused_bright);
+            kernel_log_puts(" bright / 0x");
+            kernel_log_put_hex32((uint32_t)focused_dim);
+            kernel_log_puts(" dim, unfocused: 0x");
+            kernel_log_put_hex32((uint32_t)unfocused_bright);
+            kernel_log_puts(" bright / 0x");
+            kernel_log_put_hex32((uint32_t)unfocused_dim);
+            kernel_log_puts(" dim)\n");
             all_ok = 0;
         }
         if (!all_ok) {
             panic("M46 window-chrome self-test: the titlebar did not look as computed");
         }
-        klog_puts("[m46] circular titlebar buttons, focus-gated glyphs, the deeper focused "
+        kernel_log_puts("[m46] circular titlebar buttons, focus-gated glyphs, the deeper focused "
                    "shadow and the dimmed unfocused title self-test passed (9/9 checks).\n\n");
     }
 
@@ -2749,7 +2749,7 @@ static void boot_selftests_system(void) {
         selftest_reap(icons_task);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         task_t *v1 = task_spawn("shutdown-victim", spinner_task, NULL);
         task_t *v2 = task_spawn("shutdown-victim", spinner_task, NULL);
@@ -2763,41 +2763,41 @@ static void boot_selftests_system(void) {
 
         int all_ok = 1;
         if (saved_pixel != 0x00203040u) {
-            klog_puts("[m47] the desktop did not come up with the saved settings - expected 0x00203040 got 0x");
-            klog_put_hex32(saved_pixel);
-            klog_putc('\n');
+            kernel_log_puts("[m47] the desktop did not come up with the saved settings - expected 0x00203040 got 0x");
+            kernel_log_put_hex32(saved_pixel);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (fallback_pixel != 0x001B1B31u) {
-            klog_puts("[m47] a corrupted settings.conf did not fall back to the compiled-in defaults - expected 0x001B1B31 got 0x");
-            klog_put_hex32(fallback_pixel);
-            klog_putc('\n');
+            kernel_log_puts("[m47] a corrupted settings.conf did not fall back to the compiled-in defaults - expected 0x001B1B31 got 0x");
+            kernel_log_put_hex32(fallback_pixel);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (killed_no_grace != 2 || !codes_no_grace) {
-            klog_puts("[m47] with no grace period, the orderly stop did not escalate to SIGKILL (0x");
-            klog_put_hex32((uint32_t)killed_no_grace);
-            klog_puts(" killed, exit codes 0x");
-            klog_put_hex32((uint32_t)v1->exit_code);
-            klog_puts("/0x");
-            klog_put_hex32((uint32_t)v2->exit_code);
-            klog_puts(")\n");
+            kernel_log_puts("[m47] with no grace period, the orderly stop did not escalate to SIGKILL (0x");
+            kernel_log_put_hex32((uint32_t)killed_no_grace);
+            kernel_log_puts(" killed, exit codes 0x");
+            kernel_log_put_hex32((uint32_t)v1->exit_code);
+            kernel_log_puts("/0x");
+            kernel_log_put_hex32((uint32_t)v2->exit_code);
+            kernel_log_puts(")\n");
             all_ok = 0;
         }
         if (killed_with_grace != 0 || !codes_with_grace) {
-            klog_puts("[m47] with a real grace period, tasks did not stop on SIGTERM alone (0x");
-            klog_put_hex32((uint32_t)killed_with_grace);
-            klog_puts(" needed SIGKILL, exit codes 0x");
-            klog_put_hex32((uint32_t)v3->exit_code);
-            klog_puts("/0x");
-            klog_put_hex32((uint32_t)v4->exit_code);
-            klog_puts(")\n");
+            kernel_log_puts("[m47] with a real grace period, tasks did not stop on SIGTERM alone (0x");
+            kernel_log_put_hex32((uint32_t)killed_with_grace);
+            kernel_log_puts(" needed SIGKILL, exit codes 0x");
+            kernel_log_put_hex32((uint32_t)v3->exit_code);
+            kernel_log_puts("/0x");
+            kernel_log_put_hex32((uint32_t)v4->exit_code);
+            kernel_log_puts(")\n");
             all_ok = 0;
         }
         if (!all_ok) {
             panic("M47 session-lifecycle self-test: settings persistence and/or the orderly stop did not behave as specified");
         }
-        klog_puts("[m47] settings.conf round trip (including a corrupted one falling back to "
+        kernel_log_puts("[m47] settings.conf round trip (including a corrupted one falling back to "
                    "defaults) and the orderly stop's SIGTERM-then-SIGKILL escalation "
                    "self-test passed (4/4 checks).\n\n");
     }
@@ -2809,7 +2809,7 @@ static void boot_selftests_system(void) {
         if (comp_size < 64) {
             panic("vfs_read: compositor missing or absurdly small - should exist, just seeded");
         }
-        if (vfs_write(PATH_TMP_DIR "m48trunc", comp_image, 64) != 0) {
+        if (virtual_file_system_write(PATH_TMP_DIR "m48trunc", comp_image, 64) != 0) {
             panic("M48 self-test: could not write the truncated-ELF fixture");
         }
 
@@ -2821,8 +2821,8 @@ static void boot_selftests_system(void) {
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        int notify_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_NOTIFY_PIPE, (uint64_t)notify_fds, 0) != 0) {
+        int notify_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_NOTIFY_PIPE, (uint64_t)notify_file_descriptors, 0) != 0) {
             panic("M48 self-test: kernel-side SYS_pipe_open(WM_NOTIFY_PIPE) failed");
         }
         wm_notify_request_t note;
@@ -2830,22 +2830,22 @@ static void boot_selftests_system(void) {
         note.level = WM_NOTIFY_ERROR;
         k_strlcpy(note.title, "Test", sizeof(note.title));
         k_strlcpy(note.body, "Body", sizeof(note.body));
-        do_syscall(SYS_write, (uint64_t)notify_fds[1], (uint64_t)&note, sizeof(note));
+        do_syscall(SYS_write, (uint64_t)notify_file_descriptors[1], (uint64_t)&note, sizeof(note));
         pit_sleep_ms(300);
 
-        uint32_t stripe = fb_get_pixel(714, 40);
-        uint32_t toast_bg = fb_get_pixel(900, 40);
+        uint32_t stripe = framebuffer_get_pixel(714, 40);
+        uint32_t toast_bg = framebuffer_get_pixel(900, 40);
 
         pit_sleep_ms(2000);
-        uint32_t stripe_midlife = fb_get_pixel(714, 40);
+        uint32_t stripe_midlife = framebuffer_get_pixel(714, 40);
 
         pit_sleep_ms(2500);
-        uint32_t stripe_expired = fb_get_pixel(714, 40);
-        uint32_t bg_expired = fb_get_pixel(900, 40);
+        uint32_t stripe_expired = framebuffer_get_pixel(714, 40);
+        uint32_t bg_expired = framebuffer_get_pixel(900, 40);
 
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         static const struct { const char *what; uint32_t expected; } names[] = {
             {"the error toast's accent stripe", 0x00E05C55u},
@@ -2858,13 +2858,13 @@ static void boot_selftests_system(void) {
         int all_ok = 1;
         for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
             if (got[i] != names[i].expected) {
-                klog_puts("[m48] pixel check failed: ");
-                klog_puts(names[i].what);
-                klog_puts(" - expected 0x");
-                klog_put_hex32(names[i].expected);
-                klog_puts(" got 0x");
-                klog_put_hex32(got[i]);
-                klog_putc('\n');
+                kernel_log_puts("[m48] pixel check failed: ");
+                kernel_log_puts(names[i].what);
+                kernel_log_puts(" - expected 0x");
+                kernel_log_put_hex32(names[i].expected);
+                kernel_log_puts(" got 0x");
+                kernel_log_put_hex32(got[i]);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
@@ -2876,24 +2876,24 @@ static void boot_selftests_system(void) {
         const long got_codes[] = {rc_missing, rc_text, rc_trunc};
         for (size_t i = 0; i < sizeof(got_codes) / sizeof(got_codes[0]); i++) {
             if (got_codes[i] != codes[i].expected) {
-                klog_puts("[m48] SYS_spawn returned the wrong code for ");
-                klog_puts(codes[i].what);
-                klog_puts(" - expected 0x");
-                klog_put_hex32((uint32_t)codes[i].expected);
-                klog_puts(" got 0x");
-                klog_put_hex32((uint32_t)got_codes[i]);
-                klog_putc('\n');
+                kernel_log_puts("[m48] SYS_spawn returned the wrong code for ");
+                kernel_log_puts(codes[i].what);
+                kernel_log_puts(" - expected 0x");
+                kernel_log_put_hex32((uint32_t)codes[i].expected);
+                kernel_log_puts(" got 0x");
+                kernel_log_put_hex32((uint32_t)got_codes[i]);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
         if (k_strcmp(spawn_error_message(SPAWN_ERR_NOT_FOUND), spawn_error_message(SPAWN_ERR_BAD_IMAGE)) == 0) {
-            klog_puts("[m48] two distinct spawn errors share one message - the codes buy nothing\n");
+            kernel_log_puts("[m48] two distinct spawn errors share one message - the codes buy nothing\n");
             all_ok = 0;
         }
         if (!all_ok) {
             panic("M48 feedback self-test: toasts and/or spawn error codes did not behave as specified");
         }
-        klog_puts("[m48] toast raised, still up mid-life, gone by its own deadline, and each "
+        kernel_log_puts("[m48] toast raised, still up mid-life, gone by its own deadline, and each "
                    "distinct SYS_spawn failure reporting its own code self-test passed "
                    "(9/9 checks).\n\n");
     }
@@ -2917,21 +2917,21 @@ static void boot_selftests_system(void) {
         for (size_t i = 0; i < sizeof(chords) / sizeof(chords[0]); i++) {
             int got = shortcut_lookup(chords[i].ch, chords[i].mods);
             if (got != chords[i].expect) {
-                klog_puts("[m49] shortcut_lookup resolved ");
-                klog_puts(chords[i].what);
-                klog_puts(" to 0x");
-                klog_put_hex32((uint32_t)got);
-                klog_puts(", expected 0x");
-                klog_put_hex32((uint32_t)chords[i].expect);
-                klog_putc('\n');
+                kernel_log_puts("[m49] shortcut_lookup resolved ");
+                kernel_log_puts(chords[i].what);
+                kernel_log_puts(" to 0x");
+                kernel_log_put_hex32((uint32_t)got);
+                kernel_log_puts(", expected 0x");
+                kernel_log_put_hex32((uint32_t)chords[i].expect);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
         for (int i = 0; i < SHORTCUT_COUNT; i++) {
             if (SHORTCUTS[i].id == SHORTCUT_NONE || !SHORTCUTS[i].chord[0] || !SHORTCUTS[i].what[0]) {
-                klog_puts("[m49] shortcut row 0x");
-                klog_put_hex32((uint32_t)i);
-                klog_puts(" is missing an id, a chord name or a description\n");
+                kernel_log_puts("[m49] shortcut row 0x");
+                kernel_log_put_hex32((uint32_t)i);
+                kernel_log_puts(" is missing an id, a chord name or a description\n");
                 all_ok = 0;
             }
         }
@@ -2943,32 +2943,32 @@ static void boot_selftests_system(void) {
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        int drag_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_DRAG_PIPE, (uint64_t)drag_fds, 0) != 0) {
+        int drag_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_DRAG_PIPE, (uint64_t)drag_file_descriptors, 0) != 0) {
             panic("M49 self-test: kernel-side SYS_pipe_open(WM_DRAG_PIPE) failed");
         }
         wm_drag_request_t drag;
         k_memset(&drag, 0, sizeof(drag));
         k_strlcpy(drag.payload, PATH_TMP_DIR "m33test", sizeof(drag.payload));
-        do_syscall(SYS_write, (uint64_t)drag_fds[1], (uint64_t)&drag, sizeof(drag));
+        do_syscall(SYS_write, (uint64_t)drag_file_descriptors[1], (uint64_t)&drag, sizeof(drag));
         pit_sleep_ms(300);
 
-        uint32_t label_pixel = fb_get_pixel(524, 396);
+        uint32_t label_pixel = framebuffer_get_pixel(524, 396);
 
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         if (label_pixel != 0x00335577u) {
-            klog_puts("[m49] the compositor did not show a drag label after WM_DRAG_PIPE - expected 0x00335577 got 0x");
-            klog_put_hex32(label_pixel);
-            klog_putc('\n');
+            kernel_log_puts("[m49] the compositor did not show a drag label after WM_DRAG_PIPE - expected 0x00335577 got 0x");
+            kernel_log_put_hex32(label_pixel);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (!all_ok) {
             panic("M49 input-completeness self-test: the shortcut table and/or the drag protocol did not behave as specified");
         }
-        klog_puts("[m49] the shared shortcut table resolving every chord (and refusing every "
+        kernel_log_puts("[m49] the shared shortcut table resolving every chord (and refusing every "
                    "near-miss), and a drag announced on WM_DRAG_PIPE becoming a visible drag "
                    "self-test passed (22/22 checks).\n\n");
     }
@@ -2976,30 +2976,30 @@ static void boot_selftests_system(void) {
     {
         int all_ok = 1;
 
-        uint64_t shm_baseline = pmm_free_frame_count();
-        int shm_cycles_ok = 1;
+        uint64_t shared_memory_baseline = physical_memory_free_frame_count();
+        int shared_memory_cycles_ok = 1;
         for (int i = 0; i < 24; i++) {
             long id = do_syscall(SYS_shm_create, 64 * 1024, 0, 0);
             if (id < 0) {
-                klog_puts("[m50] shm_create failed on cycle 0x");
-                klog_put_hex32((uint32_t)i);
-                klog_puts(" - the segment table is not being handed back\n");
-                shm_cycles_ok = 0;
+                kernel_log_puts("[m50] shm_create failed on cycle 0x");
+                kernel_log_put_hex32((uint32_t)i);
+                kernel_log_puts(" - the segment table is not being handed back\n");
+                shared_memory_cycles_ok = 0;
                 break;
             }
             if (do_syscall(SYS_shm_free, (uint64_t)id, 0, 0) != 0) {
-                klog_puts("[m50] shm_free refused a segment this task had just created\n");
-                shm_cycles_ok = 0;
+                kernel_log_puts("[m50] shm_free refused a segment this task had just created\n");
+                shared_memory_cycles_ok = 0;
                 break;
             }
         }
-        uint64_t shm_after = pmm_free_frame_count();
-        if (!shm_cycles_ok || shm_after != shm_baseline) {
-            klog_puts("[m50] 24 shm create/free cycles did not return every frame: 0x");
-            klog_put_hex64(shm_baseline);
-            klog_puts(" free before, 0x");
-            klog_put_hex64(shm_after);
-            klog_puts(" after\n");
+        uint64_t shared_memory_after = physical_memory_free_frame_count();
+        if (!shared_memory_cycles_ok || shared_memory_after != shared_memory_baseline) {
+            kernel_log_puts("[m50] 24 shm create/free cycles did not return every frame: 0x");
+            kernel_log_put_hex64(shared_memory_baseline);
+            kernel_log_puts(" free before, 0x");
+            kernel_log_put_hex64(shared_memory_after);
+            kernel_log_puts(" after\n");
             all_ok = 0;
         }
 
@@ -3007,11 +3007,11 @@ static void boot_selftests_system(void) {
         long first_free = do_syscall(SYS_shm_free, (uint64_t)id_twice, 0, 0);
         long second_free = do_syscall(SYS_shm_free, (uint64_t)id_twice, 0, 0);
         if (first_free != 0 || second_free == 0) {
-            klog_puts("[m50] freeing an shm segment twice did not fail the second time (0x");
-            klog_put_hex32((uint32_t)first_free);
-            klog_puts(" then 0x");
-            klog_put_hex32((uint32_t)second_free);
-            klog_puts(")\n");
+            kernel_log_puts("[m50] freeing an shm segment twice did not fail the second time (0x");
+            kernel_log_put_hex32((uint32_t)first_free);
+            kernel_log_puts(" then 0x");
+            kernel_log_put_hex32((uint32_t)second_free);
+            kernel_log_puts(")\n");
             all_ok = 0;
         }
 
@@ -3026,15 +3026,15 @@ static void boot_selftests_system(void) {
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        uint64_t storm_frames_before = pmm_free_frame_count();
-        int storm_shm_before = shm_count_by_owner(comp_task->id);
+        uint64_t storm_frames_before = physical_memory_free_frame_count();
+        int storm_shared_memory_before = shared_memory_count_by_owner(comp_task->id);
         int storm_ok = 1;
         for (int round = 0; round < 16 && storm_ok; round++) {
             task_t *victim = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
             if (!victim) {
-                klog_puts("[m50] kill storm: spawn failed on round 0x");
-                klog_put_hex32((uint32_t)round);
-                klog_putc('\n');
+                kernel_log_puts("[m50] kill storm: spawn failed on round 0x");
+                kernel_log_put_hex32((uint32_t)round);
+                kernel_log_putc('\n');
                 storm_ok = 0;
                 break;
             }
@@ -3044,22 +3044,22 @@ static void boot_selftests_system(void) {
         }
         kfree(stub_image);
 
-        uint64_t storm_frames_after = pmm_free_frame_count();
-        int storm_shm_after = shm_count_by_owner(comp_task->id);
+        uint64_t storm_frames_after = physical_memory_free_frame_count();
+        int storm_shared_memory_after = shared_memory_count_by_owner(comp_task->id);
 
-        int comp_fds = 0;
+        int comp_file_descriptors = 0;
         for (int f = 0; f < MAX_FDS; f++) {
             if (comp_task->fds[f].type != FD_NONE) {
-                comp_fds++;
+                comp_file_descriptors++;
             }
         }
-        klog_puts("[m50] compositor after the storm: 0x");
-        klog_put_hex32((uint32_t)comp_fds);
-        klog_puts(" of 0x");
-        klog_put_hex32((uint32_t)MAX_FDS);
-        klog_puts(" fds, 0x");
-        klog_put_hex32((uint32_t)storm_shm_after);
-        klog_puts(" shm segment(s) held.\n");
+        kernel_log_puts("[m50] compositor after the storm: 0x");
+        kernel_log_put_hex32((uint32_t)comp_file_descriptors);
+        kernel_log_puts(" of 0x");
+        kernel_log_put_hex32((uint32_t)MAX_FDS);
+        kernel_log_puts(" fds, 0x");
+        kernel_log_put_hex32((uint32_t)storm_shared_memory_after);
+        kernel_log_puts(" shm segment(s) held.\n");
 
         size_t last_size_bytes = 0;
         uint8_t *last_image = read_program("/bin/wm_stubborn", &last_size_bytes);
@@ -3068,41 +3068,41 @@ static void boot_selftests_system(void) {
                                           : process_spawn("wm_stubborn", last_image, (size_t)last_size, "");
         kfree(last_image);
         pit_sleep_ms(700);
-        uint32_t survivor_pixel = fb_get_pixel(200, 150);
+        uint32_t survivor_pixel = framebuffer_get_pixel(200, 150);
         if (last_task) {
             selftest_reap(last_task);
         }
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         if (!storm_ok) {
             all_ok = 0;
         }
-        if (storm_shm_after != storm_shm_before) {
-            klog_puts("[m50] the kill storm left the compositor holding shm segments: 0x");
-            klog_put_hex32((uint32_t)storm_shm_before);
-            klog_puts(" before, 0x");
-            klog_put_hex32((uint32_t)storm_shm_after);
-            klog_puts(" after 16 rounds\n");
+        if (storm_shared_memory_after != storm_shared_memory_before) {
+            kernel_log_puts("[m50] the kill storm left the compositor holding shm segments: 0x");
+            kernel_log_put_hex32((uint32_t)storm_shared_memory_before);
+            kernel_log_puts(" before, 0x");
+            kernel_log_put_hex32((uint32_t)storm_shared_memory_after);
+            kernel_log_puts(" after 16 rounds\n");
             all_ok = 0;
         }
         uint64_t storm_leak = storm_frames_before > storm_frames_after
                                   ? storm_frames_before - storm_frames_after
                                   : 0;
-        klog_puts("[m50] kill storm: 0x");
-        klog_put_hex64(storm_leak);
-        klog_puts(" frames not reclaimed across 16 rounds (0x");
-        klog_put_hex64(storm_leak / 16);
-        klog_puts(" per dead address space; one leaked window buffer would be 0x18).\n");
+        kernel_log_puts("[m50] kill storm: 0x");
+        kernel_log_put_hex64(storm_leak);
+        kernel_log_puts(" frames not reclaimed across 16 rounds (0x");
+        kernel_log_put_hex64(storm_leak / 16);
+        kernel_log_puts(" per dead address space; one leaked window buffer would be 0x18).\n");
         if (storm_leak > 16 * 20) {
-            klog_puts("[m50] the kill storm leaked more than 16 dead address spaces account for - a window's pixel buffer did not come back\n");
+            kernel_log_puts("[m50] the kill storm leaked more than 16 dead address spaces account for - a window's pixel buffer did not come back\n");
             all_ok = 0;
         }
         if (survivor_pixel != 0x00B03040u) {
-            klog_puts("[m50] a client connecting after 16 kill rounds got no drawable window - expected 0x00B03040 at (200,150), got 0x");
-            klog_put_hex32(survivor_pixel);
-            klog_putc('\n');
+            kernel_log_puts("[m50] a client connecting after 16 kill rounds got no drawable window - expected 0x00B03040 at (200,150), got 0x");
+            kernel_log_put_hex32(survivor_pixel);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
 
@@ -3121,11 +3121,11 @@ static void boot_selftests_system(void) {
         };
         for (size_t i = 0; i < sizeof(garbage) / sizeof(garbage[0]); i++) {
             if (garbage[i].got >= 0) {
-                klog_puts("[m50] ");
-                klog_puts(garbage[i].what);
-                klog_puts(" succeeded (0x");
-                klog_put_hex32((uint32_t)garbage[i].got);
-                klog_puts(") instead of failing\n");
+                kernel_log_puts("[m50] ");
+                kernel_log_puts(garbage[i].what);
+                kernel_log_puts(" succeeded (0x");
+                kernel_log_put_hex32((uint32_t)garbage[i].got);
+                kernel_log_puts(") instead of failing\n");
                 all_ok = 0;
             }
         }
@@ -3133,7 +3133,7 @@ static void boot_selftests_system(void) {
         if (!all_ok) {
             panic("M50 robustness self-test: a resource did not come back, or a garbage argument was accepted");
         }
-        klog_puts("[m50] 24 shm create/free cycles frame-neutral, a double free refused, "
+        kernel_log_puts("[m50] 24 shm create/free cycles frame-neutral, a double free refused, "
                    "16 kill-storm rounds returning every window slot and segment, and 9 "
                    "garbage-argument syscalls all refused self-test passed (13/13 checks).\n\n");
     }
@@ -3143,53 +3143,53 @@ static void boot_selftests_system(void) {
 
         static const char *const LAYOUT[] = {PATH_BIN, PATH_HOME, PATH_ETC, PATH_TMP};
         for (size_t i = 0; i < sizeof(LAYOUT) / sizeof(LAYOUT[0]); i++) {
-            if (!vfs_is_dir(LAYOUT[i])) {
-                klog_puts("[m53] ");
-                klog_puts(LAYOUT[i]);
-                klog_puts(" is missing or is not a directory\n");
+            if (!virtual_file_system_is_directory(LAYOUT[i])) {
+                kernel_log_puts("[m53] ");
+                kernel_log_puts(LAYOUT[i]);
+                kernel_log_puts(" is missing or is not a directory\n");
                 all_ok = 0;
             }
         }
 
-        static char list_buf[4096];
-        size_t list_len = vfs_list(PATH_BIN, list_buf, sizeof(list_buf));
+        static char list_buffer[4096];
+        size_t list_length = virtual_file_system_list(PATH_BIN, list_buffer, sizeof(list_buffer));
         int found = 0;
         for (size_t i = 0; i < EMBEDDED_PROGRAM_COUNT; i++) {
             char path[PATH_MAX_LEN];
             path_join(path, PATH_BIN_DIR, embedded_programs[i].name);
-            if (vfs_exists(path)) {
+            if (virtual_file_system_exists(path)) {
                 found++;
             } else {
-                klog_puts("[m53] ");
-                klog_puts(path);
-                klog_puts(" was not seeded\n");
+                kernel_log_puts("[m53] ");
+                kernel_log_puts(path);
+                kernel_log_puts(" was not seeded\n");
                 all_ok = 0;
             }
         }
         int listed = 0;
-        for (size_t i = 0; i < list_len; i++) {
-            if (list_buf[i] == '\n') {
+        for (size_t i = 0; i < list_length; i++) {
+            if (list_buffer[i] == '\n') {
                 listed++;
             }
         }
         if (listed < (int)EMBEDDED_PROGRAM_COUNT) {
-            klog_puts("[m53] ");
-            klog_puts(PATH_BIN);
-            klog_puts(" lists 0x");
-            klog_put_hex32((uint32_t)listed);
-            klog_puts(" entries, fewer than the 0x");
-            klog_put_hex32((uint32_t)EMBEDDED_PROGRAM_COUNT);
-            klog_puts(" programs this build ships - the listing and the seeding disagree\n");
+            kernel_log_puts("[m53] ");
+            kernel_log_puts(PATH_BIN);
+            kernel_log_puts(" lists 0x");
+            kernel_log_put_hex32((uint32_t)listed);
+            kernel_log_puts(" entries, fewer than the 0x");
+            kernel_log_put_hex32((uint32_t)EMBEDDED_PROGRAM_COUNT);
+            kernel_log_puts(" programs this build ships - the listing and the seeding disagree\n");
             all_ok = 0;
         }
 
         static const char *const DEEP = PATH_TMP_DIR "m53dir";
-        if (!vfs_exists(DEEP) && vfs_mkdir(DEEP) != 0) {
-            klog_puts("[m53] vfs_mkdir failed on a fresh path under " PATH_TMP "\n");
+        if (!virtual_file_system_exists(DEEP) && virtual_file_system_mkdir(DEEP) != 0) {
+            kernel_log_puts("[m53] vfs_mkdir failed on a fresh path under " PATH_TMP "\n");
             all_ok = 0;
         }
-        if (!vfs_is_dir(DEEP)) {
-            klog_puts("[m53] the directory just created does not read back as one\n");
+        if (!virtual_file_system_is_directory(DEEP)) {
+            kernel_log_puts("[m53] the directory just created does not read back as one\n");
             all_ok = 0;
         }
         const int DEEP_FILES = 17;
@@ -3204,61 +3204,61 @@ static void boot_selftests_system(void) {
             char body[16];
             k_memset(body, 0, sizeof(body));
             body[0] = (char)('A' + i);
-            if (vfs_write(path, body, sizeof(body)) != 0) {
-                klog_puts("[m53] writing file 0x");
-                klog_put_hex32((uint32_t)i);
-                klog_puts(" into a directory past its first block failed\n");
+            if (virtual_file_system_write(path, body, sizeof(body)) != 0) {
+                kernel_log_puts("[m53] writing file 0x");
+                kernel_log_put_hex32((uint32_t)i);
+                kernel_log_puts(" into a directory past its first block failed\n");
                 all_ok = 0;
                 break;
             }
         }
-        size_t deep_len = vfs_list(DEEP, list_buf, sizeof(list_buf));
+        size_t deep_length = virtual_file_system_list(DEEP, list_buffer, sizeof(list_buffer));
         int deep_listed = 0;
-        for (size_t i = 0; i < deep_len; i++) {
-            if (list_buf[i] == '\n') {
+        for (size_t i = 0; i < deep_length; i++) {
+            if (list_buffer[i] == '\n') {
                 deep_listed++;
             }
         }
         if (deep_listed != DEEP_FILES) {
-            klog_puts("[m53] a directory holding 0x");
-            klog_put_hex32((uint32_t)DEEP_FILES);
-            klog_puts(" files listed 0x");
-            klog_put_hex32((uint32_t)deep_listed);
-            klog_puts(" of them - it did not grow past one block correctly\n");
+            kernel_log_puts("[m53] a directory holding 0x");
+            kernel_log_put_hex32((uint32_t)DEEP_FILES);
+            kernel_log_puts(" files listed 0x");
+            kernel_log_put_hex32((uint32_t)deep_listed);
+            kernel_log_puts(" of them - it did not grow past one block correctly\n");
             all_ok = 0;
         }
         {
             char body[16];
             k_memset(body, 0, sizeof(body));
-            int64_t n = vfs_read(PATH_TMP_DIR "m53dir/f16", body, sizeof(body));
+            int64_t n = virtual_file_system_read(PATH_TMP_DIR "m53dir/f16", body, sizeof(body));
             if (n != 16 || body[0] != (char)('A' + 16)) {
-                klog_puts("[m53] the 17th file in that directory did not read back by path (0x");
-                klog_put_hex32((uint32_t)n);
-                klog_puts(" bytes, first byte 0x");
-                klog_put_hex32((uint32_t)(uint8_t)body[0]);
-                klog_puts(")\n");
+                kernel_log_puts("[m53] the 17th file in that directory did not read back by path (0x");
+                kernel_log_put_hex32((uint32_t)n);
+                kernel_log_puts(" bytes, first byte 0x");
+                kernel_log_put_hex32((uint32_t)(uint8_t)body[0]);
+                kernel_log_puts(")\n");
                 all_ok = 0;
             }
         }
 
         static const char a_body[] = "in-tmp";
         static const char b_body[] = "in-home";
-        if (vfs_write(PATH_TMP_DIR "m53same", a_body, sizeof(a_body)) != 0 ||
-            vfs_write(PATH_ETC_DIR "m53same", b_body, sizeof(b_body)) != 0) {
-            klog_puts("[m53] could not create the same name in two directories\n");
+        if (virtual_file_system_write(PATH_TMP_DIR "m53same", a_body, sizeof(a_body)) != 0 ||
+            virtual_file_system_write(PATH_ETC_DIR "m53same", b_body, sizeof(b_body)) != 0) {
+            kernel_log_puts("[m53] could not create the same name in two directories\n");
             all_ok = 0;
         } else {
             char got_a[16], got_b[16];
             k_memset(got_a, 0, sizeof(got_a));
             k_memset(got_b, 0, sizeof(got_b));
-            vfs_read(PATH_TMP_DIR "m53same", got_a, sizeof(got_a));
-            vfs_read(PATH_ETC_DIR "m53same", got_b, sizeof(got_b));
+            virtual_file_system_read(PATH_TMP_DIR "m53same", got_a, sizeof(got_a));
+            virtual_file_system_read(PATH_ETC_DIR "m53same", got_b, sizeof(got_b));
             if (k_strcmp(got_a, a_body) != 0 || k_strcmp(got_b, b_body) != 0) {
-                klog_puts("[m53] the same name in two directories resolved to one file: '");
-                klog_puts(got_a);
-                klog_puts("' and '");
-                klog_puts(got_b);
-                klog_puts("'\n");
+                kernel_log_puts("[m53] the same name in two directories resolved to one file: '");
+                kernel_log_puts(got_a);
+                kernel_log_puts("' and '");
+                kernel_log_puts(got_b);
+                kernel_log_puts("'\n");
                 all_ok = 0;
             }
         }
@@ -3274,44 +3274,44 @@ static void boot_selftests_system(void) {
         };
         for (size_t i = 0; i < sizeof(BAD_PATHS) / sizeof(BAD_PATHS[0]); i++) {
             char scratch[16];
-            if (vfs_exists(BAD_PATHS[i].path) || vfs_read(BAD_PATHS[i].path, scratch, sizeof(scratch)) >= 0) {
-                klog_puts("[m53] path check failed: ");
-                klog_puts(BAD_PATHS[i].what);
-                klog_puts(" was accepted ('");
-                klog_puts(BAD_PATHS[i].path);
-                klog_puts("')\n");
+            if (virtual_file_system_exists(BAD_PATHS[i].path) || virtual_file_system_read(BAD_PATHS[i].path, scratch, sizeof(scratch)) >= 0) {
+                kernel_log_puts("[m53] path check failed: ");
+                kernel_log_puts(BAD_PATHS[i].what);
+                kernel_log_puts(" was accepted ('");
+                kernel_log_puts(BAD_PATHS[i].path);
+                kernel_log_puts("')\n");
                 all_ok = 0;
             }
         }
 
-        if (!vfs_is_dir(PATH_BIN_DIR)) {
-            klog_puts("[m53] a trailing slash on a directory was refused ('" PATH_BIN_DIR "')\n");
+        if (!virtual_file_system_is_directory(PATH_BIN_DIR)) {
+            kernel_log_puts("[m53] a trailing slash on a directory was refused ('" PATH_BIN_DIR "')\n");
             all_ok = 0;
         }
         {
             char scratch[16];
-            if (vfs_read(PATH_BIN_DIR "ls/", scratch, sizeof(scratch)) >= 0) {
-                klog_puts("[m53] a trailing slash on a regular file was accepted\n");
+            if (virtual_file_system_read(PATH_BIN_DIR "ls/", scratch, sizeof(scratch)) >= 0) {
+                kernel_log_puts("[m53] a trailing slash on a regular file was accepted\n");
                 all_ok = 0;
             }
         }
 
-        if (vfs_exists(PATH_BIN_DIR "settings.conf") || !vfs_exists(PATH_SETTINGS)) {
-            klog_puts("[m53] settings.conf is not where the layout says it is\n");
+        if (virtual_file_system_exists(PATH_BIN_DIR "settings.conf") || !virtual_file_system_exists(PATH_SETTINGS)) {
+            kernel_log_puts("[m53] settings.conf is not where the layout says it is\n");
             all_ok = 0;
         }
 
         if (!all_ok) {
             panic("M53 directory self-test: the namespace is not a tree");
         }
-        klog_puts("[m53] directories created, entered, grown past one block, listed and read "
+        kernel_log_puts("[m53] directories created, entered, grown past one block, listed and read "
                    "back by path; the same name in two directories staying two files; seven "
                    "malformed or escaping paths refused (and, since M60, a trailing slash "
                    "honoured on a directory and still refused on a file); and " PATH_BIN
                    " holding exactly the "
                    "programs this build ships self-test passed (");
-        klog_put_hex32((uint32_t)found);
-        klog_puts(" programs seeded).\n\n");
+        kernel_log_put_hex32((uint32_t)found);
+        kernel_log_puts(" programs seeded).\n\n");
     }
 
     {
@@ -3361,20 +3361,20 @@ static void boot_selftests_system(void) {
         uint32_t b_tick_still = selftest_pixel_settled(433, 333, 0x002060C0u,
                                                         "the other window's tick to stay unlit still");
 
-        int query_fds[2], query_resp_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_QUERY_PIPE, (uint64_t)query_fds, 0) != 0 ||
-            do_syscall(SYS_pipe_open, (uint64_t)WM_QUERY_RESP_PIPE, (uint64_t)query_resp_fds, 0) != 0) {
+        int query_file_descriptors[2], query_response_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_QUERY_PIPE, (uint64_t)query_file_descriptors, 0) != 0 ||
+            do_syscall(SYS_pipe_open, (uint64_t)WM_QUERY_RESP_PIPE, (uint64_t)query_response_file_descriptors, 0) != 0) {
             panic("M51 self-test: kernel-side SYS_pipe_open(WM_QUERY_PIPE) failed");
         }
         uint8_t ping = 1;
-        do_syscall(SYS_write, (uint64_t)query_fds[1], (uint64_t)&ping, sizeof(ping));
+        do_syscall(SYS_write, (uint64_t)query_file_descriptors[1], (uint64_t)&ping, sizeof(ping));
         pit_sleep_ms(300);
         wm_query_response_t *q = (wm_query_response_t *)kmalloc(sizeof(wm_query_response_t));
         if (!q) {
             panic("out of memory for the M51 query response");
         }
         k_memset(q, 0, sizeof(*q));
-        do_syscall(SYS_read, (uint64_t)query_resp_fds[0], (uint64_t)q, sizeof(*q));
+        do_syscall(SYS_read, (uint64_t)query_response_file_descriptors[0], (uint64_t)q, sizeof(*q));
         int32_t a_z = -1, b_z = -1;
         for (int32_t i = 0; i < q->count && i < WM_MAX_ROUTABLE_WINDOWS; i++) {
             if (k_strcmp(q->windows[i].title, "zA") == 0) {
@@ -3390,7 +3390,7 @@ static void boot_selftests_system(void) {
         selftest_reap(b_task);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         int all_ok = 1;
         static const struct { const char *what; uint32_t expected; } checks_meta[] = {
@@ -3404,30 +3404,30 @@ static void boot_selftests_system(void) {
         const uint32_t got[] = {overlap_before, overlap_after_raise, a_tick1, b_tick1, a_tick2, b_tick_still};
         for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
             if (got[i] != checks_meta[i].expected) {
-                klog_puts("[m51] pixel check failed: ");
-                klog_puts(checks_meta[i].what);
-                klog_puts(" - expected 0x");
-                klog_put_hex32(checks_meta[i].expected);
-                klog_puts(" got 0x");
-                klog_put_hex32(got[i]);
-                klog_putc('\n');
+                kernel_log_puts("[m51] pixel check failed: ");
+                kernel_log_puts(checks_meta[i].what);
+                kernel_log_puts(" - expected 0x");
+                kernel_log_put_hex32(checks_meta[i].expected);
+                kernel_log_puts(" got 0x");
+                kernel_log_put_hex32(got[i]);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
         if (a_z < 0 || b_z < 0 || a_z <= b_z) {
-            klog_puts("[m51] wm_window_info_t.z_index did not report the raised window as frontmost: zA 0x");
-            klog_put_hex32((uint32_t)a_z);
-            klog_puts(", zB 0x");
-            klog_put_hex32((uint32_t)b_z);
-            klog_puts(", of 0x");
-            klog_put_hex32((uint32_t)reported);
-            klog_puts(" window(s) reported\n");
+            kernel_log_puts("[m51] wm_window_info_t.z_index did not report the raised window as frontmost: zA 0x");
+            kernel_log_put_hex32((uint32_t)a_z);
+            kernel_log_puts(", zB 0x");
+            kernel_log_put_hex32((uint32_t)b_z);
+            kernel_log_puts(", of 0x");
+            kernel_log_put_hex32((uint32_t)reported);
+            kernel_log_puts(" window(s) reported\n");
             all_ok = 0;
         }
         if (!all_ok) {
             panic("M51 z-order self-test: overlapping windows did not behave as specified");
         }
-        klog_puts("[m51] z-order raise-on-click, occlusion-correct hit-testing (the overlap "
+        kernel_log_puts("[m51] z-order raise-on-click, occlusion-correct hit-testing (the overlap "
                    "click reaching exactly the front window) and wm_window_info_t.z_index "
                    "self-test passed (7/7 checks).\n\n");
     }
@@ -3459,16 +3459,16 @@ static void boot_selftests_system(void) {
             uint64_t t0 = tsc_read();
             mouse_inject(0, 0, 1, 0);
             for (;;) {
-                if (fb_get_pixel((uint32_t)tick_x, (uint32_t)tick_y) == 0x00F0E000u) {
+                if (framebuffer_get_pixel((uint32_t)tick_x, (uint32_t)tick_y) == 0x00F0E000u) {
                     uint64_t us = tsc_to_us(tsc_read() - t0);
                     if (us > worst_us) {
                         worst_us = us;
                     }
-                    klog_puts("[m117] press ");
-                    klog_put_dec((uint32_t)t);
-                    klog_puts(" on screen after ");
-                    klog_put_dec((uint32_t)(us / 1000));
-                    klog_puts(" ms\n");
+                    kernel_log_puts("[m117] press ");
+                    kernel_log_put_dec((uint32_t)t);
+                    kernel_log_puts(" on screen after ");
+                    kernel_log_put_dec((uint32_t)(us / 1000));
+                    kernel_log_puts(" ms\n");
                     break;
                 }
                 if (pit_get_ticks() >= deadline) {
@@ -3507,20 +3507,20 @@ static void boot_selftests_system(void) {
         selftest_reap(z_task);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         if (missed) {
             panic("M117 self-test: a press on a window never showed as that window's tick - "
                   "the click, the client's redraw or its present did not reach the screen");
         }
-        klog_perf("click_to_photon_us", worst_us, "us");
-        klog_perf("desktop_busy_pct", busy_pct, "pct");
-        klog_puts("[m117] a desktop that sleeps and a click that shows: three presses on a "
+        kernel_log_perf("click_to_photon_us", worst_us, "us");
+        kernel_log_perf("desktop_busy_pct", busy_pct, "pct");
+        kernel_log_puts("[m117] a desktop that sleeps and a click that shows: three presses on a "
                    "client each on screen as its own tick within ");
-        klog_put_dec((uint32_t)(worst_us / 1000));
-        klog_puts(" ms, and the compositor and four idle windows used ");
-        klog_put_dec((uint32_t)busy_pct);
-        klog_puts("% of the CPU over two seconds - self-test passed.\n\n");
+        kernel_log_put_dec((uint32_t)(worst_us / 1000));
+        kernel_log_puts(" ms, and the compositor and four idle windows used ");
+        kernel_log_put_dec((uint32_t)busy_pct);
+        kernel_log_puts("% of the CPU over two seconds - self-test passed.\n\n");
     }
 
     {
@@ -3535,13 +3535,13 @@ static void boot_selftests_system(void) {
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        uint64_t frames_before = pmm_free_frame_count();
+        uint64_t frames_before = physical_memory_free_frame_count();
         task_t *victim = process_spawn("wm_faulter", fault_image, (size_t)fault_size, "");
         kfree(fault_image);
         uint32_t painted = selftest_pixel_settled(150, 150, 0x0020C0A0u,
                                                    "the faulter's window to be drawn");
         int alive_before_fault = (int)do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
-        uint64_t frames_with_victim = pmm_free_frame_count();
+        uint64_t frames_with_victim = physical_memory_free_frame_count();
 
         pit_sleep_ms(1400);
 
@@ -3549,70 +3549,70 @@ static void boot_selftests_system(void) {
                                                        "the faulted client's window to be taken down");
         int alive_after_fault = (int)do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
         long victim_exit = do_syscall(SYS_wait, (uint64_t)victim->id, 0, 0);
-        uint64_t frames_after = pmm_free_frame_count();
+        uint64_t frames_after = physical_memory_free_frame_count();
 
         long seg = do_syscall(SYS_shm_create, 4096, 0, 0);
-        long free_kernel_addr = do_syscall(SYS_shm_free, (uint64_t)seg, 0x100000ULL, 0);
+        long free_kernel_address = do_syscall(SYS_shm_free, (uint64_t)seg, 0x100000ULL, 0);
         long free_unaligned = do_syscall(SYS_shm_free, (uint64_t)seg, USER_SHM_BASE + 1, 0);
         long free_ok = do_syscall(SYS_shm_free, (uint64_t)seg, 0, 0);
 
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         int all_ok = 1;
         if (painted != 0x0020C0A0u) {
-            klog_puts("[m52] the faulting client never got a window on screen, so what follows would not have been a crash - expected 0x0020C0A0 got 0x");
-            klog_put_hex32(painted);
-            klog_putc('\n');
+            kernel_log_puts("[m52] the faulting client never got a window on screen, so what follows would not have been a crash - expected 0x0020C0A0 got 0x");
+            kernel_log_put_hex32(painted);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (alive_before_fault != 1) {
-            klog_puts("[m52] the faulting client was not running before it faulted (SYS_task_alive 0x");
-            klog_put_hex32((uint32_t)alive_before_fault);
-            klog_puts(")\n");
+            kernel_log_puts("[m52] the faulting client was not running before it faulted (SYS_task_alive 0x");
+            kernel_log_put_hex32((uint32_t)alive_before_fault);
+            kernel_log_puts(")\n");
             all_ok = 0;
         }
         if (alive_after_fault != 0) {
-            klog_puts("[m52] a null dereference in ring 3 did not terminate the offending task (SYS_task_alive 0x");
-            klog_put_hex32((uint32_t)alive_after_fault);
-            klog_puts(")\n");
+            kernel_log_puts("[m52] a null dereference in ring 3 did not terminate the offending task (SYS_task_alive 0x");
+            kernel_log_put_hex32((uint32_t)alive_after_fault);
+            kernel_log_puts(")\n");
             all_ok = 0;
         }
         if (victim_exit != 128 + SIGSEGV) {
-            klog_puts("[m52] a faulting task's exit code is not distinguishable as a fault - expected 0x");
-            klog_put_hex32((uint32_t)(128 + SIGSEGV));
-            klog_puts(" got 0x");
-            klog_put_hex32((uint32_t)victim_exit);
-            klog_putc('\n');
+            kernel_log_puts("[m52] a faulting task's exit code is not distinguishable as a fault - expected 0x");
+            kernel_log_put_hex32((uint32_t)(128 + SIGSEGV));
+            kernel_log_puts(" got 0x");
+            kernel_log_put_hex32((uint32_t)victim_exit);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (after_fault != 0x001A1A2Eu) {
-            klog_puts("[m52] the dead client's window was not reclaimed - expected the desktop background 0x001A1A2E at (150,150), got 0x");
-            klog_put_hex32(after_fault);
-            klog_putc('\n');
+            kernel_log_puts("[m52] the dead client's window was not reclaimed - expected the desktop background 0x001A1A2E at (150,150), got 0x");
+            kernel_log_put_hex32(after_fault);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (frames_after < frames_with_victim + 16) {
-            klog_puts("[m52] a crashed client's shm segment was not handed back: 0x");
-            klog_put_hex64(frames_before);
-            klog_puts(" free before it started, 0x");
-            klog_put_hex64(frames_with_victim);
-            klog_puts(" with it running, 0x");
-            klog_put_hex64(frames_after);
-            klog_puts(" after it faulted and was reaped\n");
+            kernel_log_puts("[m52] a crashed client's shm segment was not handed back: 0x");
+            kernel_log_put_hex64(frames_before);
+            kernel_log_puts(" free before it started, 0x");
+            kernel_log_put_hex64(frames_with_victim);
+            kernel_log_puts(" with it running, 0x");
+            kernel_log_put_hex64(frames_after);
+            kernel_log_puts(" after it faulted and was reaped\n");
             all_ok = 0;
         }
-        if (seg < 0 || free_kernel_addr == 0 || free_unaligned == 0 || free_ok != 0) {
-            klog_puts("[m52] SYS_shm_free's vaddr bounds are wrong: id 0x");
-            klog_put_hex32((uint32_t)seg);
-            klog_puts(", kernel address returned 0x");
-            klog_put_hex32((uint32_t)free_kernel_addr);
-            klog_puts(", unaligned returned 0x");
-            klog_put_hex32((uint32_t)free_unaligned);
-            klog_puts(", the legitimate free returned 0x");
-            klog_put_hex32((uint32_t)free_ok);
-            klog_putc('\n');
+        if (seg < 0 || free_kernel_address == 0 || free_unaligned == 0 || free_ok != 0) {
+            kernel_log_puts("[m52] SYS_shm_free's vaddr bounds are wrong: id 0x");
+            kernel_log_put_hex32((uint32_t)seg);
+            kernel_log_puts(", kernel address returned 0x");
+            kernel_log_put_hex32((uint32_t)free_kernel_address);
+            kernel_log_puts(", unaligned returned 0x");
+            kernel_log_put_hex32((uint32_t)free_unaligned);
+            kernel_log_puts(", the legitimate free returned 0x");
+            kernel_log_put_hex32((uint32_t)free_ok);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
 
@@ -3623,16 +3623,16 @@ static void boot_selftests_system(void) {
         kfree(bad_image);
         long bad_exit = do_syscall(SYS_wait, (uint64_t)bad_task->id, 0, 0);
         if (bad_exit != 0) {
-            klog_puts("[m52] the garbage-argument matrix accepted 0x");
-            klog_put_hex32((uint32_t)bad_exit);
-            klog_puts(" argument(s) it should have refused - see the [badptr] lines above\n");
+            kernel_log_puts("[m52] the garbage-argument matrix accepted 0x");
+            kernel_log_put_hex32((uint32_t)bad_exit);
+            kernel_log_puts(" argument(s) it should have refused - see the [badptr] lines above\n");
             all_ok = 0;
         }
 
         if (!all_ok) {
             panic("M52 kernel-hardening self-test: a user program can still take the kernel with it");
         }
-        klog_puts("[m52] a ring-3 null dereference killing only its own task (exit 139), its "
+        kernel_log_puts("[m52] a ring-3 null dereference killing only its own task (exit 139), its "
                    "window and segment reclaimed, SYS_shm_free refusing a kernel address, and "
                    "every pointer-taking syscall refusing every shape of bad pointer "
                    "self-test passed (7/7 checks).\n\n");
@@ -3645,11 +3645,11 @@ static void boot_selftests_system(void) {
 
         const int ROUNDS = MAX_TASKS * 3;
 
-        fd_slot_t saved_stdout = sched_current()->fds[1];
-        sched_current()->fds[1].type = FD_NONE;
+        file_descriptor_slot_t saved_stdout = scheduler_current()->fds[1];
+        scheduler_current()->fds[1].type = FD_NONE;
 
-        int live_before = sched_live_task_count();
-        uint64_t frames_before = pmm_free_frame_count();
+        int live_before = scheduler_live_task_count();
+        uint64_t frames_before = physical_memory_free_frame_count();
         int spawn_failures = 0;
         int stale_seen_as_live = 0;
         int stale_pid = -1;
@@ -3669,58 +3669,58 @@ static void boot_selftests_system(void) {
             }
         }
 
-        int live_after = sched_live_task_count();
-        uint64_t frames_after = pmm_free_frame_count();
-        sched_current()->fds[1] = saved_stdout;
+        int live_after = scheduler_live_task_count();
+        uint64_t frames_after = physical_memory_free_frame_count();
+        scheduler_current()->fds[1] = saved_stdout;
         kfree(hello_image);
 
         int all_ok = 1;
         if (spawn_failures) {
-            klog_puts("[m54] a spawn failed partway through 0x");
-            klog_put_hex32((uint32_t)ROUNDS);
-            klog_puts(" rounds - the task table is still a lifetime budget\n");
+            kernel_log_puts("[m54] a spawn failed partway through 0x");
+            kernel_log_put_hex32((uint32_t)ROUNDS);
+            kernel_log_puts(" rounds - the task table is still a lifetime budget\n");
             all_ok = 0;
         }
         if (live_after != live_before) {
-            klog_puts("[m54] task slots did not come back: 0x");
-            klog_put_hex32((uint32_t)live_before);
-            klog_puts(" live before, 0x");
-            klog_put_hex32((uint32_t)live_after);
-            klog_puts(" after 0x");
-            klog_put_hex32((uint32_t)ROUNDS);
-            klog_puts(" spawn/reap rounds\n");
+            kernel_log_puts("[m54] task slots did not come back: 0x");
+            kernel_log_put_hex32((uint32_t)live_before);
+            kernel_log_puts(" live before, 0x");
+            kernel_log_put_hex32((uint32_t)live_after);
+            kernel_log_puts(" after 0x");
+            kernel_log_put_hex32((uint32_t)ROUNDS);
+            kernel_log_puts(" spawn/reap rounds\n");
             all_ok = 0;
         }
         if (frames_after != frames_before) {
-            klog_puts("[m54] frames did not come back: 0x");
-            klog_put_hex64(frames_before);
-            klog_puts(" free before, 0x");
-            klog_put_hex64(frames_after);
-            klog_puts(" after (0x");
-            klog_put_hex64(frames_before - frames_after);
-            klog_puts(" lost across 0x");
-            klog_put_hex32((uint32_t)ROUNDS);
-            klog_puts(" processes)\n");
+            kernel_log_puts("[m54] frames did not come back: 0x");
+            kernel_log_put_hex64(frames_before);
+            kernel_log_puts(" free before, 0x");
+            kernel_log_put_hex64(frames_after);
+            kernel_log_puts(" after (0x");
+            kernel_log_put_hex64(frames_before - frames_after);
+            kernel_log_puts(" lost across 0x");
+            kernel_log_put_hex32((uint32_t)ROUNDS);
+            kernel_log_puts(" processes)\n");
             all_ok = 0;
         }
         if (stale_seen_as_live) {
-            klog_puts("[m54] a stale pid was answered about 0x");
-            klog_put_hex32((uint32_t)stale_seen_as_live);
-            klog_puts(" time(s) instead of being refused - the generation counter is not doing its job\n");
+            kernel_log_puts("[m54] a stale pid was answered about 0x");
+            kernel_log_put_hex32((uint32_t)stale_seen_as_live);
+            kernel_log_puts(" time(s) instead of being refused - the generation counter is not doing its job\n");
             all_ok = 0;
         }
         if (do_syscall(SYS_task_alive, 0x7FFFFFFF, 0, 0) != -1 ||
-            do_syscall(SYS_task_alive, (uint64_t)sched_current()->id, 0, 0) != 1) {
-            klog_puts("[m54] SYS_task_alive no longer tells a live pid from an impossible one\n");
+            do_syscall(SYS_task_alive, (uint64_t)scheduler_current()->id, 0, 0) != 1) {
+            kernel_log_puts("[m54] SYS_task_alive no longer tells a live pid from an impossible one\n");
             all_ok = 0;
         }
 
         if (!all_ok) {
             panic("M54 reclaim self-test: something a dead process held did not come back");
         }
-        klog_puts("[m54] every task slot and every frame returned across 0x");
-        klog_put_hex32((uint32_t)ROUNDS);
-        klog_puts(" spawn/reap rounds (three times MAX_TASKS), and a stale pid refused rather "
+        kernel_log_puts("[m54] every task slot and every frame returned across 0x");
+        kernel_log_put_hex32((uint32_t)ROUNDS);
+        kernel_log_puts(" spawn/reap rounds (three times MAX_TASKS), and a stale pid refused rather "
                    "than answered about, self-test passed (5/5 checks).\n\n");
     }
 
@@ -3744,26 +3744,26 @@ static void boot_selftests_system(void) {
             const char *who[3] = {"compositor", "client A", "client B"};
             task_t *w[3] = {comp1, a_task, b_task};
             for (int i = 0; i < 3; i++) {
-                klog_puts("[m55] ");
-                klog_puts(who[i]);
+                kernel_log_puts("[m55] ");
+                kernel_log_puts(who[i]);
                 if (!w[i]) {
-                    klog_puts(" was never spawned\n");
+                    kernel_log_puts(" was never spawned\n");
                     continue;
                 }
-                task_t *live = sched_task_by_id(w[i]->id);
-                klog_puts(live ? " state=" : " is gone from the table\n");
+                task_t *live = scheduler_task_by_id(w[i]->id);
+                kernel_log_puts(live ? " state=" : " is gone from the table\n");
                 if (live) {
-                    klog_put_dec((uint32_t)live->state);
-                    klog_puts(" exit=");
-                    klog_put_dec((uint32_t)live->exit_code);
-                    klog_putc('\n');
+                    kernel_log_put_dec((uint32_t)live->state);
+                    kernel_log_puts(" exit=");
+                    kernel_log_put_dec((uint32_t)live->exit_code);
+                    kernel_log_putc('\n');
                 }
             }
             panic("M55 session-resilience self-test: the clients never got their windows up");
         }
 
-        uint32_t a_before = fb_get_pixel(120, 250);
-        uint32_t b_before = fb_get_pixel(420, 320);
+        uint32_t a_before = framebuffer_get_pixel(120, 250);
+        uint32_t b_before = framebuffer_get_pixel(420, 320);
 
         do_syscall(SYS_kill, (uint64_t)comp1->id, SIGKILL, 0);
         do_syscall(SYS_wait, (uint64_t)comp1->id, 0, 0);
@@ -3780,14 +3780,14 @@ static void boot_selftests_system(void) {
                                          "the second client to reconnect and repaint");
         (void)back;
 
-        uint32_t a_after = fb_get_pixel(120, 250);
-        uint32_t b_after = fb_get_pixel(420, 320);
+        uint32_t a_after = framebuffer_get_pixel(120, 250);
+        uint32_t b_after = framebuffer_get_pixel(420, 320);
 
         selftest_reap(a_task);
         selftest_reap(b_task);
         selftest_reap(comp2);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         int all_ok = 1;
         static const struct { const char *what; uint32_t expected; } names[] = {
@@ -3799,28 +3799,28 @@ static void boot_selftests_system(void) {
         const uint32_t got[] = {a_before, b_before, a_after, b_after};
         for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
             if (got[i] != names[i].expected) {
-                klog_puts("[m55] pixel check failed: ");
-                klog_puts(names[i].what);
-                klog_puts(" - expected 0x");
-                klog_put_hex32(names[i].expected);
-                klog_puts(" got 0x");
-                klog_put_hex32(got[i]);
-                klog_putc('\n');
+                kernel_log_puts("[m55] pixel check failed: ");
+                kernel_log_puts(names[i].what);
+                kernel_log_puts(" - expected 0x");
+                kernel_log_put_hex32(names[i].expected);
+                kernel_log_puts(" got 0x");
+                kernel_log_put_hex32(got[i]);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
         if (a_alive_after_crash != 1 || b_alive_after_crash != 1) {
-            klog_puts("[m55] a client did not outlive the compositor at all (SYS_task_alive 0x");
-            klog_put_hex32((uint32_t)a_alive_after_crash);
-            klog_puts(" and 0x");
-            klog_put_hex32((uint32_t)b_alive_after_crash);
-            klog_puts(")\n");
+            kernel_log_puts("[m55] a client did not outlive the compositor at all (SYS_task_alive 0x");
+            kernel_log_put_hex32((uint32_t)a_alive_after_crash);
+            kernel_log_puts(" and 0x");
+            kernel_log_put_hex32((uint32_t)b_alive_after_crash);
+            kernel_log_puts(")\n");
             all_ok = 0;
         }
         if (!all_ok) {
             panic("M55 session-resilience self-test: a compositor crash still takes its clients with it");
         }
-        klog_puts("[m55] a compositor SIGKILLed out from under two live clients, replaced, and "
+        kernel_log_puts("[m55] a compositor SIGKILLed out from under two live clients, replaced, and "
                    "both windows back on screen with their own pixels self-test passed "
                    "(5/5 checks).\n\n");
     }
@@ -3833,68 +3833,68 @@ static void boot_selftests_system(void) {
             for (size_t i = 0; i < sizeof(payload); i++) {
                 payload[i] = (char)('a' + (i % 26));
             }
-            if (vfs_write(PATH_TMP_DIR "m56a", payload, sizeof(payload)) != 0) {
-                klog_puts("[m56] could not create the file this test is about\n");
+            if (virtual_file_system_write(PATH_TMP_DIR "m56a", payload, sizeof(payload)) != 0) {
+                kernel_log_puts("[m56] could not create the file this test is about\n");
                 all_ok = 0;
             }
-            if (vfs_rename(PATH_TMP_DIR "m56a", PATH_TMP_DIR "m56b") != 0 ||
-                vfs_exists(PATH_TMP_DIR "m56a") || !vfs_exists(PATH_TMP_DIR "m56b")) {
-                klog_puts("[m56] rename did not move the name\n");
+            if (virtual_file_system_rename(PATH_TMP_DIR "m56a", PATH_TMP_DIR "m56b") != 0 ||
+                virtual_file_system_exists(PATH_TMP_DIR "m56a") || !virtual_file_system_exists(PATH_TMP_DIR "m56b")) {
+                kernel_log_puts("[m56] rename did not move the name\n");
                 all_ok = 0;
             }
             static char readback[2000];
             k_memset(readback, 0, sizeof(readback));
-            if (vfs_read(PATH_TMP_DIR "m56b", readback, sizeof(readback)) != (int64_t)sizeof(payload)) {
-                klog_puts("[m56] the renamed file did not read back at its own size - a rename moved data it should not have touched\n");
+            if (virtual_file_system_read(PATH_TMP_DIR "m56b", readback, sizeof(readback)) != (int64_t)sizeof(payload)) {
+                kernel_log_puts("[m56] the renamed file did not read back at its own size - a rename moved data it should not have touched\n");
                 all_ok = 0;
             }
             for (size_t i = 0; i < sizeof(payload); i++) {
                 if (readback[i] != payload[i]) {
-                    klog_puts("[m56] the renamed file's contents changed\n");
+                    kernel_log_puts("[m56] the renamed file's contents changed\n");
                     all_ok = 0;
                     break;
                 }
             }
-            if (vfs_rename(PATH_TMP_DIR "m56b", PATH_TMP_DIR "m53same") == 0) {
-                klog_puts("[m56] rename over an existing name succeeded - that is how a file gets lost silently\n");
+            if (virtual_file_system_rename(PATH_TMP_DIR "m56b", PATH_TMP_DIR "m53same") == 0) {
+                kernel_log_puts("[m56] rename over an existing name succeeded - that is how a file gets lost silently\n");
                 all_ok = 0;
             }
-            uint32_t free_before = vfs_free_blocks();
-            if (vfs_write(PATH_TMP_DIR "m56c", payload, sizeof(payload)) != 0) {
-                klog_puts("[m56] could not create the file the block accounting is about\n");
+            uint32_t free_before = virtual_file_system_free_blocks();
+            if (virtual_file_system_write(PATH_TMP_DIR "m56c", payload, sizeof(payload)) != 0) {
+                kernel_log_puts("[m56] could not create the file the block accounting is about\n");
                 all_ok = 0;
             }
-            uint32_t free_with = vfs_free_blocks();
+            uint32_t free_with = virtual_file_system_free_blocks();
             if (free_with >= free_before) {
-                klog_puts("[m56] writing 2000 bytes consumed no blocks at all\n");
+                kernel_log_puts("[m56] writing 2000 bytes consumed no blocks at all\n");
                 all_ok = 0;
             }
-            if (vfs_unlink(PATH_TMP_DIR "m56c") != 0) {
-                klog_puts("[m56] unlink failed on a file that had just been written\n");
+            if (virtual_file_system_unlink(PATH_TMP_DIR "m56c") != 0) {
+                kernel_log_puts("[m56] unlink failed on a file that had just been written\n");
                 all_ok = 0;
             }
-            uint32_t free_after = vfs_free_blocks();
+            uint32_t free_after = virtual_file_system_free_blocks();
             if (free_after != free_before) {
-                klog_puts("[m56] unlink did not return every block: 0x");
-                klog_put_hex32(free_before);
-                klog_puts(" free before, 0x");
-                klog_put_hex32(free_with);
-                klog_puts(" with the file, 0x");
-                klog_put_hex32(free_after);
-                klog_puts(" after removing it\n");
+                kernel_log_puts("[m56] unlink did not return every block: 0x");
+                kernel_log_put_hex32(free_before);
+                kernel_log_puts(" free before, 0x");
+                kernel_log_put_hex32(free_with);
+                kernel_log_puts(" with the file, 0x");
+                kernel_log_put_hex32(free_after);
+                kernel_log_puts(" after removing it\n");
                 all_ok = 0;
             }
-            uint32_t free_pre_rename = vfs_free_blocks();
-            int rename_ok = vfs_rename(PATH_TMP_DIR "m56b", PATH_TMP_DIR "m56d") == 0 &&
-                            vfs_rename(PATH_TMP_DIR "m56d", PATH_TMP_DIR "m56b") == 0;
-            if (!rename_ok || vfs_free_blocks() != free_pre_rename) {
-                klog_puts("[m56] a rename moved blocks, or failed outright\n");
+            uint32_t free_pre_rename = virtual_file_system_free_blocks();
+            int rename_ok = virtual_file_system_rename(PATH_TMP_DIR "m56b", PATH_TMP_DIR "m56d") == 0 &&
+                            virtual_file_system_rename(PATH_TMP_DIR "m56d", PATH_TMP_DIR "m56b") == 0;
+            if (!rename_ok || virtual_file_system_free_blocks() != free_pre_rename) {
+                kernel_log_puts("[m56] a rename moved blocks, or failed outright\n");
                 all_ok = 0;
             }
 
-            vfs_unlink(PATH_TMP_DIR "m56b");
-            if (vfs_unlink(PATH_BIN) == 0) {
-                klog_puts("[m56] unlink accepted a directory - see leanfs.h on why that is refused rather than recursed\n");
+            virtual_file_system_unlink(PATH_TMP_DIR "m56b");
+            if (virtual_file_system_unlink(PATH_BIN) == 0) {
+                kernel_log_puts("[m56] unlink accepted a directory - see leanfs.h on why that is refused rather than recursed\n");
                 all_ok = 0;
             }
         }
@@ -3912,7 +3912,7 @@ static void boot_selftests_system(void) {
         uint8_t *term_image = read_program(PATH_BIN_DIR "gui_terminal", &term_size_bytes);
         int64_t term_size = (int64_t)term_size_bytes;
 
-        vfs_unlink(PATH_TMP_DIR "m56undo");
+        virtual_file_system_unlink(PATH_TMP_DIR "m56undo");
 
         task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         selftest_wait_for_compositor();
@@ -3930,7 +3930,7 @@ static void boot_selftests_system(void) {
         pit_sleep_ms(500);
         static char after_paste[64];
         k_memset(after_paste, 0, sizeof(after_paste));
-        int64_t paste_len = vfs_read(PATH_TMP_DIR "m56undo", after_paste, sizeof(after_paste) - 1);
+        int64_t paste_length = virtual_file_system_read(PATH_TMP_DIR "m56undo", after_paste, sizeof(after_paste) - 1);
 
         keyboard_inject('Z', KBD_MOD_CTRL);
         pit_sleep_ms(300);
@@ -3938,7 +3938,7 @@ static void boot_selftests_system(void) {
         pit_sleep_ms(500);
         static char after_undo[64];
         k_memset(after_undo, 0, sizeof(after_undo));
-        int64_t undo_len = vfs_read(PATH_TMP_DIR "m56undo", after_undo, sizeof(after_undo) - 1);
+        int64_t undo_length = virtual_file_system_read(PATH_TMP_DIR "m56undo", after_undo, sizeof(after_undo) - 1);
 
         selftest_reap(ed_task);
         pit_sleep_ms(200);
@@ -3947,12 +3947,12 @@ static void boot_selftests_system(void) {
         kfree(term_image);
         pit_sleep_ms(900);
 
-        int lit_before_cmd = selftest_term_top_lit();
+        int lit_before_command = selftest_term_top_lit();
         static const char cmd[] = "ls /bin\n";
         for (size_t i = 0; i < sizeof(cmd) - 1; i++) {
             keyboard_inject(cmd[i], 0);
         }
-        int lit_live = selftest_term_top_settled(lit_before_cmd, 12000);
+        int lit_live = selftest_term_top_settled(lit_before_command, 12000);
         mouse_inject(0, 0, 0, -10);
         int lit_scrolled = selftest_term_top_settled(lit_live, 4000);
         mouse_inject(0, 0, 0, 10);
@@ -3962,45 +3962,45 @@ static void boot_selftests_system(void) {
         selftest_reap(comp_task);
         kfree(comp_image);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
-        if (paste_len != 9 || k_strcmp(after_paste, "ABPASTED\n") != 0) {
-            klog_puts("[m56] the paste did not land as expected - saved 0x");
-            klog_put_hex32((uint32_t)paste_len);
-            klog_puts(" bytes: '");
-            klog_puts(after_paste);
-            klog_puts("'\n");
+        if (paste_length != 9 || k_strcmp(after_paste, "ABPASTED\n") != 0) {
+            kernel_log_puts("[m56] the paste did not land as expected - saved 0x");
+            kernel_log_put_hex32((uint32_t)paste_length);
+            kernel_log_puts(" bytes: '");
+            kernel_log_puts(after_paste);
+            kernel_log_puts("'\n");
             all_ok = 0;
         }
-        if (undo_len != 3 || k_strcmp(after_undo, "AB\n") != 0) {
-            klog_puts("[m56] one undo did not restore the exact buffer from before the paste - saved 0x");
-            klog_put_hex32((uint32_t)undo_len);
-            klog_puts(" bytes: '");
-            klog_puts(after_undo);
-            klog_puts("'\n");
+        if (undo_length != 3 || k_strcmp(after_undo, "AB\n") != 0) {
+            kernel_log_puts("[m56] one undo did not restore the exact buffer from before the paste - saved 0x");
+            kernel_log_put_hex32((uint32_t)undo_length);
+            kernel_log_puts(" bytes: '");
+            kernel_log_puts(after_undo);
+            kernel_log_puts("'\n");
             all_ok = 0;
         }
         if (lit_live == 0) {
-            klog_puts("[m56] the terminal drew no output at all - nothing to scroll back through\n");
+            kernel_log_puts("[m56] the terminal drew no output at all - nothing to scroll back through\n");
             all_ok = 0;
         }
         if (lit_scrolled == lit_live) {
-            klog_puts("[m56] scrolling back changed nothing - the top row still shows the live grid, so there is no history\n");
+            kernel_log_puts("[m56] scrolling back changed nothing - the top row still shows the live grid, so there is no history\n");
             all_ok = 0;
         }
         if (lit_back != lit_live) {
-            klog_puts("[m56] scrolling forward again did not return to the live view (0x");
-            klog_put_hex32((uint32_t)lit_live);
-            klog_puts(" lit pixels before, 0x");
-            klog_put_hex32((uint32_t)lit_back);
-            klog_puts(" after)\n");
+            kernel_log_puts("[m56] scrolling forward again did not return to the live view (0x");
+            kernel_log_put_hex32((uint32_t)lit_live);
+            kernel_log_puts(" lit pixels before, 0x");
+            kernel_log_put_hex32((uint32_t)lit_back);
+            kernel_log_puts(" after)\n");
             all_ok = 0;
         }
 
         if (!all_ok) {
             panic("M56 depth self-test: undo, scrollback or the filesystem's remove half did not behave as specified");
         }
-        klog_puts("[m56] SYS_unlink returning every block it freed and SYS_rename moving none, "
+        kernel_log_puts("[m56] SYS_unlink returning every block it freed and SYS_rename moving none, "
                    "one editor undo restoring the exact buffer from before a paste, and a "
                    "terminal scrollback holding lines its window no longer shows "
                    "self-test passed (12/12 checks).\n\n");
@@ -4009,7 +4009,7 @@ static void boot_selftests_system(void) {
     if (dispi_available()) {
         display_mode_t list[DISPLAY_MAX_MODES];
         int n = dispi_get_modes(list, DISPLAY_MAX_MODES);
-        uint32_t boot_w = fb_width(), boot_h = fb_height();
+        uint32_t boot_w = framebuffer_width(), boot_h = framebuffer_height();
         int pick = -1;
         for (int i = 0; i < n; i++) {
             if (list[i].width == boot_w && list[i].height == boot_h) {
@@ -4038,11 +4038,11 @@ static void boot_selftests_system(void) {
         pit_sleep_ms(700);
 
         const uint32_t bar_row_from_bottom = 30;
-        uint32_t before_left  = fb_get_pixel(2, boot_h - bar_row_from_bottom);
-        uint32_t before_right = fb_get_pixel(boot_w - 3, boot_h - bar_row_from_bottom);
+        uint32_t before_left  = framebuffer_get_pixel(2, boot_h - bar_row_from_bottom);
+        uint32_t before_right = framebuffer_get_pixel(boot_w - 3, boot_h - bar_row_from_bottom);
 
-        int action_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
+        int action_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
             panic("M58 desktop self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
         wm_action_request_t req;
@@ -4050,95 +4050,95 @@ static void boot_selftests_system(void) {
         req.window_id = -1;
         req.action = WM_ACTION_SET_MODE;
         req.value = wm_pack_mode(list[pick].width, list[pick].height);
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         pit_sleep_ms(2500);
 
-        uint32_t after_w = fb_width(), after_h = fb_height();
+        uint32_t after_w = framebuffer_width(), after_h = framebuffer_height();
         uint32_t after_left = 0, after_right = 0, after_beyond_old = 0, after_desktop = 0;
         if (after_w >= 8 && after_h > bar_row_from_bottom) {
-            after_left  = fb_get_pixel(2, after_h - bar_row_from_bottom);
-            after_right = fb_get_pixel(after_w - 3, after_h - bar_row_from_bottom);
-            after_beyond_old = fb_get_pixel(after_w / 2, after_h - bar_row_from_bottom);
-            after_desktop = fb_get_pixel(after_w / 2, after_h / 2);
+            after_left  = framebuffer_get_pixel(2, after_h - bar_row_from_bottom);
+            after_right = framebuffer_get_pixel(after_w - 3, after_h - bar_row_from_bottom);
+            after_beyond_old = framebuffer_get_pixel(after_w / 2, after_h - bar_row_from_bottom);
+            after_desktop = framebuffer_get_pixel(after_w / 2, after_h / 2);
         }
 
         pit_sleep_ms(WM_MODE_REVERT_MS + 2500);
 
-        uint32_t back_w = fb_width(), back_h = fb_height();
+        uint32_t back_w = framebuffer_width(), back_h = framebuffer_height();
         uint32_t back_left = 0, back_right = 0;
         if (back_w == boot_w && back_h == boot_h) {
-            back_left  = fb_get_pixel(2, boot_h - bar_row_from_bottom);
-            back_right = fb_get_pixel(boot_w - 3, boot_h - bar_row_from_bottom);
+            back_left  = framebuffer_get_pixel(2, boot_h - bar_row_from_bottom);
+            back_right = framebuffer_get_pixel(boot_w - 3, boot_h - bar_row_from_bottom);
         }
 
         selftest_reap(shell_task);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         int all_ok = 1;
         if (before_left != before_right) {
-            klog_puts("[m58] the taskbar did not span the boot display to begin with\n");
+            kernel_log_puts("[m58] the taskbar did not span the boot display to begin with\n");
             all_ok = 0;
         }
         if (after_w != list[pick].width || after_h != list[pick].height) {
-            klog_puts("[m58] WM_ACTION_SET_MODE did not change the mode: 0x");
-            klog_put_hex32(after_w);
-            klog_puts("x");
-            klog_put_hex32(after_h);
-            klog_putc('\n');
+            kernel_log_puts("[m58] WM_ACTION_SET_MODE did not change the mode: 0x");
+            kernel_log_put_hex32(after_w);
+            kernel_log_puts("x");
+            kernel_log_put_hex32(after_h);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (after_left != after_right || after_left != after_beyond_old) {
-            klog_puts("[m58] the taskbar did not re-span the new display width - its buffer was not reallocated\n");
+            kernel_log_puts("[m58] the taskbar did not re-span the new display width - its buffer was not reallocated\n");
             all_ok = 0;
         }
         if (after_left == after_desktop) {
-            klog_puts("[m58] the taskbar row is indistinguishable from bare desktop at the new size - there is no bar there\n");
+            kernel_log_puts("[m58] the taskbar row is indistinguishable from bare desktop at the new size - there is no bar there\n");
             all_ok = 0;
         }
         if (back_w != boot_w || back_h != boot_h) {
-            klog_puts("[m58] the unconfirmed mode was never reverted - 0x");
-            klog_put_hex32(back_w);
-            klog_puts("x");
-            klog_put_hex32(back_h);
-            klog_puts(" is still up\n");
+            kernel_log_puts("[m58] the unconfirmed mode was never reverted - 0x");
+            kernel_log_put_hex32(back_w);
+            kernel_log_puts("x");
+            kernel_log_put_hex32(back_h);
+            kernel_log_puts(" is still up\n");
             all_ok = 0;
         }
         if (back_left != back_right || back_left != before_left) {
-            klog_puts("[m58] after the revert the taskbar does not span the restored display: before 0x");
-            klog_put_hex32(before_left);
-            klog_puts("/0x");
-            klog_put_hex32(before_right);
-            klog_puts(" after 0x");
-            klog_put_hex32(after_left);
-            klog_puts("/0x");
-            klog_put_hex32(after_right);
-            klog_puts(" back 0x");
-            klog_put_hex32(back_left);
-            klog_puts("/0x");
-            klog_put_hex32(back_right);
-            klog_putc('\n');
+            kernel_log_puts("[m58] after the revert the taskbar does not span the restored display: before 0x");
+            kernel_log_put_hex32(before_left);
+            kernel_log_puts("/0x");
+            kernel_log_put_hex32(before_right);
+            kernel_log_puts(" after 0x");
+            kernel_log_put_hex32(after_left);
+            kernel_log_puts("/0x");
+            kernel_log_put_hex32(after_right);
+            kernel_log_puts(" back 0x");
+            kernel_log_put_hex32(back_left);
+            kernel_log_puts("/0x");
+            kernel_log_put_hex32(back_right);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (!all_ok) {
             panic("M58 desktop self-test: a resolution change did not carry the desktop with it");
         }
-        klog_puts("[m58] a resolution change carrying the whole desktop with it - panels "
+        kernel_log_puts("[m58] a resolution change carrying the whole desktop with it - panels "
                    "re-spanning the new width, and an unconfirmed mode reverting on its own "
                    "deadline - self-test passed.\n\n");
     }
 
     {
         int all_ok = 1;
-        int openfiles_before = openfile_in_use();
+        int openfiles_before = open_file_in_use();
 
         static const char PART_A[] = "hello ";
         static const char PART_B[] = "descriptors";
         long fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59fd"),
                               OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE, 0);
         if (fd < 0) {
-            klog_puts("[m59] SYS_open could not create a file\n");
+            kernel_log_puts("[m59] SYS_open could not create a file\n");
             all_ok = 0;
         } else {
             do_syscall(SYS_write, (uint64_t)fd, (uint64_t)PART_A, sizeof(PART_A) - 1);
@@ -4151,16 +4151,16 @@ static void boot_selftests_system(void) {
             long pos = do_syscall(SYS_lseek, (uint64_t)fd, 6, SEEK_SET);
             long n = do_syscall(SYS_read, (uint64_t)fd, (uint64_t)back, 11);
             if (pos != 6 || n != 11 || k_strcmp(back, "descriptors") != 0) {
-                klog_puts("[m59] a seek-then-read did not land where it was told to\n");
+                kernel_log_puts("[m59] a seek-then-read did not land where it was told to\n");
                 all_ok = 0;
             }
             long end = do_syscall(SYS_lseek, (uint64_t)fd, 0, SEEK_END);
             if (end != (long)(sizeof(PART_A) - 1 + sizeof(PART_B) - 1)) {
-                klog_puts("[m59] SEEK_END does not agree with what was written\n");
+                kernel_log_puts("[m59] SEEK_END does not agree with what was written\n");
                 all_ok = 0;
             }
             if (do_syscall(SYS_read, (uint64_t)fd, (uint64_t)back, 4) != 0) {
-                klog_puts("[m59] a read at the end of a file returned data\n");
+                kernel_log_puts("[m59] a read at the end of a file returned data\n");
                 all_ok = 0;
             }
             do_syscall(SYS_close, (uint64_t)fd, 0, 0);
@@ -4180,18 +4180,18 @@ static void boot_selftests_system(void) {
             long got = do_syscall(SYS_read, (uint64_t)fd, (uint64_t)hole, sizeof(hole));
             do_syscall(SYS_close, (uint64_t)fd, 0, 0);
             if (got != 301) {
-                klog_puts("[m59] a write past the end did not extend the file to that point\n");
+                kernel_log_puts("[m59] a write past the end did not extend the file to that point\n");
                 all_ok = 0;
             } else if (hole[0] != 'A' || hole[1] != 'B' || hole[2] != 'C') {
-                klog_puts("[m59] writing past the end of a block erased the bytes before it\n");
+                kernel_log_puts("[m59] writing past the end of a block erased the bytes before it\n");
                 all_ok = 0;
             } else if (hole[300] != 'Z') {
-                klog_puts("[m59] the byte written past the end is not where it was put\n");
+                kernel_log_puts("[m59] the byte written past the end is not where it was put\n");
                 all_ok = 0;
             } else {
                 for (int i = 3; i < 300; i++) {
                     if (hole[i] != 0) {
-                        klog_puts("[m59] the hole is not zeros - a recycled block leaked into it\n");
+                        kernel_log_puts("[m59] the hole is not zeros - a recycled block leaked into it\n");
                         all_ok = 0;
                         break;
                     }
@@ -4201,13 +4201,13 @@ static void boot_selftests_system(void) {
         }
 
         {
-            uint32_t free_before = vfs_free_blocks();
+            uint32_t free_before = virtual_file_system_free_blocks();
             const uint32_t BIG = 200u * 1024u;
             static uint8_t chunk[1024];
             fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59big"),
                              OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE, 0);
             if (fd < 0) {
-                klog_puts("[m59] could not create the large file this test is about\n");
+                kernel_log_puts("[m59] could not create the large file this test is about\n");
                 all_ok = 0;
             } else {
                 for (uint32_t off = 0; off < BIG; off += sizeof(chunk)) {
@@ -4215,7 +4215,7 @@ static void boot_selftests_system(void) {
                         chunk[i] = (uint8_t)((off / sizeof(chunk)) + i);
                     }
                     if (do_syscall(SYS_write, (uint64_t)fd, (uint64_t)chunk, sizeof(chunk)) != (long)sizeof(chunk)) {
-                        klog_puts("[m59] a write into the double-indirect range failed\n");
+                        kernel_log_puts("[m59] a write into the double-indirect range failed\n");
                         all_ok = 0;
                         break;
                     }
@@ -4225,20 +4225,20 @@ static void boot_selftests_system(void) {
                 os_stat_t st;
                 if (do_syscall(SYS_stat, (uint64_t)(PATH_TMP_DIR "m59big"), (uint64_t)&st, 0) != 0 ||
                     st.size != BIG) {
-                    klog_puts("[m59] the large file is not the size it was written at\n");
+                    kernel_log_puts("[m59] the large file is not the size it was written at\n");
                     all_ok = 0;
                 }
                 fd = do_syscall(SYS_open, (uint64_t)(PATH_TMP_DIR "m59big"), OPEN_READ, 0);
                 static uint8_t verify[1024];
                 for (uint32_t off = 0; off < BIG && all_ok; off += sizeof(verify)) {
                     if (do_syscall(SYS_read, (uint64_t)fd, (uint64_t)verify, sizeof(verify)) != (long)sizeof(verify)) {
-                        klog_puts("[m59] the large file read short\n");
+                        kernel_log_puts("[m59] the large file read short\n");
                         all_ok = 0;
                         break;
                     }
                     for (size_t i = 0; i < sizeof(verify); i++) {
                         if (verify[i] != (uint8_t)((off / sizeof(verify)) + i)) {
-                            klog_puts("[m59] the large file read back the wrong bytes - a block mapped to the wrong place\n");
+                            kernel_log_puts("[m59] the large file read back the wrong bytes - a block mapped to the wrong place\n");
                             all_ok = 0;
                             break;
                         }
@@ -4247,16 +4247,16 @@ static void boot_selftests_system(void) {
                 do_syscall(SYS_close, (uint64_t)fd, 0, 0);
             }
             if (do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m59big"), 0, 0) != 0) {
-                klog_puts("[m59] could not unlink the large file\n");
+                kernel_log_puts("[m59] could not unlink the large file\n");
                 all_ok = 0;
             }
-            uint32_t free_after = vfs_free_blocks();
+            uint32_t free_after = virtual_file_system_free_blocks();
             if (free_after != free_before) {
-                klog_puts("[m59] the large file did not return every block: 0x");
-                klog_put_hex32(free_before);
-                klog_puts(" free before, 0x");
-                klog_put_hex32(free_after);
-                klog_puts(" after\n");
+                kernel_log_puts("[m59] the large file did not return every block: 0x");
+                kernel_log_put_hex32(free_before);
+                kernel_log_puts(" free before, 0x");
+                kernel_log_put_hex32(free_after);
+                kernel_log_puts(" after\n");
                 all_ok = 0;
             }
         }
@@ -4265,16 +4265,16 @@ static void boot_selftests_system(void) {
             os_stat_t st;
             uint32_t now = rtc_now();
             if (do_syscall(SYS_stat, (uint64_t)(PATH_TMP_DIR "m59fd"), (uint64_t)&st, 0) != 0) {
-                klog_puts("[m59] SYS_stat failed on a file that exists\n");
+                kernel_log_puts("[m59] SYS_stat failed on a file that exists\n");
                 all_ok = 0;
             } else if (rtc_available()) {
                 uint32_t age = now > st.mtime ? now - st.mtime : st.mtime - now;
                 if (st.mtime == 0 || age > 60) {
-                    klog_puts("[m59] a file written moments ago is not dated moments ago\n");
+                    kernel_log_puts("[m59] a file written moments ago is not dated moments ago\n");
                     all_ok = 0;
                 }
             } else if (st.mtime != 0) {
-                klog_puts("[m59] a machine with no clock dated a file anyway\n");
+                kernel_log_puts("[m59] a machine with no clock dated a file anyway\n");
                 all_ok = 0;
             }
         }
@@ -4287,33 +4287,33 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_close, (uint64_t)fd, 0, 0);
             uint32_t cost = leanfs_meta_writes() - before;
             if (cost > 4) {
-                klog_puts("[m59] a one-byte change cost 0x");
-                klog_put_hex32(cost);
-                klog_puts(" metadata sector writes - dirty-sector tracking is not working\n");
+                kernel_log_puts("[m59] a one-byte change cost 0x");
+                kernel_log_put_hex32(cost);
+                kernel_log_puts(" metadata sector writes - dirty-sector tracking is not working\n");
                 all_ok = 0;
             }
         }
 
         {
             if (do_syscall(SYS_mkdir, (uint64_t)(PATH_TMP_DIR "m59dir"), 0, 0) != 0) {
-                klog_puts("[m59] could not create the directory this test is about\n");
+                kernel_log_puts("[m59] could not create the directory this test is about\n");
                 all_ok = 0;
             }
-            if (vfs_write(PATH_TMP_DIR "m59dir/inside", "x", 1) != 0) {
-                klog_puts("[m59] could not put a file inside the test directory\n");
+            if (virtual_file_system_write(PATH_TMP_DIR "m59dir/inside", "x", 1) != 0) {
+                kernel_log_puts("[m59] could not put a file inside the test directory\n");
                 all_ok = 0;
             }
             if (do_syscall(SYS_rmdir, (uint64_t)(PATH_TMP_DIR "m59dir"), 0, 0) == 0) {
-                klog_puts("[m59] rmdir removed a directory that still held a file\n");
+                kernel_log_puts("[m59] rmdir removed a directory that still held a file\n");
                 all_ok = 0;
             }
             if (do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m59dir/inside"), 0, 0) != 0 ||
                 do_syscall(SYS_rmdir, (uint64_t)(PATH_TMP_DIR "m59dir"), 0, 0) != 0) {
-                klog_puts("[m59] rmdir refused a directory that was empty\n");
+                kernel_log_puts("[m59] rmdir refused a directory that was empty\n");
                 all_ok = 0;
             }
-            if (vfs_exists(PATH_TMP_DIR "m59dir")) {
-                klog_puts("[m59] the removed directory is still there\n");
+            if (virtual_file_system_exists(PATH_TMP_DIR "m59dir")) {
+                kernel_log_puts("[m59] the removed directory is still there\n");
                 all_ok = 0;
             }
         }
@@ -4321,13 +4321,13 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m59fd"), 0, 0);
 
         {
-            int openfiles_after = openfile_in_use();
+            int openfiles_after = open_file_in_use();
             if (openfiles_after != openfiles_before) {
-                klog_puts("[m59] the open-file table went from 0x");
-                klog_put_hex32((uint32_t)openfiles_before);
-                klog_puts(" entries to 0x");
-                klog_put_hex32((uint32_t)openfiles_after);
-                klog_puts(" across a test that closed everything it opened - descriptors leak\n");
+                kernel_log_puts("[m59] the open-file table went from 0x");
+                kernel_log_put_hex32((uint32_t)openfiles_before);
+                kernel_log_puts(" entries to 0x");
+                kernel_log_put_hex32((uint32_t)openfiles_after);
+                kernel_log_puts(" across a test that closed everything it opened - descriptors leak\n");
                 all_ok = 0;
             }
         }
@@ -4335,7 +4335,7 @@ static void boot_selftests_system(void) {
         if (!all_ok) {
             panic("M59 self-test: descriptors, large files, timestamps or metadata cost are wrong");
         }
-        klog_puts("[m59] descriptors (open/lseek/read/write/close), a 200 KiB file through "
+        kernel_log_puts("[m59] descriptors (open/lseek/read/write/close), a 200 KiB file through "
                    "double-indirect blocks read back byte for byte and every block returned, "
                    "a real mtime, rmdir, an open-file table back where it started, and a "
                    "one-byte save costing one metadata sector instead of thirty-one - "
@@ -4347,10 +4347,10 @@ static void boot_selftests_system(void) {
 
         {
             static const char body[] = "argv is real now\n";
-            vfs_unlink(PATH_TMP_DIR "m60src");
-            vfs_unlink(PATH_TMP_DIR "m60dst");
-            if (vfs_write(PATH_TMP_DIR "m60src", body, sizeof(body) - 1) != 0) {
-                klog_puts("[m60] could not create the file cp is about to copy\n");
+            virtual_file_system_unlink(PATH_TMP_DIR "m60src");
+            virtual_file_system_unlink(PATH_TMP_DIR "m60dst");
+            if (virtual_file_system_write(PATH_TMP_DIR "m60src", body, sizeof(body) - 1) != 0) {
+                kernel_log_puts("[m60] could not create the file cp is about to copy\n");
                 all_ok = 0;
             }
             size_t cp_bytes = 0;
@@ -4359,17 +4359,17 @@ static void boot_selftests_system(void) {
             task_t *cp_task = process_spawnv("cp", cp_image, cp_bytes, cp_argv);
             kfree(cp_image);
             if (!cp_task) {
-                klog_puts("[m60] could not spawn cp\n");
+                kernel_log_puts("[m60] could not spawn cp\n");
                 all_ok = 0;
             } else if (do_syscall(SYS_wait, (uint64_t)cp_task->id, 0, 0) != 0) {
-                klog_puts("[m60] cp exited nonzero - it did not get two arguments\n");
+                kernel_log_puts("[m60] cp exited nonzero - it did not get two arguments\n");
                 all_ok = 0;
             } else {
                 static char copied[64];
                 k_memset(copied, 0, sizeof(copied));
-                int64_t n = vfs_read(PATH_TMP_DIR "m60dst", copied, sizeof(copied) - 1);
+                int64_t n = virtual_file_system_read(PATH_TMP_DIR "m60dst", copied, sizeof(copied) - 1);
                 if (n != (int64_t)(sizeof(body) - 1) || k_strcmp(copied, body) != 0) {
-                    klog_puts("[m60] cp produced the wrong bytes\n");
+                    kernel_log_puts("[m60] cp produced the wrong bytes\n");
                     all_ok = 0;
                 }
             }
@@ -4381,9 +4381,9 @@ static void boot_selftests_system(void) {
             size_t term_bytes = 0;
             uint8_t *term_image = read_program(PATH_BIN_DIR "gui_terminal", &term_bytes);
 
-            vfs_unlink(PATH_TMP_DIR "m60out");
-            vfs_unlink(PATH_TMP_DIR "m60pipe");
-            vfs_unlink(PATH_TMP_DIR "m60tab");
+            virtual_file_system_unlink(PATH_TMP_DIR "m60out");
+            virtual_file_system_unlink(PATH_TMP_DIR "m60pipe");
+            virtual_file_system_unlink(PATH_TMP_DIR "m60tab");
 
             task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
             kfree(comp_image);
@@ -4410,36 +4410,36 @@ static void boot_selftests_system(void) {
             selftest_reap(term_task);
             selftest_reap(comp_task);
             console_init();
-            klog_use_console();
+            kernel_log_use_console();
 
             static char redirected[2048];
             k_memset(redirected, 0, sizeof(redirected));
-            int64_t rn = vfs_read(PATH_TMP_DIR "m60out", redirected, sizeof(redirected) - 1);
+            int64_t rn = virtual_file_system_read(PATH_TMP_DIR "m60out", redirected, sizeof(redirected) - 1);
             if (rn <= 0 || !k_strstr(redirected, "compositor")) {
-                klog_puts("[m60] `ls /bin > file` did not put the listing in the file\n");
+                kernel_log_puts("[m60] `ls /bin > file` did not put the listing in the file\n");
                 all_ok = 0;
             }
 
             static char completed[2048];
             k_memset(completed, 0, sizeof(completed));
-            int64_t cn = vfs_read(PATH_TMP_DIR "m60tab", completed, sizeof(completed) - 1);
+            int64_t cn = virtual_file_system_read(PATH_TMP_DIR "m60tab", completed, sizeof(completed) - 1);
             if (cn <= 0 || !k_strstr(completed, "compositor")) {
-                klog_puts("[m60] Tab did not complete `/b` to `/bin/` - the listing is of the wrong directory\n");
+                kernel_log_puts("[m60] Tab did not complete `/b` to `/bin/` - the listing is of the wrong directory\n");
                 all_ok = 0;
             }
 
             static char piped[2048];
             k_memset(piped, 0, sizeof(piped));
-            int64_t pn = vfs_read(PATH_TMP_DIR "m60pipe", piped, sizeof(piped) - 1);
+            int64_t pn = virtual_file_system_read(PATH_TMP_DIR "m60pipe", piped, sizeof(piped) - 1);
             if (pn <= 0 || !k_strstr(piped, "compositor")) {
-                klog_puts("[m60] `ls /bin | cat > file` produced nothing - the pipe never ended\n");
+                kernel_log_puts("[m60] `ls /bin | cat > file` produced nothing - the pipe never ended\n");
                 all_ok = 0;
             } else if (pn != rn) {
-                klog_puts("[m60] the piped listing is a different length from the redirected one: 0x");
-                klog_put_hex32((uint32_t)rn);
-                klog_puts(" vs 0x");
-                klog_put_hex32((uint32_t)pn);
-                klog_putc('\n');
+                kernel_log_puts("[m60] the piped listing is a different length from the redirected one: 0x");
+                kernel_log_put_hex32((uint32_t)rn);
+                kernel_log_puts(" vs 0x");
+                kernel_log_put_hex32((uint32_t)pn);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
@@ -4450,7 +4450,7 @@ static void boot_selftests_system(void) {
             size_t ed_bytes = 0;
             uint8_t *ed_image = read_program(PATH_BIN_DIR "text_editor", &ed_bytes);
 
-            vfs_unlink(PATH_TMP_DIR "m60para");
+            virtual_file_system_unlink(PATH_TMP_DIR "m60para");
 
             task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
             kfree(comp_image);
@@ -4471,7 +4471,7 @@ static void boot_selftests_system(void) {
 
             static char para[64];
             k_memset(para, 0, sizeof(para));
-            int64_t pl = vfs_read(PATH_TMP_DIR "m60para", para, sizeof(para) - 1);
+            int64_t pl = virtual_file_system_read(PATH_TMP_DIR "m60para", para, sizeof(para) - 1);
 
             keyboard_inject('Z', KBD_MOD_CTRL);
             pit_sleep_ms(200);
@@ -4479,7 +4479,7 @@ static void boot_selftests_system(void) {
             pit_sleep_ms(600);
             static char undone[64];
             k_memset(undone, 0, sizeof(undone));
-            int64_t ul = vfs_read(PATH_TMP_DIR "m60para", undone, sizeof(undone) - 1);
+            int64_t ul = virtual_file_system_read(PATH_TMP_DIR "m60para", undone, sizeof(undone) - 1);
 
             keyboard_inject('Y', KBD_MOD_CTRL);
             pit_sleep_ms(200);
@@ -4487,31 +4487,31 @@ static void boot_selftests_system(void) {
             pit_sleep_ms(600);
             static char redone[64];
             k_memset(redone, 0, sizeof(redone));
-            int64_t rl = vfs_read(PATH_TMP_DIR "m60para", redone, sizeof(redone) - 1);
+            int64_t rl = virtual_file_system_read(PATH_TMP_DIR "m60para", redone, sizeof(redone) - 1);
 
             selftest_reap(ed_task);
             selftest_reap(comp_task);
             console_init();
-            klog_use_console();
+            kernel_log_use_console();
 
             if (pl != 8 || k_strcmp(para, "ONE\nTWO\n") != 0) {
-                klog_puts("[m60] Enter did not split the line - saved 0x");
-                klog_put_hex32((uint32_t)pl);
-                klog_puts(" bytes: \"");
-                klog_puts(para);
-                klog_puts("\"\n");
+                kernel_log_puts("[m60] Enter did not split the line - saved 0x");
+                kernel_log_put_hex32((uint32_t)pl);
+                kernel_log_puts(" bytes: \"");
+                kernel_log_puts(para);
+                kernel_log_puts("\"\n");
                 all_ok = 0;
             }
             if (ul != 7 || k_strcmp(undone, "ONETWO\n") != 0) {
-                klog_puts("[m60] one undo did not join the split back - saved \"");
-                klog_puts(undone);
-                klog_puts("\"\n");
+                kernel_log_puts("[m60] one undo did not join the split back - saved \"");
+                kernel_log_puts(undone);
+                kernel_log_puts("\"\n");
                 all_ok = 0;
             }
             if (rl != 8 || k_strcmp(redone, "ONE\nTWO\n") != 0) {
-                klog_puts("[m60] redo did not put the split back - saved \"");
-                klog_puts(redone);
-                klog_puts("\"\n");
+                kernel_log_puts("[m60] redo did not put the split back - saved \"");
+                kernel_log_puts(redone);
+                kernel_log_puts("\"\n");
                 all_ok = 0;
             }
         }
@@ -4519,7 +4519,7 @@ static void boot_selftests_system(void) {
         if (!all_ok) {
             panic("M60 self-test: argv, the command line, or the editor's structural edits are wrong");
         }
-        klog_puts("[m60] a real argument vector (cp with two arguments), a command line with "
+        kernel_log_puts("[m60] a real argument vector (cp with two arguments), a command line with "
                    "redirection and a pipe that ends, and an editor whose Enter splits a line - "
                    "with undo and redo inverting it - self-test passed.\n\n");
     }
@@ -4538,12 +4538,12 @@ static void boot_selftests_system(void) {
         pit_sleep_ms(800);
 
         const uint32_t probe_x = 150;
-        uint32_t before_window = fb_get_pixel(150, 150);
-        uint32_t desktop_bg = fb_get_pixel(probe_x, 700);
+        uint32_t before_window = framebuffer_get_pixel(150, 150);
+        uint32_t desktop_bg = framebuffer_get_pixel(probe_x, 700);
         int before_lit = selftest_column_lit(probe_x, desktop_bg);
 
-        int action_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_fds, 0) != 0) {
+        int action_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_ACTION_PIPE, (uint64_t)action_file_descriptors, 0) != 0) {
             panic("M61 self-test: kernel-side SYS_pipe_open(WM_ACTION_PIPE) failed");
         }
         wm_action_request_t req;
@@ -4551,14 +4551,14 @@ static void boot_selftests_system(void) {
         req.window_id = 0;
         req.action = WM_ACTION_TOGGLE_MINIMIZE;
 
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         uint32_t lit_ms = 0;
         int during_lit = selftest_column_lit_wait(probe_x, desktop_bg, 4000, &lit_ms);
         int after_lit = selftest_column_clear_wait(probe_x, desktop_bg, 4000);
-        uint32_t after_window = fb_get_pixel(150, 150);
+        uint32_t after_window = framebuffer_get_pixel(150, 150);
 
-        int settings_fds[2];
-        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_fds, 0) != 0) {
+        int settings_file_descriptors[2];
+        if (do_syscall(SYS_pipe_open, (uint64_t)WM_SETTINGS_PIPE, (uint64_t)settings_file_descriptors, 0) != 0) {
             panic("M61 self-test: kernel-side SYS_pipe_open(WM_SETTINGS_PIPE) failed");
         }
         wm_settings_request_t off;
@@ -4568,12 +4568,12 @@ static void boot_selftests_system(void) {
         off.bg_color = 0x001A1A2Eu;
         off.accent_color = 0x004C99E6u;
         off.wallpaper = 0;
-        do_syscall(SYS_write, (uint64_t)settings_fds[1], (uint64_t)&off, sizeof(off));
+        do_syscall(SYS_write, (uint64_t)settings_file_descriptors[1], (uint64_t)&off, sizeof(off));
         selftest_wait_for_animations_setting(0, 4000);
 
-        do_syscall(SYS_write, (uint64_t)action_fds[1], (uint64_t)&req, sizeof(req));
+        do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&req, sizeof(req));
         selftest_wait_for_pixel(150, 150, before_window, 4000, "the window to come back");
-        uint32_t quiet_bg = fb_get_pixel(probe_x, 700);
+        uint32_t quiet_bg = framebuffer_get_pixel(probe_x, 700);
         uint32_t quiet_window = lit_ms * 4 + 400;
         if (quiet_window > 3000) {
             quiet_window = 3000;
@@ -4583,43 +4583,43 @@ static void boot_selftests_system(void) {
         selftest_reap(clock_task);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         if (before_window == desktop_bg) {
-            klog_puts("[m61] the window and the bare desktop below it are the same colour - this test cannot see anything\n");
+            kernel_log_puts("[m61] the window and the bare desktop below it are the same colour - this test cannot see anything\n");
             all_ok = 0;
         }
         if (before_lit != 0) {
-            klog_puts("[m61] the path to the taskbar was not bare desktop to begin with: 0x");
-            klog_put_hex32((uint32_t)before_lit);
-            klog_puts(" pixels lit\n");
+            kernel_log_puts("[m61] the path to the taskbar was not bare desktop to begin with: 0x");
+            kernel_log_put_hex32((uint32_t)before_lit);
+            kernel_log_puts(" pixels lit\n");
             all_ok = 0;
         }
         if (during_lit == 0) {
-            klog_puts("[m61] nothing was drawn on the path to the taskbar mid-minimize - the window blinked rather than moved\n");
+            kernel_log_puts("[m61] nothing was drawn on the path to the taskbar mid-minimize - the window blinked rather than moved\n");
             all_ok = 0;
         }
         if (after_lit != 0) {
-            klog_puts("[m61] the animation left 0x");
-            klog_put_hex32((uint32_t)after_lit);
-            klog_puts(" pixels behind on its path\n");
+            kernel_log_puts("[m61] the animation left 0x");
+            kernel_log_put_hex32((uint32_t)after_lit);
+            kernel_log_puts(" pixels behind on its path\n");
             all_ok = 0;
         }
         if (after_window == before_window) {
-            klog_puts("[m61] the window is still on screen after being minimized\n");
+            kernel_log_puts("[m61] the window is still on screen after being minimized\n");
             all_ok = 0;
         }
         if (quiet_lit != 0) {
-            klog_puts("[m61] motion is switched off and something still animated: 0x");
-            klog_put_hex32((uint32_t)quiet_lit);
-            klog_puts(" pixels lit\n");
+            kernel_log_puts("[m61] motion is switched off and something still animated: 0x");
+            kernel_log_put_hex32((uint32_t)quiet_lit);
+            kernel_log_puts(" pixels lit\n");
             all_ok = 0;
         }
 
         if (!all_ok) {
             panic("M61 self-test: window animation did not move, did not clean up, or ignored its setting");
         }
-        klog_puts("[m61] a minimize animating toward the taskbar - endpoints plus an intermediate "
+        kernel_log_puts("[m61] a minimize animating toward the taskbar - endpoints plus an intermediate "
                    "frame that is neither, nothing left behind, and nothing at all when motion is "
                    "switched off - self-test passed.\n\n");
     }
@@ -4628,11 +4628,11 @@ static void boot_selftests_system(void) {
         int all_ok = 1;
 
         if (do_syscall(SYS_audio_claim, 0, 0, 0) != 0) {
-            klog_puts("[m62] the first claim on the audio devices was refused\n");
+            kernel_log_puts("[m62] the first claim on the audio devices was refused\n");
             all_ok = 0;
         }
         if (do_syscall(SYS_audio_claim, 0, 0, 0) != 0) {
-            klog_puts("[m62] the owner could not re-claim what it already owns\n");
+            kernel_log_puts("[m62] the owner could not re-claim what it already owns\n");
             all_ok = 0;
         }
 
@@ -4642,11 +4642,11 @@ static void boot_selftests_system(void) {
         pit_sleep_ms(120);
         uint8_t gate_after = (uint8_t)(inb(0x61) & 0x03);
         if (gate_during != 0x03) {
-            klog_puts("[m62] the speaker gate never opened - no tone was played\n");
+            kernel_log_puts("[m62] the speaker gate never opened - no tone was played\n");
             all_ok = 0;
         }
         if (gate_after != 0) {
-            klog_puts("[m62] the speaker gate is still open past the tone's deadline\n");
+            kernel_log_puts("[m62] the speaker gate is still open past the tone's deadline\n");
             all_ok = 0;
         }
 
@@ -4654,13 +4654,13 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_beep, 880, 40, 0);
         uint8_t gate_muted = (uint8_t)(inb(0x61) & 0x03);
         if (gate_muted != 0) {
-            klog_puts("[m62] muted, and the speaker still played\n");
+            kernel_log_puts("[m62] muted, and the speaker still played\n");
             all_ok = 0;
         }
         do_syscall(SYS_audio_volume, 100, 0, 0);
 
         if (!ac97_available()) {
-            klog_puts("[m62] no AC'97 device on this machine - the stream half of this test is skipped, "
+            kernel_log_puts("[m62] no AC'97 device on this machine - the stream half of this test is skipped, "
                        "which is the same answer real hardware without one would give.\n");
         } else {
             uint32_t frames = 4800;
@@ -4679,14 +4679,14 @@ static void boot_selftests_system(void) {
             }
             uint32_t before = ac97_completions();
             if (do_syscall(SYS_audio_play, (uint64_t)tone, frames, 0) != 0) {
-                klog_puts("[m62] SYS_audio_play refused a buffer the device advertised room for\n");
+                kernel_log_puts("[m62] SYS_audio_play refused a buffer the device advertised room for\n");
                 all_ok = 0;
             }
             pit_sleep_ms(600);
             uint32_t after = ac97_completions();
             kfree(tone);
             if (after == before) {
-                klog_puts("[m62] the AC'97 device never reported finishing the buffer it was given\n");
+                kernel_log_puts("[m62] the AC'97 device never reported finishing the buffer it was given\n");
                 ac97_debug_dump();
                 all_ok = 0;
             }
@@ -4699,26 +4699,26 @@ static void boot_selftests_system(void) {
             kfree(claim_image);
             long rc = do_syscall(SYS_wait, (uint64_t)grabber->id, 0, 0);
             if (rc != 0) {
-                klog_puts("[m62] another process was able to take the speaker, or to beep without owning it: 0x");
-                klog_put_hex32((uint32_t)rc);
-                klog_putc('\n');
+                kernel_log_puts("[m62] another process was able to take the speaker, or to beep without owning it: 0x");
+                kernel_log_put_hex32((uint32_t)rc);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
 
         if (do_syscall(SYS_audio_release, 0, 0, 0) != 0) {
-            klog_puts("[m62] the owner could not release the audio devices\n");
+            kernel_log_puts("[m62] the owner could not release the audio devices\n");
             all_ok = 0;
         }
         if (do_syscall(SYS_beep, 880, 40, 0) == 0) {
-            klog_puts("[m62] a beep succeeded after the speaker was released\n");
+            kernel_log_puts("[m62] a beep succeeded after the speaker was released\n");
             all_ok = 0;
         }
 
         if (!all_ok) {
             panic("M62 self-test: the speaker, the stream, or the ownership rule is wrong");
         }
-        klog_puts("[m62] the PC speaker gated on and off by its own deadline, muted when the volume "
+        kernel_log_puts("[m62] the PC speaker gated on and off by its own deadline, muted when the volume "
                    "is zero, an AC'97 buffer the device reported finishing, and a second process "
                    "refused both the claim and the beep, then the owner handing it back - self-test passed.\n\n");
     }
@@ -4733,17 +4733,17 @@ static void boot_selftests_system(void) {
             kfree(image);
             long rc = do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
             if (rc != 0) {
-                klog_puts("[m63] the libc/SSE self-test program failed\n");
+                kernel_log_puts("[m63] the libc/SSE self-test program failed\n");
                 all_ok = 0;
             }
         }
 
         {
-            int out_fds[2];
-            if (do_syscall(SYS_pipe, (uint64_t)out_fds, 0, 0) != 0) {
+            int out_file_descriptors[2];
+            if (do_syscall(SYS_pipe, (uint64_t)out_file_descriptors, 0, 0) != 0) {
                 panic("M63 self-test: could not make a pipe for the ported program's output");
             }
-            do_syscall(SYS_dup2, (uint64_t)out_fds[1], 1, 0);
+            do_syscall(SYS_dup2, (uint64_t)out_file_descriptors[1], 1, 0);
 
             size_t bytes = 0;
             uint8_t *image = read_program(PATH_BIN_DIR "whetstone", &bytes);
@@ -4756,20 +4756,20 @@ static void boot_selftests_system(void) {
             size_t got = 0;
             long deadline = (long)pit_get_ticks() + 60 * PIT_HZ;
             for (;;) {
-                long avail = do_syscall(SYS_pipe_poll, (uint64_t)out_fds[0], 0, 0);
+                long avail = do_syscall(SYS_pipe_poll, (uint64_t)out_file_descriptors[0], 0, 0);
                 if (avail > 0 && got < sizeof(out) - 1) {
                     size_t room = sizeof(out) - 1 - got;
-                    long n = do_syscall(SYS_read, (uint64_t)out_fds[0], (uint64_t)(out + got),
+                    long n = do_syscall(SYS_read, (uint64_t)out_file_descriptors[0], (uint64_t)(out + got),
                                          (uint64_t)((size_t)avail < room ? (size_t)avail : room));
                     if (n > 0) {
                         got += (size_t)n;
                     }
                 } else if (do_syscall(SYS_wait_nb, (uint64_t)t->id, 0, 0) != -2) {
                     long n;
-                    while ((n = do_syscall(SYS_pipe_poll, (uint64_t)out_fds[0], 0, 0)) > 0 &&
+                    while ((n = do_syscall(SYS_pipe_poll, (uint64_t)out_file_descriptors[0], 0, 0)) > 0 &&
                            got < sizeof(out) - 1) {
                         size_t room = sizeof(out) - 1 - got;
-                        long r = do_syscall(SYS_read, (uint64_t)out_fds[0], (uint64_t)(out + got),
+                        long r = do_syscall(SYS_read, (uint64_t)out_file_descriptors[0], (uint64_t)(out + got),
                                              (uint64_t)((size_t)n < room ? (size_t)n : room));
                         if (r <= 0) {
                             break;
@@ -4784,22 +4784,22 @@ static void boot_selftests_system(void) {
                 }
             }
             out[got] = '\0';
-            do_syscall(SYS_close, (uint64_t)out_fds[0], 0, 0);
-            do_syscall(SYS_close, (uint64_t)out_fds[1], 0, 0);
-            fd_release(&sched_current()->fds[1]);
-            sched_current()->fds[1].type = FD_STDOUT;
+            do_syscall(SYS_close, (uint64_t)out_file_descriptors[0], 0, 0);
+            do_syscall(SYS_close, (uint64_t)out_file_descriptors[1], 0, 0);
+            file_descriptor_release(&scheduler_current()->fds[1]);
+            scheduler_current()->fds[1].type = FD_STDOUT;
 
             long wall_after = do_syscall(SYS_time, 0, 0, 0);
 
             int unmeasured = 0;
             if (k_strstr(out, "Insufficient duration")) {
                 if (wall_before > 0 && wall_after - wall_before >= 3) {
-                    klog_puts("[m63] the ported program could not time its own run, but this "
+                    kernel_log_puts("[m63] the ported program could not time its own run, but this "
                                "kernel's clock advanced across it - time() is wrong\n");
                     all_ok = 0;
                 } else {
                     unmeasured = 1;
-                    klog_puts("[m63] the ported program completed its run and the clock did not "
+                    kernel_log_puts("[m63] the ported program completed its run and the clock did not "
                                "advance across it, for the kernel either - the figure is "
                                "unmeasured on this boot, which is a statement about the host "
                                "rather than about the port\n");
@@ -4807,25 +4807,25 @@ static void boot_selftests_system(void) {
             }
 
             if (!unmeasured && !k_strstr(out, "Loops:")) {
-                klog_puts("[m63] the ported program did not report a completed run. It said:\n");
-                klog_puts(out);
-                klog_putc('\n');
+                kernel_log_puts("[m63] the ported program did not report a completed run. It said:\n");
+                kernel_log_puts(out);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
             if (unmeasured) {
             } else if (!k_strstr(out, "Whetstones:")) {
-                klog_puts("[m63] the ported program produced no benchmark figure\n");
+                kernel_log_puts("[m63] the ported program produced no benchmark figure\n");
                 all_ok = 0;
             } else {
-                klog_puts("[m63] the ported program said:");
-                klog_puts(out);
+                kernel_log_puts("[m63] the ported program said:");
+                kernel_log_puts(out);
             }
         }
 
         if (!all_ok) {
             panic("M63 self-test: floating point, the libc subset, or the ported program is wrong");
         }
-        klog_puts("[m63] SSE state preserved across task switches, a libc subset checked against "
+        kernel_log_puts("[m63] SSE state preserved across task switches, a libc subset checked against "
                    "values that are either right or not, and a 1972 benchmark nobody here wrote "
                    "running to completion and reporting a figure - self-test passed.\n\n");
     }
@@ -4848,24 +4848,24 @@ static void boot_selftests_system(void) {
         uint32_t before_magenta = 0;
         for (uint32_t y = 32; y < 80; y += 2) {
             for (uint32_t x = 32; x < 80; x += 2) {
-                if (fb_get_pixel(x, y) == MAGENTA) {
+                if (framebuffer_get_pixel(x, y) == MAGENTA) {
                     before_magenta++;
                 }
             }
         }
 
         static uint8_t blob[512];
-        int64_t n = vfs_read(PATH_ICONS_DIR "Terminal.icn", blob, sizeof(blob));
+        int64_t n = virtual_file_system_read(PATH_ICONS_DIR "Terminal.icn", blob, sizeof(blob));
         int wrote = 0;
         if (n < ICON_HEADER_BYTES || !icon_valid(blob)) {
-            klog_puts("[m63] the desktop did not write its icons out as files\n");
+            kernel_log_puts("[m63] the desktop did not write its icons out as files\n");
             all_ok = 0;
         } else {
             blob[ICON_HEADER_BYTES + 3] = 0xFF;
             blob[ICON_HEADER_BYTES + 4] = 0x00;
             blob[ICON_HEADER_BYTES + 5] = 0xFF;
-            if (vfs_write(PATH_ICONS_DIR "Terminal.icn", blob, (size_t)n) != 0) {
-                klog_puts("[m63] could not write the edited icon back\n");
+            if (virtual_file_system_write(PATH_ICONS_DIR "Terminal.icn", blob, (size_t)n) != 0) {
+                kernel_log_puts("[m63] could not write the edited icon back\n");
                 all_ok = 0;
             } else {
                 wrote = 1;
@@ -4879,7 +4879,7 @@ static void boot_selftests_system(void) {
             pit_sleep_ms(1200);
             for (uint32_t y = 32; y < 80; y += 2) {
                 for (uint32_t x = 32; x < 80; x += 2) {
-                    if (fb_get_pixel(x, y) == MAGENTA) {
+                    if (framebuffer_get_pixel(x, y) == MAGENTA) {
                         after_magenta++;
                     }
                 }
@@ -4890,25 +4890,25 @@ static void boot_selftests_system(void) {
         selftest_reap(icons_task);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         if (before_magenta != 0) {
-            klog_puts("[m63] the desktop was already showing the colour this test edits in\n");
+            kernel_log_puts("[m63] the desktop was already showing the colour this test edits in\n");
             all_ok = 0;
         }
         if (wrote && after_magenta == 0) {
-            klog_puts("[m63] editing an icon file changed nothing on screen\n");
+            kernel_log_puts("[m63] editing an icon file changed nothing on screen\n");
             all_ok = 0;
         }
 
         if (wrote) {
-            vfs_unlink(PATH_ICONS_DIR "Terminal.icn");
+            virtual_file_system_unlink(PATH_ICONS_DIR "Terminal.icn");
         }
 
         if (!all_ok) {
             panic("M63 icon self-test: icons are not files, or editing one changes nothing");
         }
-        klog_puts("[m63] icons are files: the desktop wrote them out, an edited palette entry "
+        kernel_log_puts("[m63] icons are files: the desktop wrote them out, an edited palette entry "
                    "changed what is on screen after a restart, and the format and loader did not "
                    "change at all - self-test passed.\n\n");
     }
@@ -4928,8 +4928,8 @@ static void boot_selftests_system(void) {
         kfree(clock_image);
         pit_sleep_ms(900);
 
-        uint32_t desktop = fb_get_pixel(500, 500);
-        uint32_t on_home = fb_get_pixel(150, 150);
+        uint32_t desktop = framebuffer_get_pixel(500, 500);
+        uint32_t on_home = framebuffer_get_pixel(150, 150);
 
         keyboard_inject((char)KBD_KEY_RIGHT, KBD_MOD_CTRL | KBD_MOD_SHIFT);
         uint32_t after_switch = selftest_pixel_settled(150, 150, desktop,
@@ -4950,33 +4950,33 @@ static void boot_selftests_system(void) {
         selftest_reap(clock_task);
         selftest_reap(comp_task);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         if (on_home == desktop) {
-            klog_puts("[m63] the window was not on screen to begin with - this test can see nothing\n");
+            kernel_log_puts("[m63] the window was not on screen to begin with - this test can see nothing\n");
             all_ok = 0;
         }
         if (after_switch != desktop) {
-            klog_puts("[m63] switching to the next virtual desktop left the window on screen\n");
+            kernel_log_puts("[m63] switching to the next virtual desktop left the window on screen\n");
             all_ok = 0;
         }
         if (back_home != on_home) {
-            klog_puts("[m63] switching back did not bring the window back\n");
+            kernel_log_puts("[m63] switching back did not bring the window back\n");
             all_ok = 0;
         }
         if (moved_with != on_home) {
-            klog_puts("[m63] moving a window to the next desktop did not take it there\n");
+            kernel_log_puts("[m63] moving a window to the next desktop did not take it there\n");
             all_ok = 0;
         }
         if (left_behind != desktop) {
-            klog_puts("[m63] the moved window is still on the desktop it came from\n");
+            kernel_log_puts("[m63] the moved window is still on the desktop it came from\n");
             all_ok = 0;
         }
 
         if (!all_ok) {
             panic("M63 workspace self-test: virtual desktops do not hide, show or carry windows");
         }
-        klog_puts("[m63] four virtual desktops: a window hidden by switching away, back when "
+        kernel_log_puts("[m63] four virtual desktops: a window hidden by switching away, back when "
                    "switching returns, and carried along when it is sent - self-test passed.\n\n");
     }
 
@@ -4985,7 +4985,7 @@ static void boot_selftests_system(void) {
 
         if (net_have_nic()) {
             if (!net_config_is_leased()) {
-                klog_puts("[m64] no DHCP lease - the address is the fallback constant, "
+                kernel_log_puts("[m64] no DHCP lease - the address is the fallback constant, "
                            "which is what this milestone existed to stop being the answer\n");
                 all_ok = 0;
             }
@@ -4995,15 +4995,15 @@ static void boot_selftests_system(void) {
             task_t *t = process_spawn("nettest", image, bytes, "");
             kfree(image);
             if (do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) != 0) {
-                klog_puts("[m64] the socket self-test program reported a failure\n");
+                kernel_log_puts("[m64] the socket self-test program reported a failure\n");
                 all_ok = 0;
             }
 
-            int out_fds[2];
-            if (do_syscall(SYS_pipe, (uint64_t)out_fds, 0, 0) != 0) {
+            int out_file_descriptors[2];
+            if (do_syscall(SYS_pipe, (uint64_t)out_file_descriptors, 0, 0) != 0) {
                 panic("M64 self-test: could not make a pipe for nettime's output");
             }
-            do_syscall(SYS_dup2, (uint64_t)out_fds[1], 1, 0);
+            do_syscall(SYS_dup2, (uint64_t)out_file_descriptors[1], 1, 0);
 
             image = read_program(PATH_BIN_DIR "nettime", &bytes);
             task_t *nt = process_spawn("nettime", image, bytes, "");
@@ -5014,29 +5014,29 @@ static void boot_selftests_system(void) {
             uint64_t elapsed_ms = (pit_get_ticks() - started) * 1000 / PIT_HZ;
 
             static char nettime_out[256];
-            long got = do_syscall(SYS_read, (uint64_t)out_fds[0],
+            long got = do_syscall(SYS_read, (uint64_t)out_file_descriptors[0],
                                   (uint64_t)nettime_out, sizeof(nettime_out) - 1);
             nettime_out[got > 0 ? got : 0] = '\0';
-            do_syscall(SYS_close, (uint64_t)out_fds[0], 0, 0);
-            do_syscall(SYS_close, (uint64_t)out_fds[1], 0, 0);
-            fd_release(&sched_current()->fds[1]);
-            sched_current()->fds[1].type = FD_STDOUT;
+            do_syscall(SYS_close, (uint64_t)out_file_descriptors[0], 0, 0);
+            do_syscall(SYS_close, (uint64_t)out_file_descriptors[1], 0, 0);
+            file_descriptor_release(&scheduler_current()->fds[1]);
+            scheduler_current()->fds[1].type = FD_STDOUT;
 
             if (elapsed_ms > 5000) {
-                klog_puts("[m64] nettime took longer than its own deadline to give up\n");
+                kernel_log_puts("[m64] nettime took longer than its own deadline to give up\n");
                 all_ok = 0;
             }
             if (got <= 0) {
-                klog_puts("[m64] nettime printed nothing at all\n");
+                kernel_log_puts("[m64] nettime printed nothing at all\n");
                 all_ok = 0;
             }
             if (nettime_rc == 0 && !k_strstr(nettime_out, "says")) {
-                klog_puts("[m64] nettime reported success without reporting a time\n");
+                kernel_log_puts("[m64] nettime reported success without reporting a time\n");
                 all_ok = 0;
             }
             if (nettime_rc != 0 && !k_strstr(nettime_out, "no reply") &&
                 !k_strstr(nettime_out, "unreachable")) {
-                klog_puts("[m64] nettime failed without saying why\n");
+                kernel_log_puts("[m64] nettime failed without saying why\n");
                 all_ok = 0;
             }
 
@@ -5044,14 +5044,14 @@ static void boot_selftests_system(void) {
                 panic("M64 network self-test: user space cannot use the network correctly");
             }
 
-            klog_puts("[m64] the network reached user space: a DHCP lease rather than a "
+            kernel_log_puts("[m64] the network reached user space: a DHCP lease rather than a "
                        "hardcoded address, UDP sockets in the fd table that round-trip a "
                        "datagram and refuse six kinds of wrong, and an SNTP client that "
                        "gives up cleanly - self-test passed. nettime said: ");
-            klog_puts(nettime_out);
-            klog_putc('\n');
+            kernel_log_puts(nettime_out);
+            kernel_log_putc('\n');
         } else {
-            klog_puts("[m64] no NIC on this machine - the socket layer is present but "
+            kernel_log_puts("[m64] no NIC on this machine - the socket layer is present but "
                        "untested this boot.\n\n");
         }
     }
@@ -5067,12 +5067,12 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_wait, (uint64_t)plain->id, 0, 0);
 
         if (plain_caps != CAP_APP_DEFAULT) {
-            klog_puts("[m65] a program with no manifest entry did not get the default "
+            kernel_log_puts("[m65] a program with no manifest entry did not get the default "
                        "capability set - the grant table is not being applied at spawn\n");
             all_ok = 0;
         }
-        if (sched_current()->caps != CAP_ALL) {
-            klog_puts("[m65] kernel_main is not the root of the capability model\n");
+        if (scheduler_current()->caps != CAP_ALL) {
+            kernel_log_puts("[m65] kernel_main is not the root of the capability model\n");
             all_ok = 0;
         }
 
@@ -5080,25 +5080,25 @@ static void boot_selftests_system(void) {
         task_t *comp = process_spawn("compositor", image, bytes, "");
         kfree(image);
         if (comp->caps != CAP_ALL) {
-            klog_puts("[m65] the compositor did not get the capabilities it owns the screen with\n");
+            kernel_log_puts("[m65] the compositor did not get the capabilities it owns the screen with\n");
             all_ok = 0;
         }
         selftest_reap(comp);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         task_t *victim = task_spawn("cap-victim", spinner_task, NULL);
         char victim_pid[12];
         {
             int v = victim->id, n = 0;
-            char tmp[12];
+            char temporary[12];
             do {
-                tmp[n++] = (char)('0' + (v % 10));
+                temporary[n++] = (char)('0' + (v % 10));
                 v /= 10;
             } while (v);
             int m = 0;
             while (n) {
-                victim_pid[m++] = tmp[--n];
+                victim_pid[m++] = temporary[--n];
             }
             victim_pid[m] = '\0';
         }
@@ -5107,12 +5107,12 @@ static void boot_selftests_system(void) {
         task_t *ct = process_spawn("captest", image, bytes, victim_pid);
         kfree(image);
         if (do_syscall(SYS_wait, (uint64_t)ct->id, 0, 0) != 0) {
-            klog_puts("[m65] the capability self-test program reported a failure\n");
+            kernel_log_puts("[m65] the capability self-test program reported a failure\n");
             all_ok = 0;
         }
 
         if (victim->state == TASK_TERMINATED) {
-            klog_puts("[m65] the victim task did not survive an unprivileged process asking to kill it\n");
+            kernel_log_puts("[m65] the victim task did not survive an unprivileged process asking to kill it\n");
             all_ok = 0;
         }
         selftest_reap(victim);
@@ -5120,7 +5120,7 @@ static void boot_selftests_system(void) {
         if (!all_ok) {
             panic("M65 capability self-test: the permission model does not hold");
         }
-        klog_puts("[m65] capabilities: a manifest the kernel applies rather than a launcher, "
+        kernel_log_puts("[m65] capabilities: a manifest the kernel applies rather than a launcher, "
                    "an ordinary program refused the screen, the clipboard, the process list, "
                    "a socket, the clock and another process's life, and a set that only ever "
                    "shrinks - self-test passed.\n\n");
@@ -5137,13 +5137,13 @@ static void boot_selftests_system(void) {
         task_t *t = process_spawn("tcptest", image, bytes, "");
         kfree(image);
         if (do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) != 0) {
-            klog_puts("[m66] the TCP self-test program reported a failure\n");
+            kernel_log_puts("[m66] the TCP self-test program reported a failure\n");
             all_ok = 0;
         }
 
         int retransmits = tcp_debug_retransmits() - retransmits_before;
         if (retransmits <= 0) {
-            klog_puts("[m66] three segments were dropped and nothing was ever retransmitted - "
+            kernel_log_puts("[m66] three segments were dropped and nothing was ever retransmitted - "
                        "the recovery path did not run, so the transfer that succeeded proves "
                        "less than it appears to\n");
             all_ok = 0;
@@ -5153,17 +5153,17 @@ static void boot_selftests_system(void) {
             panic("M66 TCP self-test: the connection, the transfer or the recovery does not work");
         }
 
-        klog_puts("[m66] TCP: a handshake, 16 KiB through a 4 KiB buffer arriving byte for "
+        kernel_log_puts("[m66] TCP: a handshake, 16 KiB through a 4 KiB buffer arriving byte for "
                    "byte, an end of stream a reader can tell from a pause, a refusal that "
                    "arrives as an RST rather than a timeout, and a transfer that survived ");
-        klog_put_dec((uint32_t)retransmits);
-        klog_puts(" deliberately dropped segment(s) - self-test passed.\n\n");
+        kernel_log_put_dec((uint32_t)retransmits);
+        kernel_log_puts(" deliberately dropped segment(s) - self-test passed.\n\n");
     } else {
-        klog_puts("[m66] no NIC on this machine - TCP is present but untested this boot.\n\n");
+        kernel_log_puts("[m66] no NIC on this machine - TCP is present but untested this boot.\n\n");
     }
 
     {
-        int frames_before = (int)pmm_free_frame_count();
+        int frames_before = (int)physical_memory_free_frame_count();
 
         static const int RACERS = 4;
         task_t *racers[4];
@@ -5181,24 +5181,24 @@ static void boot_selftests_system(void) {
 
         int all_ok = (spawned == RACERS);
         if (!all_ok) {
-            klog_puts("[m67] could not spawn four concurrent racers\n");
+            kernel_log_puts("[m67] could not spawn four concurrent racers\n");
         }
         for (int i = 0; i < RACERS; i++) {
             if (!racers[i]) {
                 continue;
             }
             if (do_syscall(SYS_wait, (uint64_t)racers[i]->id, 0, 0) != 0) {
-                klog_puts("[m67] a racer reported corrupted state - a lock M67 added is "
+                kernel_log_puts("[m67] a racer reported corrupted state - a lock M67 added is "
                            "missing, wrong, or not covering what it claims to\n");
                 all_ok = 0;
             }
         }
 
-        int frames_after = (int)pmm_free_frame_count();
+        int frames_after = (int)physical_memory_free_frame_count();
         if (frames_after < frames_before) {
-            klog_puts("[m67] frames leaked across the race - ");
-            klog_put_dec((uint32_t)(frames_before - frames_after));
-            klog_puts(" not returned\n");
+            kernel_log_puts("[m67] frames leaked across the race - ");
+            kernel_log_put_dec((uint32_t)(frames_before - frames_after));
+            kernel_log_puts(" not returned\n");
             all_ok = 0;
         }
 
@@ -5206,7 +5206,7 @@ static void boot_selftests_system(void) {
             panic("M67 concurrency self-test: syscalls are preemptible and the locks do not hold");
         }
 
-        klog_puts("[m67] a preemptible kernel: `int 0x80` is a trap gate, four concurrent "
+        kernel_log_puts("[m67] a preemptible kernel: `int 0x80` is a trap gate, four concurrent "
                    "processes hammered the filesystem, the shm table, pipe ring buffers and "
                    "the socket table, and every one of them read back only its own bytes - "
                    "self-test passed.\n\n");
@@ -5259,24 +5259,24 @@ static void boot_selftests_system(void) {
         }
         selftest_reap(comp);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         if (idle_us == 0 || loaded_us == 0) {
             panic("M69 latency self-test: the cursor never reached the screen - "
                    "the measurement is measuring nothing");
         }
 
-        klog_perf("input_to_photon_idle_us", idle_us, "us");
-        klog_perf("input_to_photon_loaded_us", loaded_us, "us");
-        klog_perf_distribution("input_to_photon_idle", idle_samples, LATENCY_SAMPLES);
-        klog_perf_distribution("input_to_photon_loaded", loaded_samples, LATENCY_SAMPLES);
-        klog_puts("[m69] input-to-photon: ");
-        klog_put_dec((uint32_t)idle_us);
-        klog_puts(" us idle, ");
-        klog_put_dec((uint32_t)loaded_us);
-        klog_puts(" us with ");
-        klog_put_dec((uint32_t)nload);
-        klog_puts(" CPU-bound task(s) running - measured with the TSC, "
+        kernel_log_perf("input_to_photon_idle_us", idle_us, "us");
+        kernel_log_perf("input_to_photon_loaded_us", loaded_us, "us");
+        kernel_log_perf_distribution("input_to_photon_idle", idle_samples, LATENCY_SAMPLES);
+        kernel_log_perf_distribution("input_to_photon_loaded", loaded_samples, LATENCY_SAMPLES);
+        kernel_log_puts("[m69] input-to-photon: ");
+        kernel_log_put_dec((uint32_t)idle_us);
+        kernel_log_puts(" us idle, ");
+        kernel_log_put_dec((uint32_t)loaded_us);
+        kernel_log_puts(" us with ");
+        kernel_log_put_dec((uint32_t)nload);
+        kernel_log_puts(" CPU-bound task(s) running - measured with the TSC, "
                    "cursor motion to changed pixel; the observer competes, so this is an "
                    "upper bound - self-test passed.\n\n");
     }
@@ -5285,8 +5285,8 @@ static void boot_selftests_system(void) {
         int all_ok = 1;
 
         static const char MARKER[] = "[m70] marker-cafebabe";
-        klog_puts(MARKER);
-        klog_putc('\n');
+        kernel_log_puts(MARKER);
+        kernel_log_putc('\n');
 
         static char logbuf[1024];
         uint64_t cursor = 0;
@@ -5320,23 +5320,23 @@ static void boot_selftests_system(void) {
             k_memmove(logbuf, logbuf + total - carry, (size_t)carry);
         }
         if (!found) {
-            klog_puts("[m70] the kernel log does not contain what klog just wrote to it\n");
+            kernel_log_puts("[m70] the kernel log does not contain what klog just wrote to it\n");
             all_ok = 0;
         }
 
-        uint64_t end = klog_written_total();
+        uint64_t end = kernel_log_written_total();
         long none = do_syscall4(SYS_klog, end, (uint64_t)logbuf, sizeof(logbuf) - 1,
                                  (uint64_t)&next);
         if (none != 0) {
-            klog_puts("[m70] a read from the end of the log returned bytes that were not "
+            kernel_log_puts("[m70] a read from the end of the log returned bytes that were not "
                        "written yet\n");
             all_ok = 0;
         }
-        klog_puts("x\n");
+        kernel_log_puts("x\n");
         long some = do_syscall4(SYS_klog, end, (uint64_t)logbuf, sizeof(logbuf) - 1,
                                  (uint64_t)&next);
         if (some <= 0) {
-            klog_puts("[m70] the log did not advance after something was written to it\n");
+            kernel_log_puts("[m70] the log did not advance after something was written to it\n");
             all_ok = 0;
         }
 
@@ -5346,35 +5346,35 @@ static void boot_selftests_system(void) {
 
         {
             const uint32_t BAND = 0x00800000u;
-            uint32_t h = fb_height();
+            uint32_t h = framebuffer_height();
             uint32_t band_h = 8 * FONT_HEIGHT;
             uint32_t band_y = (h > band_h) ? (h - band_h) / 2 : 0;
 
             panic_render("m70 paint check - the machine is fine, this is a test");
 
-            int band_ok = (fb_get_pixel(4, band_y + band_h - 3) == BAND);
+            int band_ok = (framebuffer_get_pixel(4, band_y + band_h - 3) == BAND);
 
             int glyph_pixels = 0;
-            for (uint32_t gx = 16; gx < 16 + 20 * FONT_WIDTH && gx < fb_width(); gx++) {
+            for (uint32_t gx = 16; gx < 16 + 20 * FONT_WIDTH && gx < framebuffer_width(); gx++) {
                 for (uint32_t gy = band_y + FONT_HEIGHT; gy < band_y + 2 * FONT_HEIGHT; gy++) {
-                    if (fb_get_pixel(gx, gy) != BAND) {
+                    if (framebuffer_get_pixel(gx, gy) != BAND) {
                         glyph_pixels++;
                     }
                 }
             }
 
             console_init();
-            klog_use_console();
+            kernel_log_use_console();
 
             if (!band_ok) {
-                klog_puts("[m70] a panic painted nothing to the framebuffer\n");
+                kernel_log_puts("[m70] a panic painted nothing to the framebuffer\n");
                 all_ok = 0;
             }
             if (glyph_pixels < 50) {
-                klog_puts("[m70] the panic band was painted but the message was not drawn "
+                kernel_log_puts("[m70] the panic band was painted but the message was not drawn "
                            "into it (");
-                klog_put_dec((uint32_t)glyph_pixels);
-                klog_puts(" glyph pixels)\n");
+                kernel_log_put_dec((uint32_t)glyph_pixels);
+                kernel_log_puts(" glyph pixels)\n");
                 all_ok = 0;
             }
             if (!all_ok) {
@@ -5382,7 +5382,7 @@ static void boot_selftests_system(void) {
             }
         }
 
-        klog_puts("[m70] the kernel log is readable from user space: a marker written and "
+        kernel_log_puts("[m70] the kernel log is readable from user space: a marker written and "
                    "found again, a cursor that follows rather than repeats, a gate "
                    "(CAP_SYSLOG) an ordinary program does not hold, and a panic that paints "
                    "its own message onto the framebuffer rather than into a serial port "
@@ -5408,38 +5408,38 @@ static void boot_selftests_system(void) {
         k_memset(readback, 0, sizeof(readback));
         do_syscall(SYS_readfile, (uint64_t)target, (uint64_t)readback, sizeof(readback) - 1);
         if (k_strcmp(readback, OLD_TEXT) != 0) {
-            klog_puts("[m71] the fixture did not read back as itself\n");
+            kernel_log_puts("[m71] the fixture did not read back as itself\n");
             all_ok = 0;
         }
 
         if (do_syscall(SYS_rename, (uint64_t)temp, (uint64_t)target, 0) == 0) {
-            klog_puts("[m71] SYS_rename replaced an existing file - M56's guarantee is gone\n");
+            kernel_log_puts("[m71] SYS_rename replaced an existing file - M56's guarantee is gone\n");
             all_ok = 0;
         }
 
         if (do_syscall(SYS_rename_replace, (uint64_t)temp, (uint64_t)target, 0) != 0) {
-            klog_puts("[m71] SYS_rename_replace failed on an existing destination\n");
+            kernel_log_puts("[m71] SYS_rename_replace failed on an existing destination\n");
             all_ok = 0;
         }
 
         k_memset(readback, 0, sizeof(readback));
         do_syscall(SYS_readfile, (uint64_t)target, (uint64_t)readback, sizeof(readback) - 1);
         if (k_strcmp(readback, NEW_TEXT) != 0) {
-            klog_puts("[m71] after the replace the target is not the new contents\n");
+            kernel_log_puts("[m71] after the replace the target is not the new contents\n");
             all_ok = 0;
         }
-        if (vfs_exists(temp)) {
-            klog_puts("[m71] the temporary file survived the rename - that is a copy, not a replace\n");
+        if (virtual_file_system_exists(temp)) {
+            kernel_log_puts("[m71] the temporary file survived the rename - that is a copy, not a replace\n");
             all_ok = 0;
         }
 
         if (do_syscall(SYS_rename_replace, (uint64_t)target, (uint64_t)target, 0) != 0 ||
-            !vfs_exists(target)) {
-            klog_puts("[m71] renaming a file onto itself destroyed it\n");
+            !virtual_file_system_exists(target)) {
+            kernel_log_puts("[m71] renaming a file onto itself destroyed it\n");
             all_ok = 0;
         }
 
-        uint32_t free_before = vfs_free_blocks();
+        uint32_t free_before = virtual_file_system_free_blocks();
 
         static char filler[3000];
         k_memset(filler, 'z', sizeof(filler));
@@ -5447,26 +5447,26 @@ static void boot_selftests_system(void) {
         if (do_syscall(SYS_writefile, (uint64_t)doomed, (uint64_t)filler, sizeof(filler)) != 0) {
             panic("M71 self-test: could not write the orphan fixture");
         }
-        uint32_t free_with_file = vfs_free_blocks();
+        uint32_t free_with_file = virtual_file_system_free_blocks();
         if (free_with_file >= free_before) {
-            klog_puts("[m71] writing a 3 KiB file consumed no blocks - the fixture is wrong\n");
+            kernel_log_puts("[m71] writing a 3 KiB file consumed no blocks - the fixture is wrong\n");
             all_ok = 0;
         }
 
         leanfs_debug_orphan(doomed);
 
-        uint32_t free_orphaned = vfs_free_blocks();
+        uint32_t free_orphaned = virtual_file_system_free_blocks();
         if (free_orphaned != free_with_file) {
-            klog_puts("[m71] orphaning did not leave the blocks allocated - nothing to reclaim\n");
+            kernel_log_puts("[m71] orphaning did not leave the blocks allocated - nothing to reclaim\n");
             all_ok = 0;
         }
 
-        vfs_check();
-        uint32_t free_after = vfs_free_blocks();
+        virtual_file_system_check();
+        uint32_t free_after = virtual_file_system_free_blocks();
         if (free_after != free_before) {
-            klog_puts("[m71] the check did not reclaim every orphaned block (");
-            klog_put_dec(free_before - free_after);
-            klog_puts(" still missing)\n");
+            kernel_log_puts("[m71] the check did not reclaim every orphaned block (");
+            kernel_log_put_dec(free_before - free_after);
+            kernel_log_puts(" still missing)\n");
             all_ok = 0;
         }
 
@@ -5476,7 +5476,7 @@ static void boot_selftests_system(void) {
             panic("M71 self-test: this filesystem can still lose a file");
         }
 
-        klog_puts("[m71] files worth trusting: a replace that repoints one directory record "
+        kernel_log_puts("[m71] files worth trusting: a replace that repoints one directory record "
                    "so the name never stops resolving, a plain rename that still refuses to "
                    "overwrite, and an unclean mount whose orphaned blocks are found and "
                    "reclaimed - self-test passed.\n\n");
@@ -5506,7 +5506,7 @@ static void boot_selftests_system(void) {
 
         long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
         if (pid < 0) {
-            klog_puts("[m72] a #! script could not be spawned as a program\n");
+            kernel_log_puts("[m72] a #! script could not be spawned as a program\n");
             all_ok = 0;
         } else {
             do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
@@ -5514,9 +5514,9 @@ static void boot_selftests_system(void) {
 
         static char produced[256];
         k_memset(produced, 0, sizeof(produced));
-        int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+        int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
         if (n <= 0) {
-            klog_puts("[m72] the script produced no output at all\n");
+            kernel_log_puts("[m72] the script produced no output at all\n");
             all_ok = 0;
         } else {
             produced[n] = '\0';
@@ -5536,9 +5536,9 @@ static void boot_selftests_system(void) {
                     found = (EXPECT[e].needle[j] == '\0');
                 }
                 if (!found) {
-                    klog_puts("[m72] the script did not demonstrate ");
-                    klog_puts(EXPECT[e].what);
-                    klog_putc('\n');
+                    kernel_log_puts("[m72] the script did not demonstrate ");
+                    kernel_log_puts(EXPECT[e].what);
+                    kernel_log_putc('\n');
                     all_ok = 0;
                 }
             }
@@ -5549,7 +5549,7 @@ static void boot_selftests_system(void) {
                     j++;
                 }
                 if (NEVER[j] == '\0') {
-                    klog_puts("[m72] && ran its right side after a failure\n");
+                    kernel_log_puts("[m72] && ran its right side after a failure\n");
                     all_ok = 0;
                     break;
                 }
@@ -5560,24 +5560,24 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
 
         if (!all_ok) {
-            klog_puts("[m72] what the script actually wrote:\n");
-            klog_puts(produced);
-            klog_puts("[m72] ---- end\n");
+            kernel_log_puts("[m72] what the script actually wrote:\n");
+            kernel_log_puts(produced);
+            kernel_log_puts("[m72] ---- end\n");
             panic("M72 self-test: scripts do not run, or the shell is not one");
         }
 
-        klog_puts("[m72] a script is a program: `#!` resolved by the ordinary spawn path, "
+        kernel_log_puts("[m72] a script is a program: `#!` resolved by the ordinary spawn path, "
                    "variables, quoting, a redirect, and && / || gated on a real exit status "
                    "- self-test passed.\n\n");
-        int idle_fds[2];
-        if (do_syscall(SYS_pipe, (uint64_t)idle_fds, 0, 0) != 0) {
+        int idle_file_descriptors[2];
+        if (do_syscall(SYS_pipe, (uint64_t)idle_file_descriptors, 0, 0) != 0) {
             panic("M68 self-test: SYS_pipe failed");
         }
 
-        uint64_t idle_before = sched_idle_ticks(0);
-        uint64_t total_before = sched_total_ticks(0);
+        uint64_t idle_before = scheduler_idle_ticks(0);
+        uint64_t total_before = scheduler_total_ticks(0);
 
-        task_t *sleeper = task_spawn("m68-sleeper", m68_sleeper_task, (void *)(uint64_t)idle_fds[0]);
+        task_t *sleeper = task_spawn("m68-sleeper", m68_sleeper_task, (void *)(uint64_t)idle_file_descriptors[0]);
         if (!sleeper) {
             panic("M68 self-test: could not spawn the sleeper");
         }
@@ -5585,27 +5585,27 @@ static void boot_selftests_system(void) {
         pit_sleep_ms(400);
 
         if (sleeper->state != TASK_BLOCKED) {
-            klog_puts("[m68] a task waiting in SYS_waitfds is not TASK_BLOCKED - it is "
+            kernel_log_puts("[m68] a task waiting in SYS_waitfds is not TASK_BLOCKED - it is "
                        "still in the run queue, which is the state this milestone exists to "
                        "remove\n");
             all_ok = 0;
         }
 
-        uint64_t idle_gained = sched_idle_ticks(0) - idle_before;
-        uint64_t total_gained = sched_total_ticks(0) - total_before;
+        uint64_t idle_gained = scheduler_idle_ticks(0) - idle_before;
+        uint64_t total_gained = scheduler_total_ticks(0) - total_before;
 
         static const char poke[] = "x";
-        do_syscall(SYS_write, (uint64_t)idle_fds[1], (uint64_t)poke, 1);
+        do_syscall(SYS_write, (uint64_t)idle_file_descriptors[1], (uint64_t)poke, 1);
         pit_sleep_ms(100);
         if (sleeper->state == TASK_BLOCKED) {
-            klog_puts("[m68] a blocked task was not woken by a write to the pipe it was "
+            kernel_log_puts("[m68] a blocked task was not woken by a write to the pipe it was "
                        "waiting on\n");
             all_ok = 0;
         }
         do_syscall(SYS_kill, (uint64_t)sleeper->id, SIGKILL, 0);
         selftest_reap(sleeper);
-        do_syscall(SYS_close, (uint64_t)idle_fds[0], 0, 0);
-        do_syscall(SYS_close, (uint64_t)idle_fds[1], 0, 0);
+        do_syscall(SYS_close, (uint64_t)idle_file_descriptors[0], 0, 0);
+        do_syscall(SYS_close, (uint64_t)idle_file_descriptors[1], 0, 0);
 
         if (!all_ok) {
             panic("M68 self-test: tasks do not block, or blocked tasks do not wake");
@@ -5613,13 +5613,13 @@ static void boot_selftests_system(void) {
 
         (void)idle_gained;
         (void)total_gained;
-        klog_puts("[m68] wait queues: a task in SYS_waitfds is TASK_BLOCKED rather than "
+        kernel_log_puts("[m68] wait queues: a task in SYS_waitfds is TASK_BLOCKED rather than "
                    "runnable, a write to the pipe it waits on wakes it, and the BSP has "
                    "accumulated ");
-        klog_put_dec((uint32_t)sched_idle_ticks(0));
-        klog_puts(" idle tick(s) of ");
-        klog_put_dec((uint32_t)sched_total_ticks(0));
-        klog_puts(" so far - a count that did not exist before this milestone - "
+        kernel_log_put_dec((uint32_t)scheduler_idle_ticks(0));
+        kernel_log_puts(" idle tick(s) of ");
+        kernel_log_put_dec((uint32_t)scheduler_total_ticks(0));
+        kernel_log_puts(" so far - a count that did not exist before this milestone - "
                    "self-test passed.\n\n");
     }
 
@@ -5665,7 +5665,7 @@ static void boot_selftests_system(void) {
 
         long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
         if (pid < 0) {
-            klog_puts("[m86] the script could not be spawned\n");
+            kernel_log_puts("[m86] the script could not be spawned\n");
             all_ok = 0;
         } else {
             do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
@@ -5673,9 +5673,9 @@ static void boot_selftests_system(void) {
 
         static char produced[1024];
         k_memset(produced, 0, sizeof(produced));
-        int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+        int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
         if (n <= 0) {
-            klog_puts("[m86] the script produced no output at all\n");
+            kernel_log_puts("[m86] the script produced no output at all\n");
             all_ok = 0;
         } else {
             produced[n] = '\0';
@@ -5694,16 +5694,16 @@ static void boot_selftests_system(void) {
             };
             for (size_t e = 0; e < sizeof(EXPECT) / sizeof(EXPECT[0]); e++) {
                 if (!selftest_contains(produced, EXPECT[e].needle)) {
-                    klog_puts("[m86] the script did not demonstrate ");
-                    klog_puts(EXPECT[e].what);
-                    klog_puts("\n");
+                    kernel_log_puts("[m86] the script did not demonstrate ");
+                    kernel_log_puts(EXPECT[e].what);
+                    kernel_log_puts("\n");
                     all_ok = 0;
                 }
             }
             static const char *const FORBIDDEN[] = { "bad", "bad2", "bad3", 0 };
             for (int e = 0; FORBIDDEN[e]; e++) {
                 if (selftest_contains(produced, FORBIDDEN[e])) {
-                    klog_puts("[m86] a branch that should not have run, ran\n");
+                    kernel_log_puts("[m86] a branch that should not have run, ran\n");
                     all_ok = 0;
                 }
             }
@@ -5711,18 +5711,18 @@ static void boot_selftests_system(void) {
 
         static char env_seen[2048];
         k_memset(env_seen, 0, sizeof(env_seen));
-        int64_t en = vfs_read(PATH_TMP_DIR "m86.env", env_seen, sizeof(env_seen) - 1);
+        int64_t en = virtual_file_system_read(PATH_TMP_DIR "m86.env", env_seen, sizeof(env_seen) - 1);
         if (en <= 0) {
-            klog_puts("[m86] `env` in a pipeline produced nothing\n");
+            kernel_log_puts("[m86] `env` in a pipeline produced nothing\n");
             all_ok = 0;
         } else {
             env_seen[en] = '\0';
             if (!selftest_contains(env_seen, "SHARED=yes")) {
-                klog_puts("[m86] an exported variable did not reach a child's environment\n");
+                kernel_log_puts("[m86] an exported variable did not reach a child's environment\n");
                 all_ok = 0;
             }
             if (selftest_contains(env_seen, "PRIVATE=no")) {
-                klog_puts("[m86] an UNexported variable reached a child's environment - "
+                kernel_log_puts("[m86] an UNexported variable reached a child's environment - "
                            "the two namespaces are one\n");
                 all_ok = 0;
             }
@@ -5733,13 +5733,13 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_unlink, (uint64_t)PATH_TMP_DIR "m86.env", 0, 0);
 
         if (!all_ok) {
-            klog_puts("[m86] what the script actually wrote:\n");
-            klog_puts(produced);
-            klog_puts("[m86] ---- end\n");
+            kernel_log_puts("[m86] what the script actually wrote:\n");
+            kernel_log_puts(produced);
+            kernel_log_puts("[m86] ---- end\n");
             panic("M86 self-test: this shell is not a shell");
         }
 
-        klog_puts("[m86] a shell that is a shell: a function called with a quoted argument, "
+        kernel_log_puts("[m86] a shell that is a shell: a function called with a quoted argument, "
                    "if/elif over a real status, a while loop advanced by command substitution, "
                    "for and case, a pipeline from a forked builtin into an exec'd program, a "
                    "subshell whose assignment does not escape it, a here-document written by a "
@@ -5750,7 +5750,7 @@ static void boot_selftests_system(void) {
     {
         os_stat_t tb;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/toybox", (uint64_t)&tb, 0) != 0) {
-            klog_puts("[m89] /bin/toybox is not on this image - skipped. "
+            kernel_log_puts("[m89] /bin/toybox is not on this image - skipped. "
                        "`make toybox` installs it; see milestones.md M89.\n\n");
         } else {
             int all_ok = 1;
@@ -5777,7 +5777,7 @@ static void boot_selftests_system(void) {
 
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m89] the pipeline script could not be spawned\n");
+                kernel_log_puts("[m89] the pipeline script could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
@@ -5785,9 +5785,9 @@ static void boot_selftests_system(void) {
 
             static char produced[1024];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m89] the five-stage pipeline produced no output at all\n");
+                kernel_log_puts("[m89] the five-stage pipeline produced no output at all\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -5798,14 +5798,14 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m89] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m89] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
                 if (selftest_contains(produced, "./a/two")) {
-                    klog_puts("[m89] grep -l reported a file that does not contain the word\n");
+                    kernel_log_puts("[m89] grep -l reported a file that does not contain the word\n");
                     all_ok = 0;
                 }
             }
@@ -5814,13 +5814,13 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
 
             if (!all_ok) {
-                klog_puts("[m89] what the pipeline actually wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m89] ---- end\n");
+                kernel_log_puts("[m89] what the pipeline actually wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m89] ---- end\n");
                 panic("M89 self-test: somebody else's userland does not run here");
             }
 
-            klog_puts("[m89] somebody else's userland: find, xargs, grep, sort and uniq - "
+            kernel_log_puts("[m89] somebody else's userland: find, xargs, grep, sort and uniq - "
                        "five programs nobody here wrote, one multi-call binary reached through "
                        "five symbolic links, connected by four pipes across five forked and "
                        "exec'd processes, over a tree made by mkdir - self-test passed.\n\n");
@@ -5830,7 +5830,7 @@ static void boot_selftests_system(void) {
     {
         os_stat_t gt;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/gcctest", (uint64_t)&gt, 0) != 0) {
-            klog_puts("[m94] /bin/gcctest is not on this image - skipped. "
+            kernel_log_puts("[m94] /bin/gcctest is not on this image - skipped. "
                        "tools/build-toolchain.sh builds the compiler and "
                        "tools/gcc-test.sh installs what it produces.\n\n");
         } else {
@@ -5846,7 +5846,7 @@ static void boot_selftests_system(void) {
             }
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m94] the compiled program could not be spawned\n");
+                kernel_log_puts("[m94] the compiled program could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
@@ -5854,9 +5854,9 @@ static void boot_selftests_system(void) {
 
             static char produced[512];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m94] the compiled program produced no output\n");
+                kernel_log_puts("[m94] the compiled program produced no output\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -5870,14 +5870,14 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m94] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m94] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
                 if (selftest_contains(produced, "FAIL")) {
-                    klog_puts("[m94] the program reported a failure of its own\n");
+                    kernel_log_puts("[m94] the program reported a failure of its own\n");
                     all_ok = 0;
                 }
             }
@@ -5886,9 +5886,9 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
 
             if (!all_ok) {
-                klog_puts("[m94] what the compiled program actually wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m94] ---- end\n");
+                kernel_log_puts("[m94] what the compiled program actually wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m94] ---- end\n");
                 panic("M94 self-test: a program this compiler produced does not run here");
             }
 
@@ -5917,54 +5917,54 @@ static void boot_selftests_system(void) {
                 }
                 long tpid = do_syscall(SYS_spawn, (uint64_t)tscript, 0, 0);
                 if (tpid < 0) {
-                    klog_puts("[m94] the third-party fixture could not be spawned\n");
+                    kernel_log_puts("[m94] the third-party fixture could not be spawned\n");
                     third_ok = 0;
                 } else {
                     do_syscall(SYS_wait, (uint64_t)tpid, 0, 0);
                 }
                 static char tout[512];
                 k_memset(tout, 0, sizeof(tout));
-                int64_t tn = vfs_read(PATH_TMP_DIR "m94b.out", tout, sizeof(tout) - 1);
+                int64_t tn = virtual_file_system_read(PATH_TMP_DIR "m94b.out", tout, sizeof(tout) - 1);
                 if (tn <= 0) {
-                    klog_puts("[m94] neither ported program produced output\n");
+                    kernel_log_puts("[m94] neither ported program produced output\n");
                     third_ok = 0;
                 } else {
                     tout[tn] = '\0';
                     if (!selftest_contains(tout, "bzip2:consumed")) {
-                        klog_puts("[m94] bzip2 -z did not consume its input - "
+                        kernel_log_puts("[m94] bzip2 -z did not consume its input - "
                                    "the compression never happened\n");
                         third_ok = 0;
                     }
                     if (!selftest_contains(tout, "bzip2:roundtrip")) {
-                        klog_puts("[m94] bzip2 did not compress and decompress back to "
+                        kernel_log_puts("[m94] bzip2 did not compress and decompress back to "
                                    "the same bytes\n");
                         third_ok = 0;
                     }
                     if (!selftest_contains(tout, "Hello, world")) {
-                        klog_puts("[m94] GNU hello did not say hello\n");
+                        kernel_log_puts("[m94] GNU hello did not say hello\n");
                         third_ok = 0;
                     }
                 }
                 do_syscall(SYS_unlink, (uint64_t)tscript, 0, 0);
                 do_syscall(SYS_unlink, (uint64_t)PATH_TMP_DIR "m94b.out", 0, 0);
                 if (!third_ok) {
-                    klog_puts("[m94] what they wrote:\n");
-                    klog_puts(tout);
-                    klog_puts("[m94] ---- end\n");
+                    kernel_log_puts("[m94] what they wrote:\n");
+                    kernel_log_puts(tout);
+                    kernel_log_puts("[m94] ---- end\n");
                     panic("M94 self-test: a program built for this OS by this OS's "
                           "compiler does not run here");
                 }
-                klog_puts("[m94] somebody else's project: bzip2, built with "
+                kernel_log_puts("[m94] somebody else's project: bzip2, built with "
                            "`make CC=x86_64-lean_os-gcc`, compressing a file and "
                            "decompressing it back to the same bytes; and GNU hello, "
                            "built with `./configure --host=x86_64-lean_os && make` "
                            "through fifty gnulib modules, saying hello.\n");
             } else {
-                klog_puts("[m94] no ported third-party programs on this image - "
+                kernel_log_puts("[m94] no ported third-party programs on this image - "
                            "tools/build-thirdparty.sh builds them.\n");
             }
 
-            klog_puts("[m94] a target this compiler knows by name: a program compiled by "
+            kernel_log_puts("[m94] a target this compiler knows by name: a program compiled by "
                        "x86_64-lean_os-gcc with no flag supplied by hand - constructor and "
                        "atexit handler both run, malloc through libc.a out of the sysroot, "
                        "a struct returned by value and a varargs call agreeing with this "
@@ -5976,7 +5976,7 @@ static void boot_selftests_system(void) {
     {
         os_stat_t bt;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/as", (uint64_t)&bt, 0) != 0) {
-            klog_puts("[m98] /bin/as is not on this image - skipped. "
+            kernel_log_puts("[m98] /bin/as is not on this image - skipped. "
                        "tools/build-native-toolchain.sh builds binutils for this "
                        "machine and tools/install-native-toolchain.sh installs it.\n\n");
         } else {
@@ -6011,7 +6011,7 @@ static void boot_selftests_system(void) {
             }
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m98] the toolchain script could not be spawned\n");
+                kernel_log_puts("[m98] the toolchain script could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
@@ -6019,9 +6019,9 @@ static void boot_selftests_system(void) {
 
             static char produced[2048];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m98] the toolchain produced no output\n");
+                kernel_log_puts("[m98] the toolchain produced no output\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -6036,9 +6036,9 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m98] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m98] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
@@ -6048,23 +6048,23 @@ static void boot_selftests_system(void) {
                     gcc_here = 1;
                     if (!selftest_contains(produced,
                             "gcc built this program on this machine")) {
-                        klog_puts("[m98] missing: the program gcc compiled, "
+                        kernel_log_puts("[m98] missing: the program gcc compiled, "
                                    "linked and ran, entirely from this disk\n");
                         all_ok = 0;
                     }
                     if (!selftest_contains(produced,
                             "make built this on this machine: 42")) {
-                        klog_puts("[m98] missing: the program make built - "
+                        kernel_log_puts("[m98] missing: the program make built - "
                                    "two rules, two compiles, one link\n");
                         all_ok = 0;
                     }
                     if (!selftest_contains(produced, "up to date")) {
-                        klog_puts("[m98] missing: make's second run "
+                        kernel_log_puts("[m98] missing: make's second run "
                                    "concluding nothing was out of date\n");
                         all_ok = 0;
                     }
                 } else {
-                    klog_puts("[m98] /usr/bin/gcc is not on this image - the "
+                    kernel_log_puts("[m98] /usr/bin/gcc is not on this image - the "
                                "compile half is skipped. "
                                "tools/build-native-toolchain.sh builds it.\n");
                 }
@@ -6078,18 +6078,18 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m98c"), 0, 0);
 
             if (!all_ok) {
-                klog_puts("[m98] what the toolchain actually wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m98] ---- end\n");
+                kernel_log_puts("[m98] what the toolchain actually wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m98] ---- end\n");
                 panic("M98 self-test: this machine's own toolchain does not work here");
             }
 
-            klog_puts("[m98] binutils runs here: as assembled it, nm read it, ar "
+            kernel_log_puts("[m98] binutils runs here: as assembled it, nm read it, ar "
                        "archived it, ld linked it at this OS's own default address "
                        "with no flags and no script, strip stripped it, objdump "
                        "disassembled it, and the result ran");
             if (gcc_here) {
-                klog_puts("; then gcc compiled a C program with no flags - "
+                kernel_log_puts("; then gcc compiled a C program with no flags - "
                            "driver, cc1, as, collect2, ld, headers, startup "
                            "files and libc all from this disk - and that ran "
                            "too; then make drove a two-rule build of a "
@@ -6097,14 +6097,14 @@ static void boot_selftests_system(void) {
                            "read leanfs's mtimes and concluded there was "
                            "nothing to do");
             }
-            klog_puts(" - self-test passed.\n\n");
+            kernel_log_puts(" - self-test passed.\n\n");
         }
     }
 
     {
         os_stat_t py;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/python3", (uint64_t)&py, 0) != 0) {
-            klog_puts("[m99] /bin/python3 is not on this image - skipped. "
+            kernel_log_puts("[m99] /bin/python3 is not on this image - skipped. "
                        "tools/build-python.sh builds it and "
                        "tools/install-python.sh puts it here.\n\n");
         } else {
@@ -6122,7 +6122,7 @@ static void boot_selftests_system(void) {
             uint64_t started = pit_get_ticks();
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m99] python could not be spawned\n");
+                kernel_log_puts("[m99] python could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
@@ -6131,9 +6131,9 @@ static void boot_selftests_system(void) {
 
             static char produced[2048];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m99] python produced no output at all\n");
+                kernel_log_puts("[m99] python produced no output at all\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -6154,9 +6154,9 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m99] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m99] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
@@ -6166,15 +6166,15 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
 
             if (!all_ok) {
-                klog_puts("[m99] what python actually wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m99] ---- end\n");
+                kernel_log_puts("[m99] what python actually wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m99] ---- end\n");
                 panic("M99 self-test: python does not run here");
             }
 
-            klog_perf("python_fixture_ms", elapsed_ms, "ms");
+            kernel_log_perf("python_fixture_ms", elapsed_ms, "ms");
 
-            klog_puts("[m99] somebody else's language runs here: a class, a dict, a "
+            kernel_log_puts("[m99] somebody else's language runs here: a class, a dict, a "
                        "loop, a file written and read back, os.stat and os.listdir, "
                        "an exception caught by type, and `import json` read as a .py "
                        "file off this filesystem - CPython 3.12, built by this "
@@ -6185,13 +6185,13 @@ static void boot_selftests_system(void) {
     {
         static char ints[8192];
         k_memset(ints, 0, sizeof(ints));
-        int64_t n = vfs_read("/proc/interrupts", ints, sizeof(ints) - 1);
+        int64_t n = virtual_file_system_read("/proc/interrupts", ints, sizeof(ints) - 1);
         if (n <= 0) {
             panic("M103 self-test: /proc/interrupts is empty");
         }
         ints[n] = '\0';
-        klog_puts("[m103] /proc/interrupts:\n");
-        klog_puts(ints);
+        kernel_log_puts("[m103] /proc/interrupts:\n");
+        kernel_log_puts(ints);
 
         if (!ioapic_available()) {
             uint64_t timer = 0;
@@ -6201,7 +6201,7 @@ static void boot_selftests_system(void) {
             if (timer < 100 || !selftest_contains(ints, "XT-PIC")) {
                 panic("M103 self-test: the 8259 path is not being counted");
             }
-            klog_puts("[m103] interrupts a real machine delivers: this boot is on "
+            kernel_log_puts("[m103] interrupts a real machine delivers: this boot is on "
                        "the 8259, which is the measured default (see "
                        "kernel/device/fwcfg.h) - every vector counted per CPU in "
                        "/proc/interrupts, and LEANOS_IOAPIC=1 runs the same "
@@ -6213,20 +6213,20 @@ static void boot_selftests_system(void) {
                 timer += ioapic_irq_count(0x20, c);
             }
             if (timer < 100) {
-                klog_puts("[m103] the timer's vector has counted 0x");
-                klog_put_hex64(timer);
-                klog_puts(" interrupts - either it is not arriving through the "
+                kernel_log_puts("[m103] the timer's vector has counted 0x");
+                kernel_log_put_hex64(timer);
+                kernel_log_puts(" interrupts - either it is not arriving through the "
                            "I/O APIC or the counter is not being kept\n");
                 all_ok = 0;
             }
             if (!selftest_contains(ints, "IO-APIC")) {
-                klog_puts("[m103] /proc/interrupts does not name the controller\n");
+                kernel_log_puts("[m103] /proc/interrupts does not name the controller\n");
                 all_ok = 0;
             }
             if (!all_ok) {
                 panic("M103 self-test: the interrupt path is not what it says it is");
             }
-            klog_puts("[m103] interrupts a real machine delivers: every legacy line "
+            kernel_log_puts("[m103] interrupts a real machine delivers: every legacy line "
                        "routed through the I/O APIC with the 8259 masked, the "
                        "firmware's interrupt source overrides applied so the timer "
                        "is on the line it is actually wired to, acknowledged at the "
@@ -6238,7 +6238,7 @@ static void boot_selftests_system(void) {
     {
         os_stat_t dt;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/dyntest", (uint64_t)&dt, 0) != 0) {
-            klog_puts("[m95] /bin/dyntest is not on this image - skipped. "
+            kernel_log_puts("[m95] /bin/dyntest is not on this image - skipped. "
                        "tools/build-dynamic.sh builds it.\n\n");
         } else {
             int all_ok = 1;
@@ -6253,16 +6253,16 @@ static void boot_selftests_system(void) {
             }
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m95] the dynamic program could not be spawned\n");
+                kernel_log_puts("[m95] the dynamic program could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
             }
             static char produced[512];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m95] the dynamic program produced no output\n");
+                kernel_log_puts("[m95] the dynamic program produced no output\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -6275,9 +6275,9 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m95] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m95] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
@@ -6288,69 +6288,69 @@ static void boot_selftests_system(void) {
             size_t img_bytes = 0;
             uint8_t *img = read_program("/bin/dyntest", &img_bytes);
             if (!img) {
-                klog_puts("[m95] could not read /bin/dyntest back\n");
+                kernel_log_puts("[m95] could not read /bin/dyntest back\n");
                 all_ok = 0;
             } else {
                 leanfs_stat_t libst;
                 uint64_t lib_bytes = 0;
-                if (vfs_stat("/lib/libc.so", &libst) == 0) {
+                if (virtual_file_system_stat("/lib/libc.so", &libst) == 0) {
                     lib_bytes = libst.size;
                 }
                 const char *shargv[] = {"/bin/dyntest", "share", 0};
 
-                uint64_t before = pmm_free_frame_count();
+                uint64_t before = physical_memory_free_frame_count();
                 task_t *a = process_spawnv("dyntest", img, img_bytes, shargv);
                 pit_sleep_ms(600);
-                uint64_t after_one = pmm_free_frame_count();
-                int shared_one = filemap_in_use();
+                uint64_t after_one = physical_memory_free_frame_count();
+                int shared_one = file_mapping_in_use();
                 task_t *b = process_spawnv("dyntest", img, img_bytes, shargv);
                 pit_sleep_ms(600);
-                uint64_t after_two = pmm_free_frame_count();
-                int shared_two = filemap_in_use();
+                uint64_t after_two = physical_memory_free_frame_count();
+                int shared_two = file_mapping_in_use();
                 kfree(img);
 
                 uint64_t first = before - after_one;
                 uint64_t second = after_one - after_two;
-                klog_puts("[m95] one dynamic process cost 0x");
-                klog_put_hex64(first);
-                klog_puts(" frames, the second cost 0x");
-                klog_put_hex64(second);
-                klog_puts("; shared library pages held: 0x");
-                klog_put_hex32((uint32_t)shared_one);
-                klog_puts(" with one process, 0x");
-                klog_put_hex32((uint32_t)shared_two);
-                klog_puts(" with two - libc.so is 0x");
-                klog_put_hex64((lib_bytes + 4095) / 4096);
-                klog_puts(" pages\n");
+                kernel_log_puts("[m95] one dynamic process cost 0x");
+                kernel_log_put_hex64(first);
+                kernel_log_puts(" frames, the second cost 0x");
+                kernel_log_put_hex64(second);
+                kernel_log_puts("; shared library pages held: 0x");
+                kernel_log_put_hex32((uint32_t)shared_one);
+                kernel_log_puts(" with one process, 0x");
+                kernel_log_put_hex32((uint32_t)shared_two);
+                kernel_log_puts(" with two - libc.so is 0x");
+                kernel_log_put_hex64((lib_bytes + 4095) / 4096);
+                kernel_log_puts(" pages\n");
 
                 if (a) {
-                    sched_raise_signal(a, SIGKILL);
+                    scheduler_raise_signal(a, SIGKILL);
                 }
                 if (b) {
-                    sched_raise_signal(b, SIGKILL);
+                    scheduler_raise_signal(b, SIGKILL);
                 }
                 pit_sleep_ms(300);
                 selftest_reap(a);
                 selftest_reap(b);
 
                 if (shared_one <= 0) {
-                    klog_puts("[m95] no shared library pages at all - the loader is "
+                    kernel_log_puts("[m95] no shared library pages at all - the loader is "
                                "not mapping from the file\n");
                     all_ok = 0;
                 } else if (shared_two > shared_one + 4) {
-                    klog_puts("[m95] the second process added shared pages of its own - "
+                    kernel_log_puts("[m95] the second process added shared pages of its own - "
                                "the library is being copied rather than shared\n");
                     all_ok = 0;
                 }
             }
 
             if (!all_ok) {
-                klog_puts("[m95] what the dynamic program wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m95] ---- end\n");
+                kernel_log_puts("[m95] what the dynamic program wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m95] ---- end\n");
                 panic("M95 self-test: code that is loaded is not loaded");
             }
-            klog_puts("[m95] code that is loaded, not linked: a position-independent "
+            kernel_log_puts("[m95] code that is loaded, not linked: a position-independent "
                        "program placed by the kernel, /lib/ld-lean.so relocating "
                        "itself and then it, libc.so reached through the PLT and the "
                        "GOT, a library dlopen'ed by name that did not exist when the "
@@ -6366,7 +6366,7 @@ static void boot_selftests_system(void) {
         if (k_memcmp(a, b, sizeof(a)) == 0) {
             panic("M100 self-test: two draws from the random device were the same");
         }
-        int64_t n = vfs_read("/dev/urandom", (char *)b, sizeof(b));
+        int64_t n = virtual_file_system_read("/dev/urandom", (char *)b, sizeof(b));
         if (n != (int64_t)sizeof(b)) {
             panic("M100 self-test: /dev/urandom did not fill a read");
         }
@@ -6375,25 +6375,25 @@ static void boot_selftests_system(void) {
         }
         uint64_t fed = random_events();
         if (fed < 2000) {
-            klog_puts("[rng] the pool has taken only ");
-            klog_put_dec((uint32_t)fed);
-            klog_puts(" events this boot\n");
+            kernel_log_puts("[rng] the pool has taken only ");
+            kernel_log_put_dec((uint32_t)fed);
+            kernel_log_puts(" events this boot\n");
             panic("M100 self-test: the interrupt path is not feeding the random device");
         }
-        klog_puts("[rng] a random device that is not a counter: ChaCha20 under a key ");
-        klog_put_dec((uint32_t)fed);
-        klog_puts(" interrupts have been mixed into and that is replaced at every draw, "
+        kernel_log_puts("[rng] a random device that is not a counter: ChaCha20 under a key ");
+        kernel_log_put_dec((uint32_t)fed);
+        kernel_log_puts(" interrupts have been mixed into and that is replaced at every draw, "
                    "two draws distinct, /dev/urandom and SYS_getrandom both live; RDRAND ");
-        klog_puts(random_has_rdrand() ? "present" : "absent");
-        klog_puts(", RDSEED ");
-        klog_puts(random_has_rdseed() ? "present" : "absent");
-        klog_puts(" on this CPU - self-test passed.\n\n");
+        kernel_log_puts(random_has_rdrand() ? "present" : "absent");
+        kernel_log_puts(", RDSEED ");
+        kernel_log_puts(random_has_rdseed() ? "present" : "absent");
+        kernel_log_puts(" on this CPU - self-test passed.\n\n");
     }
 
     {
         os_stat_t zst;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/zlibtest", (uint64_t)&zst, 0) != 0) {
-            klog_puts("[m100] /bin/zlibtest is not on this image - skipped. "
+            kernel_log_puts("[m100] /bin/zlibtest is not on this image - skipped. "
                        "tools/build-thirdparty.sh builds zlib.\n\n");
         } else {
             int all_ok = 1;
@@ -6422,16 +6422,16 @@ static void boot_selftests_system(void) {
             }
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m100] zlibtest could not be spawned\n");
+                kernel_log_puts("[m100] zlibtest could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
             }
             static char produced[1024];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m100] zlib's own test program produced no output\n");
+                kernel_log_puts("[m100] zlib's own test program produced no output\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -6443,9 +6443,9 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m100] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m100] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
@@ -6453,12 +6453,12 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
             if (!all_ok) {
-                klog_puts("[m100] what zlib's own test program wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m100] ---- end\n");
+                kernel_log_puts("[m100] what zlib's own test program wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m100] ---- end\n");
                 panic("M100 self-test: the first library of the stack does not work here");
             }
-            klog_puts("[m100] the first library of the stack: zlib 1.3.1, built "
+            kernel_log_puts("[m100] the first library of the stack: zlib 1.3.1, built "
                        "unmodified by this project's own compiler, and its OWN "
                        "test program passing on this machine - compress and "
                        "uncompress, deflate and inflate in one piece and in "
@@ -6472,7 +6472,7 @@ static void boot_selftests_system(void) {
     {
         os_stat_t jst;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/djpeg", (uint64_t)&jst, 0) != 0) {
-            klog_puts("[m100b] /bin/djpeg is not on this image - skipped. "
+            kernel_log_puts("[m100b] /bin/djpeg is not on this image - skipped. "
                        "tools/build-thirdparty.sh builds libpng and libjpeg.\n\n");
         } else {
             int all_ok = 1;
@@ -6516,16 +6516,16 @@ static void boot_selftests_system(void) {
             }
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m100b] the fixture could not be spawned\n");
+                kernel_log_puts("[m100b] the fixture could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
             }
             static char produced[1024];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m100b] neither suite produced any output\n");
+                kernel_log_puts("[m100b] neither suite produced any output\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -6551,9 +6551,9 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m100b] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m100b] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
@@ -6561,12 +6561,12 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
             if (!all_ok) {
-                klog_puts("[m100b] what the two suites wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m100b] ---- end\n");
+                kernel_log_puts("[m100b] what the two suites wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m100b] ---- end\n");
                 panic("M100 self-test: libpng or libjpeg does not work here");
             }
-            klog_puts("[m100b] two more libraries, graded by their own suites: "
+            kernel_log_puts("[m100b] two more libraries, graded by their own suites: "
                        "libpng 1.6.44 and libjpeg 9f, built unmodified by this "
                        "project's own compiler, libpng linking the zlib beside "
                        "it in the sysroot. libjpeg's own seven comparisons pass "
@@ -6582,7 +6582,7 @@ static void boot_selftests_system(void) {
     {
         os_stat_t fst;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/ftrender", (uint64_t)&fst, 0) != 0) {
-            klog_puts("[m100c] /bin/ftrender is not on this image - skipped. "
+            kernel_log_puts("[m100c] /bin/ftrender is not on this image - skipped. "
                        "tools/build-thirdparty.sh builds freetype and expat.\n\n");
         } else {
             int all_ok = 1;
@@ -6607,7 +6607,7 @@ static void boot_selftests_system(void) {
             uint64_t started = pit_get_ticks();
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m100c] the freetype fixture could not be spawned\n");
+                kernel_log_puts("[m100c] the freetype fixture could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
@@ -6615,9 +6615,9 @@ static void boot_selftests_system(void) {
             uint64_t freetype_ms = ((pit_get_ticks() - started) * 1000) / PIT_HZ;
             static char produced[1024];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m100c] the freetype fixture produced no output\n");
+                kernel_log_puts("[m100c] the freetype fixture produced no output\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -6630,9 +6630,9 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m100c] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m100c] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
@@ -6640,9 +6640,9 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
             if (!all_ok) {
-                klog_puts("[m100c] what the freetype fixture wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m100c] ---- end\n");
+                kernel_log_puts("[m100c] what the freetype fixture wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m100c] ---- end\n");
                 panic("M100 self-test: freetype does not agree with the host here");
             }
 
@@ -6666,16 +6666,16 @@ static void boot_selftests_system(void) {
             started = pit_get_ticks();
             pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m100c] the expat fixture could not be spawned\n");
+                kernel_log_puts("[m100c] the expat fixture could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
             }
             uint64_t expat_ms = ((pit_get_ticks() - started) * 1000) / PIT_HZ;
             k_memset(produced, 0, sizeof(produced));
-            n = vfs_read(result, produced, sizeof(produced) - 1);
+            n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m100c] expat's own suite produced no output\n");
+                kernel_log_puts("[m100c] expat's own suite produced no output\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -6691,9 +6691,9 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m100c] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m100c] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
@@ -6701,14 +6701,14 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
             if (!all_ok) {
-                klog_puts("[m100c] what expat wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m100c] ---- end\n");
+                kernel_log_puts("[m100c] what expat wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m100c] ---- end\n");
                 panic("M100 self-test: expat does not work here");
             }
-            klog_perf("freetype_render_ms", freetype_ms, "ms");
-            klog_perf("expat_suite_ms", expat_ms, "ms");
-            klog_puts("[m100c] freetype against the host, and expat by its own suite: "
+            kernel_log_perf("freetype_render_ms", freetype_ms, "ms");
+            kernel_log_perf("expat_suite_ms", expat_ms, "ms");
+            kernel_log_puts("[m100c] freetype against the host, and expat by its own suite: "
                        "freetype 2.13.3, linking the libpng and zlib beside it, "
                        "renders 570 glyphs of DejaVu Sans through its bytecode "
                        "interpreter, both rasterizers and its autohinter BYTE-IDENTICAL "
@@ -6722,7 +6722,7 @@ static void boot_selftests_system(void) {
     {
         os_stat_t sst;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/sqlite3", (uint64_t)&sst, 0) != 0) {
-            klog_puts("[m100d] /bin/sqlite3 is not on this image - skipped. "
+            kernel_log_puts("[m100d] /bin/sqlite3 is not on this image - skipped. "
                        "tools/build-thirdparty.sh builds sqlite.\n\n");
         } else {
             int all_ok = 1;
@@ -6749,7 +6749,7 @@ static void boot_selftests_system(void) {
             uint64_t started = pit_get_ticks();
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m100d] the sqlite fixture could not be spawned\n");
+                kernel_log_puts("[m100d] the sqlite fixture could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
@@ -6757,9 +6757,9 @@ static void boot_selftests_system(void) {
             uint64_t sqlite_ms = ((pit_get_ticks() - started) * 1000) / PIT_HZ;
             static char produced[1024];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m100d] the sqlite fixture produced no output\n");
+                kernel_log_puts("[m100d] the sqlite fixture produced no output\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -6773,9 +6773,9 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m100d] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m100d] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
@@ -6783,19 +6783,19 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
             if (flock_count() != 0) {
-                klog_puts("[m100d] record locks left in the table after sqlite exited: ");
-                klog_put_dec((uint32_t)flock_count());
-                klog_putc('\n');
+                kernel_log_puts("[m100d] record locks left in the table after sqlite exited: ");
+                kernel_log_put_dec((uint32_t)flock_count());
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
             if (!all_ok) {
-                klog_puts("[m100d] what sqlite wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m100d] ---- end\n");
+                kernel_log_puts("[m100d] what sqlite wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m100d] ---- end\n");
                 panic("M100 self-test: sqlite does not agree with the host here");
             }
-            klog_perf("sqlite_fixture_ms", sqlite_ms, "ms");
-            klog_puts("[m100d] sqlite against the host: sqlite 3.47.2, built unmodified, "
+            kernel_log_perf("sqlite_fixture_ms", sqlite_ms, "ms");
+            kernel_log_puts("[m100d] sqlite against the host: sqlite 3.47.2, built unmodified, "
                        "runs tests/sqlite/cases.sql - 5,000 rows through a B-tree and an "
                        "index, a transaction rolled back and one committed through a "
                        "journal on this filesystem, joins, window functions, a VACUUM, "
@@ -6808,7 +6808,7 @@ static void boot_selftests_system(void) {
     {
         os_stat_t hst;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/hbshape", (uint64_t)&hst, 0) != 0) {
-            klog_puts("[m100e] /bin/hbshape is not on this image - skipped. "
+            kernel_log_puts("[m100e] /bin/hbshape is not on this image - skipped. "
                        "tools/build-thirdparty.sh builds harfbuzz.\n\n");
         } else {
             int all_ok = 1;
@@ -6833,7 +6833,7 @@ static void boot_selftests_system(void) {
             uint64_t started = pit_get_ticks();
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m100e] the harfbuzz fixture could not be spawned\n");
+                kernel_log_puts("[m100e] the harfbuzz fixture could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
@@ -6841,9 +6841,9 @@ static void boot_selftests_system(void) {
             uint64_t shape_ms = ((pit_get_ticks() - started) * 1000) / PIT_HZ;
             static char produced[1024];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m100e] the harfbuzz fixture produced no output\n");
+                kernel_log_puts("[m100e] the harfbuzz fixture produced no output\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -6856,9 +6856,9 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m100e] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m100e] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
@@ -6866,13 +6866,13 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
             if (!all_ok) {
-                klog_puts("[m100e] what the harfbuzz fixture wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m100e] ---- end\n");
+                kernel_log_puts("[m100e] what the harfbuzz fixture wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m100e] ---- end\n");
                 panic("M100 self-test: harfbuzz does not agree with the host here");
             }
-            klog_perf("harfbuzz_shape_ms", shape_ms, "ms");
-            klog_puts("[m100e] harfbuzz against the host: harfbuzz 8.5.0, C++ built "
+            kernel_log_perf("harfbuzz_shape_ms", shape_ms, "ms");
+            kernel_log_puts("[m100e] harfbuzz against the host: harfbuzz 8.5.0, C++ built "
                        "unmodified by this project's g++ and linking the freetype beside "
                        "it, shapes Latin, Greek, Cyrillic, Arabic and Hebrew through its "
                        "OpenType tables and again through hb-ft, every glyph and position "
@@ -6884,7 +6884,7 @@ static void boot_selftests_system(void) {
     {
         os_stat_t tst;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/ssl_server2", (uint64_t)&tst, 0) != 0) {
-            klog_puts("[m100f] /bin/ssl_server2 is not on this image - skipped. "
+            kernel_log_puts("[m100f] /bin/ssl_server2 is not on this image - skipped. "
                        "tools/build-thirdparty.sh builds mbedtls.\n\n");
         } else {
             int all_ok = 1;
@@ -6923,7 +6923,7 @@ static void boot_selftests_system(void) {
             uint64_t started = pit_get_ticks();
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m100f] the TLS fixture could not be spawned\n");
+                kernel_log_puts("[m100f] the TLS fixture could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
@@ -6931,9 +6931,9 @@ static void boot_selftests_system(void) {
             uint64_t tls_ms = ((pit_get_ticks() - started) * 1000) / PIT_HZ;
             static char produced[4096];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m100f] the TLS fixture produced no output\n");
+                kernel_log_puts("[m100f] the TLS fixture produced no output\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -6956,9 +6956,9 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m100f] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m100f] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
@@ -6966,13 +6966,13 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
             if (!all_ok) {
-                klog_puts("[m100f] what the TLS fixture wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m100f] ---- end\n");
+                kernel_log_puts("[m100f] what the TLS fixture wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m100f] ---- end\n");
                 panic("M100 self-test: TLS does not work end to end here");
             }
-            klog_perf("tls_fixture_ms", tls_ms, "ms");
-            klog_puts("[m100f] TLS end to end over M66's TCP: mbedtls 3.6.2's own server "
+            kernel_log_perf("tls_fixture_ms", tls_ms, "ms");
+            kernel_log_puts("[m100f] TLS end to end over M66's TCP: mbedtls 3.6.2's own server "
                        "and client complete a verified session on loopback, a program "
                        "written here fetches https://localhost/ through the same library "
                        "with the chain checked against a CA on this disk, and the same "
@@ -6985,7 +6985,7 @@ static void boot_selftests_system(void) {
         os_stat_t mst;
         if (do_syscall(SYS_stat, (uint64_t)"/usr/share/m100/mbedtls/test_suite_shax",
                        (uint64_t)&mst, 0) != 0) {
-            klog_puts("[m100g] mbedtls's suites are not on this image - skipped. "
+            kernel_log_puts("[m100g] mbedtls's suites are not on this image - skipped. "
                        "tools/build-thirdparty.sh builds them.\n\n");
         } else {
             int all_ok = 1;
@@ -7008,7 +7008,7 @@ static void boot_selftests_system(void) {
             uint64_t started = pit_get_ticks();
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m100g] the fixture could not be spawned\n");
+                kernel_log_puts("[m100g] the fixture could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
@@ -7016,10 +7016,10 @@ static void boot_selftests_system(void) {
             uint64_t suites_ms = ((pit_get_ticks() - started) * 1000) / PIT_HZ;
             static char produced[4096];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             int passed = 0, lines = 0;
             if (n <= 0) {
-                klog_puts("[m100g] the suites produced no output\n");
+                kernel_log_puts("[m100g] the suites produced no output\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -7044,31 +7044,31 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
             if (!all_ok) {
-                klog_puts("[m100g] ");
-                klog_put_dec((uint32_t)passed);
-                klog_puts(" of ");
-                klog_put_dec((uint32_t)lines);
-                klog_puts(" suites passed; what they wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m100g] ---- end\n");
+                kernel_log_puts("[m100g] ");
+                kernel_log_put_dec((uint32_t)passed);
+                kernel_log_puts(" of ");
+                kernel_log_put_dec((uint32_t)lines);
+                kernel_log_puts(" suites passed; what they wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m100g] ---- end\n");
                 panic("M100 self-test: mbedtls's own suites do not pass here");
             }
-            klog_perf("mbedtls_suites_ms", suites_ms, "ms");
-            klog_puts("[m100g] mbedtls's own suites: each reading its own vectors off "
+            kernel_log_perf("mbedtls_suites_ms", suites_ms, "ms");
+            kernel_log_puts("[m100g] mbedtls's own suites: each reading its own vectors off "
                        "this disk and printing its own PASSED to the last one - "
                        "ChaCha20-Poly1305 (the AEAD [m100f] negotiated), SHA-2, and ECDSA "
                        "- the cipher, the hash and the signature a TLS 1.3 handshake here "
                        "uses, graded by the library's own answers, nothing written here - "
                        "self-test passed. ");
-            klog_put_dec((uint32_t)passed);
-            klog_puts(" suites.\n\n");
+            kernel_log_put_dec((uint32_t)passed);
+            kernel_log_puts(" suites.\n\n");
         }
     }
 
     {
         os_stat_t md;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/manydyn", (uint64_t)&md, 0) != 0) {
-            klog_puts("[m99ld] /bin/manydyn is not on this image - skipped. "
+            kernel_log_puts("[m99ld] /bin/manydyn is not on this image - skipped. "
                        "tools/build-dynamic.sh builds it.\n\n");
         } else {
             int all_ok = 1;
@@ -7083,16 +7083,16 @@ static void boot_selftests_system(void) {
             }
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m99ld] manydyn could not be spawned\n");
+                kernel_log_puts("[m99ld] manydyn could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
             }
             static char produced[512];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m99ld] manydyn produced no output\n");
+                kernel_log_puts("[m99ld] manydyn produced no output\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -7107,9 +7107,9 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m99ld] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m99ld] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
@@ -7117,12 +7117,12 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
             if (!all_ok) {
-                klog_puts("[m99ld] what manydyn wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m99ld] ---- end\n");
+                kernel_log_puts("[m99ld] what manydyn wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m99ld] ---- end\n");
                 panic("M99 loader self-test: the loader cannot carry an interpreter");
             }
-            klog_puts("[m99ld] a loader an interpreter can use: twenty-four shared "
+            kernel_log_puts("[m99ld] a loader an interpreter can use: twenty-four shared "
                        "objects open at once, every one opened by a full path out of "
                        "a directory nothing searches, a symbol resolved from each "
                        "after all of them were loaded, and a path that is not there "
@@ -7139,7 +7139,7 @@ static void boot_selftests_system(void) {
         task_t *ns = process_spawnv("nslookup", ns_img, ns_bytes, ns_argv);
         kfree(ns_img);
         if (!ns || do_syscall(SYS_wait, (uint64_t)ns->id, 0, 0) != 0) {
-            klog_puts("[m73] the DNS parser self-test reported a failure\n");
+            kernel_log_puts("[m73] the DNS parser self-test reported a failure\n");
             all_ok = 0;
         }
 
@@ -7158,7 +7158,7 @@ static void boot_selftests_system(void) {
         task_t *ft = process_spawnv("fetch", ft_img, ft_bytes, ft_argv);
         kfree(ft_img);
         if (!ft || do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) != 0) {
-            klog_puts("[m73] fetch could not retrieve over loopback\n");
+            kernel_log_puts("[m73] fetch could not retrieve over loopback\n");
             all_ok = 0;
         }
         if (hd) {
@@ -7168,11 +7168,11 @@ static void boot_selftests_system(void) {
         static const char EXPECT[] = "lean_os fetched this over loopback\n";
         static char fetched[128];
         k_memset(fetched, 0, sizeof(fetched));
-        int64_t fn = vfs_read(FETCHED, fetched, sizeof(fetched) - 1);
+        int64_t fn = virtual_file_system_read(FETCHED, fetched, sizeof(fetched) - 1);
         if (fn != (int64_t)sizeof(EXPECT) - 1 || k_strcmp(fetched, EXPECT) != 0) {
-            klog_puts("[m73] the fetched file is not what the server sent - got ");
-            klog_put_dec((uint32_t)(fn < 0 ? 0 : fn));
-            klog_puts(" byte(s)\n");
+            kernel_log_puts("[m73] the fetched file is not what the server sent - got ");
+            kernel_log_put_dec((uint32_t)(fn < 0 ? 0 : fn));
+            kernel_log_puts(" byte(s)\n");
             all_ok = 0;
         }
         do_syscall(SYS_unlink, (uint64_t)FETCHED, 0, 0);
@@ -7181,13 +7181,13 @@ static void boot_selftests_system(void) {
             panic("M73 self-test: this machine cannot resolve a name or fetch a byte");
         }
 
-        klog_puts("[m73] names, not numbers: a DNS parser that follows compression "
+        kernel_log_puts("[m73] names, not numbers: a DNS parser that follows compression "
                    "pointers and CNAMEs and refuses a pointer loop, a wrong id and a "
                    "truncated reply - and an HTTP GET over loopback whose bytes reached "
                    "the filesystem, the first thing here that was not compiled in - "
                    "self-test passed.\n\n");
     } else {
-        klog_puts("[m73] no NIC on this machine - DNS and HTTP are present but untested "
+        kernel_log_puts("[m73] no NIC on this machine - DNS and HTTP are present but untested "
                    "this boot.\n\n");
     }
 
@@ -7195,9 +7195,9 @@ static void boot_selftests_system(void) {
         int all_ok = 1;
         const char *SESSION = PATH_ETC_DIR "session.conf";
         static char saved_session[512];
-        int64_t saved_session_len = vfs_read(SESSION, saved_session, sizeof(saved_session));
-        if (saved_session_len > (int64_t)sizeof(saved_session)) {
-            saved_session_len = -1;
+        int64_t saved_session_length = virtual_file_system_read(SESSION, saved_session, sizeof(saved_session));
+        if (saved_session_length > (int64_t)sizeof(saved_session)) {
+            saved_session_length = -1;
         }
         const uint32_t CLOCK_BG = 0x00122438u;
         static const char SAVED[] = "gui_clock 520 380 200 90 0\n";
@@ -7208,7 +7208,7 @@ static void boot_selftests_system(void) {
             panic("M74 self-test: could not write the session fixture");
         }
 
-        vfs_write(PATH_SETTINGS, SELFTEST_SETTINGS_NO_ANIM,
+        virtual_file_system_write(PATH_SETTINGS, SELFTEST_SETTINGS_NO_ANIM,
                    sizeof(SELFTEST_SETTINGS_NO_ANIM) - 1);
 
         size_t comp_bytes = 0;
@@ -7223,7 +7223,7 @@ static void boot_selftests_system(void) {
 
         if (!selftest_wait_for_pixel(PROBE_X, PROBE_Y, CLOCK_BG, 12000,
                                       "the session to relaunch a window and place it")) {
-            klog_puts("[m74] the saved window was not brought back at its saved position\n");
+            kernel_log_puts("[m74] the saved window was not brought back at its saved position\n");
             all_ok = 0;
         }
 
@@ -7237,17 +7237,17 @@ static void boot_selftests_system(void) {
 
         static char written[256];
         k_memset(written, 0, sizeof(written));
-        int64_t wn = vfs_read(SESSION, written, sizeof(written) - 1);
+        int64_t wn = virtual_file_system_read(SESSION, written, sizeof(written) - 1);
         if (wn <= 0) {
-            klog_puts("[m74] the compositor did not write a session after the layout changed\n");
+            kernel_log_puts("[m74] the compositor did not write a session after the layout changed\n");
             all_ok = 0;
         } else {
             written[wn] = '\0';
             if (!selftest_contains(written, "gui_clock") ||
                 !selftest_contains(written, "wm_zorder")) {
-                klog_puts("[m74] the session it wrote does not name both running programs: ");
-                klog_puts(written);
-                klog_putc('\n');
+                kernel_log_puts("[m74] the session it wrote does not name both running programs: ");
+                kernel_log_puts(written);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
@@ -7258,28 +7258,28 @@ static void boot_selftests_system(void) {
         }
         do_syscall(SYS_kill, (uint64_t)comp->id, SIGKILL, 0);
         selftest_reap(comp);
-        for (int i = 0; i < sched_task_count(); i++) {
-            task_t *o = sched_task_by_slot(i);
+        for (int i = 0; i < scheduler_task_count(); i++) {
+            task_t *o = scheduler_task_by_slot(i);
             if (o && o->state != TASK_FREE && o->state != TASK_TERMINATED &&
                 k_strcmp(o->name, "gui_clock") == 0) {
                 do_syscall(SYS_kill, (uint64_t)o->id, SIGKILL, 0);
                 selftest_reap(o);
             }
         }
-        if (saved_session_len >= 0) {
-            vfs_write(SESSION, saved_session, (size_t)saved_session_len);
+        if (saved_session_length >= 0) {
+            virtual_file_system_write(SESSION, saved_session, (size_t)saved_session_length);
         } else {
             do_syscall(SYS_unlink, (uint64_t)SESSION, 0, 0);
         }
-        vfs_write(PATH_SETTINGS, SELFTEST_SETTINGS_CONF, sizeof(SELFTEST_SETTINGS_CONF) - 1);
+        virtual_file_system_write(PATH_SETTINGS, SELFTEST_SETTINGS_CONF, sizeof(SELFTEST_SETTINGS_CONF) - 1);
         console_init();
-        klog_use_console();
+        kernel_log_use_console();
 
         if (!all_ok) {
             panic("M74 self-test: the desktop does not remember what was open");
         }
 
-        klog_puts("[m74] the session remembers: a saved window relaunched and placed at its "
+        kernel_log_puts("[m74] the session remembers: a saved window relaunched and placed at its "
                    "own coordinates rather than the cascade's - graded on the pixel, not on "
                    "the file - and a session written naming both programs once a second "
                    "window changed the layout - self-test passed.\n\n");
@@ -7295,7 +7295,7 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m75b/beta"), 0, 0);
 
         static const char SELF_ENV[] = "M75_ABSENT=1\0M75_OUT=wrong\0M75_BODY=wrong";
-        sched_set_env(sched_current(), SELF_ENV, sizeof(SELF_ENV) - 1, 3);
+        scheduler_set_env(scheduler_current(), SELF_ENV, sizeof(SELF_ENV) - 1, 3);
 
         size_t et_bytes = 0;
         uint8_t *et_img = read_program(PATH_BIN_DIR "envtest", &et_bytes);
@@ -7312,15 +7312,15 @@ static void boot_selftests_system(void) {
             task_t *t = process_spawnve("envtest", et_img, et_bytes, argv, envp);
             long rc = t ? do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) : -1;
             if (rc != 0) {
-                klog_puts("[m75] the first child exited ");
-                klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-                klog_puts(" - see user_space/binaries/envtest.c for what each code means\n");
+                kernel_log_puts("[m75] the first child exited ");
+                kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+                kernel_log_puts(" - see user_space/binaries/envtest.c for what each code means\n");
                 all_ok = 0;
             }
         }
 
         if (do_syscall(SYS_chdir, (uint64_t)"../m75b", 0, 0) != 0) {
-            klog_puts("[m75] `cd ../m75b` from /tmp/m75a did not resolve - \"..\" is not "
+            kernel_log_puts("[m75] `cd ../m75b` from /tmp/m75a did not resolve - \"..\" is not "
                        "being normalized before leanfs sees it\n");
             all_ok = 0;
         }
@@ -7329,11 +7329,11 @@ static void boot_selftests_system(void) {
             k_memset(where, 0, sizeof(where));
             long n = do_syscall(SYS_getcwd, (uint64_t)where, sizeof(where), 0);
             if (n < 0 || k_strcmp(where, DIR_B) != 0) {
-                klog_puts("[m75] after `cd ../m75b` the directory is '");
-                klog_puts(where);
-                klog_puts("' rather than ");
-                klog_puts(DIR_B);
-                klog_putc('\n');
+                kernel_log_puts("[m75] after `cd ../m75b` the directory is '");
+                kernel_log_puts(where);
+                kernel_log_puts("' rather than ");
+                kernel_log_puts(DIR_B);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
@@ -7343,9 +7343,9 @@ static void boot_selftests_system(void) {
             task_t *t = process_spawnve("envtest", et_img, et_bytes, argv, envp);
             long rc = t ? do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) : -1;
             if (rc != 0) {
-                klog_puts("[m75] the second child exited ");
-                klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-                klog_putc('\n');
+                kernel_log_puts("[m75] the second child exited ");
+                kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
@@ -7361,23 +7361,23 @@ static void boot_selftests_system(void) {
         for (size_t i = 0; i < sizeof(LANDED) / sizeof(LANDED[0]); i++) {
             static char got[PATH_MAX_LEN + 64];
             k_memset(got, 0, sizeof(got));
-            int64_t n = vfs_read(LANDED[i].path, got, sizeof(got) - 1);
+            int64_t n = virtual_file_system_read(LANDED[i].path, got, sizeof(got) - 1);
             if (n <= 0) {
-                klog_puts("[m75] nothing was written to ");
-                klog_puts(LANDED[i].path);
-                klog_puts(" - a relative open did not land in the caller's directory\n");
+                kernel_log_puts("[m75] nothing was written to ");
+                kernel_log_puts(LANDED[i].path);
+                kernel_log_puts(" - a relative open did not land in the caller's directory\n");
                 all_ok = 0;
                 continue;
             }
             got[n] = '\0';
             if (k_strcmp(got, LANDED[i].expect) != 0) {
-                klog_puts("[m75] ");
-                klog_puts(LANDED[i].path);
-                klog_puts(" holds '");
-                klog_puts(got);
-                klog_puts("' rather than '");
-                klog_puts(LANDED[i].expect);
-                klog_puts("'\n");
+                kernel_log_puts("[m75] ");
+                kernel_log_puts(LANDED[i].path);
+                kernel_log_puts(" holds '");
+                kernel_log_puts(got);
+                kernel_log_puts("' rather than '");
+                kernel_log_puts(LANDED[i].expect);
+                kernel_log_puts("'\n");
                 all_ok = 0;
             }
         }
@@ -7400,18 +7400,18 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)RESULT, 0, 0);
             long pid = do_syscall(SYS_spawn, (uint64_t)SCRIPT, 0, 0);
             if (pid < 0) {
-                klog_puts("[m75] the shell fixture could not be spawned\n");
+                kernel_log_puts("[m75] the shell fixture could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
             }
             static char shout[1024];
             k_memset(shout, 0, sizeof(shout));
-            int64_t n = vfs_read(RESULT, shout, sizeof(shout) - 1);
+            int64_t n = virtual_file_system_read(RESULT, shout, sizeof(shout) - 1);
             if (n <= 0) {
-                klog_puts("[m75] `cd m75a` then `env > fromsh` produced nothing at ");
-                klog_puts(RESULT);
-                klog_puts(" - the shell's cd is still its own bookkeeping\n");
+                kernel_log_puts("[m75] `cd m75a` then `env > fromsh` produced nothing at ");
+                kernel_log_puts(RESULT);
+                kernel_log_puts(" - the shell's cd is still its own bookkeeping\n");
                 all_ok = 0;
             } else {
                 shout[n] = '\0';
@@ -7421,9 +7421,9 @@ static void boot_selftests_system(void) {
                 };
                 for (size_t w = 0; w < sizeof(WANT) / sizeof(WANT[0]); w++) {
                     if (!selftest_contains(shout, WANT[w].needle)) {
-                        klog_puts("[m75] the shell did not demonstrate ");
-                        klog_puts(WANT[w].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m75] the shell did not demonstrate ");
+                        kernel_log_puts(WANT[w].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
@@ -7433,7 +7433,7 @@ static void boot_selftests_system(void) {
         }
 
         do_syscall(SYS_chdir, (uint64_t)"/", 0, 0);
-        sched_release_env(sched_current());
+        scheduler_release_env(scheduler_current());
         do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m75a/alpha"), 0, 0);
         do_syscall(SYS_unlink, (uint64_t)(PATH_TMP_DIR "m75b/beta"), 0, 0);
         do_syscall(SYS_rmdir, (uint64_t)DIR_A, 0, 0);
@@ -7443,7 +7443,7 @@ static void boot_selftests_system(void) {
             panic("M75 self-test: there is still nowhere to stand and nothing to stand there with");
         }
 
-        klog_puts("[m75] environment and a place to stand: two children given different "
+        kernel_log_puts("[m75] environment and a place to stand: two children given different "
                    "environments and started in different directories, each writing a file "
                    "named only relatively and landing in its own, `..` normalized before "
                    "leanfs ever saw it, and a shell whose cd and export are the real ones - "
@@ -7471,7 +7471,7 @@ static void boot_selftests_system(void) {
 
         int ready = 0;
         for (int i = 0; i < 300 && !ready; i++) {
-            if (vfs_exists(READY)) {
+            if (virtual_file_system_exists(READY)) {
                 ready = 1;
                 break;
             }
@@ -7481,30 +7481,30 @@ static void boot_selftests_system(void) {
             pit_sleep_ms(50);
         }
         if (!ready) {
-            klog_puts("[m76] sigtest never reached its ready point - it exited ");
-            klog_put_dec((uint32_t)st->exit_code);
-            klog_puts(" (see user_space/binaries/sigtest.c for what each code means)\n");
+            kernel_log_puts("[m76] sigtest never reached its ready point - it exited ");
+            kernel_log_put_dec((uint32_t)st->exit_code);
+            kernel_log_puts(" (see user_space/binaries/sigtest.c for what each code means)\n");
             all_ok = 0;
         }
 
         if (ready) {
             if (do_syscall(SYS_kill, (uint64_t)st_pid, SIGINT, 0) != 0) {
-                klog_puts("[m76] SYS_kill refused SIGINT - only the two that kill are accepted\n");
+                kernel_log_puts("[m76] SYS_kill refused SIGINT - only the two that kill are accepted\n");
                 all_ok = 0;
             }
             int handled = 0;
             for (int i = 0; i < 200 && !handled; i++) {
-                if (vfs_exists(ALIVE)) {
+                if (virtual_file_system_exists(ALIVE)) {
                     handled = 1;
                     break;
                 }
                 pit_sleep_ms(50);
             }
             if (!handled) {
-                klog_puts("[m76] the SIGINT handler never ran, or the process did not "
+                kernel_log_puts("[m76] the SIGINT handler never ran, or the process did not "
                            "survive it - sigtest is ");
-                klog_puts(st->state == TASK_TERMINATED ? "terminated" : "still running");
-                klog_putc('\n');
+                kernel_log_puts(st->state == TASK_TERMINATED ? "terminated" : "still running");
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
 
@@ -7518,7 +7518,7 @@ static void boot_selftests_system(void) {
                     }
                 }
                 if (!found_living) {
-                    klog_puts("[m76] after SIGINT, sigtest is not listed as a living task - "
+                    kernel_log_puts("[m76] after SIGINT, sigtest is not listed as a living task - "
                                "a caught signal still killed it\n");
                     all_ok = 0;
                 }
@@ -7526,20 +7526,20 @@ static void boot_selftests_system(void) {
 
             static char alive[64];
             k_memset(alive, 0, sizeof(alive));
-            int64_t an = vfs_read(ALIVE, alive, sizeof(alive) - 1);
+            int64_t an = virtual_file_system_read(ALIVE, alive, sizeof(alive) - 1);
             if (an <= 0 || !selftest_contains(alive, "handled-and-alive 1")) {
-                klog_puts("[m76] the handler ran a number of times other than once: '");
-                klog_puts(alive);
-                klog_puts("'\n");
+                kernel_log_puts("[m76] the handler ran a number of times other than once: '");
+                kernel_log_puts(alive);
+                kernel_log_puts("'\n");
                 all_ok = 0;
             }
 
             do_syscall(SYS_kill, (uint64_t)st_pid, SIGUSR1, 0);
             long code = do_syscall(SYS_wait, (uint64_t)st_pid, 0, 0);
             if (code != 0) {
-                klog_puts("[m76] sigtest exited ");
-                klog_put_dec((uint32_t)code);
-                klog_puts(" - see user_space/binaries/sigtest.c for what that code means\n");
+                kernel_log_puts("[m76] sigtest exited ");
+                kernel_log_put_dec((uint32_t)code);
+                kernel_log_puts(" - see user_space/binaries/sigtest.c for what that code means\n");
                 all_ok = 0;
             }
         }
@@ -7558,9 +7558,9 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_kill, (uint64_t)h->id, SIGINT, 0);
             long code = do_syscall(SYS_wait, (uint64_t)h->id, 0, 0);
             if (code != 128 + SIGINT) {
-                klog_puts("[m76] a process with no SIGINT handler exited ");
-                klog_put_dec((uint32_t)code);
-                klog_puts(" rather than 130 - the default action is not being applied\n");
+                kernel_log_puts("[m76] a process with no SIGINT handler exited ");
+                kernel_log_put_dec((uint32_t)code);
+                kernel_log_puts(" rather than 130 - the default action is not being applied\n");
                 all_ok = 0;
             }
             selftest_reap(h);
@@ -7574,7 +7574,7 @@ static void boot_selftests_system(void) {
             panic("M76 self-test: a signal here is still only a way to end a program");
         }
 
-        klog_puts("[m76] a signal a program can catch: a handler installed, entered "
+        kernel_log_puts("[m76] a signal a program can catch: a handler installed, entered "
                    "through a frame on the process's own stack and returned from with "
                    "every register intact, a blocked signal held until it was unblocked, "
                    "a SIGCHLD that arrived without anyone polling, a SIGINT survived - and "
@@ -7593,14 +7593,14 @@ static void boot_selftests_system(void) {
         long ft_rc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
         kfree(ft_img);
         if (ft_rc != 0) {
-            klog_puts("[m99fault] faulttest exited ");
-            klog_put_dec((uint32_t)(ft_rc < 0 ? 99 : ft_rc));
-            klog_puts(" - see user_space/binaries/faulttest.c for what each code "
+            kernel_log_puts("[m99fault] faulttest exited ");
+            kernel_log_put_dec((uint32_t)(ft_rc < 0 ? 99 : ft_rc));
+            kernel_log_puts(" - see user_space/binaries/faulttest.c for what each code "
                        "means\n");
             panic("M99 self-test: a fault this program caught was not delivered, "
                   "or one it could not catch did not end it");
         }
-        klog_puts("[m99] a fault a program can catch: a null dereference, an "
+        kernel_log_puts("[m99] a fault a program can catch: a null dereference, an "
                    "integer divide by zero and an opcode this CPU does not have, "
                    "each delivered to its own handler as SIGSEGV, SIGFPE and "
                    "SIGILL, each survived twice so the mask came back, a "
@@ -7656,17 +7656,17 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_close, (uint64_t)outfd, 0, 0);
         kfree(tw_img);
         if (rc != 0) {
-            klog_puts("[m77] treewalk exited ");
-            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_putc('\n');
+            kernel_log_puts("[m77] treewalk exited ");
+            kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            kernel_log_putc('\n');
             all_ok = 0;
         }
 
         static char walked[2048];
         k_memset(walked, 0, sizeof(walked));
-        int64_t wn = vfs_read(OUT, walked, sizeof(walked) - 1);
+        int64_t wn = virtual_file_system_read(OUT, walked, sizeof(walked) - 1);
         if (wn <= 0) {
-            klog_puts("[m77] the walker printed nothing\n");
+            kernel_log_puts("[m77] the walker printed nothing\n");
             all_ok = 0;
         } else {
             walked[wn] = '\0';
@@ -7681,15 +7681,15 @@ static void boot_selftests_system(void) {
             };
             for (size_t w = 0; w < sizeof(WANT) / sizeof(WANT[0]); w++) {
                 if (!selftest_contains(walked, WANT[w].needle)) {
-                    klog_puts("[m77] the walker did not demonstrate ");
-                    klog_puts(WANT[w].what);
-                    klog_putc('\n');
+                    kernel_log_puts("[m77] the walker did not demonstrate ");
+                    kernel_log_puts(WANT[w].what);
+                    kernel_log_putc('\n');
                     all_ok = 0;
                 }
             }
             if (selftest_contains(walked, "!!")) {
-                klog_puts("[m77] the walker reported an inconsistency:\n");
-                klog_puts(walked);
+                kernel_log_puts("[m77] the walker reported an inconsistency:\n");
+                kernel_log_puts(walked);
                 all_ok = 0;
             }
         }
@@ -7701,18 +7701,18 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_writefile, (uint64_t)A, (uint64_t)thirty, sizeof(thirty));
             long fd = do_syscall(SYS_open, (uint64_t)A, OPEN_READ, 0);
             if (fd < 0) {
-                klog_puts("[m77] could not open the fstat fixture\n");
+                kernel_log_puts("[m77] could not open the fstat fixture\n");
                 all_ok = 0;
             } else {
                 if (do_syscall(SYS_rename, (uint64_t)A, (uint64_t)B, 0) != 0) {
-                    klog_puts("[m77] could not rename the fstat fixture out from under its fd\n");
+                    kernel_log_puts("[m77] could not rename the fstat fixture out from under its fd\n");
                     all_ok = 0;
                 }
                 os_stat_t st;
                 k_memset(&st, 0, sizeof(st));
                 if (do_syscall(SYS_fstat, (uint64_t)fd, (uint64_t)&st, 0) != 0 ||
                     st.size != sizeof(thirty) || st.is_dir) {
-                    klog_puts("[m77] SYS_fstat could not describe a descriptor whose name "
+                    kernel_log_puts("[m77] SYS_fstat could not describe a descriptor whose name "
                                "had changed - which is the one question SYS_stat cannot answer\n");
                     all_ok = 0;
                 }
@@ -7721,13 +7721,13 @@ static void boot_selftests_system(void) {
                     k_memset(&st, 0, sizeof(st));
                     if (do_syscall(SYS_fstat, (uint64_t)pfds[0], (uint64_t)&st, 0) != 0 ||
                         st.kind != OS_STAT_FIFO || st.size != 0 || st.is_dir) {
-                        klog_puts("[m77] SYS_fstat could not say that a pipe is a pipe\n");
+                        kernel_log_puts("[m77] SYS_fstat could not say that a pipe is a pipe\n");
                         all_ok = 0;
                     }
                     do_syscall(SYS_close, (uint64_t)pfds[0], 0, 0);
                     do_syscall(SYS_close, (uint64_t)pfds[1], 0, 0);
                     if (do_syscall(SYS_fstat, (uint64_t)pfds[0], (uint64_t)&st, 0) != -1) {
-                        klog_puts("[m77] SYS_fstat described a descriptor that is not open\n");
+                        kernel_log_puts("[m77] SYS_fstat described a descriptor that is not open\n");
                         all_ok = 0;
                     }
                 }
@@ -7741,7 +7741,7 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_unlink, (uint64_t)OUT, 0, 0);
         do_syscall(SYS_rmdir, (uint64_t)SUB, 0, 0);
         if (do_syscall(SYS_rmdir, (uint64_t)ROOT, 0, 0) != 0) {
-            klog_puts("[m77] the fixture tree could not be removed - something is still in it\n");
+            kernel_log_puts("[m77] the fixture tree could not be removed - something is still in it\n");
             all_ok = 0;
         }
         if (tw) {
@@ -7752,7 +7752,7 @@ static void boot_selftests_system(void) {
             panic("M77 self-test: a program written against POSIX headers cannot walk this filesystem");
         }
 
-        klog_puts("[m77] POSIX names for what is already here: a program including only "
+        kernel_log_puts("[m77] POSIX names for what is already here: a program including only "
                    "<dirent.h>, <sys/stat.h> and <unistd.h> walked a tree it was not told "
                    "the shape of, S_ISDIR and d_type agreed on every entry, the sizes added "
                    "up, and fstat described a descriptor whose name had changed - "
@@ -7768,7 +7768,7 @@ static void boot_selftests_system(void) {
         if (sct_status != 0) {
             panic("[q5] a syscall accepted an argument it should have refused - see the syscalltest lines above");
         }
-        klog_puts("[q5] every syscall told a lie: all 98 entries handed a null, a "
+        kernel_log_puts("[q5] every syscall told a lie: all 98 entries handed a null, a "
                    "kernel address, an unmapped one, an address at the user/kernel line and "
                    "an overflowing length; every one returned, every pointer argument was "
                    "refused, every unopened fd and every out-of-range syscall number was "
@@ -7782,17 +7782,17 @@ static void boot_selftests_system(void) {
         if (!ex_img) {
             panic("Q9 self-test: /bin/exhausttest is not on this disk");
         }
-        uint64_t frames_before = pmm_free_frame_count();
+        uint64_t frames_before = physical_memory_free_frame_count();
         for (int round = 0; round < 2; round++) {
             const char *ex_argv[] = {PATH_BIN_DIR "exhausttest", 0};
             task_t *ex = process_spawnv("exhausttest", ex_img, ex_bytes, ex_argv);
             long rc = ex ? do_syscall(SYS_wait, (uint64_t)ex->id, 0, 0) : -1;
             if (rc != 0) {
-                klog_puts("[q9] exhausttest round ");
-                klog_put_dec((uint32_t)round);
-                klog_puts(" exited ");
-                klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-                klog_puts(" - see user_space/binaries/exhausttest.c for what each "
+                kernel_log_puts("[q9] exhausttest round ");
+                kernel_log_put_dec((uint32_t)round);
+                kernel_log_puts(" exited ");
+                kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+                kernel_log_puts(" - see user_space/binaries/exhausttest.c for what each "
                           "code means\n");
                 kfree(ex_img);
                 panic("Q9 self-test: a resource this machine ran out of did not "
@@ -7801,43 +7801,43 @@ static void boot_selftests_system(void) {
         }
         kfree(ex_img);
 
-        uint64_t frames_after = pmm_free_frame_count();
+        uint64_t frames_after = physical_memory_free_frame_count();
         if (frames_after < frames_before) {
-            klog_puts("[q9] filling and emptying every table cost ");
-            klog_put_dec((uint32_t)(frames_before - frames_after));
-            klog_puts(" frames that never came back\n");
+            kernel_log_puts("[q9] filling and emptying every table cost ");
+            kernel_log_put_dec((uint32_t)(frames_before - frames_after));
+            kernel_log_puts(" frames that never came back\n");
             panic("Q9 self-test: exhausting a resource leaked physical memory");
         }
 
         {
-            static char q9_buf[512];
-            k_memset(q9_buf, 'q', sizeof(q9_buf));
-            if (vfs_write("/tmp/q9-after", q9_buf, sizeof(q9_buf)) != 0) {
+            static char q9_buffer[512];
+            k_memset(q9_buffer, 'q', sizeof(q9_buffer));
+            if (virtual_file_system_write("/tmp/q9-after", q9_buffer, sizeof(q9_buffer)) != 0) {
                 panic("Q9 self-test: the machine could not work after running out");
             }
-            k_memset(q9_buf, 0, sizeof(q9_buf));
-            if (vfs_read("/tmp/q9-after", q9_buf, sizeof(q9_buf)) != (int64_t)sizeof(q9_buf) ||
-                q9_buf[0] != 'q') {
+            k_memset(q9_buffer, 0, sizeof(q9_buffer));
+            if (virtual_file_system_read("/tmp/q9-after", q9_buffer, sizeof(q9_buffer)) != (int64_t)sizeof(q9_buffer) ||
+                q9_buffer[0] != 'q') {
                 panic("Q9 self-test: the machine could not work after running out");
             }
-            vfs_unlink("/tmp/q9-after");
+            virtual_file_system_unlink("/tmp/q9-after");
         }
 
         {
-            uint64_t f0 = pmm_free_frame_count();
+            uint64_t f0 = physical_memory_free_frame_count();
             size_t hu0 = heap_used_bytes();
             size_t ht0 = heap_total_bytes();
-            int tasks0 = sched_task_count();
-            blk_stats_t bs0;
-            blk_stats(&bs0);
+            int tasks0 = scheduler_task_count();
+            block_device_statistics_t bs0;
+            block_device_statistics(&bs0);
 
             for (int i = 0; i < 2000; i++) {
-                int fd = vfs_open("/tmp/q9-churn", 1);
+                int fd = virtual_file_system_open("/tmp/q9-churn", 1);
                 if (fd >= 0) {
-                    vfs_handle_close(fd);
+                    virtual_file_system_handle_close(fd);
                 }
             }
-            vfs_unlink("/tmp/q9-churn");
+            virtual_file_system_unlink("/tmp/q9-churn");
 
             size_t sp_bytes = 0;
             uint8_t *sp_img = read_program(PATH_BIN_DIR "hello", &sp_bytes);
@@ -7852,35 +7852,35 @@ static void boot_selftests_system(void) {
                 kfree(sp_img);
             }
 
-            uint64_t f1 = pmm_free_frame_count();
+            uint64_t f1 = physical_memory_free_frame_count();
             size_t hu1 = heap_used_bytes();
             size_t ht1 = heap_total_bytes();
-            int tasks1 = sched_task_count();
-            blk_stats_t bs1;
-            blk_stats(&bs1);
+            int tasks1 = scheduler_task_count();
+            block_device_statistics_t bs1;
+            block_device_statistics(&bs1);
 
-            klog_puts("[q9] leak audit over 2000 open/close and 200 spawn/exit "
+            kernel_log_puts("[q9] leak audit over 2000 open/close and 200 spawn/exit "
                        "rounds - free frames ");
-            klog_put_dec((uint32_t)f0);
-            klog_puts(" -> ");
-            klog_put_dec((uint32_t)f1);
-            klog_puts(", heap used ");
-            klog_put_dec((uint32_t)hu0);
-            klog_puts(" -> ");
-            klog_put_dec((uint32_t)hu1);
-            klog_puts(", heap total ");
-            klog_put_dec((uint32_t)ht0);
-            klog_puts(" -> ");
-            klog_put_dec((uint32_t)ht1);
-            klog_puts(", task slots ");
-            klog_put_dec((uint32_t)tasks0);
-            klog_puts(" -> ");
-            klog_put_dec((uint32_t)tasks1);
-            klog_puts(", cache blocks ");
-            klog_put_dec((uint32_t)bs0.resident);
-            klog_puts(" -> ");
-            klog_put_dec((uint32_t)bs1.resident);
-            klog_putc('\n');
+            kernel_log_put_dec((uint32_t)f0);
+            kernel_log_puts(" -> ");
+            kernel_log_put_dec((uint32_t)f1);
+            kernel_log_puts(", heap used ");
+            kernel_log_put_dec((uint32_t)hu0);
+            kernel_log_puts(" -> ");
+            kernel_log_put_dec((uint32_t)hu1);
+            kernel_log_puts(", heap total ");
+            kernel_log_put_dec((uint32_t)ht0);
+            kernel_log_puts(" -> ");
+            kernel_log_put_dec((uint32_t)ht1);
+            kernel_log_puts(", task slots ");
+            kernel_log_put_dec((uint32_t)tasks0);
+            kernel_log_puts(" -> ");
+            kernel_log_put_dec((uint32_t)tasks1);
+            kernel_log_puts(", cache blocks ");
+            kernel_log_put_dec((uint32_t)bs0.resident);
+            kernel_log_puts(" -> ");
+            kernel_log_put_dec((uint32_t)bs1.resident);
+            kernel_log_putc('\n');
 
             if (f1 < f0) {
                 panic("Q9 leak audit: physical frames did not come back");
@@ -7890,7 +7890,7 @@ static void boot_selftests_system(void) {
             }
         }
 
-        klog_puts("[q9] a machine that runs out of things and stays up: "
+        kernel_log_puts("[q9] a machine that runs out of things and stays up: "
                    "descriptors, pipes, shared-memory segments and sockets each "
                    "taken to their ceiling and each refusing rather than halting, "
                    "every one of them given back and taken again, twice over with "
@@ -7898,14 +7898,14 @@ static void boot_selftests_system(void) {
                    "reading and writing files afterwards, and a leak audit "
                    "over 2200 rounds with every frame and every heap byte back "
                    "- self-test passed (");
-        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
-        if (!vfs_exists("/pkg/repo/index")) {
-            klog_puts("[m111] no package repository on this disk - skipped. "
+        if (!virtual_file_system_exists("/pkg/repo/index")) {
+            kernel_log_puts("[m111] no package repository on this disk - skipped. "
                       "Run tools/build-packages.sh and `make packages`.\n\n");
         } else {
             size_t pk_bytes = 0;
@@ -7918,9 +7918,9 @@ static void boot_selftests_system(void) {
             long rc = pk ? do_syscall(SYS_wait, (uint64_t)pk->id, 0, 0) : -1;
             kfree(pk_img);
             if (rc != 0) {
-                klog_puts("[m111] pkgtest exited ");
-                klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-                klog_puts(" - see user_space/binaries/pkgtest.c for what each code "
+                kernel_log_puts("[m111] pkgtest exited ");
+                kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+                kernel_log_puts(" - see user_space/binaries/pkgtest.c for what each code "
                           "means\n");
                 panic("M111 self-test: the package manager did not install, run "
                       "or isolate a package the way it says it does");
@@ -7928,26 +7928,26 @@ static void boot_selftests_system(void) {
 
             int entries = pkg_registry_count();
             if (entries <= 0) {
-                klog_puts("[m111] the kernel's view of /pkg/db/caps has ");
-                klog_put_dec((uint32_t)(entries < 0 ? 0 : entries));
-                klog_puts(" entries after two installs - the registry did not "
+                kernel_log_puts("[m111] the kernel's view of /pkg/db/caps has ");
+                kernel_log_put_dec((uint32_t)(entries < 0 ? 0 : entries));
+                kernel_log_puts(" entries after two installs - the registry did not "
                           "reach the kernel, so every package would have been "
                           "refused everything for the wrong reason\n");
                 panic("M111 self-test: the package capability registry is empty");
             }
-            klog_puts("[m111] the kernel's package registry: ");
-            klog_put_dec((uint32_t)entries);
-            klog_puts(" entries, reloaded from disk because a write under /pkg "
+            kernel_log_puts("[m111] the kernel's package registry: ");
+            kernel_log_put_dec((uint32_t)entries);
+            kernel_log_puts(" entries, reloaded from disk because a write under /pkg "
                       "invalidated it\n");
 
-            klog_puts("[m111] a package manager: GNU grep 3.11, built here by "
+            kernel_log_puts("[m111] a package manager: GNU grep 3.11, built here by "
                       "this project's own compiler, installed by /bin/os from a "
                       "verified archive into its own prefix, run from /pkg/bin "
                       "with the capabilities its manifest asked for - and a "
                       "package calling its binary `compositor` got none of the "
                       "compositor's - self-test passed (");
-            klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
-            klog_puts(" ms).\n\n");
+            kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+            kernel_log_puts(" ms).\n\n");
         }
     }
 
@@ -7963,20 +7963,20 @@ static void boot_selftests_system(void) {
         long rc = dt ? do_syscall(SYS_wait, (uint64_t)dt->id, 0, 0) : -1;
         kfree(dt_img);
         if (rc != 0) {
-            klog_puts("[m112] dirtest exited ");
-            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/binaries/dirtest.c for what each code "
+            kernel_log_puts("[m112] dirtest exited ");
+            kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            kernel_log_puts(" - see user_space/binaries/dirtest.c for what each code "
                       "means\n");
             panic("M112 self-test: the recursive tree walk behind the Files "
                   "app does not do what it says on this filesystem");
         }
-        klog_puts("[m112] the Files app's tree walks, on leanfs: a three-level "
+        kernel_log_puts("[m112] the Files app's tree walks, on leanfs: a three-level "
                   "tree counted to the byte, SYS_rmdir refusing the full "
                   "directory it is supposed to refuse, the whole tree removed "
                   "by the user-space walk, and the directory beside it "
                   "untouched - self-test passed (");
-        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     {
@@ -7991,26 +7991,26 @@ static void boot_selftests_system(void) {
         long rc = bt ? do_syscall(SYS_wait, (uint64_t)bt->id, 0, 0) : -1;
         kfree(bt_img);
         if (rc != 0) {
-            klog_puts("[m100h] browsertest exited ");
-            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/binaries/browsertest.c for what each "
+            kernel_log_puts("[m100h] browsertest exited ");
+            kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            kernel_log_puts(" - see user_space/binaries/browsertest.c for what each "
                       "code means\n");
             panic("M100 self-test: what the browser port added to this "
                   "system does not work on this machine");
         }
-        klog_puts("[m100h] what porting a browser added: pread and pwrite "
+        kernel_log_puts("[m100h] what porting a browser added: pread and pwrite "
                   "leaving the descriptor's own offset where it was, "
                   "scandir filtering and sorting a directory, iconv turning "
                   "windows-1252 curly quotes into UTF-8 and REFUSING a "
                   "character ISO-8859-1 does not have, and lround rounding "
                   "2.5 to 3 - self-test passed (");
-        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
-        int un_before = unixsock_in_use();
+        int un_before = unix_socket_in_use();
         size_t ut_bytes = 0;
         uint8_t *ut_img = read_program(PATH_BIN_DIR "unixtest", &ut_bytes);
         if (!ut_img) {
@@ -8021,27 +8021,27 @@ static void boot_selftests_system(void) {
         long rc = ut ? do_syscall(SYS_wait, (uint64_t)ut->id, 0, 0) : -1;
         kfree(ut_img);
         if (rc != 0) {
-            klog_puts("[m118] unixtest exited ");
-            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/binaries/unixtest.c for what each "
+            kernel_log_puts("[m118] unixtest exited ");
+            kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            kernel_log_puts(" - see user_space/binaries/unixtest.c for what each "
                       "code means\n");
             panic("M118 self-test: AF_UNIX or descriptor passing does not "
                   "work on this machine");
         }
-        int un_after = unixsock_in_use();
-        int queued = unixsock_queued_fds();
+        int un_after = unix_socket_in_use();
+        int queued = unix_socket_queued_file_descriptors();
         if (un_after != un_before || queued != 0) {
-            klog_puts("[m118] sockets before ");
-            klog_put_dec((uint32_t)un_before);
-            klog_puts(", after ");
-            klog_put_dec((uint32_t)un_after);
-            klog_puts(", descriptors still queued ");
-            klog_put_dec((uint32_t)queued);
-            klog_puts("\n");
+            kernel_log_puts("[m118] sockets before ");
+            kernel_log_put_dec((uint32_t)un_before);
+            kernel_log_puts(", after ");
+            kernel_log_put_dec((uint32_t)un_after);
+            kernel_log_puts(", descriptors still queued ");
+            kernel_log_put_dec((uint32_t)queued);
+            kernel_log_puts("\n");
             panic("M118 self-test: a process that exited left a Unix-domain "
                   "socket or a passed descriptor behind");
         }
-        klog_puts("[m118] AF_UNIX: a socketpair both ways, a SOCK_SEQPACKET "
+        kernel_log_puts("[m118] AF_UNIX: a socketpair both ways, a SOCK_SEQPACKET "
                   "boundary kept, a pipe end and an open FILE passed to a "
                   "forked child through SCM_RIGHTS - the file still at the "
                   "offset its parent had read to - a socket passed over a "
@@ -8050,8 +8050,8 @@ static void boot_selftests_system(void) {
                   "shutdown seen as end of stream, MSG_CTRUNC reported, and "
                   "a child holding NO capabilities doing all of it - "
                   "self-test passed (");
-        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     {
@@ -8069,32 +8069,32 @@ static void boot_selftests_system(void) {
         long rc = et ? do_syscall(SYS_wait, (uint64_t)et->id, 0, 0) : -1;
         kfree(et_img);
         if (rc != 0) {
-            klog_puts("[m119] epolltest exited ");
-            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/binaries/epolltest.c for what each "
+            kernel_log_puts("[m119] epolltest exited ");
+            kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            kernel_log_puts(" - see user_space/binaries/epolltest.c for what each "
                       "code means\n");
             panic("M119 self-test: epoll, eventfd or timerfd does not work "
                   "on this machine");
         }
         if (eventfd_in_use() != ev_before || timerfd_in_use() != tf_before ||
             epoll_in_use() != ep_before) {
-            klog_puts("[m119] counters before ");
-            klog_put_dec((uint32_t)ev_before);
-            klog_puts("/");
-            klog_put_dec((uint32_t)tf_before);
-            klog_puts("/");
-            klog_put_dec((uint32_t)ep_before);
-            klog_puts(", after ");
-            klog_put_dec((uint32_t)eventfd_in_use());
-            klog_puts("/");
-            klog_put_dec((uint32_t)timerfd_in_use());
-            klog_puts("/");
-            klog_put_dec((uint32_t)epoll_in_use());
-            klog_puts("\n");
+            kernel_log_puts("[m119] counters before ");
+            kernel_log_put_dec((uint32_t)ev_before);
+            kernel_log_puts("/");
+            kernel_log_put_dec((uint32_t)tf_before);
+            kernel_log_puts("/");
+            kernel_log_put_dec((uint32_t)ep_before);
+            kernel_log_puts(", after ");
+            kernel_log_put_dec((uint32_t)eventfd_in_use());
+            kernel_log_puts("/");
+            kernel_log_put_dec((uint32_t)timerfd_in_use());
+            kernel_log_puts("/");
+            kernel_log_put_dec((uint32_t)epoll_in_use());
+            kernel_log_puts("\n");
             panic("M119 self-test: a process that exited left an eventfd, a "
                   "timerfd or an epoll set behind");
         }
-        klog_puts("[m119] a message pump: an eventfd counting and saturating, "
+        kernel_log_puts("[m119] a message pump: an eventfd counting and saturating, "
                   "EFD_SEMAPHORE taking one, a 60 ms timer that fired at 60 "
                   "and a 10 ms one that reported the firings nobody read, a "
                   "set holding a pipe and a Unix socket and a counter and a "
@@ -8105,15 +8105,15 @@ static void boot_selftests_system(void) {
                   "re-armed, a 200 ms epoll_wait(-1) that ended when its "
                   "timer did WITH THE CPU IDLE, and a wake from another "
                   "process - self-test passed (");
-        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
         int mf_before = memfd_in_use();
         uint32_t pages_before = memfd_pages_held();
-        uint64_t frames_before = pmm_free_frame_count();
+        uint64_t frames_before = physical_memory_free_frame_count();
         size_t mf_bytes = 0;
         uint8_t *mf_img = read_program(PATH_BIN_DIR "memfdtest", &mf_bytes);
         if (!mf_img) {
@@ -8124,36 +8124,36 @@ static void boot_selftests_system(void) {
         long rc = mf ? do_syscall(SYS_wait, (uint64_t)mf->id, 0, 0) : -1;
         kfree(mf_img);
         if (rc != 0) {
-            klog_puts("[m120] memfdtest exited ");
-            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/binaries/memfdtest.c for what each "
+            kernel_log_puts("[m120] memfdtest exited ");
+            kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            kernel_log_puts(" - see user_space/binaries/memfdtest.c for what each "
                       "code means\n");
             panic("M120 self-test: shared memory by descriptor does not work "
                   "on this machine");
         }
         if (memfd_in_use() != mf_before || memfd_pages_held() != pages_before) {
-            klog_puts("[m120] objects before ");
-            klog_put_dec((uint32_t)mf_before);
-            klog_puts(" after ");
-            klog_put_dec((uint32_t)memfd_in_use());
-            klog_puts(", pages before ");
-            klog_put_dec(pages_before);
-            klog_puts(" after ");
-            klog_put_dec(memfd_pages_held());
-            klog_puts(", first still alive: '");
-            klog_puts(memfd_first_live_name());
-            klog_puts("'\n");
+            kernel_log_puts("[m120] objects before ");
+            kernel_log_put_dec((uint32_t)mf_before);
+            kernel_log_puts(" after ");
+            kernel_log_put_dec((uint32_t)memfd_in_use());
+            kernel_log_puts(", pages before ");
+            kernel_log_put_dec(pages_before);
+            kernel_log_puts(" after ");
+            kernel_log_put_dec(memfd_pages_held());
+            kernel_log_puts(", first still alive: '");
+            kernel_log_puts(memfd_first_live_name());
+            kernel_log_puts("'\n");
             panic("M120 self-test: a process that exited left shared memory "
                   "behind");
         }
-        uint64_t frames_after = pmm_free_frame_count();
+        uint64_t frames_after = physical_memory_free_frame_count();
         if (frames_after < frames_before) {
-            klog_puts("[m120] sharing memory across a channel cost ");
-            klog_put_dec((uint32_t)(frames_before - frames_after));
-            klog_puts(" frames that never came back\n");
+            kernel_log_puts("[m120] sharing memory across a channel cost ");
+            kernel_log_put_dec((uint32_t)(frames_before - frames_after));
+            kernel_log_puts(" frames that never came back\n");
             panic("M120 self-test: shared memory leaked physical frames");
         }
-        klog_puts("[m120] a buffer shared across a channel: a memfd created, "
+        kernel_log_puts("[m120] a buffer shared across a channel: a memfd created, "
                   "sized, mapped and written; its descriptor sent over a Unix "
                   "socket to a forked child that holds no capabilities at "
                   "all; the child's writes read back by the parent through a "
@@ -8162,14 +8162,14 @@ static void boot_selftests_system(void) {
                   "writable mapping; a shrink, a MAP_PRIVATE, a read and a "
                   "map past the end all refused - self-test passed, every "
                   "frame back (");
-        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     {
         os_stat_t ct;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/clangtest", (uint64_t)&ct, 0) != 0) {
-            klog_puts("[m121] /bin/clangtest is not on this image - skipped. "
+            kernel_log_puts("[m121] /bin/clangtest is not on this image - skipped. "
                        "tools/build-clang.sh builds the compiler and "
                        "tools/clang-test.sh installs what it produces.\n\n");
         } else {
@@ -8189,15 +8189,15 @@ static void boot_selftests_system(void) {
                 "/bin/mixedtest >> " PATH_TMP_DIR "m121.out\n"
                 "/bin/clangcxxtest >> " PATH_TMP_DIR "m121.out\n";
             const char *body = have_cxx ? SCRIPT_CXX : SCRIPT;
-            size_t body_len = have_cxx ? sizeof(SCRIPT_CXX) - 1
+            size_t body_length = have_cxx ? sizeof(SCRIPT_CXX) - 1
                                        : sizeof(SCRIPT) - 1;
             if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)body,
-                            body_len) != 0) {
+                            body_length) != 0) {
                 panic("M121 self-test: could not write the script fixture");
             }
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
-                klog_puts("[m121] the compiled programs could not be spawned\n");
+                kernel_log_puts("[m121] the compiled programs could not be spawned\n");
                 all_ok = 0;
             } else {
                 do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
@@ -8205,9 +8205,9 @@ static void boot_selftests_system(void) {
 
             static char produced[1536];
             k_memset(produced, 0, sizeof(produced));
-            int64_t n = vfs_read(result, produced, sizeof(produced) - 1);
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
             if (n <= 0) {
-                klog_puts("[m121] the compiled programs produced no output\n");
+                kernel_log_puts("[m121] the compiled programs produced no output\n");
                 all_ok = 0;
             } else {
                 produced[n] = '\0';
@@ -8239,9 +8239,9 @@ static void boot_selftests_system(void) {
                 };
                 for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
                     if (!selftest_contains(produced, EXPECT[i].needle)) {
-                        klog_puts("[m121] missing: ");
-                        klog_puts(EXPECT[i].what);
-                        klog_putc('\n');
+                        kernel_log_puts("[m121] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
                         all_ok = 0;
                     }
                 }
@@ -8256,15 +8256,15 @@ static void boot_selftests_system(void) {
                     };
                     for (unsigned i = 0; i < sizeof(CXX) / sizeof(CXX[0]); i++) {
                         if (!selftest_contains(produced, CXX[i].needle)) {
-                            klog_puts("[m121] missing: ");
-                            klog_puts(CXX[i].what);
-                            klog_putc('\n');
+                            kernel_log_puts("[m121] missing: ");
+                            kernel_log_puts(CXX[i].what);
+                            kernel_log_putc('\n');
                             all_ok = 0;
                         }
                     }
                 }
                 if (selftest_contains(produced, "FAIL")) {
-                    klog_puts("[m121] a program reported a failure of its own\n");
+                    kernel_log_puts("[m121] a program reported a failure of its own\n");
                     all_ok = 0;
                 }
             }
@@ -8273,14 +8273,14 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
 
             if (!all_ok) {
-                klog_puts("[m121] what the compiled programs actually wrote:\n");
-                klog_puts(produced);
-                klog_puts("[m121] ---- end\n");
+                kernel_log_puts("[m121] what the compiled programs actually wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m121] ---- end\n");
                 panic("M121 self-test: a program x86_64-lean_os-clang produced "
                       "does not run here");
             }
 
-            klog_puts("[m121] a second compiler that knows this OS by name: a "
+            kernel_log_puts("[m121] a second compiler that knows this OS by name: a "
                       "program from x86_64-lean_os-clang running here with no "
                       "flag supplied by hand - the large code model checked "
                       "from inside the program, a signal delivered over live "
@@ -8290,14 +8290,14 @@ static void boot_selftests_system(void) {
                       "calling each other across twelve ABI shapes in both "
                       "directions");
             if (have_cxx) {
-                klog_puts("; and libc++ over libc++abi over libgcc_eh, with "
+                kernel_log_puts("; and libc++ over libc++abi over libgcc_eh, with "
                           "the destructors of an unwind counted and their "
                           "order checked");
             } else {
-                klog_puts(" (libc++ not on this image - "
+                kernel_log_puts(" (libc++ not on this image - "
                           "tools/build-libcxx.sh builds it)");
             }
-            klog_puts(" - self-test passed.\n\n");
+            kernel_log_puts(" - self-test passed.\n\n");
         }
     }
 
@@ -8305,26 +8305,26 @@ static void boot_selftests_system(void) {
         os_stat_t nst;
         if (do_syscall(SYS_stat, (uint64_t)(PATH_BIN_DIR "netsurf"),
                         (uint64_t)&nst, 0) != 0) {
-            klog_puts("[m113] /bin/netsurf is not on this image - skipped. "
+            kernel_log_puts("[m113] /bin/netsurf is not on this image - skipped. "
                        "`make browser` builds and installs it; see "
                        "docs/browser.md.\n\n");
         } else {
             int all_ok = 1;
 
             if (nst.kind != OS_STAT_FILE || nst.size < 1024u * 1024u) {
-                klog_puts("[m113] /bin/netsurf is there but is not a "
+                kernel_log_puts("[m113] /bin/netsurf is there but is not a "
                            "plausible browser: kind ");
-                klog_put_dec((uint32_t)nst.kind);
-                klog_puts(", ");
-                klog_put_dec((uint32_t)(nst.size / 1024u));
-                klog_puts(" KiB\n");
+                kernel_log_put_dec((uint32_t)nst.kind);
+                kernel_log_puts(", ");
+                kernel_log_put_dec((uint32_t)(nst.size / 1024u));
+                kernel_log_puts(" KiB\n");
                 all_ok = 0;
             }
 
             os_stat_t cst;
             if (do_syscall(SYS_stat, (uint64_t)"/usr/share/netsurf/default.css",
                             (uint64_t)&cst, 0) != 0 || cst.size == 0) {
-                klog_puts("[m113] /usr/share/netsurf/default.css is missing or "
+                kernel_log_puts("[m113] /usr/share/netsurf/default.css is missing or "
                            "empty - the cascade has no default stylesheet\n");
                 all_ok = 0;
             }
@@ -8333,20 +8333,20 @@ static void boot_selftests_system(void) {
             if (do_syscall(SYS_stat,
                             (uint64_t)"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                             (uint64_t)&fst, 0) != 0 || fst.size == 0) {
-                klog_puts("[m113] DejaVuSans.ttf is not where freetype looks "
+                kernel_log_puts("[m113] DejaVuSans.ttf is not where freetype looks "
                            "for it - a browser with no glyphs\n");
                 all_ok = 0;
             }
 
             uint32_t ncaps = caps_for_program(PATH_BIN_DIR "netsurf");
             if (ncaps != (CAP_APP_DEFAULT | CAP_NETWORK)) {
-                klog_puts("[m113] netsurf's capability grant is 0x");
-                klog_put_hex32(ncaps);
-                klog_puts(", not CAP_APP_DEFAULT | CAP_NETWORK\n");
+                kernel_log_puts("[m113] netsurf's capability grant is 0x");
+                kernel_log_put_hex32(ncaps);
+                kernel_log_puts(", not CAP_APP_DEFAULT | CAP_NETWORK\n");
                 all_ok = 0;
             }
             if (ncaps & CAP_FRAMEBUFFER) {
-                klog_puts("[m113] netsurf holds CAP_FRAMEBUFFER - it paints "
+                kernel_log_puts("[m113] netsurf holds CAP_FRAMEBUFFER - it paints "
                            "its window's shared segment and must not have "
                            "authority over the screen\n");
                 all_ok = 0;
@@ -8356,9 +8356,9 @@ static void boot_selftests_system(void) {
                 panic("M113 self-test: the browser on this image is not "
                       "installed the way a shipped program is");
             }
-            klog_puts("[m113] the browser is installed: /bin/netsurf (");
-            klog_put_dec((uint32_t)(nst.size / 1024u));
-            klog_puts(" KiB), its default stylesheet and DejaVuSans.ttf "
+            kernel_log_puts("[m113] the browser is installed: /bin/netsurf (");
+            kernel_log_put_dec((uint32_t)(nst.size / 1024u));
+            kernel_log_puts(" KiB), its default stylesheet and DejaVuSans.ttf "
                        "where the compiled-in paths look for them, holding "
                        "CAP_FS_WRITE and CAP_NETWORK and NOT CAP_FRAMEBUFFER "
                        "- self-test passed.\n\n");
@@ -8367,9 +8367,9 @@ static void boot_selftests_system(void) {
 
     {
         char rc[2048];
-        int64_t n = vfs_read(PATH_RESOLV_CONF, rc, sizeof(rc) - 1);
+        int64_t n = virtual_file_system_read(PATH_RESOLV_CONF, rc, sizeof(rc) - 1);
         if (n <= 0) {
-            klog_puts("[m114] " PATH_RESOLV_CONF " is missing - the first-boot "
+            kernel_log_puts("[m114] " PATH_RESOLV_CONF " is missing - the first-boot "
                        "seeding in this file did not run\n");
             panic("M114 self-test: this machine has no resolver configuration");
         }
@@ -8382,16 +8382,16 @@ static void boot_selftests_system(void) {
             }
         }
         if (!found) {
-            klog_puts("[m114] " PATH_RESOLV_CONF " has no nameserver line - "
+            kernel_log_puts("[m114] " PATH_RESOLV_CONF " has no nameserver line - "
                        "this machine can only ask whatever DHCP handed it\n");
             panic("M114 self-test: the resolver configuration names no server");
         }
-        klog_puts("[m114] more than one nameserver: " PATH_RESOLV_CONF " is on "
+        kernel_log_puts("[m114] more than one nameserver: " PATH_RESOLV_CONF " is on "
                    "this disk with a server in it, so a DHCP nameserver that "
                    "answers nothing is no longer the end of every lookup "
                    "- self-test passed (");
-        klog_put_dec((uint32_t)n);
-        klog_puts(" bytes).\n\n");
+        kernel_log_put_dec((uint32_t)n);
+        kernel_log_puts(" bytes).\n\n");
     }
 
     {
@@ -8399,98 +8399,98 @@ static void boot_selftests_system(void) {
         k_memset(want, 0, sizeof(want));
         int wn = fwcfg_read_file("opt/leanos/nicstream", want, sizeof(want) - 1);
         if (wn <= 0 || !net_have_nic()) {
-            klog_puts("[m116] no host stream on this boot - the NIC's receive "
+            kernel_log_puts("[m116] no host stream on this boot - the NIC's receive "
                        "path is untested (tools/qemu-serial-test.sh provides one)\n\n");
         } else {
             uint32_t checksum_before = tcp_checksum_failures();
-            size_t nr_bytes = 0;
-            uint8_t *nr_img = read_program(PATH_BIN_DIR "netrecv", &nr_bytes);
-            if (!nr_img) {
+            size_t number_bytes = 0;
+            uint8_t *number_img = read_program(PATH_BIN_DIR "netrecv", &number_bytes);
+            if (!number_img) {
                 panic("M116 self-test: /bin/netrecv is not on this disk");
             }
-            const char *nr_argv[] = {PATH_BIN_DIR "netrecv", "10.0.2.100", "7777", want, 0};
+            const char *number_argv[] = {PATH_BIN_DIR "netrecv", "10.0.2.100", "7777", want, 0};
             uint64_t t0 = tsc_read();
-            task_t *nr = process_spawnv("netrecv", nr_img, nr_bytes, nr_argv);
-            kfree(nr_img);
+            task_t *nr = process_spawnv("netrecv", number_img, number_bytes, number_argv);
+            kfree(number_img);
             long rc = nr ? (long)do_syscall(SYS_wait, (uint64_t)nr->id, 0, 0) : -1;
             uint64_t ms = tsc_to_us(tsc_read() - t0) / 1000;
             uint32_t corrupt = tcp_checksum_failures() - checksum_before;
-            klog_perf("nic_stream_recv_ms", ms, "ms");
+            kernel_log_perf("nic_stream_recv_ms", ms, "ms");
             if (rc != 0) {
-                klog_puts("[m116] netrecv did not receive the host's stream intact "
+                kernel_log_puts("[m116] netrecv did not receive the host's stream intact "
                            "(its own line above says how)\n");
                 panic("M116 self-test: a stream from the host did not arrive byte for byte");
             }
             if (corrupt != 0) {
-                klog_puts("[m116] the stream arrived, but ");
-                klog_put_dec(corrupt);
-                klog_puts(" segment(s) on the way failed TCP's checksum - the NIC "
+                kernel_log_puts("[m116] the stream arrived, but ");
+                kernel_log_put_dec(corrupt);
+                kernel_log_puts(" segment(s) on the way failed TCP's checksum - the NIC "
                            "is handing the stack corrupt frames and retransmission "
                            "is hiding it\n");
                 panic("M116 self-test: corrupt segments on the receive path");
             }
-            klog_puts("[m116] a stream from the host: ");
-            klog_puts(want);
-            klog_puts(" bytes through SLIRP, the RTL8139's ring and TCP, every one "
+            kernel_log_puts("[m116] a stream from the host: ");
+            kernel_log_puts(want);
+            kernel_log_puts(" bytes through SLIRP, the RTL8139's ring and TCP, every one "
                        "of them right and no segment failing its checksum, in ");
-            klog_put_dec((uint32_t)ms);
-            klog_puts(" ms - self-test passed.\n\n");
+            kernel_log_put_dec((uint32_t)ms);
+            kernel_log_puts(" ms - self-test passed.\n\n");
         }
     }
 
     {
         int all_ok = 1;
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
-        uint64_t errors_before = blk_error_count();
-        static char q16_buf[4096];
+        uint64_t errors_before = block_device_error_count();
+        static char q16_buffer[4096];
 
-        k_memset(q16_buf, 'a', sizeof(q16_buf));
-        if (vfs_write("/tmp/q16-before", q16_buf, sizeof(q16_buf)) != 0) {
-            klog_puts("[q16] a healthy disk refused an ordinary write\n");
+        k_memset(q16_buffer, 'a', sizeof(q16_buffer));
+        if (virtual_file_system_write("/tmp/q16-before", q16_buffer, sizeof(q16_buffer)) != 0) {
+            kernel_log_puts("[q16] a healthy disk refused an ordinary write\n");
             all_ok = 0;
         }
 
         if (all_ok) {
-            blk_fault_inject(-1, 0);
-            k_memset(q16_buf, 'b', sizeof(q16_buf));
-            int rc = vfs_write("/tmp/q16-during", q16_buf, sizeof(q16_buf));
-            blk_fault_inject(-1, -1);
+            block_device_fault_inject(-1, 0);
+            k_memset(q16_buffer, 'b', sizeof(q16_buffer));
+            int rc = virtual_file_system_write("/tmp/q16-during", q16_buffer, sizeof(q16_buffer));
+            block_device_fault_inject(-1, -1);
 
             if (rc == 0) {
-                klog_puts("[q16] a write to a disk that refuses every write reported success\n");
+                kernel_log_puts("[q16] a write to a disk that refuses every write reported success\n");
                 all_ok = 0;
             }
-            if (all_ok && blk_error_count() <= errors_before) {
-                klog_puts("[q16] the disk failed and nothing counted it\n");
-                all_ok = 0;
-            }
-        }
-
-        if (all_ok) {
-            k_memset(q16_buf, 0, sizeof(q16_buf));
-            int64_t n = vfs_read("/tmp/q16-before", q16_buf, sizeof(q16_buf));
-            if (n != (int64_t)sizeof(q16_buf) || q16_buf[0] != 'a' ||
-                q16_buf[sizeof(q16_buf) - 1] != 'a') {
-                klog_puts("[q16] a file written before the fault did not survive it\n");
-                all_ok = 0;
-            }
-        }
-        if (all_ok) {
-            k_memset(q16_buf, 'c', sizeof(q16_buf));
-            if (vfs_write("/tmp/q16-after", q16_buf, sizeof(q16_buf)) != 0) {
-                klog_puts("[q16] the disk recovered and the filesystem did not\n");
+            if (all_ok && block_device_error_count() <= errors_before) {
+                kernel_log_puts("[q16] the disk failed and nothing counted it\n");
                 all_ok = 0;
             }
         }
 
         if (all_ok) {
-            blk_cache_drop();
-            blk_fault_inject(0, -1);
-            k_memset(q16_buf, 'z', sizeof(q16_buf));
-            int64_t n = vfs_read("/tmp/q16-before", q16_buf, sizeof(q16_buf));
-            blk_fault_inject(-1, -1);
+            k_memset(q16_buffer, 0, sizeof(q16_buffer));
+            int64_t n = virtual_file_system_read("/tmp/q16-before", q16_buffer, sizeof(q16_buffer));
+            if (n != (int64_t)sizeof(q16_buffer) || q16_buffer[0] != 'a' ||
+                q16_buffer[sizeof(q16_buffer) - 1] != 'a') {
+                kernel_log_puts("[q16] a file written before the fault did not survive it\n");
+                all_ok = 0;
+            }
+        }
+        if (all_ok) {
+            k_memset(q16_buffer, 'c', sizeof(q16_buffer));
+            if (virtual_file_system_write("/tmp/q16-after", q16_buffer, sizeof(q16_buffer)) != 0) {
+                kernel_log_puts("[q16] the disk recovered and the filesystem did not\n");
+                all_ok = 0;
+            }
+        }
+
+        if (all_ok) {
+            block_device_cache_drop();
+            block_device_fault_inject(0, -1);
+            k_memset(q16_buffer, 'z', sizeof(q16_buffer));
+            int64_t n = virtual_file_system_read("/tmp/q16-before", q16_buffer, sizeof(q16_buffer));
+            block_device_fault_inject(-1, -1);
             if (n >= 0) {
-                klog_puts("[q16] a read from a disk that refuses every read reported success\n");
+                kernel_log_puts("[q16] a read from a disk that refuses every read reported success\n");
                 all_ok = 0;
             }
         }
@@ -8498,51 +8498,51 @@ static void boot_selftests_system(void) {
         if (all_ok) {
             static uint8_t q16_raw[BLK_SECTOR_SIZE];
             k_memset(q16_raw, 'z', sizeof(q16_raw));
-            blk_cache_drop();
-            blk_fault_inject(0, -1);
-            int rc = blk_read(0, 1, q16_raw);
-            blk_fault_inject(-1, -1);
+            block_device_cache_drop();
+            block_device_fault_inject(0, -1);
+            int rc = block_device_read(0, 1, q16_raw);
+            block_device_fault_inject(-1, -1);
             if (rc == 0) {
-                klog_puts("[q16] the block layer reported success on a refused read\n");
+                kernel_log_puts("[q16] the block layer reported success on a refused read\n");
                 all_ok = 0;
             }
             if (all_ok && q16_raw[0] == 'z') {
-                klog_puts("[q16] a failed read left the caller's buffer as it found it\n");
+                kernel_log_puts("[q16] a failed read left the caller's buffer as it found it\n");
                 all_ok = 0;
             }
         }
 
         if (all_ok) {
-            blk_cache_drop();
-            if (vfs_check() != 0) {
-                klog_puts("[q16] the filesystem is inconsistent after a disk that failed\n");
+            block_device_cache_drop();
+            if (virtual_file_system_check() != 0) {
+                kernel_log_puts("[q16] the filesystem is inconsistent after a disk that failed\n");
                 all_ok = 0;
             }
         }
 
-        vfs_unlink("/tmp/q16-before");
-        vfs_unlink("/tmp/q16-during");
-        vfs_unlink("/tmp/q16-after");
-        blk_fault_inject(-1, -1);
+        virtual_file_system_unlink("/tmp/q16-before");
+        virtual_file_system_unlink("/tmp/q16-during");
+        virtual_file_system_unlink("/tmp/q16-after");
+        block_device_fault_inject(-1, -1);
 
         if (!all_ok) {
             panic("Q16 self-test: this machine does not survive a disk that fails");
         }
-        klog_puts("[q16] devices that fail, and a machine that keeps running: a write to a "
+        kernel_log_puts("[q16] devices that fail, and a machine that keeps running: a write to a "
                    "disk that refuses every write reported an error and was counted, a file "
                    "written before it survived, the next write after it succeeded, a failed "
                    "read reported an error and left zeros rather than stale bytes at the "
                    "block layer and an error at the filesystem, and the "
                    "filesystem is consistent afterwards - through ");
-        klog_puts(blk_backend_name());
-        klog_puts(" - self-test passed (");
-        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_puts(block_device_backend_name());
+        kernel_log_puts(" - self-test passed (");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     {
         int all_ok = 1;
-        uint64_t frames_before = pmm_free_frame_count();
+        uint64_t frames_before = physical_memory_free_frame_count();
 
         size_t mt_bytes = 0;
         uint8_t *mt_img = read_program(PATH_BIN_DIR "mmaptest", &mt_bytes);
@@ -8554,24 +8554,24 @@ static void boot_selftests_system(void) {
         long rc = mt ? do_syscall(SYS_wait, (uint64_t)mt->id, 0, 0) : -1;
         kfree(mt_img);
         if (rc != 0) {
-            klog_puts("[m78] mmaptest exited ");
-            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/binaries/mmaptest.c for what each code means\n");
+            kernel_log_puts("[m78] mmaptest exited ");
+            kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            kernel_log_puts(" - see user_space/binaries/mmaptest.c for what each code means\n");
             all_ok = 0;
         }
 
-        uint64_t frames_after = pmm_free_frame_count();
+        uint64_t frames_after = physical_memory_free_frame_count();
         if (frames_after != frames_before) {
-            klog_puts("[m78] ");
-            klog_put_dec((uint32_t)(frames_before > frames_after
+            kernel_log_puts("[m78] ");
+            kernel_log_put_dec((uint32_t)(frames_before > frames_after
                                      ? frames_before - frames_after : 0));
-            klog_puts(" frame(s) did not come back from a process that mapped 64 pages, "
+            kernel_log_puts(" frame(s) did not come back from a process that mapped 64 pages, "
                        "freed them, and exited\n");
             all_ok = 0;
         }
 
         if (all_ok) {
-            uint64_t mid_before = pmm_free_frame_count();
+            uint64_t mid_before = physical_memory_free_frame_count();
             const char *again[] = {PATH_BIN_DIR "mmaptest", 0};
             uint8_t *again_img = read_program(PATH_BIN_DIR "mmaptest", &mt_bytes);
             task_t *m2 = again_img
@@ -8581,8 +8581,8 @@ static void boot_selftests_system(void) {
                 do_syscall(SYS_wait, (uint64_t)m2->id, 0, 0);
             }
             kfree(again_img);
-            if (pmm_free_frame_count() != mid_before) {
-                klog_puts("[m78] a second map/free/exit round did not return every frame\n");
+            if (physical_memory_free_frame_count() != mid_before) {
+                kernel_log_puts("[m78] a second map/free/exit round did not return every frame\n");
                 all_ok = 0;
             }
             if (m2) {
@@ -8597,7 +8597,7 @@ static void boot_selftests_system(void) {
             panic("M78 self-test: this machine still cannot take a page back");
         }
 
-        klog_puts("[m78] memory that can be given back: 64 pages mapped and touched, half "
+        kernel_log_puts("[m78] memory that can be given back: 64 pages mapped and touched, half "
                    "released and the *same addresses* handed out again rather than the arena "
                    "growing, an interior hole reused, a shared or file-backed mapping refused "
                    "by name, malloc routing a repeated 1 MiB allocation through it without "
@@ -8611,14 +8611,14 @@ static void boot_selftests_system(void) {
         if (!tt_img) {
             panic("M79 self-test: /bin/threadtest is not on this disk");
         }
-        for (int i = 0; i < sched_task_count(); i++) {
-            task_t *stale = sched_task_by_slot(i);
+        for (int i = 0; i < scheduler_task_count(); i++) {
+            task_t *stale = scheduler_task_by_slot(i);
             if (stale && stale->state == TASK_TERMINATED) {
                 selftest_reap(stale);
             }
         }
 
-        uint64_t frames_before = pmm_free_frame_count();
+        uint64_t frames_before = physical_memory_free_frame_count();
 
         const char *tt_argv[] = {PATH_BIN_DIR "threadtest", 0};
         task_t *tt = process_spawnv("threadtest", tt_img, tt_bytes, tt_argv);
@@ -8630,7 +8630,7 @@ static void boot_selftests_system(void) {
         int shared_seen = 0;
         int max_sharers = 0;
         for (int i = 0; i < 400 && !shared_seen; i++) {
-            int count = sched_count_sharing_address_space(tt->pml4_phys);
+            int count = scheduler_count_sharing_address_space(tt->pml4_phys);
             if (count > max_sharers) {
                 max_sharers = count;
             }
@@ -8644,34 +8644,34 @@ static void boot_selftests_system(void) {
             pit_sleep_ms(25);
         }
         if (!shared_seen) {
-            klog_puts("[m79] never saw three tasks sharing one page table - the most that "
+            kernel_log_puts("[m79] never saw three tasks sharing one page table - the most that "
                        "ever did was ");
-            klog_put_dec((uint32_t)max_sharers);
-            klog_puts(", so a 'thread' here is still a process\n");
+            kernel_log_put_dec((uint32_t)max_sharers);
+            kernel_log_puts(", so a 'thread' here is still a process\n");
             all_ok = 0;
         }
 
         long rc = do_syscall(SYS_wait, (uint64_t)tt->id, 0, 0);
         if (rc != 0) {
-            klog_puts("[m79] threadtest exited ");
-            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/binaries/threadtest.c for what each code means\n");
+            kernel_log_puts("[m79] threadtest exited ");
+            kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            kernel_log_puts(" - see user_space/binaries/threadtest.c for what each code means\n");
             all_ok = 0;
         }
         selftest_reap(tt);
 
-        for (int i = 0; i < sched_task_count(); i++) {
-            task_t *o = sched_task_by_slot(i);
+        for (int i = 0; i < scheduler_task_count(); i++) {
+            task_t *o = scheduler_task_by_slot(i);
             if (o && o->state == TASK_TERMINATED) {
                 selftest_reap(o);
             }
         }
-        uint64_t frames_after = pmm_free_frame_count();
+        uint64_t frames_after = physical_memory_free_frame_count();
         if (frames_after != frames_before) {
-            klog_puts("[m79] ");
-            klog_put_dec((uint32_t)(frames_before > frames_after
+            kernel_log_puts("[m79] ");
+            kernel_log_put_dec((uint32_t)(frames_before > frames_after
                                      ? frames_before - frames_after : 0));
-            klog_puts(" frame(s) did not come back from a process that ran two threads\n");
+            kernel_log_puts(" frame(s) did not come back from a process that ran two threads\n");
             all_ok = 0;
         }
 
@@ -8679,7 +8679,7 @@ static void boot_selftests_system(void) {
             panic("M79 self-test: this scheduler still cannot run two tasks in one address space");
         }
 
-        klog_puts("[m79] two threads, one address space: three tasks on one page table at "
+        kernel_log_puts("[m79] two threads, one address space: three tasks on one page table at "
                    "once, two million increments through a mutex arriving as exactly two "
                    "million, memory written by one thread read by the other, separate tids "
                    "under one pid, each thread's floating-point state surviving the other's, "
@@ -8701,24 +8701,24 @@ static void boot_selftests_system(void) {
         }
         int id = t->id;
         uint64_t deadline = pit_get_ticks() + 6000;
-        while (sched_task_by_id(id) && sched_task_by_id(id)->state != TASK_TERMINATED) {
+        while (scheduler_task_by_id(id) && scheduler_task_by_id(id)->state != TASK_TERMINATED) {
             if (pit_get_ticks() > deadline) {
                 panic("M96 self-test: the futex fixture never finished - a waiter is "
                       "asleep with nothing to wake it");
             }
             pit_sleep_ms(10);
         }
-        task_t *done = sched_task_by_id(id);
+        task_t *done = scheduler_task_by_id(id);
         int code = done ? done->exit_code : -1;
         selftest_reap(done);
         if (code != 0) {
-            klog_puts("[m96] the fixture exited 0x");
-            klog_put_hex32((uint32_t)code);
-            klog_puts(" - see user_space/binaries/futextest.c for what each code means\n");
+            kernel_log_puts("[m96] the fixture exited 0x");
+            kernel_log_put_hex32((uint32_t)code);
+            kernel_log_puts(" - see user_space/binaries/futextest.c for what each code means\n");
             panic("M96 self-test: threads do not have their own variables, or a "
                   "waiting thread still costs a core");
         }
-        klog_puts("[m96] a thread with its own variables, and a wait that costs nothing: "
+        kernel_log_puts("[m96] a thread with its own variables, and a wait that costs nothing: "
                    "sixteen threads on one contended mutex each reporting its own "
                    "__thread count, a blocked waiter measured in CPU ticks rather than "
                    "in throughput because throughput passes with a spin loop still in "
@@ -8730,22 +8730,22 @@ static void boot_selftests_system(void) {
     {
         const int WRITERS = 4;
 
-        blk_cache_drop();
-        blk_stats_t scan_before, scan_after;
-        blk_stats(&scan_before);
+        block_device_cache_drop();
+        block_device_statistics_t scan_before, scan_after;
+        block_device_statistics(&scan_before);
         uint64_t s0 = tsc_read();
-        int quiet_problems = vfs_check();
+        int quiet_problems = virtual_file_system_check();
         uint64_t s1 = tsc_read();
         uint64_t quiet_scan_us = tsc_to_us(s1 - s0);
-        blk_stats(&scan_after);
+        block_device_statistics(&scan_after);
         uint64_t quiet_scan_reads = scan_after.reads - scan_before.reads;
         uint64_t quiet_scan_misses = (scan_after.reads - scan_before.reads) -
                                      (scan_after.hits - scan_before.hits);
         uint64_t quiet_scan_dev = scan_after.device_reads - scan_before.device_reads;
 
-        blk_cache_drop();
+        block_device_cache_drop();
         uint64_t r0 = tsc_read();
-        int repeat_problems = vfs_check();
+        int repeat_problems = virtual_file_system_check();
         uint64_t r1 = tsc_read();
         uint64_t repeat_scan_us = tsc_to_us(r1 - r0);
         if (repeat_problems != 0) {
@@ -8753,13 +8753,13 @@ static void boot_selftests_system(void) {
                   "disagreed with the first");
         }
         if (quiet_problems != 0) {
-            klog_puts("[m105] the scan found ");
-            klog_put_dec((uint32_t)quiet_problems);
-            klog_puts(" problem(s) on a filesystem nothing had written to yet\n");
+            kernel_log_puts("[m105] the scan found ");
+            kernel_log_put_dec((uint32_t)quiet_problems);
+            kernel_log_puts(" problem(s) on a filesystem nothing had written to yet\n");
             panic("M105 self-test: the boot filesystem does not check out clean");
         }
 
-        uint32_t free_before = vfs_free_blocks();
+        uint32_t free_before = virtual_file_system_free_blocks();
 
         size_t image_bytes = 0;
         uint8_t *image = read_program(PATH_BIN_DIR "fswriter", &image_bytes);
@@ -8782,8 +8782,8 @@ static void boot_selftests_system(void) {
         uint64_t w0 = tsc_read();
         uint64_t deadline = pit_get_ticks() + 12000;
         for (int w = 0; w < WRITERS; w++) {
-            while (sched_task_by_id(ids[w]) &&
-                   sched_task_by_id(ids[w])->state != TASK_TERMINATED) {
+            while (scheduler_task_by_id(ids[w]) &&
+                   scheduler_task_by_id(ids[w])->state != TASK_TERMINATED) {
                 if (pit_get_ticks() > deadline) {
                     panic("M105 self-test: a writer never finished - four writers on one "
                           "coarse filesystem lock have deadlocked or starved");
@@ -8795,35 +8795,35 @@ static void boot_selftests_system(void) {
         uint64_t writers_us = tsc_to_us(w1 - w0);
 
         for (int w = 0; w < WRITERS; w++) {
-            task_t *done = sched_task_by_id(ids[w]);
+            task_t *done = scheduler_task_by_id(ids[w]);
             int code = done ? done->exit_code : -1;
             selftest_reap(done);
             if (code != 0) {
-                klog_puts("[m105] writer ");
-                klog_put_dec((uint32_t)w);
-                klog_puts(" exited ");
-                klog_put_dec((uint32_t)code);
-                klog_puts(" - see user_space/binaries/fswriter.c for what each code means\n");
+                kernel_log_puts("[m105] writer ");
+                kernel_log_put_dec((uint32_t)w);
+                kernel_log_puts(" exited ");
+                kernel_log_put_dec((uint32_t)code);
+                kernel_log_puts(" - see user_space/binaries/fswriter.c for what each code means\n");
                 panic("M105 self-test: a writer could not verify its own bytes with "
                       "three others writing beside it");
             }
         }
 
-        blk_cache_drop();
-        blk_stats(&scan_before);
+        block_device_cache_drop();
+        block_device_statistics(&scan_before);
         uint64_t s2 = tsc_read();
-        int busy_problems = vfs_check();
+        int busy_problems = virtual_file_system_check();
         uint64_t s3 = tsc_read();
         uint64_t busy_scan_us = tsc_to_us(s3 - s2);
-        blk_stats(&scan_after);
+        block_device_statistics(&scan_after);
         uint64_t busy_scan_reads = scan_after.reads - scan_before.reads;
         uint64_t busy_scan_misses = (scan_after.reads - scan_before.reads) -
                                     (scan_after.hits - scan_before.hits);
         uint64_t busy_scan_dev = scan_after.device_reads - scan_before.device_reads;
         if (busy_problems != 0) {
-            klog_puts("[m105] the scan found ");
-            klog_put_dec((uint32_t)busy_problems);
-            klog_puts(" problem(s) after four concurrent writers\n");
+            kernel_log_puts("[m105] the scan found ");
+            kernel_log_put_dec((uint32_t)busy_problems);
+            kernel_log_puts(" problem(s) after four concurrent writers\n");
             panic("M105 self-test: concurrent writers corrupted the block bitmap - "
                   "write ordering plus a mount check is no longer enough");
         }
@@ -8845,54 +8845,54 @@ static void boot_selftests_system(void) {
                     }
                     path[q++] = (char)('0' + f % 10);
                     path[q] = '\0';
-                    if (vfs_exists(path)) {
-                        vfs_unlink(path);
+                    if (virtual_file_system_exists(path)) {
+                        virtual_file_system_unlink(path);
                     }
                 }
             }
-            vfs_rmdir(dir);
+            virtual_file_system_rmdir(dir);
         }
-        uint32_t free_after = vfs_free_blocks();
+        uint32_t free_after = virtual_file_system_free_blocks();
         if (free_after != free_before) {
-            klog_puts("[m105] ");
-            klog_put_dec(free_before);
-            klog_puts(" data blocks free before the writers ran and ");
-            klog_put_dec(free_after);
-            klog_puts(" after removing everything they made\n");
+            kernel_log_puts("[m105] ");
+            kernel_log_put_dec(free_before);
+            kernel_log_puts(" data blocks free before the writers ran and ");
+            kernel_log_put_dec(free_after);
+            kernel_log_puts(" after removing everything they made\n");
             panic("M105 self-test: concurrent writers leaked blocks - the free count did "
                   "not come back");
         }
 
-        klog_perf("mount_scan_us", quiet_scan_us, "us");
-        klog_perf("mount_scan_repeat_us", repeat_scan_us, "us");
-        klog_perf("mount_scan_busy_us", busy_scan_us, "us");
-        klog_perf("four_writers_us", writers_us, "us");
-        klog_puts("[m105] the quiet scan: ");
-        klog_put_dec((uint32_t)quiet_scan_reads);
-        klog_puts(" block reads, ");
-        klog_put_dec((uint32_t)quiet_scan_misses);
-        klog_puts(" of them missed the cache, ");
-        klog_put_dec((uint32_t)quiet_scan_dev);
-        klog_puts(" sector reads issued to the device. The busy scan: ");
-        klog_put_dec((uint32_t)busy_scan_reads);
-        klog_puts(" / ");
-        klog_put_dec((uint32_t)busy_scan_misses);
-        klog_puts(" / ");
-        klog_put_dec((uint32_t)busy_scan_dev);
-        klog_putc('\n');
+        kernel_log_perf("mount_scan_us", quiet_scan_us, "us");
+        kernel_log_perf("mount_scan_repeat_us", repeat_scan_us, "us");
+        kernel_log_perf("mount_scan_busy_us", busy_scan_us, "us");
+        kernel_log_perf("four_writers_us", writers_us, "us");
+        kernel_log_puts("[m105] the quiet scan: ");
+        kernel_log_put_dec((uint32_t)quiet_scan_reads);
+        kernel_log_puts(" block reads, ");
+        kernel_log_put_dec((uint32_t)quiet_scan_misses);
+        kernel_log_puts(" of them missed the cache, ");
+        kernel_log_put_dec((uint32_t)quiet_scan_dev);
+        kernel_log_puts(" sector reads issued to the device. The busy scan: ");
+        kernel_log_put_dec((uint32_t)busy_scan_reads);
+        kernel_log_puts(" / ");
+        kernel_log_put_dec((uint32_t)busy_scan_misses);
+        kernel_log_puts(" / ");
+        kernel_log_put_dec((uint32_t)busy_scan_dev);
+        kernel_log_putc('\n');
 
-        klog_puts("[m105] the journal's two conditions, measured together: the full scan "
+        kernel_log_puts("[m105] the journal's two conditions, measured together: the full scan "
                    "an unclean mount runs costs ");
-        klog_put_dec((uint32_t)quiet_scan_us);
-        klog_puts(" us on this filesystem and ");
-        klog_put_dec((uint32_t)busy_scan_us);
-        klog_puts(" us with four writers' trees on it; four processes wrote, fsynced, "
+        kernel_log_put_dec((uint32_t)quiet_scan_us);
+        kernel_log_puts(" us on this filesystem and ");
+        kernel_log_put_dec((uint32_t)busy_scan_us);
+        kernel_log_puts(" us with four writers' trees on it; four processes wrote, fsynced, "
                    "renamed and deleted concurrently for ");
-        klog_put_dec((uint32_t)writers_us);
-        klog_puts(" us, every one of them read back exactly the bytes it wrote, the scan "
+        kernel_log_put_dec((uint32_t)writers_us);
+        kernel_log_puts(" us, every one of them read back exactly the bytes it wrote, the scan "
                    "found no orphaned or doubly-allocated block, and all ");
-        klog_put_dec(free_before);
-        klog_puts(" free blocks came back - M71's first condition is met and costs "
+        kernel_log_put_dec(free_before);
+        kernel_log_puts(" free blocks came back - M71's first condition is met and costs "
                    "nothing, because one coarse lock makes a metadata sequence atomic "
                    "against another writer. Journal still refused - self-test passed.\n\n");
     }
@@ -8904,8 +8904,8 @@ static void boot_selftests_system(void) {
         const int MANY = 1200;
         static const char *const MANY_DIR = PATH_TMP_DIR "m81many";
 
-        if (!vfs_exists(MANY_DIR) && vfs_mkdir(MANY_DIR) != 0) {
-            klog_puts("[m81] could not create the directory for the file storm\n");
+        if (!virtual_file_system_exists(MANY_DIR) && virtual_file_system_mkdir(MANY_DIR) != 0) {
+            kernel_log_puts("[m81] could not create the directory for the file storm\n");
             all_ok = 0;
         }
 
@@ -8915,7 +8915,7 @@ static void boot_selftests_system(void) {
             char name[16];
             m81_storm_name(name, i);
             if (path_join(path, PATH_TMP_DIR "m81many/", name) != 0) {
-                klog_puts("[m81] a name in the file storm did not fit a path\n");
+                kernel_log_puts("[m81] a name in the file storm did not fit a path\n");
                 all_ok = 0;
                 break;
             }
@@ -8924,10 +8924,10 @@ static void boot_selftests_system(void) {
             body[1] = (char)((i >> 8) & 0xFF);
             body[2] = 'm';
             body[3] = '\0';
-            if (vfs_write(path, body, sizeof(body)) != 0) {
-                klog_puts("[m81] the filesystem ran out at 0x");
-                klog_put_hex32((uint32_t)i);
-                klog_puts(" files - the inode cap is still a wall\n");
+            if (virtual_file_system_write(path, body, sizeof(body)) != 0) {
+                kernel_log_puts("[m81] the filesystem ran out at 0x");
+                kernel_log_put_hex32((uint32_t)i);
+                kernel_log_puts(" files - the inode cap is still a wall\n");
                 all_ok = 0;
                 break;
             }
@@ -8942,47 +8942,47 @@ static void boot_selftests_system(void) {
         {
             char path[PATH_MAX_LEN];
             if (path_join(path, PATH_TMP_DIR "m81many/", longname) != 0 ||
-                vfs_write(path, "long", 5) != 0) {
-                klog_puts("[m81] a 255-character name was refused\n");
+                virtual_file_system_write(path, "long", 5) != 0) {
+                kernel_log_puts("[m81] a 255-character name was refused\n");
                 all_ok = 0;
             } else {
                 char got[8];
                 k_memset(got, 0, sizeof(got));
-                if (vfs_read(path, got, sizeof(got)) != 5 || got[0] != 'l') {
-                    klog_puts("[m81] a 255-character name did not read back by path\n");
+                if (virtual_file_system_read(path, got, sizeof(got)) != 5 || got[0] != 'l') {
+                    kernel_log_puts("[m81] a 255-character name did not read back by path\n");
                     all_ok = 0;
                 }
             }
         }
 
         char deep[PATH_MAX_LEN];
-        int deep_len = 0;
+        int deep_length = 0;
         {
             const char *seg = "/adirectorylevelname";
             k_strlcpy(deep, PATH_TMP_DIR "m81deep", sizeof(deep));
-            deep_len = (int)k_strlen(deep);
-            if (!vfs_exists(deep) && vfs_mkdir(deep) != 0) {
-                klog_puts("[m81] could not start the deep path\n");
+            deep_length = (int)k_strlen(deep);
+            if (!virtual_file_system_exists(deep) && virtual_file_system_mkdir(deep) != 0) {
+                kernel_log_puts("[m81] could not start the deep path\n");
                 all_ok = 0;
             }
             for (int level = 0; level < 12 && all_ok; level++) {
-                size_t seg_len = k_strlen(seg);
-                if (deep_len + (int)seg_len >= (int)sizeof(deep)) {
+                size_t seg_length = k_strlen(seg);
+                if (deep_length + (int)seg_length >= (int)sizeof(deep)) {
                     break;
                 }
-                k_memcpy(deep + deep_len, seg, seg_len);
-                deep_len += (int)seg_len;
-                deep[deep_len] = '\0';
-                if (!vfs_exists(deep) && vfs_mkdir(deep) != 0) {
-                    klog_puts("[m81] mkdir failed at depth 0x");
-                    klog_put_hex32((uint32_t)level);
-                    klog_puts("\n");
+                k_memcpy(deep + deep_length, seg, seg_length);
+                deep_length += (int)seg_length;
+                deep[deep_length] = '\0';
+                if (!virtual_file_system_exists(deep) && virtual_file_system_mkdir(deep) != 0) {
+                    kernel_log_puts("[m81] mkdir failed at depth 0x");
+                    kernel_log_put_hex32((uint32_t)level);
+                    kernel_log_puts("\n");
                     all_ok = 0;
                 }
             }
         }
-        if (all_ok && deep_len <= 128) {
-            klog_puts("[m81] the deep path is not actually deeper than the old limit\n");
+        if (all_ok && deep_length <= 128) {
+            kernel_log_puts("[m81] the deep path is not actually deeper than the old limit\n");
             all_ok = 0;
         }
         if (all_ok) {
@@ -8991,17 +8991,17 @@ static void boot_selftests_system(void) {
             size_t l = k_strlen(leaf);
             k_strlcpy(leaf + l, "/bottom.txt", sizeof(leaf) - l);
             static const char deep_body[] = "reached the bottom";
-            if (vfs_write(leaf, deep_body, sizeof(deep_body)) != 0) {
-                klog_puts("[m81] could not write a file at the bottom of a 0x");
-                klog_put_hex32((uint32_t)deep_len);
-                klog_puts("-byte path\n");
+            if (virtual_file_system_write(leaf, deep_body, sizeof(deep_body)) != 0) {
+                kernel_log_puts("[m81] could not write a file at the bottom of a 0x");
+                kernel_log_put_hex32((uint32_t)deep_length);
+                kernel_log_puts("-byte path\n");
                 all_ok = 0;
             } else {
                 char got[32];
                 k_memset(got, 0, sizeof(got));
-                if (vfs_read(leaf, got, sizeof(got)) != (int64_t)sizeof(deep_body) ||
+                if (virtual_file_system_read(leaf, got, sizeof(got)) != (int64_t)sizeof(deep_body) ||
                     got[0] != 'r') {
-                    klog_puts("[m81] the file at the bottom of the deep path did not read back\n");
+                    kernel_log_puts("[m81] the file at the bottom of the deep path did not read back\n");
                     all_ok = 0;
                 }
             }
@@ -9014,9 +9014,9 @@ static void boot_selftests_system(void) {
             static uint8_t seen_ino[LEANFS_MAX_INODES / 8];
             k_memset(seen_ino, 0, sizeof(seen_ino));
             uint32_t cookie = 0;
-            leanfs_dir_entry_t e;
+            leanfs_directory_entry_t e;
             int rc;
-            while ((rc = vfs_readdir(MANY_DIR, &cookie, &e)) == 1) {
+            while ((rc = virtual_file_system_readdir(MANY_DIR, &cookie, &e)) == 1) {
                 seen++;
                 if (e.inode < LEANFS_MAX_INODES) {
                     if (seen_ino[e.inode / 8] & (1u << (e.inode % 8))) {
@@ -9029,38 +9029,38 @@ static void boot_selftests_system(void) {
                 }
             }
             if (rc < 0) {
-                klog_puts("[m81] readdir reported a corrupt directory\n");
+                kernel_log_puts("[m81] readdir reported a corrupt directory\n");
                 all_ok = 0;
             }
         }
         if (all_ok && seen != created + 1) {
-            klog_puts("[m81] a directory holding 0x");
-            klog_put_hex32((uint32_t)(created + 1));
-            klog_puts(" entries walked back 0x");
-            klog_put_hex32((uint32_t)seen);
-            klog_puts(" of them\n");
+            kernel_log_puts("[m81] a directory holding 0x");
+            kernel_log_put_hex32((uint32_t)(created + 1));
+            kernel_log_puts(" entries walked back 0x");
+            kernel_log_put_hex32((uint32_t)seen);
+            kernel_log_puts(" of them\n");
             all_ok = 0;
         }
         if (all_ok && !saw_long) {
-            klog_puts("[m81] the 255-character name was not among the entries walked back\n");
+            kernel_log_puts("[m81] the 255-character name was not among the entries walked back\n");
             all_ok = 0;
         }
         if (all_ok && dup_inode) {
-            klog_puts("[m81] two entries reported the same inode number - the walk repeated itself\n");
+            kernel_log_puts("[m81] two entries reported the same inode number - the walk repeated itself\n");
             all_ok = 0;
         }
 
         if (all_ok) {
             leanfs_stat_t before, after;
-            vfs_stat(MANY_DIR, &before);
+            virtual_file_system_stat(MANY_DIR, &before);
             const int CHURN = 8;
             for (int i = 0; i < created; i += CHURN) {
                 char path[PATH_MAX_LEN];
                 char name[16];
                 m81_storm_name(name, i);
                 path_join(path, PATH_TMP_DIR "m81many/", name);
-                if (vfs_unlink(path) != 0) {
-                    klog_puts("[m81] could not remove a file from the storm\n");
+                if (virtual_file_system_unlink(path) != 0) {
+                    kernel_log_puts("[m81] could not remove a file from the storm\n");
                     all_ok = 0;
                     break;
                 }
@@ -9070,19 +9070,19 @@ static void boot_selftests_system(void) {
                 char name[16];
                 m81_storm_name(name, i);
                 path_join(path, PATH_TMP_DIR "m81many/", name);
-                if (vfs_write(path, "re", 3) != 0) {
-                    klog_puts("[m81] could not put a removed file back\n");
+                if (virtual_file_system_write(path, "re", 3) != 0) {
+                    kernel_log_puts("[m81] could not put a removed file back\n");
                     all_ok = 0;
                     break;
                 }
             }
-            vfs_stat(MANY_DIR, &after);
+            virtual_file_system_stat(MANY_DIR, &after);
             if (all_ok && after.size > before.size) {
-                klog_puts("[m81] a directory grew from 0x");
-                klog_put_hex32(before.size);
-                klog_puts(" to 0x");
-                klog_put_hex32(after.size);
-                klog_puts(" bytes across a delete/recreate cycle - the holes are not being reused\n");
+                kernel_log_puts("[m81] a directory grew from 0x");
+                kernel_log_put_hex32(before.size);
+                kernel_log_puts(" to 0x");
+                kernel_log_put_hex32(after.size);
+                kernel_log_puts(" bytes across a delete/recreate cycle - the holes are not being reused\n");
                 all_ok = 0;
             }
         }
@@ -9091,17 +9091,17 @@ static void boot_selftests_system(void) {
         if (!all_ok) {
             panic("M81 self-test: this filesystem still cannot hold somebody else's program");
         }
-        klog_puts("[m81] a filesystem that can hold somebody else's program: 0x");
-        klog_put_hex32((uint32_t)created);
-        klog_puts(" files in one directory (the whole disk held 0xC0 before this milestone), "
+        kernel_log_puts("[m81] a filesystem that can hold somebody else's program: 0x");
+        kernel_log_put_hex32((uint32_t)created);
+        kernel_log_puts(" files in one directory (the whole disk held 0xC0 before this milestone), "
                    "a 255-character name written and read back by path, a file at the bottom "
                    "of a 0x");
-        klog_put_hex32((uint32_t)deep_len);
-        klog_puts("-byte path, every entry walked back one at a time by streaming readdir "
+        kernel_log_put_hex32((uint32_t)deep_length);
+        kernel_log_puts("-byte path, every entry walked back one at a time by streaming readdir "
                    "with no two sharing an inode number, and a delete/recreate cycle reusing "
                    "the holes rather than growing the directory - self-test passed (");
-        klog_put_dec(took_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_put_dec(took_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     {
@@ -9114,9 +9114,9 @@ static void boot_selftests_system(void) {
         static uint8_t chunk[64 * 1024];
         int big_handle = -1;
         if (all_ok) {
-            big_handle = vfs_open(BIG, 1);
+            big_handle = virtual_file_system_open(BIG, 1);
             if (big_handle < 0) {
-                klog_puts("[m93] could not create a file to grow\n");
+                kernel_log_puts("[m93] could not create a file to grow\n");
                 all_ok = 0;
             }
         }
@@ -9125,38 +9125,38 @@ static void boot_selftests_system(void) {
                 chunk[i] = (uint8_t)((off + i) >> 12);
                 chunk[i + 1] = (uint8_t)((off + i) >> 20);
             }
-            if (vfs_handle_write(big_handle, chunk, CHUNK, off) != (int64_t)CHUNK) {
-                klog_puts("[m93] a write past the old 8 MiB ceiling was refused at 0x");
-                klog_put_hex32(off);
-                klog_putc('\n');
+            if (virtual_file_system_handle_write(big_handle, chunk, CHUNK, off) != (int64_t)CHUNK) {
+                kernel_log_puts("[m93] a write past the old 8 MiB ceiling was refused at 0x");
+                kernel_log_put_hex32(off);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
-        if (all_ok && vfs_handle_size(big_handle) != BIG_BYTES) {
-            klog_puts("[m93] the grown file is not the size it was written to\n");
+        if (all_ok && virtual_file_system_handle_size(big_handle) != BIG_BYTES) {
+            kernel_log_puts("[m93] the grown file is not the size it was written to\n");
             all_ok = 0;
         }
         for (uint32_t off = 0; all_ok && off < BIG_BYTES; off += CHUNK) {
             k_memset(chunk, 0, CHUNK);
-            if (vfs_handle_read(big_handle, chunk, CHUNK, off) != (int64_t)CHUNK) {
-                klog_puts("[m93] a read past the old ceiling came up short\n");
+            if (virtual_file_system_handle_read(big_handle, chunk, CHUNK, off) != (int64_t)CHUNK) {
+                kernel_log_puts("[m93] a read past the old ceiling came up short\n");
                 all_ok = 0;
                 break;
             }
             for (uint32_t i = 0; i < CHUNK; i += 512) {
                 if (chunk[i] != (uint8_t)((off + i) >> 12) ||
                     chunk[i + 1] != (uint8_t)((off + i) >> 20)) {
-                    klog_puts("[m93] a block came back from the wrong place at 0x");
-                    klog_put_hex32(off + i);
-                    klog_putc('\n');
+                    kernel_log_puts("[m93] a block came back from the wrong place at 0x");
+                    kernel_log_put_hex32(off + i);
+                    kernel_log_putc('\n');
                     all_ok = 0;
                     break;
                 }
             }
         }
         if (all_ok) {
-            if (vfs_unlink(BIG) != 0) {
-                klog_puts("[m93] the big file could not be removed\n");
+            if (virtual_file_system_unlink(BIG) != 0) {
+                kernel_log_puts("[m93] the big file could not be removed\n");
                 all_ok = 0;
             }
         }
@@ -9164,8 +9164,8 @@ static void boot_selftests_system(void) {
         static const char *const MANYDIR = PATH_TMP_DIR "m93many";
         const int PAST_CAP = 9000;
         int made = 0;
-        if (all_ok && !vfs_exists(MANYDIR) && vfs_mkdir(MANYDIR) != 0) {
-            klog_puts("[m93] could not make the directory for the inode storm\n");
+        if (all_ok && !virtual_file_system_exists(MANYDIR) && virtual_file_system_mkdir(MANYDIR) != 0) {
+            kernel_log_puts("[m93] could not make the directory for the inode storm\n");
             all_ok = 0;
         }
         for (int i = 0; i < PAST_CAP && all_ok; i++) {
@@ -9173,32 +9173,32 @@ static void boot_selftests_system(void) {
             char name[16];
             m81_storm_name(name, i);
             if (path_join(path, PATH_TMP_DIR "m93many/", name) != 0 ||
-                vfs_write(path, "x", 1) != 0) {
-                klog_puts("[m93] file creation failed at 0x");
-                klog_put_hex32((uint32_t)i);
-                klog_puts(" - the inode cap is still where it was\n");
+                virtual_file_system_write(path, "x", 1) != 0) {
+                kernel_log_puts("[m93] file creation failed at 0x");
+                kernel_log_put_hex32((uint32_t)i);
+                kernel_log_puts(" - the inode cap is still where it was\n");
                 all_ok = 0;
                 break;
             }
             made++;
         }
         if (all_ok && made <= 8192) {
-            klog_puts("[m93] the storm stopped at or below the old cap, so it proved nothing\n");
+            kernel_log_puts("[m93] the storm stopped at or below the old cap, so it proved nothing\n");
             all_ok = 0;
         }
         if (all_ok) {
             uint32_t cookie = 0;
-            leanfs_dir_entry_t e;
+            leanfs_directory_entry_t e;
             int seen = 0;
-            while (vfs_readdir(MANYDIR, &cookie, &e) == 1) {
+            while (virtual_file_system_readdir(MANYDIR, &cookie, &e) == 1) {
                 seen++;
             }
             if (seen != made) {
-                klog_puts("[m93] made 0x");
-                klog_put_hex32((uint32_t)made);
-                klog_puts(" files and read back 0x");
-                klog_put_hex32((uint32_t)seen);
-                klog_putc('\n');
+                kernel_log_puts("[m93] made 0x");
+                kernel_log_put_hex32((uint32_t)made);
+                kernel_log_puts(" files and read back 0x");
+                kernel_log_put_hex32((uint32_t)seen);
+                kernel_log_putc('\n');
                 all_ok = 0;
             }
         }
@@ -9206,50 +9206,50 @@ static void boot_selftests_system(void) {
         static const char *const L_A = PATH_TMP_DIR "m93link.a";
         static const char *const L_B = PATH_TMP_DIR "m93link.b";
         if (all_ok) {
-            vfs_unlink(L_A);
-            vfs_unlink(L_B);
-            if (vfs_write(L_A, "two names", 9) != 0) {
-                klog_puts("[m93] could not write the file to link\n");
+            virtual_file_system_unlink(L_A);
+            virtual_file_system_unlink(L_B);
+            if (virtual_file_system_write(L_A, "two names", 9) != 0) {
+                kernel_log_puts("[m93] could not write the file to link\n");
                 all_ok = 0;
             }
         }
-        if (all_ok && vfs_link(L_A, L_B) != 0) {
-            klog_puts("[m93] link refused a file it should have accepted\n");
+        if (all_ok && virtual_file_system_link(L_A, L_B) != 0) {
+            kernel_log_puts("[m93] link refused a file it should have accepted\n");
             all_ok = 0;
         }
-        if (all_ok && (vfs_nlink(L_A) != 2 || vfs_nlink(L_B) != 2)) {
-            klog_puts("[m93] the link count is not 2 through both names\n");
+        if (all_ok && (virtual_file_system_nlink(L_A) != 2 || virtual_file_system_nlink(L_B) != 2)) {
+            kernel_log_puts("[m93] the link count is not 2 through both names\n");
             all_ok = 0;
         }
-        if (all_ok && vfs_link(PATH_TMP_DIR "m93many", PATH_TMP_DIR "m93dirlink") == 0) {
-            klog_puts("[m93] a hard link to a directory was allowed\n");
+        if (all_ok && virtual_file_system_link(PATH_TMP_DIR "m93many", PATH_TMP_DIR "m93dirlink") == 0) {
+            kernel_log_puts("[m93] a hard link to a directory was allowed\n");
             all_ok = 0;
         }
-        if (all_ok && vfs_unlink(L_A) != 0) {
-            klog_puts("[m93] removing the first name failed\n");
+        if (all_ok && virtual_file_system_unlink(L_A) != 0) {
+            kernel_log_puts("[m93] removing the first name failed\n");
             all_ok = 0;
         }
         if (all_ok) {
             char back[16];
-            int64_t n = vfs_read(L_B, back, sizeof(back));
+            int64_t n = virtual_file_system_read(L_B, back, sizeof(back));
             if (n != 9 || back[0] != 't') {
-                klog_puts("[m93] removing one name took the file with it\n");
+                kernel_log_puts("[m93] removing one name took the file with it\n");
                 all_ok = 0;
             }
         }
-        if (all_ok && vfs_nlink(L_B) != 1) {
-            klog_puts("[m93] the link count did not come back down\n");
+        if (all_ok && virtual_file_system_nlink(L_B) != 1) {
+            kernel_log_puts("[m93] the link count did not come back down\n");
             all_ok = 0;
         }
         if (all_ok) {
-            vfs_unlink(L_B);
+            virtual_file_system_unlink(L_B);
         }
 
         if (all_ok) {
             int fds[2];
             if (do_syscall(SYS_pipe, (uint64_t)fds, 0, 0) == 0) {
                 if (do_syscall(SYS_fsync, (uint64_t)fds[0], 0, 0) == 0) {
-                    klog_puts("[m93] fsync claimed to have made a pipe durable\n");
+                    kernel_log_puts("[m93] fsync claimed to have made a pipe durable\n");
                     all_ok = 0;
                 }
                 do_syscall(SYS_close, (uint64_t)fds[0], 0, 0);
@@ -9261,16 +9261,16 @@ static void boot_selftests_system(void) {
             panic("M93 self-test: this filesystem cannot hold what a build would put in it");
         }
         uint32_t took_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms;
-        klog_puts("[m93] a filesystem that can hold a source tree: a 16 MiB file written and "
+        kernel_log_puts("[m93] a filesystem that can hold a source tree: a 16 MiB file written and "
                    "read back block for block where 8 MiB was the structural ceiling, 0x");
-        klog_put_hex32((uint32_t)made);
-        klog_puts(" files created past an inode cap of 0x2000 and every one of them read back, "
+        kernel_log_put_hex32((uint32_t)made);
+        kernel_log_puts(" files created past an inode cap of 0x2000 and every one of them read back, "
                    "a second name for a file with the link count to prove it is the same file "
                    "rather than a copy, one name removed leaving the other readable, a hard "
                    "link to a directory refused, and fsync refusing a pipe it cannot make "
                    "durable - self-test passed (");
-        klog_put_dec(took_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_put_dec(took_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     selftest_image_manifest();
@@ -9278,7 +9278,7 @@ static void boot_selftests_system(void) {
     {
         int all_ok = 1;
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
-        uint64_t frames_before = pmm_free_frame_count();
+        uint64_t frames_before = physical_memory_free_frame_count();
 
         size_t lz_bytes = 0;
         uint8_t *lz_img = read_program(PATH_BIN_DIR "lazytest", &lz_bytes);
@@ -9298,7 +9298,7 @@ static void boot_selftests_system(void) {
             if (do_syscall(SYS_task_alive, (uint64_t)lz_id, 0, 0) != 1) {
                 break;
             }
-            uint64_t now = pmm_free_frame_count();
+            uint64_t now = physical_memory_free_frame_count();
             if (now < lowest_free) {
                 lowest_free = now;
             }
@@ -9308,34 +9308,34 @@ static void boot_selftests_system(void) {
         long rc = do_syscall(SYS_wait, (uint64_t)lz_id, 0, 0);
         kfree(lz_img);
         if (rc != 0) {
-            klog_puts("[m82] lazytest exited ");
-            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/binaries/lazytest.c for what each code means\n");
+            kernel_log_puts("[m82] lazytest exited ");
+            kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            kernel_log_puts(" - see user_space/binaries/lazytest.c for what each code means\n");
             all_ok = 0;
         }
 
         uint64_t peak_spend = frames_before > lowest_free ? frames_before - lowest_free : 0;
         if (all_ok && peak_spend > 2048) {
-            klog_puts("[m82] a 144 MiB reservation cost 0x");
-            klog_put_hex64(peak_spend);
-            klog_puts(" frames while it was held - it is still being backed eagerly\n");
+            kernel_log_puts("[m82] a 144 MiB reservation cost 0x");
+            kernel_log_put_hex64(peak_spend);
+            kernel_log_puts(" frames while it was held - it is still being backed eagerly\n");
             all_ok = 0;
         }
         if (all_ok && peak_spend < 200) {
-            klog_puts("[m82] only 0x");
-            klog_put_hex64(peak_spend);
-            klog_puts(" frames were ever seen in use - the sample was taken before "
+            kernel_log_puts("[m82] only 0x");
+            kernel_log_put_hex64(peak_spend);
+            kernel_log_puts(" frames were ever seen in use - the sample was taken before "
                        "lazytest held its mapping, so this test proved nothing\n");
             all_ok = 0;
         }
 
-        uint64_t frames_after = pmm_free_frame_count();
+        uint64_t frames_after = physical_memory_free_frame_count();
         if (all_ok && frames_after != frames_before) {
-            klog_puts("[m82] frames before 0x");
-            klog_put_hex64(frames_before);
-            klog_puts(" after 0x");
-            klog_put_hex64(frames_after);
-            klog_puts(" - demand-filled pages are not all coming back\n");
+            kernel_log_puts("[m82] frames before 0x");
+            kernel_log_put_hex64(frames_before);
+            kernel_log_puts(" after 0x");
+            kernel_log_put_hex64(frames_after);
+            kernel_log_puts(" - demand-filled pages are not all coming back\n");
             all_ok = 0;
         }
 
@@ -9355,11 +9355,11 @@ static void boot_selftests_system(void) {
             long frc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
             kfree(f_img);
             if (frc != 128 + SIGSEGV) {
-                klog_puts("[m82] ");
-                klog_puts(FATAL_WHY[m]);
-                klog_puts(" exited 0x");
-                klog_put_hex32((uint32_t)frc);
-                klog_puts(" rather than being killed - the fault handler is filling too much\n");
+                kernel_log_puts("[m82] ");
+                kernel_log_puts(FATAL_WHY[m]);
+                kernel_log_puts(" exited 0x");
+                kernel_log_put_hex32((uint32_t)frc);
+                kernel_log_puts(" rather than being killed - the fault handler is filling too much\n");
                 all_ok = 0;
             }
         }
@@ -9367,10 +9367,10 @@ static void boot_selftests_system(void) {
         if (!all_ok) {
             panic("M82 self-test: this kernel is not filling pages on demand, or is filling too many");
         }
-        klog_puts("[m82] a page that arrives when it is asked for: a 144 MiB reservation "
+        kernel_log_puts("[m82] a page that arrives when it is asked for: a 144 MiB reservation "
                    "granted on a 128 MiB machine and held for 0x");
-        klog_put_hex64(peak_spend);
-        klog_puts(" frames rather than 0x9000 - and for more than the 0x100 pages "
+        kernel_log_put_hex64(peak_spend);
+        kernel_log_puts(" frames rather than 0x9000 - and for more than the 0x100 pages "
                    "deliberately touched, so the measurement is of something real - an "
                    "untouched page reading as zero, an untouched mapping accepted as a "
                    "syscall buffer, over a "
@@ -9379,14 +9379,14 @@ static void boot_selftests_system(void) {
                    "fatal - a write to a read-only mapping and a touch of unreserved arena "
                    "address space - still killing only the program that made them - "
                    "self-test passed (");
-        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
         int all_ok = 1;
-        uint64_t frames_before = pmm_free_frame_count();
+        uint64_t frames_before = physical_memory_free_frame_count();
 
         size_t vm_bytes = 0;
         uint8_t *vm_img = read_program(PATH_BIN_DIR "vmtest", &vm_bytes);
@@ -9398,9 +9398,9 @@ static void boot_selftests_system(void) {
         long vrc = vt ? do_syscall(SYS_wait, (uint64_t)vt->id, 0, 0) : -1;
         kfree(vm_img);
         if (vrc != 0) {
-            klog_puts("[m91] vmtest exited ");
-            klog_put_hex32((uint32_t)vrc);
-            klog_puts(" - see user_space/binaries/vmtest.c for what each code means\n");
+            kernel_log_puts("[m91] vmtest exited ");
+            kernel_log_put_hex32((uint32_t)vrc);
+            kernel_log_puts(" - see user_space/binaries/vmtest.c for what each code means\n");
             all_ok = 0;
         }
 
@@ -9422,22 +9422,22 @@ static void boot_selftests_system(void) {
             long frc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
             kfree(f_img);
             if (frc != 128 + SIGSEGV) {
-                klog_puts("[m91] ");
-                klog_puts(M91_WHY[m]);
-                klog_puts(" exited 0x");
-                klog_put_hex32((uint32_t)frc);
-                klog_puts(" rather than being killed\n");
+                kernel_log_puts("[m91] ");
+                kernel_log_puts(M91_WHY[m]);
+                kernel_log_puts(" exited 0x");
+                kernel_log_put_hex32((uint32_t)frc);
+                kernel_log_puts(" rather than being killed\n");
                 all_ok = 0;
             }
         }
 
-        uint64_t frames_after = pmm_free_frame_count();
+        uint64_t frames_after = physical_memory_free_frame_count();
         if (all_ok && frames_after != frames_before) {
-            klog_puts("[m91] frames before 0x");
-            klog_put_hex64(frames_before);
-            klog_puts(" after 0x");
-            klog_put_hex64(frames_after);
-            klog_puts(" - a mapping that was placed, replaced, reprotected or dropped "
+            kernel_log_puts("[m91] frames before 0x");
+            kernel_log_put_hex64(frames_before);
+            kernel_log_puts(" after 0x");
+            kernel_log_put_hex64(frames_after);
+            kernel_log_puts(" - a mapping that was placed, replaced, reprotected or dropped "
                        "is not giving every frame back\n");
             all_ok = 0;
         }
@@ -9445,16 +9445,16 @@ static void boot_selftests_system(void) {
         if (!all_ok) {
             panic("M91 self-test: the address space is not a set of mappings this program can arrange");
         }
-        int shared_left = filemap_in_use();
+        int shared_left = file_mapping_in_use();
         if (all_ok && shared_left != 0) {
-            klog_puts("[m91] 0x");
-            klog_put_hex32((uint32_t)shared_left);
-            klog_puts(" shared file page(s) still held after every mapping was "
+            kernel_log_puts("[m91] 0x");
+            kernel_log_put_hex32((uint32_t)shared_left);
+            kernel_log_puts(" shared file page(s) still held after every mapping was "
                        "dropped - see kernel/memory_management/file_mapping.c\n");
             all_ok = 0;
         }
 
-        klog_puts("[m91] an address space that is a set of mappings: an address hint "
+        kernel_log_puts("[m91] an address space that is a set of mappings: an address hint "
                    "honoured and MAP_FIXED landing exactly where it was told and "
                    "replacing what was there, mprotect taking write away and giving it "
                    "back with the bytes intact and refusing a range no mapping covers, "
@@ -9467,19 +9467,19 @@ static void boot_selftests_system(void) {
                    "MAP_SHARED twice as one piece of memory with a write that reached the "
                    "disk through msync, "
                    "NX ");
-        klog_puts(vmm_nx_enabled() ? "enforced" : "unavailable on this CPU");
-        klog_puts(", and all four faults that must stay fatal - executing a "
+        kernel_log_puts(virtual_memory_nx_enabled() ? "enforced" : "unavailable on this CPU");
+        kernel_log_puts(", and all four faults that must stay fatal - executing a "
                    "non-executable page, writing to one mprotect made read-only, touching "
                    "a guard page, and touching far below the stack pointer - still "
                    "killing only the program that made them - self-test passed (");
-        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     {
         int all_ok = 1;
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
-        uint64_t frames_before = pmm_free_frame_count();
+        uint64_t frames_before = physical_memory_free_frame_count();
 
         size_t ft_bytes = 0;
         uint8_t *ft_img = read_program(PATH_BIN_DIR "forktest", &ft_bytes);
@@ -9491,31 +9491,31 @@ static void boot_selftests_system(void) {
         long rc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
         kfree(ft_img);
         if (rc != 0) {
-            klog_puts("[m83] forktest exited ");
-            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/binaries/forktest.c for what each code means\n");
+            kernel_log_puts("[m83] forktest exited ");
+            kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            kernel_log_puts(" - see user_space/binaries/forktest.c for what each code means\n");
             all_ok = 0;
         }
 
-        for (int i = 0; i < sched_task_count(); i++) {
-            task_t *stale = sched_task_by_slot(i);
+        for (int i = 0; i < scheduler_task_count(); i++) {
+            task_t *stale = scheduler_task_by_slot(i);
             if (stale && stale->state == TASK_TERMINATED) {
                 selftest_reap(stale);
             }
         }
-        uint64_t frames_after = pmm_free_frame_count();
+        uint64_t frames_after = physical_memory_free_frame_count();
         if (all_ok && frames_after != frames_before) {
-            klog_puts("[m83] frames before 0x");
-            klog_put_hex64(frames_before);
-            klog_puts(" after 0x");
-            klog_put_hex64(frames_after);
-            klog_puts(" - a hundred forks did not give everything back\n");
+            kernel_log_puts("[m83] frames before 0x");
+            kernel_log_put_hex64(frames_before);
+            kernel_log_puts(" after 0x");
+            kernel_log_put_hex64(frames_after);
+            kernel_log_puts(" - a hundred forks did not give everything back\n");
             all_ok = 0;
         }
 
         uint64_t cow_spend = 0;
         if (all_ok) {
-            uint64_t cow_before = pmm_free_frame_count();
+            uint64_t cow_before = physical_memory_free_frame_count();
             size_t cw_bytes = 0;
             uint8_t *cw_img = read_program(PATH_BIN_DIR "forktest", &cw_bytes);
             if (!cw_img) {
@@ -9533,7 +9533,7 @@ static void boot_selftests_system(void) {
                 if (do_syscall(SYS_task_alive, (uint64_t)cw_id, 0, 0) != 1) {
                     break;
                 }
-                uint64_t now = pmm_free_frame_count();
+                uint64_t now = physical_memory_free_frame_count();
                 if (now < lowest_free) {
                     lowest_free = now;
                 }
@@ -9544,32 +9544,32 @@ static void boot_selftests_system(void) {
             cow_spend = cow_before > lowest_free ? cow_before - lowest_free : 0;
 
             if (cw_rc != 0) {
-                klog_puts("[m83] forktest cow exited ");
-                klog_put_dec((uint32_t)(cw_rc < 0 ? 99 : cw_rc));
-                klog_puts("\n");
+                kernel_log_puts("[m83] forktest cow exited ");
+                kernel_log_put_dec((uint32_t)(cw_rc < 0 ? 99 : cw_rc));
+                kernel_log_puts("\n");
                 all_ok = 0;
             }
             if (all_ok && cow_spend > 3000) {
-                klog_puts("[m83] a fork of an 8 MiB process cost 0x");
-                klog_put_hex64(cow_spend);
-                klog_puts(" frames - the address space is being copied, not shared\n");
+                kernel_log_puts("[m83] a fork of an 8 MiB process cost 0x");
+                kernel_log_put_hex64(cow_spend);
+                kernel_log_puts(" frames - the address space is being copied, not shared\n");
                 all_ok = 0;
             }
             if (all_ok && cow_spend < 2048) {
-                klog_puts("[m83] only 0x");
-                klog_put_hex64(cow_spend);
-                klog_puts(" frames were ever seen in use - the sample was taken before "
+                kernel_log_puts("[m83] only 0x");
+                kernel_log_put_hex64(cow_spend);
+                kernel_log_puts(" frames were ever seen in use - the sample was taken before "
                            "forktest had touched its memory, so this proved nothing\n");
                 all_ok = 0;
             }
-            for (int i = 0; i < sched_task_count(); i++) {
-                task_t *stale = sched_task_by_slot(i);
+            for (int i = 0; i < scheduler_task_count(); i++) {
+                task_t *stale = scheduler_task_by_slot(i);
                 if (stale && stale->state == TASK_TERMINATED) {
                     selftest_reap(stale);
                 }
             }
-            if (all_ok && pmm_free_frame_count() != cow_before) {
-                klog_puts("[m83] the copy-on-write round did not give every frame back\n");
+            if (all_ok && physical_memory_free_frame_count() != cow_before) {
+                kernel_log_puts("[m83] the copy-on-write round did not give every frame back\n");
                 all_ok = 0;
             }
         }
@@ -9577,22 +9577,22 @@ static void boot_selftests_system(void) {
         if (!all_ok) {
             panic("M83 self-test: this kernel cannot make two processes out of one");
         }
-        klog_puts("[m83] two processes from one: fork returning twice into two pids, "
+        kernel_log_puts("[m83] two processes from one: fork returning twice into two pids, "
                    "memory written before the call visible to the child and memory "
                    "written after it private to each, an inherited pipe carrying a "
                    "message from child to parent, a hundred rounds of fork/exit/wait "
                    "returning every task slot and every frame, and an 8 MiB process "
                    "forked for 0x");
-        klog_put_hex64(cow_spend);
-        klog_puts(" frames rather than the 0x1000 a copy would have cost - "
+        kernel_log_put_hex64(cow_spend);
+        kernel_log_puts(" frames rather than the 0x1000 a copy would have cost - "
                    "self-test passed (");
-        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
-        uint64_t frames_before = pmm_free_frame_count();
+        uint64_t frames_before = physical_memory_free_frame_count();
 
         size_t ex_bytes = 0;
         uint8_t *ex_img = read_program(PATH_BIN_DIR "exectest", &ex_bytes);
@@ -9607,39 +9607,39 @@ static void boot_selftests_system(void) {
 
         int all_ok = 1;
         if (rc != 0) {
-            klog_puts("[m84] exectest exited ");
-            klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-            klog_puts(" - see user_space/binaries/exectest.c for what each code means\n");
+            kernel_log_puts("[m84] exectest exited ");
+            kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            kernel_log_puts(" - see user_space/binaries/exectest.c for what each code means\n");
             all_ok = 0;
         }
 
-        for (int i = 0; i < sched_task_count(); i++) {
-            task_t *stale = sched_task_by_slot(i);
+        for (int i = 0; i < scheduler_task_count(); i++) {
+            task_t *stale = scheduler_task_by_slot(i);
             if (stale && stale->state == TASK_TERMINATED) {
                 selftest_reap(stale);
             }
         }
-        uint64_t frames_after = pmm_free_frame_count();
+        uint64_t frames_after = physical_memory_free_frame_count();
         if (all_ok && frames_after != frames_before) {
-            klog_puts("[m84] frames before 0x");
-            klog_put_hex64(frames_before);
-            klog_puts(" after 0x");
-            klog_put_hex64(frames_after);
-            klog_puts(" - an exec is not giving back the address space it replaced\n");
+            kernel_log_puts("[m84] frames before 0x");
+            kernel_log_put_hex64(frames_before);
+            kernel_log_puts(" after 0x");
+            kernel_log_put_hex64(frames_after);
+            kernel_log_puts(" - an exec is not giving back the address space it replaced\n");
             all_ok = 0;
         }
 
         if (!all_ok) {
             panic("M84 self-test: exec, or the wait that has to describe it, is wrong");
         }
-        klog_puts("[m84] a program that replaces itself: a descriptor marked "
+        kernel_log_puts("[m84] a program that replaces itself: a descriptor marked "
                    "close-on-exec gone on the far side of an exec while its neighbour "
                    "survives and still reads, waitpid telling a death by SIGSEGV from a "
                    "program that exited 139, WNOHANG not waiting, execvp finding a "
                    "program on PATH, a process keeping its pid across an exec, and every "
                    "frame of every replaced address space back - self-test passed (");
-        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     {
@@ -9656,9 +9656,9 @@ static void boot_selftests_system(void) {
             k_memset(got, 0, sizeof(got));
             uint32_t n = tty_read(tty, got, sizeof(got) - 1);
             if (n != 4 || got[0] != 'a' || got[1] != 'b' || got[2] != 'c' || got[3] != '\n') {
-                klog_puts("[m85] a line assembled with backspaces read back as 0x");
-                klog_put_hex32(n);
-                klog_puts(" bytes rather than \"abc\\n\"\n");
+                kernel_log_puts("[m85] a line assembled with backspaces read back as 0x");
+                kernel_log_put_hex32(n);
+                kernel_log_puts(" bytes rather than \"abc\\n\"\n");
                 all_ok = 0;
             }
         }
@@ -9667,12 +9667,12 @@ static void boot_selftests_system(void) {
             tty_input_char(tty, 'x');
             tty_input_char(tty, 'y');
             if (tty_readable(tty) != 0) {
-                klog_puts("[m85] a half-typed line was readable before Enter\n");
+                kernel_log_puts("[m85] a half-typed line was readable before Enter\n");
                 all_ok = 0;
             }
             tty_input_char(tty, 21);
             if (tty_readable(tty) != 0) {
-                klog_puts("[m85] ^U did not discard the line being edited\n");
+                kernel_log_puts("[m85] ^U did not discard the line being edited\n");
                 all_ok = 0;
             }
         }
@@ -9682,13 +9682,13 @@ static void boot_selftests_system(void) {
             tty->tio.c_lflag &= ~(tcflag_t)ICANON;
             tty_input_char(tty, 'r');
             if (tty_readable(tty) != 1) {
-                klog_puts("[m85] with ICANON off, a byte was not readable immediately\n");
+                kernel_log_puts("[m85] with ICANON off, a byte was not readable immediately\n");
                 all_ok = 0;
             }
             char one = 0;
             tty_read(tty, &one, 1);
             if (one != 'r') {
-                klog_puts("[m85] raw mode delivered the wrong byte\n");
+                kernel_log_puts("[m85] raw mode delivered the wrong byte\n");
                 all_ok = 0;
             }
             tty->tio.c_lflag = saved;
@@ -9698,11 +9698,11 @@ static void boot_selftests_system(void) {
             tty->sid = 4242;
             tty->fg_pgid = 999999;
             if (tty_may_read(tty, 4242, 12345) != 0) {
-                klog_puts("[m85] a background job was allowed to read the terminal\n");
+                kernel_log_puts("[m85] a background job was allowed to read the terminal\n");
                 all_ok = 0;
             }
             if (all_ok && tty_may_read(tty, 4242, 999999) != 1) {
-                klog_puts("[m85] the foreground job was refused its own terminal\n");
+                kernel_log_puts("[m85] the foreground job was refused its own terminal\n");
                 all_ok = 0;
             }
         }
@@ -9715,53 +9715,53 @@ static void boot_selftests_system(void) {
         }
 
         if (all_ok) {
-            int mh = vfs_open("/dev/ptmx", 0);
+            int mh = virtual_file_system_open("/dev/ptmx", 0);
             if (mh < 0) {
-                klog_puts("[m85] /dev/ptmx would not open\n");
+                kernel_log_puts("[m85] /dev/ptmx would not open\n");
                 all_ok = 0;
             } else {
-                if (!vfs_exists("/dev/pts/0")) {
-                    klog_puts("[m85] /dev/pts/0 did not appear when a pty was made\n");
+                if (!virtual_file_system_exists("/dev/pts/0")) {
+                    kernel_log_puts("[m85] /dev/pts/0 did not appear when a pty was made\n");
                     all_ok = 0;
                 }
-                int sh_ = vfs_open("/dev/pts/0", 0);
+                int sh_ = virtual_file_system_open("/dev/pts/0", 0);
                 if (sh_ < 0) {
-                    klog_puts("[m85] the slave end of a fresh pty would not open\n");
+                    kernel_log_puts("[m85] the slave end of a fresh pty would not open\n");
                     all_ok = 0;
                 } else {
                     char got[16];
                     k_memset(got, 0, sizeof(got));
-                    vfs_handle_write(mh, "hi", 2, 0);
-                    if (vfs_handle_readable(sh_)) {
-                        klog_puts("[m85] a pty delivered a half-typed line to its slave\n");
+                    virtual_file_system_handle_write(mh, "hi", 2, 0);
+                    if (virtual_file_system_handle_readable(sh_)) {
+                        kernel_log_puts("[m85] a pty delivered a half-typed line to its slave\n");
                         all_ok = 0;
                     }
-                    vfs_handle_write(mh, "\n", 1, 0);
-                    int64_t n = vfs_handle_read(sh_, got, sizeof(got) - 1, 0);
+                    virtual_file_system_handle_write(mh, "\n", 1, 0);
+                    int64_t n = virtual_file_system_handle_read(sh_, got, sizeof(got) - 1, 0);
                     if (n != 3 || got[0] != 'h' || got[1] != 'i' || got[2] != '\n') {
-                        klog_puts("[m85] a line typed at a pty master did not arrive whole at the slave\n");
+                        kernel_log_puts("[m85] a line typed at a pty master did not arrive whole at the slave\n");
                         all_ok = 0;
                     }
                     k_memset(got, 0, sizeof(got));
-                    vfs_handle_write(sh_, "y\n", 2, 0);
-                    n = vfs_handle_read(mh, got, sizeof(got) - 1, 0);
+                    virtual_file_system_handle_write(sh_, "y\n", 2, 0);
+                    n = virtual_file_system_handle_read(mh, got, sizeof(got) - 1, 0);
                     if (n < 3 || got[n - 2] != '\r' || got[n - 1] != '\n') {
-                        klog_puts("[m85] the slave's output did not reach the master with ONLCR\n");
+                        kernel_log_puts("[m85] the slave's output did not reach the master with ONLCR\n");
                         all_ok = 0;
                     }
-                    vfs_handle_close(mh);
-                    if (!vfs_handle_readable(sh_)) {
-                        klog_puts("[m85] a slave whose master closed would have blocked forever\n");
+                    virtual_file_system_handle_close(mh);
+                    if (!virtual_file_system_handle_readable(sh_)) {
+                        kernel_log_puts("[m85] a slave whose master closed would have blocked forever\n");
                         all_ok = 0;
                     }
-                    if (vfs_handle_read(sh_, got, sizeof(got) - 1, 0) != 0) {
-                        klog_puts("[m85] a hung-up pty slave did not read end-of-file\n");
+                    if (virtual_file_system_handle_read(sh_, got, sizeof(got) - 1, 0) != 0) {
+                        kernel_log_puts("[m85] a hung-up pty slave did not read end-of-file\n");
                         all_ok = 0;
                     }
-                    vfs_handle_close(sh_);
+                    virtual_file_system_handle_close(sh_);
                 }
-                if (vfs_exists("/dev/pts/0")) {
-                    klog_puts("[m85] a pty was not recycled when both ends closed\n");
+                if (virtual_file_system_exists("/dev/pts/0")) {
+                    kernel_log_puts("[m85] a pty was not recycled when both ends closed\n");
                     all_ok = 0;
                 }
             }
@@ -9778,9 +9778,9 @@ static void boot_selftests_system(void) {
             long rc = pt ? do_syscall(SYS_wait, (uint64_t)pt->id, 0, 0) : -1;
             kfree(pt_img);
             if (rc != 0) {
-                klog_puts("[m85] ptytest exited ");
-                klog_put_dec((uint32_t)(rc < 0 ? 99 : rc));
-                klog_puts(" - see user_space/binaries/ptytest.c for what each code means\n");
+                kernel_log_puts("[m85] ptytest exited ");
+                kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+                kernel_log_puts(" - see user_space/binaries/ptytest.c for what each code means\n");
                 all_ok = 0;
             }
         }
@@ -9788,15 +9788,15 @@ static void boot_selftests_system(void) {
         if (!all_ok) {
             panic("M85 self-test: this machine's terminal is not a terminal");
         }
-        klog_puts("[m85] a terminal that is a device: a line assembled with backspaces and "
+        kernel_log_puts("[m85] a terminal that is a device: a line assembled with backspaces and "
                    "delivered whole only on Enter, nothing readable before it, ^U discarding "
                    "it, ICANON off delivering a byte immediately, a background job "
                    "refused its terminal while the foreground job is served, SIGTSTP "
                    "stopping a task and SIGCONT resuming it, and a pseudo-terminal "
                    "carrying a line, an echo and a ^C between two processes - self-test "
                    "passed (");
-        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     {
@@ -9804,104 +9804,104 @@ static void boot_selftests_system(void) {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
         char buf[128];
 
-        if (!vfs_is_dir(PATH_DEV) || !vfs_is_dir(PATH_PROC)) {
-            klog_puts("[m87] /dev or /proc is not a directory\n");
+        if (!virtual_file_system_is_directory(PATH_DEV) || !virtual_file_system_is_directory(PATH_PROC)) {
+            kernel_log_puts("[m87] /dev or /proc is not a directory\n");
             all_ok = 0;
         }
         if (all_ok) {
-            size_t n = vfs_list("/", buf, sizeof(buf));
-            int saw_dev = 0, saw_proc = 0;
+            size_t n = virtual_file_system_list("/", buf, sizeof(buf));
+            int saw_dev = 0, saw_process = 0;
             for (size_t i = 0; i + 4 <= n; i++) {
                 if (k_memcmp(buf + i, "dev/", 4) == 0) {
                     saw_dev = 1;
                 }
                 if (i + 5 <= n && k_memcmp(buf + i, "proc/", 5) == 0) {
-                    saw_proc = 1;
+                    saw_process = 1;
                 }
             }
-            if (!saw_dev || !saw_proc) {
-                klog_puts("[m87] a mount point is not listed in its parent directory\n");
+            if (!saw_dev || !saw_process) {
+                kernel_log_puts("[m87] a mount point is not listed in its parent directory\n");
                 all_ok = 0;
             }
         }
 
         if (all_ok) {
-            int h = vfs_open(PATH_DEV_DIR "null", 0);
+            int h = virtual_file_system_open(PATH_DEV_DIR "null", 0);
             if (h < 0) {
-                klog_puts("[m87] /dev/null could not be opened\n");
+                kernel_log_puts("[m87] /dev/null could not be opened\n");
                 all_ok = 0;
             } else {
                 k_memset(buf, 0xAA, sizeof(buf));
-                if (vfs_handle_read(h, buf, sizeof(buf), 0) != 0) {
-                    klog_puts("[m87] a read of /dev/null returned bytes\n");
+                if (virtual_file_system_handle_read(h, buf, sizeof(buf), 0) != 0) {
+                    kernel_log_puts("[m87] a read of /dev/null returned bytes\n");
                     all_ok = 0;
                 }
-                if (vfs_handle_write(h, "swallowed", 9, 0) != 9) {
-                    klog_puts("[m87] a write to /dev/null was not accepted\n");
+                if (virtual_file_system_handle_write(h, "swallowed", 9, 0) != 9) {
+                    kernel_log_puts("[m87] a write to /dev/null was not accepted\n");
                     all_ok = 0;
                 }
             }
         }
 
         if (all_ok) {
-            int h = vfs_open(PATH_DEV_DIR "zero", 0);
+            int h = virtual_file_system_open(PATH_DEV_DIR "zero", 0);
             k_memset(buf, 0xAA, sizeof(buf));
-            if (h < 0 || vfs_handle_read(h, buf, 64, 0) != 64) {
-                klog_puts("[m87] /dev/zero did not deliver 64 bytes\n");
+            if (h < 0 || virtual_file_system_handle_read(h, buf, 64, 0) != 64) {
+                kernel_log_puts("[m87] /dev/zero did not deliver 64 bytes\n");
                 all_ok = 0;
             } else {
                 for (int i = 0; i < 64; i++) {
                     if (buf[i] != 0) {
-                        klog_puts("[m87] /dev/zero delivered something that was not zero\n");
+                        kernel_log_puts("[m87] /dev/zero delivered something that was not zero\n");
                         all_ok = 0;
                         break;
                     }
                 }
-                if (all_ok && vfs_handle_read(h, buf, 16, 4096) != 16) {
-                    klog_puts("[m87] /dev/zero ended at an offset - it is being treated as a file\n");
+                if (all_ok && virtual_file_system_handle_read(h, buf, 16, 4096) != 16) {
+                    kernel_log_puts("[m87] /dev/zero ended at an offset - it is being treated as a file\n");
                     all_ok = 0;
                 }
             }
         }
 
         if (all_ok) {
-            int h = vfs_open(PATH_DEV_DIR "full", 0);
-            if (h < 0 || vfs_handle_write(h, "x", 1, 0) != -1) {
-                klog_puts("[m87] /dev/full accepted a write\n");
+            int h = virtual_file_system_open(PATH_DEV_DIR "full", 0);
+            if (h < 0 || virtual_file_system_handle_write(h, "x", 1, 0) != -1) {
+                kernel_log_puts("[m87] /dev/full accepted a write\n");
                 all_ok = 0;
             }
         }
 
         if (all_ok) {
-            int h = vfs_open(PATH_DEV_DIR "urandom", 0);
+            int h = virtual_file_system_open(PATH_DEV_DIR "urandom", 0);
             char a[16], b[16];
             k_memset(a, 0, sizeof(a));
             k_memset(b, 0, sizeof(b));
-            if (h < 0 || vfs_handle_read(h, a, sizeof(a), 0) != (int64_t)sizeof(a) ||
-                vfs_handle_read(h, b, sizeof(b), 0) != (int64_t)sizeof(b)) {
-                klog_puts("[m87] /dev/urandom did not deliver bytes\n");
+            if (h < 0 || virtual_file_system_handle_read(h, a, sizeof(a), 0) != (int64_t)sizeof(a) ||
+                virtual_file_system_handle_read(h, b, sizeof(b), 0) != (int64_t)sizeof(b)) {
+                kernel_log_puts("[m87] /dev/urandom did not deliver bytes\n");
                 all_ok = 0;
             } else if (k_memcmp(a, b, sizeof(a)) == 0) {
-                klog_puts("[m87] two reads of /dev/urandom returned identical bytes\n");
+                kernel_log_puts("[m87] two reads of /dev/urandom returned identical bytes\n");
                 all_ok = 0;
             }
         }
 
         if (all_ok) {
-            if (vfs_write(PATH_DEV_DIR "null", "x", 1) == 0 ||
-                vfs_mkdir(PATH_DEV_DIR "newdir") == 0 ||
-                vfs_unlink(PATH_DEV_DIR "null") == 0 ||
-                vfs_write(PATH_PROC_DIR "uptime", "x", 1) == 0) {
-                klog_puts("[m87] a synthetic filesystem accepted a change to itself\n");
+            if (virtual_file_system_write(PATH_DEV_DIR "null", "x", 1) == 0 ||
+                virtual_file_system_mkdir(PATH_DEV_DIR "newdir") == 0 ||
+                virtual_file_system_unlink(PATH_DEV_DIR "null") == 0 ||
+                virtual_file_system_write(PATH_PROC_DIR "uptime", "x", 1) == 0) {
+                kernel_log_puts("[m87] a synthetic filesystem accepted a change to itself\n");
                 all_ok = 0;
             }
         }
 
         if (all_ok) {
             k_memset(buf, 0, sizeof(buf));
-            int64_t n = vfs_read(PATH_PROC_DIR "self/exe", buf, sizeof(buf) - 1);
+            int64_t n = virtual_file_system_read(PATH_PROC_DIR "self/exe", buf, sizeof(buf) - 1);
             if (n <= 0 || buf[0] != '/') {
-                klog_puts("[m87] /proc/self/exe did not read back a path\n");
+                kernel_log_puts("[m87] /proc/self/exe did not read back a path\n");
                 all_ok = 0;
             }
         }
@@ -9910,16 +9910,16 @@ static void boot_selftests_system(void) {
             char first[32], second[32];
             k_memset(first, 0, sizeof(first));
             k_memset(second, 0, sizeof(second));
-            vfs_read(PATH_PROC_DIR "uptime", first, sizeof(first) - 1);
+            virtual_file_system_read(PATH_PROC_DIR "uptime", first, sizeof(first) - 1);
             if (first[0] < '0' || first[0] > '9') {
-                klog_puts("[m87] /proc/uptime did not start with a digit\n");
+                kernel_log_puts("[m87] /proc/uptime did not start with a digit\n");
                 all_ok = 0;
             }
             if (all_ok) {
                 pit_sleep_ms(1200);
-                vfs_read(PATH_PROC_DIR "uptime", second, sizeof(second) - 1);
+                virtual_file_system_read(PATH_PROC_DIR "uptime", second, sizeof(second) - 1);
                 if (k_strcmp(first, second) == 0) {
-                    klog_puts("[m87] /proc/uptime read the same twice a second apart\n");
+                    kernel_log_puts("[m87] /proc/uptime read the same twice a second apart\n");
                     all_ok = 0;
                 }
             }
@@ -9927,93 +9927,93 @@ static void boot_selftests_system(void) {
 
         if (all_ok) {
             k_memset(buf, 0, sizeof(buf));
-            int64_t n = vfs_read(PATH_PROC_DIR "self/status", buf, sizeof(buf) - 1);
+            int64_t n = virtual_file_system_read(PATH_PROC_DIR "self/status", buf, sizeof(buf) - 1);
             if (n <= 0 || k_memcmp(buf, "Name:\t", 6) != 0) {
-                klog_puts("[m87] /proc/self/status did not begin with a Name field\n");
+                kernel_log_puts("[m87] /proc/self/status did not begin with a Name field\n");
                 all_ok = 0;
             }
         }
 
         if (all_ok) {
             uint32_t cookie = 0;
-            leanfs_dir_entry_t e;
+            leanfs_directory_entry_t e;
             int entries = 0;
             int saw_uptime = 0;
-            while (vfs_readdir(PATH_PROC, &cookie, &e) == 1 && entries < 200) {
+            while (virtual_file_system_readdir(PATH_PROC, &cookie, &e) == 1 && entries < 200) {
                 entries++;
                 if (k_strcmp(e.name, "uptime") == 0) {
                     saw_uptime = 1;
                 }
             }
             if (!saw_uptime || entries < 3) {
-                klog_puts("[m87] /proc listed 0x");
-                klog_put_hex32((uint32_t)entries);
-                klog_puts(" entries and that is not a directory of processes\n");
+                kernel_log_puts("[m87] /proc listed 0x");
+                kernel_log_put_hex32((uint32_t)entries);
+                kernel_log_puts(" entries and that is not a directory of processes\n");
                 all_ok = 0;
             }
         }
 
         if (all_ok) {
-            if (vfs_write("/devices", "real", 5) != 0) {
-                klog_puts("[m87] /devices could not be created on the real filesystem\n");
+            if (virtual_file_system_write("/devices", "real", 5) != 0) {
+                kernel_log_puts("[m87] /devices could not be created on the real filesystem\n");
                 all_ok = 0;
             } else {
                 k_memset(buf, 0, sizeof(buf));
-                if (vfs_read("/devices", buf, sizeof(buf)) != 5 || buf[0] != 'r') {
-                    klog_puts("[m87] /devices was shadowed by the /dev mount\n");
+                if (virtual_file_system_read("/devices", buf, sizeof(buf)) != 5 || buf[0] != 'r') {
+                    kernel_log_puts("[m87] /devices was shadowed by the /dev mount\n");
                     all_ok = 0;
                 }
-                vfs_unlink("/devices");
+                virtual_file_system_unlink("/devices");
             }
         }
 
         if (all_ok) {
             static const char *const LOCK = PATH_TMP_DIR "m87.lock";
-            vfs_unlink(LOCK);
-            int first = vfs_open(LOCK, LEANFS_OPEN_CREATE | LEANFS_OPEN_EXCL);
-            int second = vfs_open(LOCK, LEANFS_OPEN_CREATE | LEANFS_OPEN_EXCL);
+            virtual_file_system_unlink(LOCK);
+            int first = virtual_file_system_open(LOCK, LEANFS_OPEN_CREATE | LEANFS_OPEN_EXCL);
+            int second = virtual_file_system_open(LOCK, LEANFS_OPEN_CREATE | LEANFS_OPEN_EXCL);
             if (first < 0) {
-                klog_puts("[m87] an exclusive create of a fresh path failed\n");
+                kernel_log_puts("[m87] an exclusive create of a fresh path failed\n");
                 all_ok = 0;
             } else if (second >= 0) {
-                klog_puts("[m87] a second exclusive create of the same path succeeded\n");
+                kernel_log_puts("[m87] a second exclusive create of the same path succeeded\n");
                 all_ok = 0;
             }
-            if (all_ok && vfs_open(LOCK, LEANFS_OPEN_CREATE) < 0) {
-                klog_puts("[m87] a plain create could not open a file that exists\n");
+            if (all_ok && virtual_file_system_open(LOCK, LEANFS_OPEN_CREATE) < 0) {
+                kernel_log_puts("[m87] a plain create could not open a file that exists\n");
                 all_ok = 0;
             }
-            vfs_unlink(LOCK);
+            virtual_file_system_unlink(LOCK);
         }
 
         if (all_ok) {
             static const char *const TRUNC = PATH_TMP_DIR "m87.trunc";
             static char body[100];
             k_memset(body, 'A', sizeof(body));
-            if (vfs_write(TRUNC, body, sizeof(body)) != 0) {
-                klog_puts("[m87] could not create the file to truncate\n");
+            if (virtual_file_system_write(TRUNC, body, sizeof(body)) != 0) {
+                kernel_log_puts("[m87] could not create the file to truncate\n");
                 all_ok = 0;
             } else {
-                int h = vfs_open(TRUNC, 0);
-                if (h < 0 || vfs_handle_truncate_to(h, 10) != 0 ||
-                    vfs_handle_size(h) != 10) {
-                    klog_puts("[m87] shrinking a file did not set its size to 10\n");
+                int h = virtual_file_system_open(TRUNC, 0);
+                if (h < 0 || virtual_file_system_handle_truncate_to(h, 10) != 0 ||
+                    virtual_file_system_handle_size(h) != 10) {
+                    kernel_log_puts("[m87] shrinking a file did not set its size to 10\n");
                     all_ok = 0;
                 }
                 if (all_ok) {
-                    if (vfs_handle_truncate_to(h, 200) != 0 || vfs_handle_size(h) != 200) {
-                        klog_puts("[m87] growing a file did not set its size to 200\n");
+                    if (virtual_file_system_handle_truncate_to(h, 200) != 0 || virtual_file_system_handle_size(h) != 200) {
+                        kernel_log_puts("[m87] growing a file did not set its size to 200\n");
                         all_ok = 0;
                     } else {
                         char tail[32];
                         k_memset(tail, 0xAA, sizeof(tail));
-                        if (vfs_handle_read(h, tail, sizeof(tail), 150) != (int64_t)sizeof(tail)) {
-                            klog_puts("[m87] a grown file would not read past its old end\n");
+                        if (virtual_file_system_handle_read(h, tail, sizeof(tail), 150) != (int64_t)sizeof(tail)) {
+                            kernel_log_puts("[m87] a grown file would not read past its old end\n");
                             all_ok = 0;
                         } else {
                             for (size_t i = 0; i < sizeof(tail); i++) {
                                 if (tail[i] != 0) {
-                                    klog_puts("[m87] a grown file's new bytes were not zero\n");
+                                    kernel_log_puts("[m87] a grown file's new bytes were not zero\n");
                                     all_ok = 0;
                                     break;
                                 }
@@ -10024,16 +10024,16 @@ static void boot_selftests_system(void) {
                 if (all_ok) {
                     char head[16];
                     k_memset(head, 0, sizeof(head));
-                    vfs_handle_read(h, head, 10, 0);
+                    virtual_file_system_handle_read(h, head, 10, 0);
                     for (int i = 0; i < 10; i++) {
                         if (head[i] != 'A') {
-                            klog_puts("[m87] truncation corrupted the bytes it kept\n");
+                            kernel_log_puts("[m87] truncation corrupted the bytes it kept\n");
                             all_ok = 0;
                             break;
                         }
                     }
                 }
-                vfs_unlink(TRUNC);
+                virtual_file_system_unlink(TRUNC);
             }
         }
 
@@ -10043,24 +10043,24 @@ static void boot_selftests_system(void) {
             static const char *const CHAIN = PATH_TMP_DIR "m87chain";
             static const char *const LOOP_A = PATH_TMP_DIR "m87loopa";
             static const char *const LOOP_B = PATH_TMP_DIR "m87loopb";
-            vfs_unlink(LINK);
-            vfs_unlink(CHAIN);
-            vfs_unlink(LOOP_A);
-            vfs_unlink(LOOP_B);
-            vfs_unlink(REAL);
+            virtual_file_system_unlink(LINK);
+            virtual_file_system_unlink(CHAIN);
+            virtual_file_system_unlink(LOOP_A);
+            virtual_file_system_unlink(LOOP_B);
+            virtual_file_system_unlink(REAL);
 
             static const char body[] = "pointed at";
-            if (vfs_write(REAL, body, sizeof(body)) != 0 ||
-                vfs_symlink(LINK, REAL) != 0) {
-                klog_puts("[m87] could not create a file and a link to it\n");
+            if (virtual_file_system_write(REAL, body, sizeof(body)) != 0 ||
+                virtual_file_system_symlink(LINK, REAL) != 0) {
+                kernel_log_puts("[m87] could not create a file and a link to it\n");
                 all_ok = 0;
             }
 
             if (all_ok) {
                 k_memset(buf, 0, sizeof(buf));
-                if (vfs_read(LINK, buf, sizeof(buf)) != (int64_t)sizeof(body) ||
+                if (virtual_file_system_read(LINK, buf, sizeof(buf)) != (int64_t)sizeof(body) ||
                     buf[0] != 'p') {
-                    klog_puts("[m87] reading through a symlink did not reach the file\n");
+                    kernel_log_puts("[m87] reading through a symlink did not reach the file\n");
                     all_ok = 0;
                 }
             }
@@ -10068,75 +10068,75 @@ static void boot_selftests_system(void) {
             if (all_ok) {
                 char target[128];
                 k_memset(target, 0, sizeof(target));
-                int64_t n = vfs_readlink(LINK, target, sizeof(target) - 1);
+                int64_t n = virtual_file_system_readlink(LINK, target, sizeof(target) - 1);
                 if (n <= 0 || k_strcmp(target, REAL) != 0) {
-                    klog_puts("[m87] readlink did not return the target it was given\n");
+                    kernel_log_puts("[m87] readlink did not return the target it was given\n");
                     all_ok = 0;
                 }
-                if (all_ok && vfs_readlink(REAL, target, sizeof(target)) >= 0) {
-                    klog_puts("[m87] readlink answered for something that is not a link\n");
+                if (all_ok && virtual_file_system_readlink(REAL, target, sizeof(target)) >= 0) {
+                    kernel_log_puts("[m87] readlink answered for something that is not a link\n");
                     all_ok = 0;
                 }
             }
 
             if (all_ok) {
                 leanfs_stat_t st_follow, st_link;
-                if (vfs_stat(LINK, &st_follow) != 0 || vfs_lstat(LINK, &st_link) != 0) {
-                    klog_puts("[m87] stat or lstat failed on a symlink\n");
+                if (virtual_file_system_stat(LINK, &st_follow) != 0 || virtual_file_system_lstat(LINK, &st_link) != 0) {
+                    kernel_log_puts("[m87] stat or lstat failed on a symlink\n");
                     all_ok = 0;
                 } else if (st_follow.is_link != 0 || st_link.is_link != 1) {
-                    klog_puts("[m87] stat and lstat gave the same answer about a symlink\n");
+                    kernel_log_puts("[m87] stat and lstat gave the same answer about a symlink\n");
                     all_ok = 0;
                 } else if (st_follow.size != sizeof(body)) {
-                    klog_puts("[m87] stat through a link reported the link's size, not the file's\n");
+                    kernel_log_puts("[m87] stat through a link reported the link's size, not the file's\n");
                     all_ok = 0;
                 }
             }
 
             if (all_ok) {
-                if (vfs_symlink(CHAIN, LINK) != 0) {
-                    klog_puts("[m87] could not create a link to a link\n");
+                if (virtual_file_system_symlink(CHAIN, LINK) != 0) {
+                    kernel_log_puts("[m87] could not create a link to a link\n");
                     all_ok = 0;
                 } else {
                     k_memset(buf, 0, sizeof(buf));
-                    if (vfs_read(CHAIN, buf, sizeof(buf)) != (int64_t)sizeof(body)) {
-                        klog_puts("[m87] a chain of two links did not reach the file\n");
+                    if (virtual_file_system_read(CHAIN, buf, sizeof(buf)) != (int64_t)sizeof(body)) {
+                        kernel_log_puts("[m87] a chain of two links did not reach the file\n");
                         all_ok = 0;
                     }
                 }
             }
 
             if (all_ok) {
-                if (vfs_symlink(LOOP_A, LOOP_B) != 0 ||
-                    vfs_symlink(LOOP_B, LOOP_A) != 0) {
-                    klog_puts("[m87] could not build a symlink loop to test\n");
+                if (virtual_file_system_symlink(LOOP_A, LOOP_B) != 0 ||
+                    virtual_file_system_symlink(LOOP_B, LOOP_A) != 0) {
+                    kernel_log_puts("[m87] could not build a symlink loop to test\n");
                     all_ok = 0;
-                } else if (vfs_exists(LOOP_A)) {
-                    klog_puts("[m87] a symlink loop resolved to something\n");
+                } else if (virtual_file_system_exists(LOOP_A)) {
+                    kernel_log_puts("[m87] a symlink loop resolved to something\n");
                     all_ok = 0;
                 }
             }
 
             if (all_ok) {
-                if (vfs_unlink(LINK) != 0) {
-                    klog_puts("[m87] a symlink could not be removed\n");
+                if (virtual_file_system_unlink(LINK) != 0) {
+                    kernel_log_puts("[m87] a symlink could not be removed\n");
                     all_ok = 0;
-                } else if (!vfs_exists(REAL)) {
-                    klog_puts("[m87] removing a symlink removed the file it pointed at\n");
+                } else if (!virtual_file_system_exists(REAL)) {
+                    kernel_log_puts("[m87] removing a symlink removed the file it pointed at\n");
                     all_ok = 0;
                 }
             }
 
-            vfs_unlink(CHAIN);
-            vfs_unlink(LOOP_A);
-            vfs_unlink(LOOP_B);
-            vfs_unlink(REAL);
+            virtual_file_system_unlink(CHAIN);
+            virtual_file_system_unlink(LOOP_A);
+            virtual_file_system_unlink(LOOP_B);
+            virtual_file_system_unlink(REAL);
         }
 
         if (!all_ok) {
             panic("M87 self-test: this machine's /dev and /proc are not what they claim");
         }
-        klog_puts("[m87] files with a type and a place: /dev and /proc mounted and listed "
+        kernel_log_puts("[m87] files with a type and a place: /dev and /proc mounted and listed "
                    "in their parent, /dev/null ending a read and swallowing a write, "
                    "/dev/zero delivering zeros at any offset rather than ending like a "
                    "0-length file, /dev/full refusing, /dev/urandom returning something "
@@ -10149,13 +10149,13 @@ static void boot_selftests_system(void) {
                    "open and not followed by readlink or lstat, a chain of two followed to "
                    "the end, a loop refused rather than walked, and removing a link leaving "
                    "the file it pointed at - self-test passed (");
-        klog_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
-        klog_puts(" ms).\n\n");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
     }
 
     {
-        int tasks_before = sched_live_task_count();
-        uint64_t frames_before = pmm_free_frame_count();
+        int tasks_before = scheduler_live_task_count();
+        uint64_t frames_before = physical_memory_free_frame_count();
 
         long rc_missing = do_syscall(SYS_spawn, (uint64_t)"definitely_not_a_file", 0, 0);
         if (rc_missing >= 0) {
@@ -10167,31 +10167,31 @@ static void boot_selftests_system(void) {
             panic("M40 SYS_spawn self-test: spawning a non-ELF file should fail, not succeed");
         }
 
-        int tasks_after = sched_live_task_count();
-        uint64_t frames_after = pmm_free_frame_count();
+        int tasks_after = scheduler_live_task_count();
+        uint64_t frames_after = physical_memory_free_frame_count();
         if (tasks_after != tasks_before) {
-            klog_puts("[m40] failed spawns changed the task count: 0x");
-            klog_put_hex32((uint32_t)tasks_before);
-            klog_puts(" -> 0x");
-            klog_put_hex32((uint32_t)tasks_after);
-            klog_putc('\n');
+            kernel_log_puts("[m40] failed spawns changed the task count: 0x");
+            kernel_log_put_hex32((uint32_t)tasks_before);
+            kernel_log_puts(" -> 0x");
+            kernel_log_put_hex32((uint32_t)tasks_after);
+            kernel_log_putc('\n');
             panic("M40 SYS_spawn self-test: a failed spawn left a task behind");
         }
         if (frames_after != frames_before) {
-            klog_puts("[m40] failed spawns leaked physical frames: 0x");
-            klog_put_hex64(frames_before);
-            klog_puts(" free -> 0x");
-            klog_put_hex64(frames_after);
-            klog_putc('\n');
+            kernel_log_puts("[m40] failed spawns leaked physical frames: 0x");
+            kernel_log_put_hex64(frames_before);
+            kernel_log_puts(" free -> 0x");
+            kernel_log_put_hex64(frames_after);
+            kernel_log_putc('\n');
             panic("M40 SYS_spawn self-test: a failed spawn leaked physical memory");
         }
 
-        klog_puts("[m40] SYS_spawn failure-path self-test passed (missing file and "
+        kernel_log_puts("[m40] SYS_spawn failure-path self-test passed (missing file and "
                    "non-ELF file both refused cleanly, no task or frame leaked).\n\n");
     }
 
     {
-        task_t *boot_task = sched_current();
+        task_t *boot_task = scheduler_current();
         int leaked = 0;
         for (int i = 2; i < MAX_FDS; i++) {
             if (boot_task->fds[i].type != FD_NONE) {
@@ -10201,7 +10201,7 @@ static void boot_selftests_system(void) {
         if (leaked == 0) {
             panic("M40 fd-inheritance self-test: expected the boot self-tests above to have left fds open on task 0 - if that is genuinely no longer true, delete this check and sched_reset_fds_to_std with it");
         }
-        sched_reset_fds_to_std(boot_task);
+        scheduler_reset_file_descriptors_to_std(boot_task);
         for (int i = 2; i < MAX_FDS; i++) {
             if (boot_task->fds[i].type != FD_NONE) {
                 panic("M40 fd-inheritance self-test: sched_reset_fds_to_std left an fd behind");
@@ -10210,22 +10210,22 @@ static void boot_selftests_system(void) {
         if (boot_task->fds[0].type != FD_STDIN || boot_task->fds[1].type != FD_STDOUT) {
             panic("M40 fd-inheritance self-test: sched_reset_fds_to_std did not leave stdin/stdout intact");
         }
-        klog_puts("[m40] boot-task fd reset self-test passed (0x");
-        klog_put_hex32((uint32_t)leaked);
-        klog_puts(" leaked self-test fd(s) reclaimed before PID 1 inherits the table).\n\n");
+        kernel_log_puts("[m40] boot-task fd reset self-test passed (0x");
+        kernel_log_put_hex32((uint32_t)leaked);
+        kernel_log_puts(" leaked self-test fd(s) reclaimed before PID 1 inherits the table).\n\n");
     }
 }
 
-void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys) {
-    klog_init();
-    klog_puts("lean_os kernel: hello from C!\n\n");
+void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, uint64_t rsdp_phys) {
+    kernel_log_init();
+    kernel_log_puts("lean_os kernel: hello from C!\n\n");
 
     fwcfg_init();
     if (boot_selftests_enabled()) {
-        klog_puts("[boot] self-tests ENABLED for this boot "
+        kernel_log_puts("[boot] self-tests ENABLED for this boot "
                    "(opt/leanos/selftest=1 via fw_cfg).\n\n");
     } else {
-        klog_puts("[boot] self-tests off - booting straight to the desktop. "
+        kernel_log_puts("[boot] self-tests off - booting straight to the desktop. "
                    "tools/run-tests.sh turns them on.\n\n");
     }
 
@@ -10233,10 +10233,10 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     idt_init();
     pic_remap();
     acpi_set_rsdp(rsdp_phys);
-    klog_puts("GDT/TSS, IDT, and PIC remap initialized.\n");
+    kernel_log_puts("GDT/TSS, IDT, and PIC remap initialized.\n");
 
     __asm__ volatile("int3");
-    klog_puts("Resumed after breakpoint self-test.\n\n");
+    kernel_log_puts("Resumed after breakpoint self-test.\n\n");
 
     uint32_t count = *e820_map;
     if (count == 0) {
@@ -10245,42 +10245,42 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
     e820_entry_t *entries = (e820_entry_t *)((uint8_t *)e820_map + 8);
 
-    klog_puts("E820 memory map (");
-    klog_put_hex32(count);
-    klog_puts(" entries):\n");
+    kernel_log_puts("E820 memory map (");
+    kernel_log_put_hex32(count);
+    kernel_log_puts(" entries):\n");
 
     for (uint32_t i = 0; i < count; i++) {
-        klog_puts("  base=0x");
-        klog_put_hex64(entries[i].base);
-        klog_puts(" len=0x");
-        klog_put_hex64(entries[i].length);
-        klog_puts(" type=0x");
-        klog_put_hex32(entries[i].type);
-        klog_putc('\n');
+        kernel_log_puts("  base=0x");
+        kernel_log_put_hex64(entries[i].base);
+        kernel_log_puts(" len=0x");
+        kernel_log_put_hex64(entries[i].length);
+        kernel_log_puts(" type=0x");
+        kernel_log_put_hex32(entries[i].type);
+        kernel_log_putc('\n');
     }
-    klog_putc('\n');
+    kernel_log_putc('\n');
 
-    pmm_init(e820_map);
-    vmm_init(e820_map);
+    physical_memory_init(e820_map);
+    virtual_memory_init(e820_map);
     heap_init();
 
-    unixsock_init();
+    unix_socket_init();
     eventfd_init();
     timerfd_init();
     epoll_init();
     memfd_init();
 
-    uint64_t scratch_phys = pmm_alloc_frame();
+    uint64_t scratch_phys = physical_memory_alloc_frame();
     uint64_t scratch_virt = KERNEL_HEAP_VIRT_BASE - 0x40000000ULL;
-    vmm_map_page(scratch_virt, scratch_phys, VMM_FLAG_WRITABLE);
+    virtual_memory_map_page(scratch_virt, scratch_phys, VMM_FLAG_WRITABLE);
     volatile uint64_t *scratch = (volatile uint64_t *)scratch_virt;
     *scratch = 0x1122334455667788ULL;
     if (*scratch != 0x1122334455667788ULL) {
         panic("vmm self-test: readback mismatch");
     }
-    vmm_unmap_page(scratch_virt);
-    pmm_free_frame(scratch_phys);
-    klog_puts("[vmm] map/unmap self-test passed.\n");
+    virtual_memory_unmap_page(scratch_virt);
+    physical_memory_free_frame(scratch_phys);
+    kernel_log_puts("[vmm] map/unmap self-test passed.\n");
 
     uint64_t *test = (uint64_t *)kmalloc(sizeof(uint64_t));
     if (!test) {
@@ -10291,10 +10291,10 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         panic("kmalloc self-test: readback mismatch");
     }
     kfree(test);
-    klog_puts("[heap] kmalloc/kfree self-test passed.\n\n");
+    kernel_log_puts("[heap] kmalloc/kfree self-test passed.\n\n");
 
     {
-        uint64_t tracked = pmm_tracked_limit();
+        uint64_t tracked = physical_memory_tracked_limit();
         uint64_t floor;
         if (tracked > PMM_DMA_LIMIT) {
             floor = PMM_DMA_LIMIT;
@@ -10303,15 +10303,15 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         } else {
             floor = tracked / 2;
         }
-        uint64_t before = pmm_free_frame_count();
-        uint64_t high = pmm_alloc_frame_above(floor);
+        uint64_t before = physical_memory_free_frame_count();
+        uint64_t high = physical_memory_alloc_frame_above(floor);
         if (high == 0) {
             panic("[m90] no free frame above the probe floor");
         }
         if (high < floor) {
             panic("[m90] pmm_alloc_frame_above returned a frame below its floor");
         }
-        if (!vmm_identity_covers(high, 4096)) {
+        if (!virtual_memory_identity_covers(high, 4096)) {
             panic("[m90] a frame the allocator handed out is not identity-mapped");
         }
         volatile uint64_t *probe = (volatile uint64_t *)(uintptr_t)high;
@@ -10320,25 +10320,25 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (probe[0] != 0x9090909090909090ULL || probe[511] != 0x0123456789ABCDEFULL) {
             panic("[m90] readback mismatch on a high physical frame");
         }
-        pmm_free_frame(high);
-        if (pmm_free_frame_count() != before) {
+        physical_memory_free_frame(high);
+        if (physical_memory_free_frame_count() != before) {
             panic("[m90] freeing a high frame did not return the count");
         }
-        if (vmm_identity_covers(tracked + 0x40000000ULL, 4096)) {
+        if (virtual_memory_identity_covers(tracked + 0x40000000ULL, 4096)) {
             panic("[m90] the identity map claims to cover memory that does not exist");
         }
-        klog_puts("[m90] more than a gigabyte: ");
-        klog_put_hex64(tracked / (1024 * 1024));
-        klog_puts(" MiB tracked in ");
-        klog_put_hex64(pmm_total_frame_count());
-        klog_puts(" frames, a frame at 0x");
-        klog_put_hex64(high);
-        klog_puts(" written and read back through the identity map, freed with the\n"
+        kernel_log_puts("[m90] more than a gigabyte: ");
+        kernel_log_put_hex64(tracked / (1024 * 1024));
+        kernel_log_puts(" MiB tracked in ");
+        kernel_log_put_hex64(physical_memory_total_frame_count());
+        kernel_log_puts(" frames, a frame at 0x");
+        kernel_log_put_hex64(high);
+        kernel_log_puts(" written and read back through the identity map, freed with the\n"
                   "      count returning exactly, and an address past the end of memory "
                   "correctly reported as not mapped.\n\n");
     }
 
-    fb_init(fb_info);
+    framebuffer_init(framebuffer_info);
     dispi_init();
     rtc_init();
     {
@@ -10346,27 +10346,27 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         rtc_read(&now);
         random_init(&now, sizeof(now));
     }
-    pcspk_init();
+    pc_speaker_init();
     ac97_init();
 
-    fb_clear(0x001A1A2E);
-    fb_fill_rect(10, 10, 100, 50, 0x00E94560);
-    if (fb_get_pixel(0, 0) != 0x001A1A2E) {
+    framebuffer_clear(0x001A1A2E);
+    framebuffer_fill_rect(10, 10, 100, 50, 0x00E94560);
+    if (framebuffer_get_pixel(0, 0) != 0x001A1A2E) {
         panic("fb self-test: background color readback mismatch");
     }
-    if (fb_get_pixel(59, 34) != 0x00E94560) {
+    if (framebuffer_get_pixel(59, 34) != 0x00E94560) {
         panic("fb self-test: rectangle color readback mismatch (inside)");
     }
-    if (fb_get_pixel(200, 200) != 0x001A1A2E) {
+    if (framebuffer_get_pixel(200, 200) != 0x001A1A2E) {
         panic("fb self-test: rectangle color readback mismatch (outside, should be background)");
     }
-    klog_puts("[fb] framebuffer clear/fill/readback self-test passed.\n\n");
+    kernel_log_puts("[fb] framebuffer clear/fill/readback self-test passed.\n\n");
 
     {
-        uint32_t boot_w = fb_width(), boot_h = fb_height(), boot_pitch = fb_pitch_bytes();
+        uint32_t boot_w = framebuffer_width(), boot_h = framebuffer_height(), boot_pitch = framebuffer_pitch_bytes();
 
         if (!dispi_available()) {
-            klog_puts("[m58] no runtime mode-setting interface on this adapter - "
+            kernel_log_puts("[m58] no runtime mode-setting interface on this adapter - "
                        "resolution stays what the firmware chose (self-test skipped).\n\n");
         } else {
             display_mode_t list[DISPLAY_MAX_MODES];
@@ -10395,20 +10395,20 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             if (pitch < list[pick].width * 4u) {
                 panic("M58 self-test: the pitch read back from the device is narrower than one row of pixels");
             }
-            fb_remap(pitch, list[pick].width, list[pick].height);
+            framebuffer_remap(pitch, list[pick].width, list[pick].height);
 
-            if (fb_width() != list[pick].width || fb_height() != list[pick].height) {
+            if (framebuffer_width() != list[pick].width || framebuffer_height() != list[pick].height) {
                 panic("M58 self-test: fb geometry after a mode change is not the mode that was set");
             }
-            if (fb_pitch_bytes() != pitch) {
+            if (framebuffer_pitch_bytes() != pitch) {
                 panic("M58 self-test: fb pitch is not the one read back from the device");
             }
-            if (fb_mapped_bytes() < (uint64_t)pitch * fb_height()) {
+            if (framebuffer_mapped_bytes() < (uint64_t)pitch * framebuffer_height()) {
                 panic("M58 self-test: the framebuffer mapping does not cover the new mode");
             }
 
-            fb_put_pixel(fb_width() - 1, fb_height() - 1, 0x00123456u);
-            if (fb_get_pixel(fb_width() - 1, fb_height() - 1) != 0x00123456u) {
+            framebuffer_put_pixel(framebuffer_width() - 1, framebuffer_height() - 1, 0x00123456u);
+            if (framebuffer_get_pixel(framebuffer_width() - 1, framebuffer_height() - 1) != 0x00123456u) {
                 panic("M58 self-test: the last pixel of the new mode did not read back");
             }
 
@@ -10416,13 +10416,13 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             if (dispi_set_mode(boot_w, boot_h, &back_pitch) != 0) {
                 panic("M58 self-test: could not restore the boot mode - this is the failure the revert timer exists for");
             }
-            fb_remap(back_pitch, boot_w, boot_h);
-            if (fb_width() != boot_w || fb_height() != boot_h || fb_pitch_bytes() != boot_pitch) {
+            framebuffer_remap(back_pitch, boot_w, boot_h);
+            if (framebuffer_width() != boot_w || framebuffer_height() != boot_h || framebuffer_pitch_bytes() != boot_pitch) {
                 panic("M58 self-test: the boot mode did not come back exactly as it was");
             }
-            fb_clear(0x00000000u);
+            framebuffer_clear(0x00000000u);
 
-            klog_puts("[m58] display mode set and read back from the device (geometry, "
+            kernel_log_puts("[m58] display mode set and read back from the device (geometry, "
                        "device-chosen pitch and a grown mapping), then restored - self-test passed.\n\n");
         }
     }
@@ -10435,9 +10435,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         for (int code = 0; code < 128 && all_ok; code++) {
             for (int row = 0; row < FONT_HEIGHT; row++) {
                 if (font8x16[code][row] & 0x01u) {
-                    klog_puts("[font39] glyph 0x");
-                    klog_put_hex32((uint32_t)code);
-                    klog_puts(" has ink in column 7, the reserved advance gap.\n");
+                    kernel_log_puts("[font39] glyph 0x");
+                    kernel_log_put_hex32((uint32_t)code);
+                    kernel_log_puts(" has ink in column 7, the reserved advance gap.\n");
                     all_ok = 0;
                     break;
                 }
@@ -10453,9 +10453,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                 }
             }
             if (blank) {
-                klog_puts("[font39] printable codepoint 0x");
-                klog_put_hex32((uint32_t)code);
-                klog_puts(" is blank - the table is incomplete.\n");
+                kernel_log_puts("[font39] printable codepoint 0x");
+                kernel_log_put_hex32((uint32_t)code);
+                kernel_log_puts(" is blank - the table is incomplete.\n");
                 all_ok = 0;
             }
         }
@@ -10466,9 +10466,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             }
             for (int row = 0; row < FONT_HEIGHT; row++) {
                 if (font8x16[code][row]) {
-                    klog_puts("[font39] non-printable codepoint 0x");
-                    klog_put_hex32((uint32_t)code);
-                    klog_puts(" should be blank but isn't.\n");
+                    kernel_log_puts("[font39] non-printable codepoint 0x");
+                    kernel_log_put_hex32((uint32_t)code);
+                    kernel_log_puts(" should be blank but isn't.\n");
                     all_ok = 0;
                     break;
                 }
@@ -10479,9 +10479,9 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             for (int row = 0; row < FONT_HEIGHT; row++) {
                 uint8_t bits = font8x16[code][row];
                 if (font8x16_bold[code][row] != (uint8_t)(bits | (bits >> 1))) {
-                    klog_puts("[font39] font8x16_bold disagrees with the dilation of font8x16 at 0x");
-                    klog_put_hex32((uint32_t)code);
-                    klog_putc('\n');
+                    kernel_log_puts("[font39] font8x16_bold disagrees with the dilation of font8x16 at 0x");
+                    kernel_log_put_hex32((uint32_t)code);
+                    kernel_log_putc('\n');
                     all_ok = 0;
                     break;
                 }
@@ -10490,7 +10490,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         if (all_ok) {
             console_puts("Axg");
-            uint32_t bg = fb_get_pixel(0, 0);
+            uint32_t bg = framebuffer_get_pixel(0, 0);
 
             int top[3], bot[3], gap_clear[3];
             for (int cell = 0; cell < 3; cell++) {
@@ -10499,7 +10499,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                 gap_clear[cell] = 1;
                 for (int y = 0; y < FONT_HEIGHT; y++) {
                     for (int x = 0; x < FONT_WIDTH; x++) {
-                        if (fb_get_pixel((uint32_t)(cell * FONT_WIDTH + x), (uint32_t)y) != bg) {
+                        if (framebuffer_get_pixel((uint32_t)(cell * FONT_WIDTH + x), (uint32_t)y) != bg) {
                             if (top[cell] < 0) {
                                 top[cell] = y;
                             }
@@ -10525,13 +10525,13 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             };
             for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
                 if (checks[i].got != checks[i].want) {
-                    klog_puts("[font39] rendered-pixel check failed: ");
-                    klog_puts(checks[i].what);
-                    klog_puts(" - expected ");
-                    klog_put_hex32((uint32_t)checks[i].want);
-                    klog_puts(" got ");
-                    klog_put_hex32((uint32_t)checks[i].got);
-                    klog_putc('\n');
+                    kernel_log_puts("[font39] rendered-pixel check failed: ");
+                    kernel_log_puts(checks[i].what);
+                    kernel_log_puts(" - expected ");
+                    kernel_log_put_hex32((uint32_t)checks[i].want);
+                    kernel_log_puts(" got ");
+                    kernel_log_put_hex32((uint32_t)checks[i].got);
+                    kernel_log_putc('\n');
                     all_ok = 0;
                 }
             }
@@ -10542,11 +10542,11 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (!all_ok) {
             panic("M39 font self-test: glyph table and/or rendered text metric is wrong");
         }
-        klog_puts("[font39] glyph table + shared-baseline render self-test passed.\n\n");
+        kernel_log_puts("[font39] glyph table + shared-baseline render self-test passed.\n\n");
     }
 
-    klog_use_console();
-    klog_puts("[console] framebuffer text console active - logging switched over from VGA text mode.\n\n");
+    kernel_log_use_console();
+    kernel_log_puts("[console] framebuffer text console active - logging switched over from VGA text mode.\n\n");
 
     __asm__ volatile("sti");
 
@@ -10554,29 +10554,29 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
     pit_init();
     tsc_init();
-    klog_puts("[pit] channel 0 programmed for ");
-    klog_put_hex32(PIT_HZ);
-    klog_puts(" Hz, IRQ0 unmasked.\n");
+    kernel_log_puts("[pit] channel 0 programmed for ");
+    kernel_log_put_hex32(PIT_HZ);
+    kernel_log_puts(" Hz, IRQ0 unmasked.\n");
 
     uint64_t before = pit_get_ticks();
     pit_sleep_ms(50);
     uint64_t after = pit_get_ticks();
-    klog_puts("[pit] slept 50ms: ticks ");
-    klog_put_hex64(before);
-    klog_puts(" -> ");
-    klog_put_hex64(after);
-    klog_putc('\n');
+    kernel_log_puts("[pit] slept 50ms: ticks ");
+    kernel_log_put_hex64(before);
+    kernel_log_puts(" -> ");
+    kernel_log_put_hex64(after);
+    kernel_log_putc('\n');
 
     keyboard_init();
 
     int usb_devices = xhci_init();
     if (usb_devices > 0) {
-        klog_puts("[usb] ");
-        klog_put_dec(usb_devices);
-        klog_puts(" boot-protocol HID device(s) on the USB bus.\n");
+        kernel_log_puts("[usb] ");
+        kernel_log_put_dec(usb_devices);
+        kernel_log_puts(" boot-protocol HID device(s) on the USB bus.\n");
     }
 
-    klog_puts("[kbd] IRQ1 unmasked, waiting up to 3s for a test keypress "
+    kernel_log_puts("[kbd] IRQ1 unmasked, waiting up to 3s for a test keypress "
                "(QEMU monitor: 'sendkey <key>')...\n");
     int key = -1;
     uint64_t deadline = pit_get_ticks() + 3 * PIT_HZ;
@@ -10588,19 +10588,19 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         __asm__ volatile("hlt");
     }
     if (key != -1) {
-        klog_puts("[kbd] received keypress: '");
-        klog_putc((char)key);
-        klog_puts("'\n");
+        kernel_log_puts("[kbd] received keypress: '");
+        kernel_log_putc((char)key);
+        kernel_log_puts("'\n");
     } else {
-        klog_puts("[kbd] no keypress within timeout - driver is installed, "
+        kernel_log_puts("[kbd] no keypress within timeout - driver is installed, "
                    "just untested interactively this boot.\n");
     }
 
-    klog_putc('\n');
+    kernel_log_putc('\n');
 
     mouse_init();
-    cursor_init((int32_t)(fb_width() / 2), (int32_t)(fb_height() / 2));
-    klog_puts("[mouse] IRQ12 unmasked, cursor drawn at screen center. Waiting "
+    cursor_init((int32_t)(framebuffer_width() / 2), (int32_t)(framebuffer_height() / 2));
+    kernel_log_puts("[mouse] IRQ12 unmasked, cursor drawn at screen center. Waiting "
                "up to 3s for test movement (QEMU monitor: 'mouse_move dx dy' "
                "/ 'mouse_button val')...\n");
     int got_mouse_event = 0;
@@ -10616,34 +10616,34 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         __asm__ volatile("hlt");
     }
     if (got_mouse_event) {
-        klog_puts("[mouse] received movement/click - cursor now at (");
-        klog_put_hex32((uint32_t)cursor_x());
-        klog_puts(", ");
-        klog_put_hex32((uint32_t)cursor_y());
-        klog_puts(") buttons=0x");
-        klog_put_hex32(last_ev.buttons);
-        klog_putc('\n');
+        kernel_log_puts("[mouse] received movement/click - cursor now at (");
+        kernel_log_put_hex32((uint32_t)cursor_x());
+        kernel_log_puts(", ");
+        kernel_log_put_hex32((uint32_t)cursor_y());
+        kernel_log_puts(") buttons=0x");
+        kernel_log_put_hex32(last_ev.buttons);
+        kernel_log_putc('\n');
     } else {
-        klog_puts("[mouse] no movement within timeout - driver is installed, "
+        kernel_log_puts("[mouse] no movement within timeout - driver is installed, "
                    "just untested interactively this boot.\n");
     }
-    klog_putc('\n');
+    kernel_log_putc('\n');
 
     fpu_init_cpu();
-    sched_init();
-    sched_spawn_idle_tasks(2);
-    klog_puts("[sched] round-robin scheduler initialized (this context is task 0).\n");
+    scheduler_init();
+    scheduler_spawn_idle_tasks(2);
+    kernel_log_puts("[sched] round-robin scheduler initialized (this context is task 0).\n");
     task_spawn("demo-a", demo_task, "A");
     task_spawn("demo-b", demo_task, "B");
-    klog_puts("[sched] spawned tasks A and B; letting them run via "
+    kernel_log_puts("[sched] spawned tasks A and B; letting them run via "
                "preemption for ~1.5s...\n");
     pit_sleep_ms(1500);
-    klog_puts("[sched] back on the main task - preemption round trip verified.\n\n");
+    kernel_log_puts("[sched] back on the main task - preemption round trip verified.\n\n");
 
     long pid = do_syscall(SYS_getpid, 0, 0, 0);
-    klog_puts("[syscall] getpid() = ");
-    klog_put_hex64((uint64_t)pid);
-    klog_putc('\n');
+    kernel_log_puts("[syscall] getpid() = ");
+    kernel_log_put_hex64((uint64_t)pid);
+    kernel_log_putc('\n');
 
     static const char msg[] = "[syscall] hello via SYS_write\n";
     long written = do_syscall(SYS_write, 1, (uint64_t)msg, sizeof(msg) - 1);
@@ -10653,7 +10653,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
     task_spawn("syscall-exit", syscall_exit_task, NULL);
     pit_sleep_ms(200);
-    klog_puts("[syscall] SYS_exit self-test task ran and terminated.\n\n");
+    kernel_log_puts("[syscall] SYS_exit self-test task ran and terminated.\n\n");
 
     pipe_t *test_pipe = pipe_create();
     if (!test_pipe) {
@@ -10665,23 +10665,23 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         schedule();
     }
     kfree(test_pipe);
-    klog_puts("[pipe] kernel-level producer/consumer self-test passed.\n\n");
+    kernel_log_puts("[pipe] kernel-level producer/consumer self-test passed.\n\n");
 
-    int pipe_fds[2];
-    if (do_syscall(SYS_pipe, (uint64_t)pipe_fds, 0, 0) != 0) {
+    int pipe_file_descriptors[2];
+    if (do_syscall(SYS_pipe, (uint64_t)pipe_file_descriptors, 0, 0) != 0) {
         panic("SYS_pipe self-test: pipe creation failed");
     }
-    static const char pipe_msg[] = "hello through a syscall pipe";
-    long pipe_written = do_syscall(SYS_write, (uint64_t)pipe_fds[1], (uint64_t)pipe_msg, sizeof(pipe_msg) - 1);
-    if (pipe_written != (long)sizeof(pipe_msg) - 1) {
+    static const char pipe_message[] = "hello through a syscall pipe";
+    long pipe_written = do_syscall(SYS_write, (uint64_t)pipe_file_descriptors[1], (uint64_t)pipe_message, sizeof(pipe_message) - 1);
+    if (pipe_written != (long)sizeof(pipe_message) - 1) {
         panic("SYS_pipe self-test: SYS_write returned an unexpected length");
     }
     char pipe_readback[64] = {0};
-    long pipe_read_n = do_syscall(SYS_read, (uint64_t)pipe_fds[0], (uint64_t)pipe_readback, sizeof(pipe_readback) - 1);
-    if (pipe_read_n != (long)sizeof(pipe_msg) - 1 || k_strcmp(pipe_readback, pipe_msg) != 0) {
+    long pipe_read_n = do_syscall(SYS_read, (uint64_t)pipe_file_descriptors[0], (uint64_t)pipe_readback, sizeof(pipe_readback) - 1);
+    if (pipe_read_n != (long)sizeof(pipe_message) - 1 || k_strcmp(pipe_readback, pipe_message) != 0) {
         panic("SYS_pipe self-test: SYS_read returned unexpected data");
     }
-    klog_puts("[pipe] SYS_pipe/SYS_write/SYS_read self-test passed.\n\n");
+    kernel_log_puts("[pipe] SYS_pipe/SYS_write/SYS_read self-test passed.\n\n");
 
     task_t *spinner = task_spawn("spinner", spinner_task, NULL);
     pit_sleep_ms(100);
@@ -10694,7 +10694,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     if (spinner->exit_code != 128 + SIGTERM) {
         panic("SYS_kill self-test: unexpected exit code after SIGTERM");
     }
-    klog_puts("[signal] SIGTERM self-test passed (spinner task terminated).\n\n");
+    kernel_log_puts("[signal] SIGTERM self-test passed (spinner task terminated).\n\n");
 
     while (do_syscall(SYS_wait, (uint64_t)-1, 0, 0) != -1) {
     }
@@ -10710,7 +10710,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     if (do_syscall(SYS_wait, (uint64_t)-1, 0, 0) != -1) {
         panic("SYS_wait(-1) self-test: expected -1 once no children remain");
     }
-    klog_puts("[wait] SYS_wait(-1) self-test passed (reaped two children, then -1).\n\n");
+    kernel_log_puts("[wait] SYS_wait(-1) self-test passed (reaped two children, then -1).\n\n");
 
     task_t *pgid_child = task_spawn("pgidprobe", spinner_task, NULL);
     long self_pgid = do_syscall(SYS_getpgid, 0, 0, 0);
@@ -10720,26 +10720,26 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     if (self_pgid != 0 || child_pgid != self_pgid) {
         panic("SYS_getpgid self-test: child did not inherit its parent's process group");
     }
-    klog_puts("[pgid] SYS_getpgid self-test passed (child inherited pgid ");
-    klog_put_hex64((uint64_t)self_pgid);
-    klog_puts(").\n\n");
+    kernel_log_puts("[pgid] SYS_getpgid self-test passed (child inherited pgid ");
+    kernel_log_put_hex64((uint64_t)self_pgid);
+    kernel_log_puts(").\n\n");
 
-    blk_init();
+    block_device_init();
 
-    vfs_init();
+    virtual_file_system_init();
     {
-        blk_stats_t before, after;
+        block_device_statistics_t before, after;
         static uint8_t cold[64 * 1024];
         static uint8_t warm[64 * 1024];
         const uint32_t RUNS = 16;
         const uint32_t SECTORS = sizeof(cold) / BLK_SECTOR_SIZE;
 
-        blk_cache_drop();
-        blk_stats(&before);
+        block_device_cache_drop();
+        block_device_statistics(&before);
         uint64_t c0 = tsc_read();
         uint32_t sum_cold = 0;
         for (uint32_t r = 0; r < RUNS; r++) {
-            blk_read(LEANFS_START_LBA + r * SECTORS, SECTORS, cold);
+            block_device_read(LEANFS_START_LBA + r * SECTORS, SECTORS, cold);
             for (uint32_t i = 0; i < sizeof(cold); i += 512) {
                 sum_cold += cold[i];
             }
@@ -10748,13 +10748,13 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
 
         uint32_t sum_warm = 0;
         for (uint32_t r = 0; r < RUNS; r++) {
-            blk_read(LEANFS_START_LBA + r * SECTORS, SECTORS, warm);
+            block_device_read(LEANFS_START_LBA + r * SECTORS, SECTORS, warm);
             for (uint32_t i = 0; i < sizeof(warm); i += 512) {
                 sum_warm += warm[i];
             }
         }
         uint64_t c2 = tsc_read();
-        blk_stats(&after);
+        block_device_statistics(&after);
         uint64_t cold_us = tsc_to_us(c1 - c0);
         uint64_t warm_us = tsc_to_us(c2 - c1);
 
@@ -10769,19 +10769,19 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             panic("M92 self-test: the warm pass never hit the cache - it is not caching");
         }
 
-        klog_perf("disk_1mib_cold_us", cold_us, "us");
-        klog_perf("disk_1mib_warm_us", warm_us, "us");
-        klog_puts("[m92] a disk worth reading: 1 MiB through ");
-        klog_puts(blk_backend_name());
-        klog_puts(" cold in ");
-        klog_put_dec((uint32_t)cold_us);
-        klog_puts(" us and warm from the cache in ");
-        klog_put_dec((uint32_t)warm_us);
-        klog_puts(" us, identical byte for byte; 0x");
-        klog_put_hex64(after.hits);
-        klog_puts(" of 0x");
-        klog_put_hex64(after.reads);
-        klog_puts(" reads served without touching the device since boot - self-test passed.\n\n");
+        kernel_log_perf("disk_1mib_cold_us", cold_us, "us");
+        kernel_log_perf("disk_1mib_warm_us", warm_us, "us");
+        kernel_log_puts("[m92] a disk worth reading: 1 MiB through ");
+        kernel_log_puts(block_device_backend_name());
+        kernel_log_puts(" cold in ");
+        kernel_log_put_dec((uint32_t)cold_us);
+        kernel_log_puts(" us and warm from the cache in ");
+        kernel_log_put_dec((uint32_t)warm_us);
+        kernel_log_puts(" us, identical byte for byte; 0x");
+        kernel_log_put_hex64(after.hits);
+        kernel_log_puts(" of 0x");
+        kernel_log_put_hex64(after.reads);
+        kernel_log_puts(" reads served without touching the device since boot - self-test passed.\n\n");
     }
 
     {
@@ -10794,25 +10794,25 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         }
 
         int ok = 1;
-        if (blk_write(SCRATCH_LBA, 1, m107_write) != 0) {
-            klog_puts("[m107] the scratch write failed\n");
+        if (block_device_write(SCRATCH_LBA, 1, m107_write) != 0) {
+            kernel_log_puts("[m107] the scratch write failed\n");
             ok = 0;
         }
-        if (ok && blk_flush() != 0) {
-            klog_puts("[m107] the barrier after the scratch write failed\n");
+        if (ok && block_device_flush() != 0) {
+            kernel_log_puts("[m107] the barrier after the scratch write failed\n");
             ok = 0;
         }
-        blk_cache_drop();
-        if (ok && blk_read(SCRATCH_LBA, 1, m107_read) != 0) {
-            klog_puts("[m107] the scratch read failed\n");
+        block_device_cache_drop();
+        if (ok && block_device_read(SCRATCH_LBA, 1, m107_read) != 0) {
+            kernel_log_puts("[m107] the scratch read failed\n");
             ok = 0;
         }
         if (ok) {
             for (uint32_t i = 0; i < sizeof(m107_write); i++) {
                 if (m107_read[i] != m107_write[i]) {
-                    klog_puts("[m107] the scratch sector read back wrong at byte 0x");
-                    klog_put_hex32(i);
-                    klog_putc('\n');
+                    kernel_log_puts("[m107] the scratch sector read back wrong at byte 0x");
+                    kernel_log_put_hex32(i);
+                    kernel_log_putc('\n');
                     ok = 0;
                     break;
                 }
@@ -10824,24 +10824,24 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         for (uint32_t i = 0; i < sizeof(m107_multi); i++) {
             m107_multi[i] = (uint8_t)(i * 31 + (i >> 9));
         }
-        if (ok && blk_write(SCRATCH_LBA + 8, 8, m107_multi) != 0) {
-            klog_puts("[m107] the eight-sector write failed\n");
+        if (ok && block_device_write(SCRATCH_LBA + 8, 8, m107_multi) != 0) {
+            kernel_log_puts("[m107] the eight-sector write failed\n");
             ok = 0;
         }
-        if (ok && blk_flush() != 0) {
+        if (ok && block_device_flush() != 0) {
             ok = 0;
         }
-        blk_cache_drop();
-        if (ok && blk_read(SCRATCH_LBA + 8, 8, m107_back) != 0) {
-            klog_puts("[m107] the eight-sector read failed\n");
+        block_device_cache_drop();
+        if (ok && block_device_read(SCRATCH_LBA + 8, 8, m107_back) != 0) {
+            kernel_log_puts("[m107] the eight-sector read failed\n");
             ok = 0;
         }
         if (ok) {
             for (uint32_t i = 0; i < sizeof(m107_multi); i++) {
                 if (m107_back[i] != m107_multi[i]) {
-                    klog_puts("[m107] the eight-sector round trip differs at byte 0x");
-                    klog_put_hex32(i);
-                    klog_putc('\n');
+                    kernel_log_puts("[m107] the eight-sector round trip differs at byte 0x");
+                    kernel_log_put_hex32(i);
+                    kernel_log_putc('\n');
                     ok = 0;
                     break;
                 }
@@ -10852,12 +10852,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             panic("M107 self-test: the block backend did not return what was written to it");
         }
 
-        klog_puts("[m107] the devices a real machine has: the block layer is on ");
-        klog_puts(blk_backend_name());
-        klog_puts(", one sector and eight sectors written, dropped from the cache, "
+        kernel_log_puts("[m107] the devices a real machine has: the block layer is on ");
+        kernel_log_puts(block_device_backend_name());
+        kernel_log_puts(", one sector and eight sectors written, dropped from the cache, "
                   "and read back byte for byte; USB: ");
-        klog_put_dec((uint32_t)xhci_device_count());
-        klog_puts(" boot-protocol HID device(s) - self-test passed.\n\n");
+        kernel_log_put_dec((uint32_t)xhci_device_count());
+        kernel_log_puts(" boot-protocol HID device(s) - self-test passed.\n\n");
     }
 
     {
@@ -10867,7 +10867,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         const uint32_t SECTORS = sizeof(wbuf) / BLK_SECTOR_SIZE;
         const uint32_t SCRATCH = leanfs_free_scratch_lba(RUNS * 16u);
         if (SCRATCH == 0) {
-            klog_puts("[m104] no free run at the end of the data region - the "
+            kernel_log_puts("[m104] no free run at the end of the data region - the "
                        "write benchmark is skipped rather than run over "
                        "somebody's file.\n\n");
         } else {
@@ -10876,36 +10876,36 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             wbuf[i] = (uint8_t)(i * 7u + 13u);
         }
 
-        blk_stats_t b0, b1, b2;
+        block_device_statistics_t b0, b1, b2;
 
-        blk_cache_drop();
-        blk_stats(&b0);
+        block_device_cache_drop();
+        block_device_statistics(&b0);
         uint64_t t0 = tsc_read();
         for (uint32_t r = 0; r < RUNS; r++) {
-            blk_write(SCRATCH + r * SECTORS, SECTORS, wbuf);
+            block_device_write(SCRATCH + r * SECTORS, SECTORS, wbuf);
         }
-        blk_flush();
+        block_device_flush();
         uint64_t t1 = tsc_read();
-        blk_stats(&b1);
+        block_device_statistics(&b1);
 
-        blk_cache_drop();
+        block_device_cache_drop();
         uint64_t t2 = tsc_read();
         for (uint32_t r = 0; r < RUNS; r++) {
             for (uint32_t k = 0; k < SECTORS; k++) {
-                blk_write(SCRATCH + r * SECTORS + k, 1,
+                block_device_write(SCRATCH + r * SECTORS + k, 1,
                           wbuf + (uint64_t)k * BLK_SECTOR_SIZE);
             }
         }
         uint64_t t3 = tsc_read();
-        blk_stats(&b2);
+        block_device_statistics(&b2);
 
         uint64_t absorbed_us = tsc_to_us(t1 - t0);
         uint64_t through_us = tsc_to_us(t3 - t2);
 
-        blk_cache_drop();
+        block_device_cache_drop();
         int identical = 1;
         for (uint32_t r = 0; r < RUNS && identical; r++) {
-            blk_read(SCRATCH + r * SECTORS, SECTORS, rbuf);
+            block_device_read(SCRATCH + r * SECTORS, SECTORS, rbuf);
             for (uint32_t i = 0; i < sizeof(rbuf); i++) {
                 if (rbuf[i] != wbuf[i]) {
                     identical = 0;
@@ -10922,43 +10922,43 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
                   "is holding a megabyte and calling it written");
         }
 
-        blk_set_readahead(0);
-        blk_cache_drop();
+        block_device_set_readahead(0);
+        block_device_cache_drop();
         uint64_t r0 = tsc_read();
         for (uint32_t r = 0; r < RUNS; r++) {
-            blk_read(SCRATCH + r * SECTORS, SECTORS, rbuf);
+            block_device_read(SCRATCH + r * SECTORS, SECTORS, rbuf);
         }
         uint64_t r1 = tsc_read();
 
-        blk_set_readahead(8);
-        blk_cache_drop();
+        block_device_set_readahead(8);
+        block_device_cache_drop();
         uint64_t r2 = tsc_read();
         for (uint32_t r = 0; r < RUNS; r++) {
-            blk_read(SCRATCH + r * SECTORS, SECTORS, rbuf);
+            block_device_read(SCRATCH + r * SECTORS, SECTORS, rbuf);
         }
         uint64_t r3 = tsc_read();
-        blk_stats_t b3;
-        blk_stats(&b3);
+        block_device_statistics_t b3;
+        block_device_statistics(&b3);
 
         uint64_t noread_us = tsc_to_us(r1 - r0);
         uint64_t ahead_us = tsc_to_us(r3 - r2);
 
-        klog_perf("disk_1mib_write_absorbed_us", absorbed_us, "us");
-        klog_perf("disk_1mib_write_through_us", through_us, "us");
-        klog_perf("disk_1mib_seq_read_no_readahead_us", noread_us, "us");
-        klog_perf("disk_1mib_seq_read_readahead_us", ahead_us, "us");
+        kernel_log_perf("disk_1mib_write_absorbed_us", absorbed_us, "us");
+        kernel_log_perf("disk_1mib_write_through_us", through_us, "us");
+        kernel_log_perf("disk_1mib_seq_read_no_readahead_us", noread_us, "us");
+        kernel_log_perf("disk_1mib_seq_read_readahead_us", ahead_us, "us");
 
-        klog_puts("[m104] writeback: 1 MiB written and barriered in ");
-        klog_put_dec((uint32_t)absorbed_us);
-        klog_puts(" us against ");
-        klog_put_dec((uint32_t)through_us);
-        klog_puts(" us written through; 1 MiB read sequentially in ");
-        klog_put_dec((uint32_t)ahead_us);
-        klog_puts(" us with readahead against ");
-        klog_put_dec((uint32_t)noread_us);
-        klog_puts(" us without (0x");
-        klog_put_hex64(b3.readaheads);
-        klog_puts(" lines fetched ahead); every byte read back identical to what "
+        kernel_log_puts("[m104] writeback: 1 MiB written and barriered in ");
+        kernel_log_put_dec((uint32_t)absorbed_us);
+        kernel_log_puts(" us against ");
+        kernel_log_put_dec((uint32_t)through_us);
+        kernel_log_puts(" us written through; 1 MiB read sequentially in ");
+        kernel_log_put_dec((uint32_t)ahead_us);
+        kernel_log_puts(" us with readahead against ");
+        kernel_log_put_dec((uint32_t)noread_us);
+        kernel_log_puts(" us without (0x");
+        kernel_log_put_hex64(b3.readaheads);
+        kernel_log_puts(" lines fetched ahead); every byte read back identical to what "
                    "was written, and the device's own write counter proves the "
                    "barrier reached it - self-test passed.\n\n");
         }
@@ -10968,7 +10968,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     {
         static const char *const LAYOUT[] = {PATH_BIN, PATH_HOME, PATH_ETC, PATH_TMP};
         for (size_t i = 0; i < sizeof(LAYOUT) / sizeof(LAYOUT[0]); i++) {
-            if (!vfs_exists(LAYOUT[i]) && vfs_mkdir(LAYOUT[i]) != 0) {
+            if (!virtual_file_system_exists(LAYOUT[i]) && virtual_file_system_mkdir(LAYOUT[i]) != 0) {
                 panic("vfs_mkdir: failed to create the filesystem layout");
             }
         }
@@ -10979,17 +10979,17 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (path_join(path, PATH_BIN_DIR, p->name) != 0) {
             panic("a program name is too long to live in /bin");
         }
-        if (!vfs_exists(path)) {
-            klog_puts("[fs] seeding disk with '");
-            klog_puts(path);
-            klog_puts("' (first boot only)...\n");
+        if (!virtual_file_system_exists(path)) {
+            kernel_log_puts("[fs] seeding disk with '");
+            kernel_log_puts(path);
+            kernel_log_puts("' (first boot only)...\n");
             size_t size = (size_t)(p->end - p->start);
-            if (vfs_write(path, p->start, size) != 0) {
+            if (virtual_file_system_write(path, p->start, size) != 0) {
                 panic("vfs_write: failed to seed a program onto disk");
             }
         }
     }
-    klog_puts("[fs] all user programs present in " PATH_BIN ".\n\n");
+    kernel_log_puts("[fs] all user programs present in " PATH_BIN ".\n\n");
 
     {
         static const struct {
@@ -11050,45 +11050,45 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
              "nameserver 1.1.1.1\n"},
         };
         for (size_t i = 0; i < sizeof(FIRST_BOOT) / sizeof(FIRST_BOOT[0]); i++) {
-            if (vfs_exists(FIRST_BOOT[i].path)) {
+            if (virtual_file_system_exists(FIRST_BOOT[i].path)) {
                 continue;
             }
             size_t len = 0;
             while (FIRST_BOOT[i].body[len]) {
                 len++;
             }
-            if (vfs_write(FIRST_BOOT[i].path, FIRST_BOOT[i].body, len) != 0) {
+            if (virtual_file_system_write(FIRST_BOOT[i].path, FIRST_BOOT[i].body, len) != 0) {
                 panic("vfs_write: failed to seed a first-boot file into " PATH_HOME);
             }
         }
     }
 
     {
-        size_t fstest_len = 20000;
-        uint8_t *fstest_buf = (uint8_t *)kmalloc(fstest_len);
-        uint8_t *fstest_readback = (uint8_t *)kmalloc(fstest_len);
-        if (!fstest_buf || !fstest_readback) {
+        size_t fstest_length = 20000;
+        uint8_t *fstest_buffer = (uint8_t *)kmalloc(fstest_length);
+        uint8_t *fstest_readback = (uint8_t *)kmalloc(fstest_length);
+        if (!fstest_buffer || !fstest_readback) {
             panic("out of memory for leanfs indirect-block self-test");
         }
-        for (size_t i = 0; i < fstest_len; i++) {
-            fstest_buf[i] = (uint8_t)(i * 31 + 7);
+        for (size_t i = 0; i < fstest_length; i++) {
+            fstest_buffer[i] = (uint8_t)(i * 31 + 7);
         }
-        if (vfs_write(PATH_TMP_DIR "fstest", fstest_buf, fstest_len) != 0) {
+        if (virtual_file_system_write(PATH_TMP_DIR "fstest", fstest_buffer, fstest_length) != 0) {
             panic("leanfs indirect-block self-test: vfs_write failed");
         }
-        k_memset(fstest_readback, 0, fstest_len);
-        int64_t fstest_size = vfs_read(PATH_TMP_DIR "fstest", fstest_readback, fstest_len);
-        if (fstest_size != (int64_t)fstest_len) {
+        k_memset(fstest_readback, 0, fstest_length);
+        int64_t fstest_size = virtual_file_system_read(PATH_TMP_DIR "fstest", fstest_readback, fstest_length);
+        if (fstest_size != (int64_t)fstest_length) {
             panic("leanfs indirect-block self-test: size mismatch on readback");
         }
-        for (size_t i = 0; i < fstest_len; i++) {
-            if (fstest_readback[i] != fstest_buf[i]) {
+        for (size_t i = 0; i < fstest_length; i++) {
+            if (fstest_readback[i] != fstest_buffer[i]) {
                 panic("leanfs indirect-block self-test: data mismatch on readback");
             }
         }
-        kfree(fstest_buf);
+        kfree(fstest_buffer);
         kfree(fstest_readback);
-        klog_puts("[fs] leanfs indirect-block self-test passed (20000-byte round trip).\n\n");
+        kernel_log_puts("[fs] leanfs indirect-block self-test passed (20000-byte round trip).\n\n");
     }
 
     {
@@ -11101,7 +11101,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (memtest_status != 0) {
             panic("memtest self-test: nonzero exit code - malloc or shm is broken");
         }
-        klog_puts("[memtest] user-space malloc/free and cross-process shm self-tests passed.\n\n");
+        kernel_log_puts("[memtest] user-space malloc/free and cross-process shm self-tests passed.\n\n");
     }
 
     {
@@ -11114,7 +11114,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         if (fonttest_status != 0) {
             panic("M57 font self-test: a measured text width disagrees with the pixels drawn");
         }
-        klog_puts("[m57] proportional UI font: per-glyph advances, one shared baseline across three sizes, and every measured width matching the ink drawn - self-test passed.\n\n");
+        kernel_log_puts("[m57] proportional UI font: per-glyph advances, one shared baseline across three sizes, and every measured width matching the ink drawn - self-test passed.\n\n");
     }
 
     if (boot_selftests_enabled()) {
@@ -11126,7 +11126,7 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     power_init();
 
     if (!net_init()) {
-        klog_puts("[net] no RTL8139 NIC found - networking unavailable this boot "
+        kernel_log_puts("[net] no RTL8139 NIC found - networking unavailable this boot "
                    "(expected on real hardware; see docs/real-hardware.md).\n\n");
     }
 
@@ -11138,23 +11138,23 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         selftest_settings_restore();
     }
 
-    klog_puts("[sched] task table at handoff: 0x");
-    klog_put_hex32((uint32_t)sched_live_task_count());
-    klog_puts(" live of 0x");
-    klog_put_hex32((uint32_t)MAX_TASKS);
-    klog_puts(" slots (high-water mark 0x");
-    klog_put_hex32((uint32_t)sched_task_count());
-    klog_puts(").\n");
+    kernel_log_puts("[sched] task table at handoff: 0x");
+    kernel_log_put_hex32((uint32_t)scheduler_live_task_count());
+    kernel_log_puts(" live of 0x");
+    kernel_log_put_hex32((uint32_t)MAX_TASKS);
+    kernel_log_puts(" slots (high-water mark 0x");
+    kernel_log_put_hex32((uint32_t)scheduler_task_count());
+    kernel_log_puts(").\n");
 
     if (boot_bootstrap_enabled()) {
         os_stat_t bst;
         if (do_syscall(SYS_stat, (uint64_t)"/tests/bootstrap/run.sh",
                        (uint64_t)&bst, 0) != 0) {
-            klog_puts("[m98boot] no build fixtures on this image - skipped. "
+            kernel_log_puts("[m98boot] no build fixtures on this image - skipped. "
                        "tools/install-native-toolchain.sh puts them there, and "
                        "it needs tools/build-native-toolchain.sh to have run.\n\n");
         } else {
-            klog_puts("[m98boot] building on this machine - this is minutes, "
+            kernel_log_puts("[m98boot] building on this machine - this is minutes, "
                        "not seconds.\n");
             uint64_t started = pit_get_ticks();
             long pid = do_syscall(SYS_spawn,
@@ -11165,30 +11165,30 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
             uint64_t elapsed_s = (pit_get_ticks() - started) / PIT_HZ;
 
-            int fd_task = -1;
-            int fd_peak = sched_fd_high_water(&fd_task);
-            int task_peak = sched_peak_live_tasks();
+            int file_descriptor_task = -1;
+            int file_descriptor_peak = scheduler_file_descriptor_high_water(&file_descriptor_task);
+            int task_peak = scheduler_peak_live_tasks();
             uint64_t page_kb = 4;
-            uint64_t used_frames = pmm_total_frame_count() - pmm_free_frame_count();
+            uint64_t used_frames = physical_memory_total_frame_count() - physical_memory_free_frame_count();
 
-            klog_perf("build_wall_s", elapsed_s, "s");
-            klog_perf("build_peak_live_tasks", (uint64_t)task_peak, "tasks");
-            klog_perf("build_peak_fds_one_task", (uint64_t)fd_peak, "fds");
-            klog_perf("build_frames_in_use_after", used_frames * page_kb, "KiB");
+            kernel_log_perf("build_wall_s", elapsed_s, "s");
+            kernel_log_perf("build_peak_live_tasks", (uint64_t)task_peak, "tasks");
+            kernel_log_perf("build_peak_fds_one_task", (uint64_t)file_descriptor_peak, "fds");
+            kernel_log_perf("build_frames_in_use_after", used_frames * page_kb, "KiB");
 
-            klog_puts("[m98boot] the toolchain built somebody else's program here: "
+            kernel_log_puts("[m98boot] the toolchain built somebody else's program here: "
                        "the whole build ran in ");
-            klog_put_dec((uint32_t)elapsed_s);
-            klog_puts(" s, and the two ceilings this milestone predicted it would "
+            kernel_log_put_dec((uint32_t)elapsed_s);
+            kernel_log_puts(" s, and the two ceilings this milestone predicted it would "
                        "hit were reached at ");
-            klog_put_dec((uint32_t)task_peak);
-            klog_puts(" of ");
-            klog_put_dec((uint32_t)MAX_TASKS);
-            klog_puts(" task slots and ");
-            klog_put_dec((uint32_t)fd_peak);
-            klog_puts(" of ");
-            klog_put_dec((uint32_t)MAX_FDS);
-            klog_puts(" descriptors in one task - measured.\n\n");
+            kernel_log_put_dec((uint32_t)task_peak);
+            kernel_log_puts(" of ");
+            kernel_log_put_dec((uint32_t)MAX_TASKS);
+            kernel_log_puts(" task slots and ");
+            kernel_log_put_dec((uint32_t)file_descriptor_peak);
+            kernel_log_puts(" of ");
+            kernel_log_put_dec((uint32_t)MAX_FDS);
+            kernel_log_puts(" descriptors in one task - measured.\n\n");
         }
     }
 
@@ -11196,12 +11196,12 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         os_stat_t pst;
         if (do_syscall(SYS_stat, (uint64_t)"/tests/python/run.sh",
                        (uint64_t)&pst, 0) != 0) {
-            klog_puts("[m99pytest] no python fixtures on this image - "
+            kernel_log_puts("[m99pytest] no python fixtures on this image - "
                        "skipped. tools/build-python.sh builds CPython and "
                        "tools/install-python.sh puts it and its own test "
                        "suite here.\n\n");
         } else {
-            klog_puts("[m99pytest] running CPython's own regression suite - "
+            kernel_log_puts("[m99pytest] running CPython's own regression suite - "
                        "this is tens of minutes, not seconds.\n");
             uint64_t started = pit_get_ticks();
             long pid = do_syscall(SYS_spawn,
@@ -11212,26 +11212,26 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
             uint64_t elapsed_s = (pit_get_ticks() - started) / PIT_HZ;
 
-            int fd_task = -1;
-            int fd_peak = sched_fd_high_water(&fd_task);
-            int task_peak = sched_peak_live_tasks();
+            int file_descriptor_task = -1;
+            int file_descriptor_peak = scheduler_file_descriptor_high_water(&file_descriptor_task);
+            int task_peak = scheduler_peak_live_tasks();
 
-            klog_perf("pytest_wall_s", elapsed_s, "s");
-            klog_perf("pytest_peak_live_tasks", (uint64_t)task_peak, "tasks");
-            klog_perf("pytest_peak_fds_one_task", (uint64_t)fd_peak, "fds");
+            kernel_log_perf("pytest_wall_s", elapsed_s, "s");
+            kernel_log_perf("pytest_peak_live_tasks", (uint64_t)task_peak, "tasks");
+            kernel_log_perf("pytest_peak_fds_one_task", (uint64_t)file_descriptor_peak, "fds");
 
-            klog_puts("[m99pytest] somebody else's test suite ran here: "
+            kernel_log_puts("[m99pytest] somebody else's test suite ran here: "
                        "the whole list took ");
-            klog_put_dec((uint32_t)elapsed_s);
-            klog_puts(" s, reaching ");
-            klog_put_dec((uint32_t)task_peak);
-            klog_puts(" of ");
-            klog_put_dec((uint32_t)MAX_TASKS);
-            klog_puts(" task slots and ");
-            klog_put_dec((uint32_t)fd_peak);
-            klog_puts(" of ");
-            klog_put_dec((uint32_t)MAX_FDS);
-            klog_puts(" descriptors in one task - and what it says about "
+            kernel_log_put_dec((uint32_t)elapsed_s);
+            kernel_log_puts(" s, reaching ");
+            kernel_log_put_dec((uint32_t)task_peak);
+            kernel_log_puts(" of ");
+            kernel_log_put_dec((uint32_t)MAX_TASKS);
+            kernel_log_puts(" task slots and ");
+            kernel_log_put_dec((uint32_t)file_descriptor_peak);
+            kernel_log_puts(" of ");
+            kernel_log_put_dec((uint32_t)MAX_FDS);
+            kernel_log_puts(" descriptors in one task - and what it says about "
                        "itself is above, in its own words.\n\n");
         }
     }
@@ -11240,10 +11240,10 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
         os_stat_t bst;
         if (do_syscall(SYS_stat, (uint64_t)"/tests/pybuild/run.sh",
                        (uint64_t)&bst, 0) != 0) {
-            klog_puts("[m99build] no pybuild fixture on this image - "
+            kernel_log_puts("[m99build] no pybuild fixture on this image - "
                        "skipped.\n\n");
         } else {
-            klog_puts("[m99build] measuring what CPython's own build would "
+            kernel_log_puts("[m99build] measuring what CPython's own build would "
                        "cost on this machine.\n");
             uint64_t started = pit_get_ticks();
             long pid = do_syscall(SYS_spawn,
@@ -11253,13 +11253,13 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
             }
             do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
             uint64_t elapsed_s = (pit_get_ticks() - started) / PIT_HZ;
-            int fd_task = -1;
-            int fd_peak = sched_fd_high_water(&fd_task);
-            int task_peak = sched_peak_live_tasks();
-            klog_perf("pybuild_wall_s", elapsed_s, "s");
-            klog_perf("pybuild_peak_live_tasks", (uint64_t)task_peak, "tasks");
-            klog_perf("pybuild_peak_fds_one_task", (uint64_t)fd_peak, "fds");
-            klog_puts("[m99build] the units are measured: what they multiply "
+            int file_descriptor_task = -1;
+            int file_descriptor_peak = scheduler_file_descriptor_high_water(&file_descriptor_task);
+            int task_peak = scheduler_peak_live_tasks();
+            kernel_log_perf("pybuild_wall_s", elapsed_s, "s");
+            kernel_log_perf("pybuild_peak_live_tasks", (uint64_t)task_peak, "tasks");
+            kernel_log_perf("pybuild_peak_fds_one_task", (uint64_t)file_descriptor_peak, "fds");
+            kernel_log_puts("[m99build] the units are measured: what they multiply "
                        "out to is tools/python-build-test.sh's arithmetic, "
                        "printed there so it can be checked rather than "
                        "believed.\n\n");
@@ -11273,22 +11273,22 @@ void kernel_main(uint32_t *e820_map, fb_boot_info_t *fb_info, uint64_t rsdp_phys
     kfree(init_image);
 
     if (*(volatile uint64_t *)kernel_stack_guard != KERNEL_STACK_GUARD_VALUE) {
-        klog_puts("[boot] KERNEL STACK GUARD CLOBBERED - the boot stack overflowed; "
+        kernel_log_puts("[boot] KERNEL STACK GUARD CLOBBERED - the boot stack overflowed; "
                   "statics below it in .rodata/.data are not to be trusted\n");
     } else {
-        klog_puts("[boot] kernel stack guard intact.\n");
+        kernel_log_puts("[boot] kernel stack guard intact.\n");
     }
 
     {
         uint64_t boot_s = pit_get_ticks() * (1000 / PIT_HZ) / 1000;
-        klog_perf("boot_to_desktop_s", boot_s, "s");
-        klog_puts("[boot] reached the desktop handoff in ");
-        klog_put_dec((uint32_t)boot_s);
-        klog_puts(" s\n");
+        kernel_log_perf("boot_to_desktop_s", boot_s, "s");
+        kernel_log_puts("[boot] reached the desktop handoff in ");
+        kernel_log_put_dec((uint32_t)boot_s);
+        kernel_log_puts(" s\n");
     }
-    klog_puts("[init] PID 1 spawned - handing off to the desktop shell.\n\n");
+    kernel_log_puts("[init] PID 1 spawned - handing off to the desktop shell.\n\n");
 
-    sched_mark_self_idle();
+    scheduler_mark_self_idle();
 
     for (;;) {
         __asm__ volatile("hlt");

@@ -5,26 +5,26 @@
 #include "../file_system/virtual_file_system.h"
 
 static char registry[PKG_REGISTRY_MAX];
-static int  registry_len;
+static int  registry_length;
 static int  registry_loaded;
 static int  registry_entries;
 
 void pkg_registry_invalidate(void) {
     registry_loaded = 0;
-    registry_len = 0;
+    registry_length = 0;
     registry_entries = 0;
 }
 
 static void count_entries(void) {
     registry_entries = 0;
     int i = 0;
-    while (i < registry_len) {
+    while (i < registry_length) {
         int start = i;
-        while (i < registry_len && registry[i] != '\n') {
+        while (i < registry_length && registry[i] != '\n') {
             i++;
         }
         int end = i;
-        if (i < registry_len) {
+        if (i < registry_length) {
             i++;
         }
         while (start < end && (registry[start] == ' ' || registry[start] == '\t')) {
@@ -40,22 +40,22 @@ static void load(void) {
     if (registry_loaded) {
         return;
     }
-    if (!vfs_exists(PKG_REGISTRY_PATH)) {
-        registry_len = 0;
+    if (!virtual_file_system_exists(PKG_REGISTRY_PATH)) {
+        registry_length = 0;
         registry_entries = 0;
         registry_loaded = 1;
         return;
     }
-    int64_t n = vfs_read(PKG_REGISTRY_PATH, registry, sizeof(registry));
+    int64_t n = virtual_file_system_read(PKG_REGISTRY_PATH, registry, sizeof(registry));
     if (n < 0 || n >= (int64_t)sizeof(registry)) {
-        klog_puts("[pkg] " PKG_REGISTRY_PATH " could not be read whole - "
+        kernel_log_puts("[pkg] " PKG_REGISTRY_PATH " could not be read whole - "
                   "every package will run with no capabilities until it can\n");
-        registry_len = 0;
+        registry_length = 0;
         registry_entries = 0;
         registry_loaded = -1;
         return;
     }
-    registry_len = (int)n;
+    registry_length = (int)n;
     count_entries();
     registry_loaded = 1;
 }
@@ -82,13 +82,13 @@ static uint32_t pkg_caps_for_path(const char *path) {
     }
 
     int i = 0;
-    while (i < registry_len) {
+    while (i < registry_length) {
         int start = i;
-        while (i < registry_len && registry[i] != '\n') {
+        while (i < registry_length && registry[i] != '\n') {
             i++;
         }
         int end = i;
-        if (i < registry_len) {
+        if (i < registry_length) {
             i++;
         }
         if (end > start && registry[end - 1] == '\r') {

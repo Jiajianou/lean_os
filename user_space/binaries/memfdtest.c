@@ -18,7 +18,7 @@ union cmsg_one {
     char buf[CMSG_SPACE(sizeof(int))];
 };
 
-static int send_fd(int sock, int fd) {
+static int send_file_descriptor(int sock, int fd) {
     char byte = 'h';
     struct iovec iov = {&byte, 1};
     union cmsg_one c;
@@ -37,7 +37,7 @@ static int send_fd(int sock, int fd) {
     return sendmsg(sock, &msg, 0) < 0 ? -1 : 0;
 }
 
-static int recv_fd(int sock) {
+static int receive_file_descriptor(int sock) {
     char byte = 0;
     struct iovec iov = {&byte, 1};
     union cmsg_one c;
@@ -135,7 +135,7 @@ static int test_across_a_channel(void) {
         close(sv[0]);
         close(fd);
         munmap(mine, REGION);
-        int got = recv_fd(sv[1]);
+        int got = receive_file_descriptor(sv[1]);
         if (got < 0) {
             sys_exit(9);
         }
@@ -157,7 +157,7 @@ static int test_across_a_channel(void) {
         sys_exit(0);
     }
     close(sv[1]);
-    if (send_fd(sv[0], fd) != 0) {
+    if (send_file_descriptor(sv[0], fd) != 0) {
         FAIL(8);
     }
     close(fd);
@@ -285,7 +285,7 @@ static int test_no_capabilities(void) {
         if (sys_dropcaps(0) != 0) {
             sys_exit(17);
         }
-        int got = recv_fd(sv[1]);
+        int got = receive_file_descriptor(sv[1]);
         if (got < 0) {
             sys_exit(17);
         }
@@ -310,7 +310,7 @@ static int test_no_capabilities(void) {
         sys_exit(0);
     }
     close(sv[1]);
-    if (send_fd(sv[0], fd) != 0) {
+    if (send_file_descriptor(sv[0], fd) != 0) {
         FAIL(8);
     }
     close(fd);

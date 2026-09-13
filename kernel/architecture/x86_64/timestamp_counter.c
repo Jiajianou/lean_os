@@ -40,11 +40,11 @@ void tsc_init(void) {
         cycles_per_us = 1;
     }
 
-    klog_puts("[tsc] calibrated: ");
-    klog_put_dec((uint32_t)cycles_per_us);
-    klog_puts(" cycles/us (~");
-    klog_put_dec((uint32_t)cycles_per_us);
-    klog_puts(" MHz), invariant=");
-    klog_put_dec((uint32_t)tsc_is_invariant());
-    klog_putc('\n');
+    kernel_log_puts("[tsc] calibrated: ");
+    kernel_log_put_dec((uint32_t)cycles_per_us);
+    kernel_log_puts(" cycles/us (~");
+    kernel_log_put_dec((uint32_t)cycles_per_us);
+    kernel_log_puts(" MHz), invariant=");
+    kernel_log_put_dec((uint32_t)tsc_is_invariant());
+    kernel_log_putc('\n');
 }

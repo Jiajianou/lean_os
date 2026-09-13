@@ -17,9 +17,9 @@ typedef struct {
     int         code;
     int         top;
     const char *rows[16];
-} glyph_src_t;
+} glyph_source_t;
 
-static const glyph_src_t GLYPHS[] = {
+static const glyph_source_t GLYPHS[] = {
 
 { ' ', 0, { NULL } },
 { '!', CAP_TOP, { "...##..","...##..","...##..","...##..","...##..","...##..","...##..",".......","...##..","...##..", NULL } },
@@ -143,7 +143,7 @@ static void build(void) {
     int seen[128] = { 0 };
 
     for (int g = 0; g < NGLYPHS; g++) {
-        const glyph_src_t *src = &GLYPHS[g];
+        const glyph_source_t *src = &GLYPHS[g];
         int code = src->code;
 
         if (code < 0x20 || code > 0x7E) {
@@ -312,7 +312,7 @@ typedef struct {
     int         top;
     int         width;
     const char *rows[UI_MAX_ROWS + 1];
-} ui_glyph_src_t;
+} ui_glyph_source_t;
 
 typedef struct {
     const char    *ident;
@@ -320,14 +320,14 @@ typedef struct {
     int            cap_top;
     int            x_top;
     int            baseline;
-    int            desc_last;
+    int            descriptor_last;
     int            space_advance;
     int            has_bold;
     unsigned short rows[128][UI_MAX_ROWS];
     unsigned short bold[128][UI_MAX_ROWS];
     unsigned char  width[128];
     unsigned char  advance[128];
-} uifont_t;
+} user_interface_font_t;
 
 #define UI_SPECIAL_ARROW_LEFT  0x01
 #define UI_SPECIAL_ARROW_RIGHT 0x02
@@ -340,7 +340,7 @@ typedef struct {
 #define UI_SPECIAL_FIRST       UI_SPECIAL_ARROW_LEFT
 #define UI_SPECIAL_LAST        UI_SPECIAL_CLOSE
 
-static const ui_glyph_src_t UI_SPECIALS_16[] = {
+static const ui_glyph_source_t UI_SPECIALS_16[] = {
 { UI_SPECIAL_ARROW_LEFT,  3, 5, { "....#","...##","..###",".####","#####",".####","..###","...##","....#", NULL } },
 { UI_SPECIAL_ARROW_RIGHT, 3, 5, { "#....","##...","###..","####.","#####","####.","###..","##...","#....", NULL } },
 { UI_SPECIAL_ARROW_UP,    5, 9, { "....#....","...###...","..#####..",".#######.","#########", NULL } },
@@ -351,7 +351,7 @@ static const ui_glyph_src_t UI_SPECIALS_16[] = {
 { UI_SPECIAL_CLOSE,       4, 8, { "##....##","###..###",".######.","..####..","..####..",".######.","###..###","##....##", NULL } },
 };
 
-static const ui_glyph_src_t UI_SPECIALS_12[] = {
+static const ui_glyph_source_t UI_SPECIALS_12[] = {
 { UI_SPECIAL_ARROW_LEFT,  2, 4, { "...#","..##",".###","####",".###","..##","...#", NULL } },
 { UI_SPECIAL_ARROW_RIGHT, 2, 4, { "#...","##..","###.","####","###.","##..","#...", NULL } },
 { UI_SPECIAL_ARROW_UP,    4, 7, { "...#...","..###..",".#####.","#######", NULL } },
@@ -362,7 +362,7 @@ static const ui_glyph_src_t UI_SPECIALS_12[] = {
 { UI_SPECIAL_CLOSE,       3, 6, { "#....#",".#..#.","..##..","..##..",".#..#.","#....#", NULL } },
 };
 
-static const ui_glyph_src_t UI_UI_OVERRIDE[] = {
+static const ui_glyph_source_t UI_UI_OVERRIDE[] = {
 { 'M', CAP_TOP, 8, { "##....##","###..###","########","##.##.##","##.##.##","##....##","##....##","##....##","##....##","##....##", NULL } },
 { 'W', CAP_TOP, 8, { "##....##","##....##","##....##","##....##","##....##","##.##.##","##.##.##","##.##.##","########",".##..##.", NULL } },
 { 'm', X_TOP,   8, { "###..##.","########","##.##.##","##.##.##","##.##.##","##.##.##","##.##.##", NULL } },
@@ -378,7 +378,7 @@ static const ui_glyph_src_t UI_UI_OVERRIDE[] = {
 #define SM_BASELINE  9
 #define SM_DESC_LAST 11
 
-static const ui_glyph_src_t UI_SM_GLYPHS[] = {
+static const ui_glyph_source_t UI_SM_GLYPHS[] = {
 { ' ', 0, 0, { NULL } },
 { '!', SM_CAP_TOP, 1, { "#","#","#","#","#","#",".","#", NULL } },
 { '"', SM_CAP_TOP, 3, { "#.#","#.#", NULL } },
@@ -476,23 +476,23 @@ static const ui_glyph_src_t UI_SM_GLYPHS[] = {
 { '~', 6, 5, { ".#..#","#..#.", NULL } },
 };
 
-static uifont_t ui_small, ui_ui, ui_large;
+static user_interface_font_t ui_small, ui_ui, ui_large;
 
-static void ui_err(const char *what, const char *fontname, int code) {
+static void ui_error(const char *what, const char *fontname, int code) {
     fprintf(stderr, "gen-font: [%s] 0x%02X '%c': %s\n", fontname, code,
             (code >= 0x20 && code < 0x7F) ? code : '?', what);
     errors++;
 }
 
-static void ui_set_glyph(uifont_t *f, const ui_glyph_src_t *g) {
+static void ui_set_glyph(user_interface_font_t *f, const ui_glyph_source_t *g) {
     int code = g->code;
 
     if (code < 0 || code > 0x7E) {
-        ui_err("outside the range this font covers", f->ident, code);
+        ui_error("outside the range this font covers", f->ident, code);
         return;
     }
     if (g->width < 0 || g->width > UI_MAX_COLS) {
-        ui_err("width outside 0..UI_MAX_COLS", f->ident, code);
+        ui_error("width outside 0..UI_MAX_COLS", f->ident, code);
         return;
     }
     for (int r = 0; r < UI_MAX_ROWS; r++) {
@@ -503,18 +503,18 @@ static void ui_set_glyph(uifont_t *f, const ui_glyph_src_t *g) {
         int row = g->top + i;
 
         if ((int)strlen(art) != g->width) {
-            ui_err("art row is not the declared width", f->ident, code);
+            ui_error("art row is not the declared width", f->ident, code);
             return;
         }
         if (row < 0 || row >= f->height) {
-            ui_err("art runs past the bottom of the cell", f->ident, code);
+            ui_error("art runs past the bottom of the cell", f->ident, code);
             return;
         }
         for (int c = 0; c < g->width; c++) {
             if (art[c] == '#') {
                 f->rows[code][row] |= (unsigned short)(0x8000u >> c);
             } else if (art[c] != '.') {
-                ui_err("art uses a character other than '#' or '.'", f->ident, code);
+                ui_error("art uses a character other than '#' or '.'", f->ident, code);
                 return;
             }
         }
@@ -523,7 +523,7 @@ static void ui_set_glyph(uifont_t *f, const ui_glyph_src_t *g) {
     f->advance[code] = (unsigned char)(g->width ? g->width + 1 : 0);
 }
 
-static void ui_build_from_mono(uifont_t *f) {
+static void ui_build_from_mono(user_interface_font_t *f) {
     for (int code = 0; code < 128; code++) {
         int lo = FONT_WIDTH, hi = -1;
 
@@ -557,12 +557,12 @@ static void ui_build_from_mono(uifont_t *f) {
 static int ui_scale_first(int m) { return (3 * m + 1) / 2; }
 static int ui_scale_last(int m)  { return (3 * (m + 1) - 1) / 2; }
 
-static void ui_scale_3_2(const uifont_t *src, uifont_t *dst) {
+static void ui_scale_3_2(const user_interface_font_t *src, user_interface_font_t *dst) {
     dst->height    = src->height * 3 / 2;
     dst->cap_top   = ui_scale_first(src->cap_top);
     dst->x_top     = ui_scale_first(src->x_top);
     dst->baseline  = ui_scale_first(src->baseline);
-    dst->desc_last = ui_scale_last(src->desc_last);
+    dst->descriptor_last = ui_scale_last(src->descriptor_last);
     dst->space_advance = (3 * src->space_advance + 1) / 2;
 
     for (int code = 0; code < 128; code++) {
@@ -570,7 +570,7 @@ static void ui_scale_3_2(const uifont_t *src, uifont_t *dst) {
         int dw = w ? (3 * w + 1) / 2 : 0;
 
         if (dw > UI_MAX_COLS) {
-            ui_err("scaled glyph is wider than UI_MAX_COLS", dst->ident, code);
+            ui_error("scaled glyph is wider than UI_MAX_COLS", dst->ident, code);
             dw = UI_MAX_COLS;
         }
         for (int r = 0; r < dst->height; r++) {
@@ -591,7 +591,7 @@ static void ui_scale_3_2(const uifont_t *src, uifont_t *dst) {
     dst->advance[' '] = (unsigned char)dst->space_advance;
 }
 
-static void ui_make_bold(uifont_t *f) {
+static void ui_make_bold(user_interface_font_t *f) {
     for (int code = 0; code < 128; code++) {
         for (int r = 0; r < UI_MAX_ROWS; r++) {
             unsigned short bits = f->rows[code][r];
@@ -601,7 +601,7 @@ static void ui_make_bold(uifont_t *f) {
     f->has_bold = 1;
 }
 
-static void ui_tabular_digits(uifont_t *f) {
+static void ui_tabular_digits(user_interface_font_t *f) {
     int box = 0;
     for (int c = '0'; c <= '9'; c++) {
         if (f->width[c] > box) box = f->width[c];
@@ -618,17 +618,17 @@ static void ui_tabular_digits(uifont_t *f) {
     }
 }
 
-static int ui_ink_top(const uifont_t *f, int code) {
+static int ui_ink_top(const user_interface_font_t *f, int code) {
     for (int r = 0; r < f->height; r++) if (f->rows[code][r]) return r;
     return -1;
 }
 
-static int ui_ink_bottom(const uifont_t *f, int code) {
+static int ui_ink_bottom(const user_interface_font_t *f, int code) {
     for (int r = f->height - 1; r >= 0; r--) if (f->rows[code][r]) return r;
     return -1;
 }
 
-static void ui_check(const uifont_t *f) {
+static void ui_check(const user_interface_font_t *f) {
     static const char *UPPER  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     static const char *DIGITS = "0123456789";
     static const char *XBAND  = "acemnorsuvwxz";
@@ -636,65 +636,65 @@ static void ui_check(const uifont_t *f) {
     static const char *ASC    = "bdfhikl";
 
     if (f->advance[' '] == 0) {
-        ui_err("the space glyph has no advance - text would have no word gaps", f->ident, ' ');
+        ui_error("the space glyph has no advance - text would have no word gaps", f->ident, ' ');
     }
     for (int code = 0x21; code <= 0x7E; code++) {
         if (f->advance[code] == 0) {
-            ui_err("printable codepoint has no advance", f->ident, code);
+            ui_error("printable codepoint has no advance", f->ident, code);
         }
         if (ui_ink_top(f, code) < 0) {
-            ui_err("printable codepoint is blank", f->ident, code);
+            ui_error("printable codepoint is blank", f->ident, code);
         }
     }
     for (int code = UI_SPECIAL_FIRST; code <= UI_SPECIAL_LAST; code++) {
         if (f->advance[code] == 0 || ui_ink_top(f, code) < 0) {
-            ui_err("special glyph is missing", f->ident, code);
+            ui_error("special glyph is missing", f->ident, code);
         }
     }
     for (int code = 0; code < 128; code++) {
         if (f->advance[code] && f->advance[code] <= f->width[code]) {
-            ui_err("advance does not clear the glyph box - letters would touch", f->ident, code);
+            ui_error("advance does not clear the glyph box - letters would touch", f->ident, code);
         }
         for (int r = 0; r < UI_MAX_ROWS; r++) {
             unsigned short beyond = f->width[code] >= UI_MAX_COLS
                                   ? 0
                                   : (unsigned short)(f->rows[code][r] & (0xFFFFu >> f->width[code]));
             if (beyond) {
-                ui_err("ink outside the declared glyph box", f->ident, code);
+                ui_error("ink outside the declared glyph box", f->ident, code);
                 break;
             }
         }
         if (code < 0x20 && (code < UI_SPECIAL_FIRST || code > UI_SPECIAL_LAST)) {
             if (ui_ink_top(f, code) >= 0) {
-                ui_err("control code is not blank", f->ident, code);
+                ui_error("control code is not blank", f->ident, code);
             }
         }
     }
-    if (ui_ink_top(f, 0x20) >= 0) ui_err("space is not blank", f->ident, 0x20);
+    if (ui_ink_top(f, 0x20) >= 0) ui_error("space is not blank", f->ident, 0x20);
 
     for (int code = '1'; code <= '9'; code++) {
         if (f->advance[code] != f->advance['0']) {
-            ui_err("digit does not share the tabular advance", f->ident, code);
+            ui_error("digit does not share the tabular advance", f->ident, code);
         }
     }
-    if (ui_ink_top(f, 0x7F) >= 0) ui_err("0x7F is not blank", f->ident, 0x7F);
+    if (ui_ink_top(f, 0x7F) >= 0) ui_error("0x7F is not blank", f->ident, 0x7F);
 
     for (int code = 0x21; code <= 0x7E; code++) {
         int top = ui_ink_top(f, code), bot = ui_ink_bottom(f, code);
         if (top < 0) continue;
-        if (bot > f->desc_last) ui_err("ink below the descender row", f->ident, code);
+        if (bot > f->descriptor_last) ui_error("ink below the descender row", f->ident, code);
 
         if (in(UPPER, code) || in(DIGITS, code)) {
-            if (top != f->cap_top)      ui_err("does not start on the shared cap line", f->ident, code);
-            if (bot != f->baseline - 1) ui_err("does not sit on the shared baseline", f->ident, code);
+            if (top != f->cap_top)      ui_error("does not start on the shared cap line", f->ident, code);
+            if (bot != f->baseline - 1) ui_error("does not sit on the shared baseline", f->ident, code);
         } else if (in(XBAND, code)) {
-            if (top != f->x_top)        ui_err("does not start on the shared x-height line", f->ident, code);
-            if (bot != f->baseline - 1) ui_err("does not sit on the shared baseline", f->ident, code);
+            if (top != f->x_top)        ui_error("does not start on the shared x-height line", f->ident, code);
+            if (bot != f->baseline - 1) ui_error("does not sit on the shared baseline", f->ident, code);
         } else if (in(DESC, code)) {
-            if (bot != f->desc_last)    ui_err("descender does not reach the shared descender row", f->ident, code);
+            if (bot != f->descriptor_last)    ui_error("descender does not reach the shared descender row", f->ident, code);
         } else if (in(ASC, code)) {
-            if (top != f->cap_top)      ui_err("ascender does not start on the shared cap line", f->ident, code);
-            if (bot != f->baseline - 1) ui_err("does not sit on the shared baseline", f->ident, code);
+            if (top != f->cap_top)      ui_error("ascender does not start on the shared cap line", f->ident, code);
+            if (bot != f->baseline - 1) ui_error("does not sit on the shared baseline", f->ident, code);
         }
     }
 }
@@ -705,7 +705,7 @@ static void ui_build_all(void) {
     ui_ui.cap_top  = CAP_TOP;
     ui_ui.x_top    = X_TOP;
     ui_ui.baseline = BASELINE;
-    ui_ui.desc_last = DESC_LAST;
+    ui_ui.descriptor_last = DESC_LAST;
     ui_ui.space_advance = 5;
     ui_build_from_mono(&ui_ui);
     for (size_t i = 0; i < sizeof(UI_UI_OVERRIDE) / sizeof(UI_UI_OVERRIDE[0]); i++) {
@@ -723,7 +723,7 @@ static void ui_build_all(void) {
     ui_small.cap_top  = SM_CAP_TOP;
     ui_small.x_top    = SM_X_TOP;
     ui_small.baseline = SM_BASELINE;
-    ui_small.desc_last = SM_DESC_LAST;
+    ui_small.descriptor_last = SM_DESC_LAST;
     ui_small.space_advance = 4;
     for (size_t i = 0; i < sizeof(UI_SM_GLYPHS) / sizeof(UI_SM_GLYPHS[0]); i++) {
         ui_set_glyph(&ui_small, &UI_SM_GLYPHS[i]);
@@ -742,7 +742,7 @@ static void ui_build_all(void) {
     ui_check(&ui_large);
 }
 
-static void emit_ui_rows(const char *name, const uifont_t *f, const unsigned short t[128][UI_MAX_ROWS]) {
+static void emit_ui_rows(const char *name, const user_interface_font_t *f, const unsigned short t[128][UI_MAX_ROWS]) {
     emit("static const uint16_t %s[128 * %d] = {\n", name, f->height);
     for (int code = 0; code < 128; code++) {
         emit("   ");
@@ -766,7 +766,7 @@ static void emit_ui_bytes(const char *name, const unsigned char t[128]) {
     emit("};\n\n");
 }
 
-static void emit_uifont(const uifont_t *f) {
+static void emit_user_interface_font(const user_interface_font_t *f) {
     char buf[64];
 
     snprintf(buf, sizeof(buf), "ui_rows_%s", f->ident);
@@ -788,7 +788,7 @@ static void emit_uifont(const uifont_t *f) {
     emit("const ui_font_t ui_font_%s = {\n", f->ident);
     emit("    .height = %d, .cap_top = %d, .x_top = %d, .baseline = %d,\n",
          f->height, f->cap_top, f->x_top, f->baseline);
-    emit("    .desc_last = %d, .max_advance = %d,\n", f->desc_last, max_adv);
+    emit("    .descriptor_last = %d, .max_advance = %d,\n", f->descriptor_last, max_adv);
     emit("    .rows = ui_rows_%s,\n", f->ident);
     if (f->has_bold) {
         emit("    .rows_bold = ui_bold_%s,\n", f->ident);
@@ -801,7 +801,7 @@ static void emit_uifont(const uifont_t *f) {
 }
 
 
-static void build_uifont_header(void) {
+static void build_user_interface_font_header(void) {
     out_len = 0;
     emit("#pragma once\n\n");
     emit("#include <stdint.h>\n\n");
@@ -812,7 +812,7 @@ static void build_uifont_header(void) {
          "    uint8_t cap_top;\n"
          "    uint8_t x_top;\n"
          "    uint8_t baseline;\n"
-         "    uint8_t desc_last;\n"
+         "    uint8_t descriptor_last;\n"
          "    uint8_t max_advance;\n"
          "    const uint16_t *rows;\n"
          "    const uint16_t *rows_bold;\n"
@@ -846,12 +846,12 @@ static void build_uifont_header(void) {
     emit("#define UI_GLYPH_SPECIAL_LAST  0x%02X\n", UI_SPECIAL_LAST);
 }
 
-static void build_uifont_source(void) {
+static void build_user_interface_font_source(void) {
     out_len = 0;
     emit("#include \"user_interface_font.h\"\n\n");
-    emit_uifont(&ui_small);
-    emit_uifont(&ui_ui);
-    emit_uifont(&ui_large);
+    emit_user_interface_font(&ui_small);
+    emit_user_interface_font(&ui_ui);
+    emit_user_interface_font(&ui_large);
 }
 
 static int write_if(const char *path, int check_only) {
@@ -868,12 +868,12 @@ static int write_if(const char *path, int check_only) {
     }
 
     static char have[1 << 20];
-    size_t have_len = fread(have, 1, sizeof(have), f);
+    size_t have_length = fread(have, 1, sizeof(have), f);
     fclose(f);
 
-    if (have_len != out_len || memcmp(have, out, out_len) != 0) {
+    if (have_length != out_len || memcmp(have, out, out_len) != 0) {
         size_t i = 0, line = 1;
-        while (i < have_len && i < out_len && have[i] == out[i]) {
+        while (i < have_length && i < out_len && have[i] == out[i]) {
             if (have[i] == '\n') line++;
             i++;
         }
@@ -911,8 +911,8 @@ int main(int argc, char **argv) {
     build_source(1); bad |= write_if("kernel/drivers/font8x16.c", check_only);
     build_header(0); bad |= write_if("user_space/library/font8x16.h", check_only);
     build_source(0); bad |= write_if("user_space/library/font8x16.c", check_only);
-    build_uifont_header(); bad |= write_if("user_space/library/user_interface_font.h", check_only);
-    build_uifont_source(); bad |= write_if("user_space/library/user_interface_font.c", check_only);
+    build_user_interface_font_header(); bad |= write_if("user_space/library/user_interface_font.h", check_only);
+    build_user_interface_font_source(); bad |= write_if("user_space/library/user_interface_font.c", check_only);
 
     if (bad) return 1;
     if (check_only) printf("gen-font: all six font files match the generator.\n");

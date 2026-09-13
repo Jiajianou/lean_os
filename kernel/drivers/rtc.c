@@ -113,22 +113,22 @@ void rtc_init(void) {
     os_datetime_t now;
     available = sample(&now);
     if (!available) {
-        klog_puts("[rtc] no readable CMOS clock - files will be dated zero and the clock shows uptime.\n");
+        kernel_log_puts("[rtc] no readable CMOS clock - files will be dated zero and the clock shows uptime.\n");
         return;
     }
-    klog_puts("[rtc] ");
-    klog_put_dec_pad(now.year, 4);
-    klog_putc('-');
-    klog_put_dec_pad(now.month, 2);
-    klog_putc('-');
-    klog_put_dec_pad(now.day, 2);
-    klog_putc(' ');
-    klog_put_dec_pad(now.hour, 2);
-    klog_putc(':');
-    klog_put_dec_pad(now.minute, 2);
-    klog_putc(':');
-    klog_put_dec_pad(now.second, 2);
-    klog_puts(" (UTC, as the firmware keeps it) - this machine knows the date.\n");
+    kernel_log_puts("[rtc] ");
+    kernel_log_put_dec_pad(now.year, 4);
+    kernel_log_putc('-');
+    kernel_log_put_dec_pad(now.month, 2);
+    kernel_log_putc('-');
+    kernel_log_put_dec_pad(now.day, 2);
+    kernel_log_putc(' ');
+    kernel_log_put_dec_pad(now.hour, 2);
+    kernel_log_putc(':');
+    kernel_log_put_dec_pad(now.minute, 2);
+    kernel_log_putc(':');
+    kernel_log_put_dec_pad(now.second, 2);
+    kernel_log_puts(" (UTC, as the firmware keeps it) - this machine knows the date.\n");
 }
 
 int rtc_available(void) {

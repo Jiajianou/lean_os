@@ -43,7 +43,7 @@ struct eventfd *eventfd_create(uint64_t initval, int semaphore) {
     return e;
 }
 
-void eventfd_ref(struct eventfd *e) {
+void eventfd_reference(struct eventfd *e) {
     if (!e) {
         return;
     }
@@ -84,7 +84,7 @@ int eventfd_read(struct eventfd *e, uint64_t *out) {
         e->count = 0;
     }
     spin_unlock_irqrestore(&eventfd_lock, f);
-    sched_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHED_POLL_CHAN);
     return 0;
 }
 
@@ -105,7 +105,7 @@ int eventfd_write(struct eventfd *e, uint64_t v) {
     }
     e->count += v;
     spin_unlock_irqrestore(&eventfd_lock, f);
-    sched_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHED_POLL_CHAN);
     return 0;
 }
 

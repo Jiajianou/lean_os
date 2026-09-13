@@ -97,7 +97,7 @@ typedef struct {
     uint8_t slot;
     uint8_t proto;
     uint8_t ep_dci;
-    uint8_t report_len;
+    uint8_t report_length;
     xhci_ring_t ring;
     uint8_t *report;
     uint64_t report_phys;
@@ -111,17 +111,17 @@ static volatile uint32_t *doorbells;
 static uint32_t max_ports;
 static uint32_t context_size;
 static uint64_t *dcbaa;
-static xhci_ring_t cmd_ring;
+static xhci_ring_t command_ring;
 static xhci_ring_t event_ring;
 static uint64_t erdp_phys;
 static int started;
 
 static hid_device_t hid_devices[MAX_HID_DEVICES];
 static int hid_count;
-static uint64_t kbd_reports, mouse_reports;
+static uint64_t keyboard_reports, mouse_reports;
 
-static uint8_t *enum_buf;
-static uint64_t enum_buf_phys;
+static uint8_t *enum_buffer;
+static uint64_t enum_buffer_phys;
 
 static uint32_t op_read(uint32_t off) { return *(volatile uint32_t *)(op_regs + off); }
 static void op_write(uint32_t off, uint32_t v) { *(volatile uint32_t *)(op_regs + off) = v; }
@@ -140,7 +140,7 @@ static void rt_write64(uint32_t off, uint64_t v) {
 }
 
 static int ring_init(xhci_ring_t *r) {
-    uint64_t page = pmm_alloc_contiguous(1);
+    uint64_t page = physical_memory_alloc_contiguous(1);
     if (!page) {
         return -1;
     }
@@ -173,7 +173,7 @@ static int event_wait(xhci_trb_t *out) {
 }
 
 static int command_sync(uint64_t param, uint32_t status, uint32_t control, uint8_t *slot_out) {
-    xhci_ring_push(&cmd_ring, param, status, control);
+    xhci_ring_push(&command_ring, param, status, control);
     doorbell(0, 0);
 
     xhci_trb_t ev;
@@ -196,7 +196,7 @@ static int command_sync(uint64_t param, uint32_t status, uint32_t control, uint8
     return -1;
 }
 
-static uint32_t *ctx_at(void *base, uint32_t index) {
+static uint32_t *context_at(void *base, uint32_t index) {
     return (uint32_t *)((uint8_t *)base + (uint64_t)index * context_size);
 }
 
@@ -219,12 +219,12 @@ static int control_transfer(uint8_t slot, xhci_ring_t *ring, uint8_t bm_request_
     xhci_ring_push(ring, setup, 8, (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | (trt << 16));
 
     if (len > 0) {
-        xhci_ring_push(ring, enum_buf_phys, len,
+        xhci_ring_push(ring, enum_buffer_phys, len,
                   (TRB_DATA_STAGE << TRB_TYPE_SHIFT) |
                       ((bm_request_type & 0x80) ? (1u << 16) : 0));
     }
-    uint32_t status_dir = (len > 0 && (bm_request_type & 0x80)) ? 0 : (1u << 16);
-    xhci_ring_push(ring, 0, 0, (TRB_STATUS_STAGE << TRB_TYPE_SHIFT) | TRB_IOC | status_dir);
+    uint32_t status_directory = (len > 0 && (bm_request_type & 0x80)) ? 0 : (1u << 16);
+    xhci_ring_push(ring, 0, 0, (TRB_STATUS_STAGE << TRB_TYPE_SHIFT) | TRB_IOC | status_directory);
 
     doorbell(slot, 1);
 
@@ -276,91 +276,91 @@ static int enumerate_port(uint32_t port) {
         return 0;
     }
 
-    uint64_t dev_ctx = pmm_alloc_contiguous(1);
-    uint64_t in_ctx = pmm_alloc_contiguous(1);
-    if (!dev_ctx || !in_ctx) {
+    uint64_t dev_context = physical_memory_alloc_contiguous(1);
+    uint64_t in_context = physical_memory_alloc_contiguous(1);
+    if (!dev_context || !in_context) {
         return 0;
     }
-    k_memset((void *)dev_ctx, 0, 4096);
-    k_memset((void *)in_ctx, 0, 4096);
-    dcbaa[slot] = dev_ctx;
+    k_memset((void *)dev_context, 0, 4096);
+    k_memset((void *)in_context, 0, 4096);
+    dcbaa[slot] = dev_context;
 
     xhci_ring_t ep0;
     if (ring_init(&ep0) != 0) {
         return 0;
     }
 
-    uint32_t *icc = ctx_at((void *)in_ctx, 0);
+    uint32_t *icc = context_at((void *)in_context, 0);
     icc[1] = 0x3;
 
-    uint32_t *slot_ctx = ctx_at((void *)in_ctx, 1);
-    slot_ctx[0] = (1u << 27) | (speed << 20);
-    slot_ctx[1] = port << 16;
+    uint32_t *slot_context = context_at((void *)in_context, 1);
+    slot_context[0] = (1u << 27) | (speed << 20);
+    slot_context[1] = port << 16;
 
-    uint32_t *ep0_ctx = ctx_at((void *)in_ctx, 2);
-    ep0_ctx[1] = (4u << 3) | (3u << 1) | (ep0_max_packet(speed) << 16);
-    *(uint64_t *)&ep0_ctx[2] = ep0.phys | 1;
-    ep0_ctx[4] = 8;
+    uint32_t *ep0_context = context_at((void *)in_context, 2);
+    ep0_context[1] = (4u << 3) | (3u << 1) | (ep0_max_packet(speed) << 16);
+    *(uint64_t *)&ep0_context[2] = ep0.phys | 1;
+    ep0_context[4] = 8;
 
-    if (command_sync(in_ctx, 0, (TRB_CMD_ADDRESS_DEVICE << TRB_TYPE_SHIFT) | ((uint32_t)slot << 24),
+    if (command_sync(in_context, 0, (TRB_CMD_ADDRESS_DEVICE << TRB_TYPE_SHIFT) | ((uint32_t)slot << 24),
                      0) != CC_SUCCESS) {
         return 0;
     }
 
-    k_memset(enum_buf, 0, 64);
+    k_memset(enum_buffer, 0, 64);
     if (control_transfer(slot, &ep0, 0x80, USB_REQ_GET_DESCRIPTOR,
                          (USB_DESC_DEVICE << 8), 0, 8) != 0) {
         return 0;
     }
-    uint32_t real_mps = enum_buf[7];
+    uint32_t real_mps = enum_buffer[7];
     if (speed == SPEED_FULL && real_mps != 0 && real_mps != ep0_max_packet(speed)) {
-        k_memset((void *)in_ctx, 0, 4096);
-        icc = ctx_at((void *)in_ctx, 0);
+        k_memset((void *)in_context, 0, 4096);
+        icc = context_at((void *)in_context, 0);
         icc[1] = 0x2;
-        ep0_ctx = ctx_at((void *)in_ctx, 2);
-        ep0_ctx[1] = (4u << 3) | (3u << 1) | (real_mps << 16);
-        *(uint64_t *)&ep0_ctx[2] = ep0.phys | ep0.cycle;
-        ep0_ctx[4] = 8;
-        command_sync(in_ctx, 0,
+        ep0_context = context_at((void *)in_context, 2);
+        ep0_context[1] = (4u << 3) | (3u << 1) | (real_mps << 16);
+        *(uint64_t *)&ep0_context[2] = ep0.phys | ep0.cycle;
+        ep0_context[4] = 8;
+        command_sync(in_context, 0,
                      (TRB_CMD_EVALUATE_CTX << TRB_TYPE_SHIFT) | ((uint32_t)slot << 24), 0);
     }
 
-    k_memset(enum_buf, 0, 256);
+    k_memset(enum_buffer, 0, 256);
     if (control_transfer(slot, &ep0, 0x80, USB_REQ_GET_DESCRIPTOR,
                          (USB_DESC_CONFIG << 8), 0, 255) != 0) {
         return 0;
     }
 
-    uint16_t total = (uint16_t)(enum_buf[2] | (enum_buf[3] << 8));
+    uint16_t total = (uint16_t)(enum_buffer[2] | (enum_buffer[3] << 8));
     if (total > 255) {
         total = 255;
     }
-    uint8_t config_value = enum_buf[5];
+    uint8_t config_value = enum_buffer[5];
 
-    int proto = 0, iface_num = -1, ep_addr = -1, ep_interval = 8;
+    int proto = 0, interface_number = -1, ep_address = -1, ep_interval = 8;
     uint16_t ep_mps = 8;
     for (uint16_t off = 0; off + 1 < total;) {
-        uint8_t dlen = enum_buf[off];
-        uint8_t dtype = enum_buf[off + 1];
+        uint8_t dlen = enum_buffer[off];
+        uint8_t dtype = enum_buffer[off + 1];
         if (dlen == 0) {
             break;
         }
         if (dtype == 4 && off + 8 < total) {
-            if (enum_buf[off + 5] == HID_CLASS && enum_buf[off + 6] == HID_SUBCLASS_BOOT) {
-                proto = enum_buf[off + 7];
-                iface_num = enum_buf[off + 2];
-                ep_addr = -1;
+            if (enum_buffer[off + 5] == HID_CLASS && enum_buffer[off + 6] == HID_SUBCLASS_BOOT) {
+                proto = enum_buffer[off + 7];
+                interface_number = enum_buffer[off + 2];
+                ep_address = -1;
             } else {
                 proto = 0;
-                iface_num = -1;
+                interface_number = -1;
             }
-        } else if (dtype == 5 && proto != 0 && ep_addr < 0 && off + 6 < total) {
-            uint8_t addr = enum_buf[off + 2];
-            uint8_t attr = enum_buf[off + 3];
+        } else if (dtype == 5 && proto != 0 && ep_address < 0 && off + 6 < total) {
+            uint8_t addr = enum_buffer[off + 2];
+            uint8_t attr = enum_buffer[off + 3];
             if ((addr & 0x80) && (attr & 0x03) == 3) {
-                ep_addr = addr;
-                ep_mps = (uint16_t)(enum_buf[off + 4] | (enum_buf[off + 5] << 8));
-                ep_interval = enum_buf[off + 6];
+                ep_address = addr;
+                ep_mps = (uint16_t)(enum_buffer[off + 4] | (enum_buffer[off + 5] << 8));
+                ep_interval = enum_buffer[off + 6];
             }
         }
         off = (uint16_t)(off + dlen);
@@ -369,7 +369,7 @@ static int enumerate_port(uint32_t port) {
     if (proto != HID_PROTO_KEYBOARD && proto != HID_PROTO_MOUSE) {
         return 0;
     }
-    if (ep_addr < 0 || hid_count >= MAX_HID_DEVICES) {
+    if (ep_address < 0 || hid_count >= MAX_HID_DEVICES) {
         return 0;
     }
 
@@ -382,7 +382,7 @@ static int enumerate_port(uint32_t port) {
     if (ring_init(&d->ring) != 0) {
         return 0;
     }
-    uint64_t report_page = pmm_alloc_contiguous(1);
+    uint64_t report_page = physical_memory_alloc_contiguous(1);
     if (!report_page) {
         return 0;
     }
@@ -390,15 +390,15 @@ static int enumerate_port(uint32_t port) {
     d->report = (uint8_t *)report_page;
     d->report_phys = report_page;
 
-    uint8_t dci = (uint8_t)(2 * (ep_addr & 0x0F) + 1);
-    k_memset((void *)in_ctx, 0, 4096);
-    icc = ctx_at((void *)in_ctx, 0);
+    uint8_t dci = (uint8_t)(2 * (ep_address & 0x0F) + 1);
+    k_memset((void *)in_context, 0, 4096);
+    icc = context_at((void *)in_context, 0);
     icc[1] = 1u | (1u << dci);
-    slot_ctx = ctx_at((void *)in_ctx, 1);
-    slot_ctx[0] = ((uint32_t)dci << 27) | (speed << 20);
-    slot_ctx[1] = port << 16;
+    slot_context = context_at((void *)in_context, 1);
+    slot_context[0] = ((uint32_t)dci << 27) | (speed << 20);
+    slot_context[1] = port << 16;
 
-    uint32_t *ep_ctx = ctx_at((void *)in_ctx, dci + 1);
+    uint32_t *ep_context = context_at((void *)in_context, dci + 1);
     uint32_t interval;
     if (speed == SPEED_HIGH || speed == SPEED_SUPER) {
         interval = ep_interval > 0 ? (uint32_t)ep_interval - 1 : 3;
@@ -409,44 +409,44 @@ static int enumerate_port(uint32_t port) {
             interval++;
         }
     }
-    ep_ctx[0] = interval << 16;
-    ep_ctx[1] = (7u << 3) | (3u << 1) | ((uint32_t)ep_mps << 16);
-    *(uint64_t *)&ep_ctx[2] = d->ring.phys | 1;
-    ep_ctx[4] = ep_mps | ((uint32_t)ep_mps << 16);
+    ep_context[0] = interval << 16;
+    ep_context[1] = (7u << 3) | (3u << 1) | ((uint32_t)ep_mps << 16);
+    *(uint64_t *)&ep_context[2] = d->ring.phys | 1;
+    ep_context[4] = ep_mps | ((uint32_t)ep_mps << 16);
 
-    if (command_sync(in_ctx, 0,
+    if (command_sync(in_context, 0,
                      (TRB_CMD_CONFIGURE_EP << TRB_TYPE_SHIFT) | ((uint32_t)slot << 24),
                      0) != CC_SUCCESS) {
         return 0;
     }
 
     if (control_transfer(slot, &ep0, 0x21, USB_HID_SET_PROTOCOL, 0,
-                         (uint16_t)(iface_num < 0 ? 0 : iface_num), 0) != 0) {
-        klog_puts("[usb] the device refused SET_PROTOCOL(boot) - skipping it.\n");
+                         (uint16_t)(interface_number < 0 ? 0 : interface_number), 0) != 0) {
+        kernel_log_puts("[usb] the device refused SET_PROTOCOL(boot) - skipping it.\n");
         return 0;
     }
     control_transfer(slot, &ep0, 0x21, USB_HID_SET_IDLE, 0,
-                     (uint16_t)(iface_num < 0 ? 0 : iface_num), 0);
+                     (uint16_t)(interface_number < 0 ? 0 : interface_number), 0);
 
     d->slot = slot;
     d->proto = (uint8_t)proto;
     d->ep_dci = dci;
-    d->report_len = proto == HID_PROTO_KEYBOARD ? 8 : 4;
+    d->report_length = proto == HID_PROTO_KEYBOARD ? 8 : 4;
     hid_count++;
 
-    xhci_ring_push(&d->ring, d->report_phys, d->report_len,
+    xhci_ring_push(&d->ring, d->report_phys, d->report_length,
               (TRB_NORMAL << TRB_TYPE_SHIFT) | TRB_IOC);
     doorbell(slot, dci);
 
-    klog_puts("[usb] ");
-    klog_puts(proto == HID_PROTO_KEYBOARD ? "boot keyboard" : "boot mouse");
-    klog_puts(" on port ");
-    klog_put_dec(port);
-    klog_puts(", slot ");
-    klog_put_dec(slot);
-    klog_puts(", endpoint DCI ");
-    klog_put_dec(dci);
-    klog_putc('\n');
+    kernel_log_puts("[usb] ");
+    kernel_log_puts(proto == HID_PROTO_KEYBOARD ? "boot keyboard" : "boot mouse");
+    kernel_log_puts(" on port ");
+    kernel_log_put_dec(port);
+    kernel_log_puts(", slot ");
+    kernel_log_put_dec(slot);
+    kernel_log_puts(", endpoint DCI ");
+    kernel_log_put_dec(dci);
+    kernel_log_putc('\n');
     return 1;
 }
 
@@ -470,7 +470,7 @@ static void take_ownership(void) {
                     }
                     __asm__ volatile("pause");
                 }
-                klog_puts("[xhci] took the controller from the firmware.\n");
+                kernel_log_puts("[xhci] took the controller from the firmware.\n");
             }
             *(volatile uint32_t *)(p + 4) = 0xE0000000u;
             return;
@@ -490,14 +490,14 @@ int xhci_init(void) {
         }
         pci_enable_device(&dev);
 
-        uint64_t bar = pci_bar_mem_base(&dev, 0);
-        uint64_t bar_len = pci_bar_mem_size(&dev, 0);
-        if (bar == 0 || bar_len == 0) {
+        uint64_t bar = pci_bar_memory_base(&dev, 0);
+        uint64_t bar_length = pci_bar_memory_size(&dev, 0);
+        if (bar == 0 || bar_length == 0) {
             continue;
         }
-        cap_regs = (volatile uint8_t *)vmm_map_mmio(bar, bar_len);
+        cap_regs = (volatile uint8_t *)virtual_memory_map_mmio(bar, bar_length);
         if (cap_regs == 0) {
-            klog_puts("[xhci] BAR0 is not mappable - declining this controller.\n");
+            kernel_log_puts("[xhci] BAR0 is not mappable - declining this controller.\n");
             continue;
         }
 
@@ -530,13 +530,13 @@ int xhci_init(void) {
             __asm__ volatile("pause");
         }
         if (!ready) {
-            klog_puts("[xhci] the controller never came out of reset - declining it.\n");
+            kernel_log_puts("[xhci] the controller never came out of reset - declining it.\n");
             continue;
         }
 
         op_write(OP_CONFIG, max_slots);
 
-        uint64_t dcbaa_page = pmm_alloc_contiguous(1);
+        uint64_t dcbaa_page = physical_memory_alloc_contiguous(1);
         if (!dcbaa_page) {
             continue;
         }
@@ -546,14 +546,14 @@ int xhci_init(void) {
         uint32_t hcs2 = cap_read(CAP_HCSPARAMS2);
         uint32_t scratchpads = ((hcs2 >> 21) & 0x1F) | (((hcs2 >> 27) & 0x1F) << 5);
         if (scratchpads > 0) {
-            uint64_t array = pmm_alloc_contiguous(1);
+            uint64_t array = physical_memory_alloc_contiguous(1);
             if (!array) {
                 continue;
             }
             k_memset((void *)array, 0, 4096);
             uint64_t *slots = (uint64_t *)array;
             for (uint32_t i = 0; i < scratchpads && i < 512; i++) {
-                uint64_t page = pmm_alloc_contiguous(1);
+                uint64_t page = physical_memory_alloc_contiguous(1);
                 if (!page) {
                     break;
                 }
@@ -564,16 +564,16 @@ int xhci_init(void) {
         }
         op_write64(OP_DCBAAP, dcbaa_page);
 
-        if (ring_init(&cmd_ring) != 0 || ring_init(&event_ring) != 0) {
+        if (ring_init(&command_ring) != 0 || ring_init(&event_ring) != 0) {
             continue;
         }
         k_memset(event_ring.trb, 0, 4096);
         event_ring.cycle = 1;
         event_ring.index = 0;
 
-        op_write64(OP_CRCR, cmd_ring.phys | 1);
+        op_write64(OP_CRCR, command_ring.phys | 1);
 
-        uint64_t erst_page = pmm_alloc_contiguous(1);
+        uint64_t erst_page = physical_memory_alloc_contiguous(1);
         if (!erst_page) {
             continue;
         }
@@ -587,25 +587,25 @@ int xhci_init(void) {
         erdp_phys = event_ring.phys;
         rt_write(RT_IMAN, rt_read(RT_IMAN) & ~1u);
 
-        uint64_t enum_page = pmm_alloc_contiguous(1);
+        uint64_t enum_page = physical_memory_alloc_contiguous(1);
         if (!enum_page) {
             continue;
         }
         k_memset((void *)enum_page, 0, 4096);
-        enum_buf = (uint8_t *)enum_page;
-        enum_buf_phys = enum_page;
+        enum_buffer = (uint8_t *)enum_page;
+        enum_buffer_phys = enum_page;
 
         op_write(OP_USBCMD, op_read(OP_USBCMD) | USBCMD_RS);
 
-        klog_puts("[xhci] xHCI ");
-        klog_put_hex32(cap_read(0) >> 16);
-        klog_puts(", ");
-        klog_put_dec(max_ports);
-        klog_puts(" root ports, ");
-        klog_put_dec(max_slots);
-        klog_puts(" slots, ");
-        klog_put_dec(context_size);
-        klog_puts("-byte contexts\n");
+        kernel_log_puts("[xhci] xHCI ");
+        kernel_log_put_hex32(cap_read(0) >> 16);
+        kernel_log_puts(", ");
+        kernel_log_put_dec(max_ports);
+        kernel_log_puts(" root ports, ");
+        kernel_log_put_dec(max_slots);
+        kernel_log_puts(" slots, ");
+        kernel_log_put_dec(context_size);
+        kernel_log_puts("-byte contexts\n");
 
         for (uint32_t i = 0; i < 30000000u; i++) {
             __asm__ volatile("pause");
@@ -630,12 +630,12 @@ static void deliver_keyboard(hid_device_t *d) {
     for (int i = 0; i < keys.count; i++) {
         keyboard_inject(keys.ch[i], keys.mods[i]);
     }
-    kbd_reports++;
+    keyboard_reports++;
 }
 
 static void deliver_mouse(hid_device_t *d) {
     usb_hid_mouse_t m;
-    usb_hid_decode_mouse(&d->hid, d->report, d->report_len, &m);
+    usb_hid_decode_mouse(&d->hid, d->report, d->report_length, &m);
     if (m.deliver) {
         mouse_inject(m.dx, m.dy, m.buttons, m.wheel);
     }
@@ -679,7 +679,7 @@ void xhci_poll(void) {
                 }
             }
             k_memset(d->report, 0, 8);
-            xhci_ring_push(&d->ring, d->report_phys, d->report_len,
+            xhci_ring_push(&d->ring, d->report_phys, d->report_length,
                       (TRB_NORMAL << TRB_TYPE_SHIFT) | TRB_IOC);
             doorbell(d->slot, d->ep_dci);
             break;

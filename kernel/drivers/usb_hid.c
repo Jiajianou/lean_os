@@ -78,11 +78,11 @@ void usb_hid_decode_keyboard(usb_hid_state_t *state, const uint8_t report[8],
 }
 
 void usb_hid_decode_mouse(usb_hid_state_t *state, const uint8_t *report,
-                          uint8_t report_len, usb_hid_mouse_t *out) {
+                          uint8_t report_length, usb_hid_mouse_t *out) {
     out->buttons = (uint8_t)(report[0] & 0x07);
     out->dx = (int8_t)report[1];
     out->dy = (int8_t)report[2];
-    out->wheel = report_len > 3 ? (int8_t)report[3] : 0;
+    out->wheel = report_length > 3 ? (int8_t)report[3] : 0;
     out->deliver = (out->dx != 0 || out->dy != 0 || out->wheel != 0 ||
                     out->buttons != state->last_buttons || !state->have_last);
     state->last_buttons = out->buttons;

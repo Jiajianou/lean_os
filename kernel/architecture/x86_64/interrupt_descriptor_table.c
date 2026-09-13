@@ -9,7 +9,7 @@ typedef struct __attribute__((packed)) {
     uint16_t offset_low;
     uint16_t selector;
     uint8_t  ist;
-    uint8_t  type_attr;
+    uint8_t  type_attribute;
     uint16_t offset_mid;
     uint32_t offset_high;
     uint32_t reserved;
@@ -18,7 +18,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint16_t limit;
     uint64_t base;
-} table_ptr_t;
+} table_pointer_t;
 
 #define IDT_ENTRIES 256
 #define IDT_GATE_INTERRUPT_RING0 0x8E
@@ -31,15 +31,15 @@ typedef struct __attribute__((packed)) {
 #define SYSCALL_VECTOR 0x80
 
 static idt_entry_t idt[IDT_ENTRIES];
-static table_ptr_t idtp;
+static table_pointer_t idtp;
 
-extern void idt_flush(table_ptr_t *ptr);
+extern void idt_flush(table_pointer_t *ptr);
 
-static void idt_set_gate(uint8_t vector, uint64_t handler, uint8_t ist, uint8_t type_attr) {
+static void idt_set_gate(uint8_t vector, uint64_t handler, uint8_t ist, uint8_t type_attribute) {
     idt[vector].offset_low = handler & 0xFFFF;
     idt[vector].selector = GDT_KERNEL_CODE_SEL;
     idt[vector].ist = ist;
-    idt[vector].type_attr = type_attr;
+    idt[vector].type_attribute = type_attribute;
     idt[vector].offset_mid = (handler >> 16) & 0xFFFF;
     idt[vector].offset_high = (handler >> 32) & 0xFFFFFFFF;
     idt[vector].reserved = 0;
@@ -53,10 +53,10 @@ void idt_init(void) {
     for (int line = 0; line < 16; line++) {
         idt_set_gate((uint8_t)(32 + line), irq_stub_table[line], 0, IDT_GATE_INTERRUPT_RING0);
     }
-    idt_set_gate(SYSCALL_VECTOR, syscall_stub_addr, 0, IDT_GATE_TRAP_RING3);
+    idt_set_gate(SYSCALL_VECTOR, syscall_stub_address, 0, IDT_GATE_TRAP_RING3);
 
-    idt_set_gate(IPI_SCHEDULE_VECTOR, isr_ipi_schedule_addr, 0, IDT_GATE_INTERRUPT_RING0);
-    idt_set_gate(LAPIC_SPURIOUS_VECTOR, isr_lapic_spurious_addr, 0, IDT_GATE_INTERRUPT_RING0);
+    idt_set_gate(IPI_SCHEDULE_VECTOR, isr_ipi_schedule_address, 0, IDT_GATE_INTERRUPT_RING0);
+    idt_set_gate(LAPIC_SPURIOUS_VECTOR, isr_lapic_spurious_address, 0, IDT_GATE_INTERRUPT_RING0);
 
     idtp.limit = sizeof(idt) - 1;
     idtp.base = (uint64_t)&idt;

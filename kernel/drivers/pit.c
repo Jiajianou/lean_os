@@ -24,8 +24,8 @@ static void (*tick_hook)(void);
 static void pit_irq(isr_regs_t *regs) {
     ticks++;
     profile_sample(regs);
-    sched_account_tick((regs->cs & 3) != 0);
-    pcspk_tick();
+    scheduler_account_tick((regs->cs & 3) != 0);
+    pc_speaker_tick();
     xhci_poll();
     if (tick_hook) {
         tick_hook();
@@ -53,11 +53,11 @@ void pit_sleep_ms(uint32_t ms) {
         needed = 1;
     }
     uint64_t target = ticks + needed;
-    sched_idle_enter();
+    scheduler_idle_enter();
     while (ticks < target) {
         __asm__ volatile("hlt");
     }
-    sched_idle_exit();
+    scheduler_idle_exit();
 }
 
 void pit_set_tick_hook(void (*hook)(void)) {

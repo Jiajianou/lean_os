@@ -39,100 +39,100 @@ static uint64_t read_cr2(void) {
 
 static void dump_regs(isr_regs_t *r) {
     {
-        task_t *t = sched_current();
-        klog_puts("  cpu=");
-        klog_put_dec((uint32_t)smp_current_cpu());
-        klog_puts(" task=");
-        klog_puts(t && t->name[0] ? t->name : "(none)");
-        klog_puts(" pid=0x");
-        klog_put_hex32((uint32_t)(t ? t->id : -1));
-        klog_puts(" tss.rsp0=0x");
-        klog_put_hex64(tss_get_rsp0(smp_current_cpu()));
-        klog_puts(" kstack_top=0x");
-        klog_put_hex64(t ? t->kernel_stack_top : 0);
-        klog_putc('\n');
-        sched_dump_cpus();
+        task_t *t = scheduler_current();
+        kernel_log_puts("  cpu=");
+        kernel_log_put_dec((uint32_t)smp_current_cpu());
+        kernel_log_puts(" task=");
+        kernel_log_puts(t && t->name[0] ? t->name : "(none)");
+        kernel_log_puts(" pid=0x");
+        kernel_log_put_hex32((uint32_t)(t ? t->id : -1));
+        kernel_log_puts(" tss.rsp0=0x");
+        kernel_log_put_hex64(tss_get_rsp0(smp_current_cpu()));
+        kernel_log_puts(" kstack_top=0x");
+        kernel_log_put_hex64(t ? t->kernel_stack_top : 0);
+        kernel_log_putc('\n');
+        scheduler_dump_cpus();
     }
-    klog_puts("  vector=0x");
-    klog_put_hex64(r->vector);
-    klog_puts(" error_code=0x");
-    klog_put_hex64(r->error_code);
-    klog_puts("\n  rip=0x");
-    klog_put_hex64(r->rip);
-    klog_puts(" cs=0x");
-    klog_put_hex64(r->cs);
-    klog_puts(" rflags=0x");
-    klog_put_hex64(r->rflags);
-    klog_puts("\n  rsp=0x");
-    klog_put_hex64(r->rsp);
-    klog_puts(" ss=0x");
-    klog_put_hex64(r->ss);
+    kernel_log_puts("  vector=0x");
+    kernel_log_put_hex64(r->vector);
+    kernel_log_puts(" error_code=0x");
+    kernel_log_put_hex64(r->error_code);
+    kernel_log_puts("\n  rip=0x");
+    kernel_log_put_hex64(r->rip);
+    kernel_log_puts(" cs=0x");
+    kernel_log_put_hex64(r->cs);
+    kernel_log_puts(" rflags=0x");
+    kernel_log_put_hex64(r->rflags);
+    kernel_log_puts("\n  rsp=0x");
+    kernel_log_put_hex64(r->rsp);
+    kernel_log_puts(" ss=0x");
+    kernel_log_put_hex64(r->ss);
     if (r->vector == PAGE_FAULT_VECTOR) {
-        klog_puts("\n  cr2=0x");
-        klog_put_hex64(read_cr2());
+        kernel_log_puts("\n  cr2=0x");
+        kernel_log_put_hex64(read_cr2());
     }
-    klog_puts("\n  rax=0x");
-    klog_put_hex64(r->rax);
-    klog_puts(" rbx=0x");
-    klog_put_hex64(r->rbx);
-    klog_puts(" rcx=0x");
-    klog_put_hex64(r->rcx);
-    klog_puts("\n  rdx=0x");
-    klog_put_hex64(r->rdx);
-    klog_puts(" rsi=0x");
-    klog_put_hex64(r->rsi);
-    klog_puts(" rdi=0x");
-    klog_put_hex64(r->rdi);
-    klog_puts("\n  rbp=0x");
-    klog_put_hex64(r->rbp);
-    klog_puts(" r10=0x");
-    klog_put_hex64(r->r10);
+    kernel_log_puts("\n  rax=0x");
+    kernel_log_put_hex64(r->rax);
+    kernel_log_puts(" rbx=0x");
+    kernel_log_put_hex64(r->rbx);
+    kernel_log_puts(" rcx=0x");
+    kernel_log_put_hex64(r->rcx);
+    kernel_log_puts("\n  rdx=0x");
+    kernel_log_put_hex64(r->rdx);
+    kernel_log_puts(" rsi=0x");
+    kernel_log_put_hex64(r->rsi);
+    kernel_log_puts(" rdi=0x");
+    kernel_log_put_hex64(r->rdi);
+    kernel_log_puts("\n  rbp=0x");
+    kernel_log_put_hex64(r->rbp);
+    kernel_log_puts(" r10=0x");
+    kernel_log_put_hex64(r->r10);
     {
-        task_t *ft = sched_current();
+        task_t *ft = scheduler_current();
         if (r->rip != 0 && ft &&
-            vmm_user_range_ok(ft->pml4_phys, r->rip, 16, 0)) {
+            virtual_memory_user_range_ok(ft->pml4_phys, r->rip, 16, 0)) {
             const uint8_t *code = (const uint8_t *)(uintptr_t)r->rip;
-            klog_puts("\n  code@rip=");
+            kernel_log_puts("\n  code@rip=");
             for (int i = 0; i < 16; i++) {
-                klog_put_hex32(code[i]);
-                klog_putc(' ');
+                kernel_log_put_hex32(code[i]);
+                kernel_log_putc(' ');
             }
         }
     }
-    klog_putc('\n');
+    kernel_log_putc('\n');
 }
 
 void isr_handler(isr_regs_t *r) {
     if (r->vector == BREAKPOINT_VECTOR) {
-        uint64_t msg = klog_begin();
-        klog_puts("[isr] breakpoint (int3) hit - resuming\n");
+        uint64_t msg = kernel_log_begin();
+        kernel_log_puts("[isr] breakpoint (int3) hit - resuming\n");
         dump_regs(r);
-        klog_end(msg);
+        kernel_log_end(msg);
         return;
     }
 
     if (r->vector == PAGE_FAULT_VECTOR) {
-        int filled = sched_fault_fill(read_cr2(), r->error_code, r->rsp);
+        int filled = scheduler_fault_fill(read_cr2(), r->error_code, r->rsp);
         if (filled == 1) {
             return;
         }
         if (filled == FILL_NO_MEMORY) {
-            task_t *t = sched_current();
-            klog_puts("\n[oom] out of physical memory filling 0x");
-            klog_put_hex64(read_cr2());
-            klog_puts(" for task ");
-            klog_puts(t && t->name[0] ? t->name : "(unnamed)");
-            klog_puts(" pid 0x");
-            klog_put_hex32((uint32_t)(t ? t->id : -1));
-            klog_puts(" - killing it, not the machine. ");
-            klog_put_dec((uint32_t)pmm_free_frame_count());
-            klog_puts(" frames free.\n");
+            task_t *t = scheduler_current();
+            kernel_log_puts("\n[oom] out of physical memory filling 0x");
+            kernel_log_put_hex64(read_cr2());
+            kernel_log_puts(" for task ");
+            kernel_log_puts(t && t->name[0] ? t->name : "(unnamed)");
+            kernel_log_puts(" pid 0x");
+            kernel_log_put_hex32((uint32_t)(t ? t->id : -1));
+            kernel_log_puts(" - killing it, not the machine. ");
+            kernel_log_put_dec((uint32_t)physical_memory_free_frame_count());
+            kernel_log_puts(" frames free.\n");
             task_exit_with_signal(SIGKILL);
         }
     }
 
     if ((r->cs & 3) == 3) {
-        task_t *t = sched_current();
+        task_t *t = scheduler_current();
         int fault_signo;
         switch (r->vector) {
         case 0:
@@ -150,35 +150,35 @@ void isr_handler(isr_regs_t *r) {
             fault_signo = SIGSEGV;
             break;
         }
-        uint64_t fault_addr = (r->vector == PAGE_FAULT_VECTOR) ? read_cr2() : 0;
-        if (signal_deliver_fault(r, fault_signo, fault_addr)) {
+        uint64_t fault_address = (r->vector == PAGE_FAULT_VECTOR) ? read_cr2() : 0;
+        if (signal_deliver_fault(r, fault_signo, fault_address)) {
             return;
         }
-        uint64_t msg = klog_begin();
-        klog_puts("\n[isr] ring-3 fault: ");
-        klog_puts(exception_name(r->vector));
-        klog_puts(" in task ");
-        klog_puts(t && t->name[0] ? t->name : "(unnamed)");
-        klog_puts(" pid 0x");
-        klog_put_hex32((uint32_t)(t ? t->id : -1));
-        klog_puts(" - terminating it, not the machine\n");
+        uint64_t msg = kernel_log_begin();
+        kernel_log_puts("\n[isr] ring-3 fault: ");
+        kernel_log_puts(exception_name(r->vector));
+        kernel_log_puts(" in task ");
+        kernel_log_puts(t && t->name[0] ? t->name : "(unnamed)");
+        kernel_log_puts(" pid 0x");
+        kernel_log_put_hex32((uint32_t)(t ? t->id : -1));
+        kernel_log_puts(" - terminating it, not the machine\n");
         dump_regs(r);
-        klog_end(msg);
+        kernel_log_end(msg);
         task_exit_with_signal(fault_signo);
     }
 
-    uint64_t msg = klog_begin();
-    klog_puts("\n*** UNHANDLED CPU EXCEPTION: ");
-    klog_puts(exception_name(r->vector));
-    klog_puts(" ***\n");
+    uint64_t msg = kernel_log_begin();
+    kernel_log_puts("\n*** UNHANDLED CPU EXCEPTION: ");
+    kernel_log_puts(exception_name(r->vector));
+    kernel_log_puts(" ***\n");
     dump_regs(r);
-    klog_end(msg);
+    kernel_log_end(msg);
     panic("unrecoverable CPU exception");
 }
 
-static irq_handler_fn irq_handlers[16];
+static irq_handler_function irq_handlers[16];
 
-void irq_register_handler(uint8_t irq, irq_handler_fn handler) {
+void irq_register_handler(uint8_t irq, irq_handler_function handler) {
     irq_handlers[irq] = handler;
 }
 
@@ -205,8 +205,8 @@ void irq_handler(isr_regs_t *r) {
     if (irq_handlers[irq]) {
         irq_handlers[irq](r);
     } else {
-        klog_puts("[irq] unhandled IRQ ");
-        klog_put_hex64(irq);
-        klog_putc('\n');
+        kernel_log_puts("[irq] unhandled IRQ ");
+        kernel_log_put_hex64(irq);
+        kernel_log_putc('\n');
     }
 }

@@ -5,38 +5,38 @@
 
 #include <stdint.h>
 
-void klog_init(void);
-void klog_putc(char c);
-void klog_puts(const char *s);
+void kernel_log_init(void);
+void kernel_log_putc(char c);
+void kernel_log_puts(const char *s);
 
-uint64_t klog_begin(void);
-void klog_end(uint64_t flags);
+uint64_t kernel_log_begin(void);
+void kernel_log_end(uint64_t flags);
 
-void klog_release_console(void);
+void kernel_log_release_console(void);
 
-void klog_enter_panic(void);
-void klog_put_hex32(uint32_t value);
-void klog_put_dec(uint32_t value);
-void klog_put_dec_pad(uint32_t value, int width);
-void klog_put_hex64(uint64_t value);
+void kernel_log_enter_panic(void);
+void kernel_log_put_hex32(uint32_t value);
+void kernel_log_put_dec(uint32_t value);
+void kernel_log_put_dec_pad(uint32_t value, int width);
+void kernel_log_put_hex64(uint64_t value);
 
 typedef enum {
     KLOG_DEBUG = 0,
     KLOG_INFO,
     KLOG_WARN,
     KLOG_ERROR,
-} klog_level_t;
+} kernel_log_level_t;
 
-void klog_log(klog_level_t level, const char *s);
-void klog_log_hex64(klog_level_t level, uint64_t value);
+void kernel_log_log(kernel_log_level_t level, const char *s);
+void kernel_log_log_hex64(kernel_log_level_t level, uint64_t value);
 
-static inline void klog_debug(const char *s) { klog_log(KLOG_DEBUG, s); }
-static inline void klog_info(const char *s) { klog_log(KLOG_INFO, s); }
-static inline void klog_warn(const char *s) { klog_log(KLOG_WARN, s); }
-static inline void klog_error(const char *s) { klog_log(KLOG_ERROR, s); }
+static inline void kernel_log_debug(const char *s) { kernel_log_log(KLOG_DEBUG, s); }
+static inline void kernel_log_info(const char *s) { kernel_log_log(KLOG_INFO, s); }
+static inline void kernel_log_warn(const char *s) { kernel_log_log(KLOG_WARN, s); }
+static inline void kernel_log_error(const char *s) { kernel_log_log(KLOG_ERROR, s); }
 
-void klog_use_console(void);
+void kernel_log_use_console(void);
 
-size_t klog_read(uint64_t from, char *out, size_t max, uint64_t *next);
+size_t kernel_log_read(uint64_t from, char *out, size_t max, uint64_t *next);
 
-uint64_t klog_written_total(void);
+uint64_t kernel_log_written_total(void);

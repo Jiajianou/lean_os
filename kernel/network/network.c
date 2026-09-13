@@ -47,11 +47,11 @@ void net_lock_release(void) {
 }
 
 static void log_ip(const char *label, uint32_t ip) {
-    klog_puts(label);
+    kernel_log_puts(label);
     for (int shift = 24; shift >= 0; shift -= 8) {
-        klog_put_dec((ip >> shift) & 0xFF);
+        kernel_log_put_dec((ip >> shift) & 0xFF);
         if (shift) {
-            klog_putc('.');
+            kernel_log_putc('.');
         }
     }
 }
@@ -81,15 +81,15 @@ int net_init(void) {
     dhcp_configure();
 
     log_ip("[net] ", local_ip);
-    klog_puts("/");
+    kernel_log_puts("/");
     int bits = 0;
     for (uint32_t m = subnet; m & 0x80000000u; m <<= 1) {
         bits++;
     }
-    klog_put_dec((uint32_t)bits);
+    kernel_log_put_dec((uint32_t)bits);
     log_ip(" via ", gateway_ip);
     log_ip(", DNS ", dns_ip);
-    klog_puts(leased ? " (DHCP lease)\n" : " (no DHCP answer - fallback configuration)\n");
+    kernel_log_puts(leased ? " (DHCP lease)\n" : " (no DHCP answer - fallback configuration)\n");
     return 1;
 }
 

@@ -142,9 +142,9 @@ static long dechunk(char *buf, long len) {
     return out;
 }
 
-static int header_has(const char *hdr, const char *name, const char **val) {
-    for (const char *p = hdr; *p; p++) {
-        if (p == hdr || p[-1] == '\n') {
+static int header_has(const char *header, const char *name, const char **val) {
+    for (const char *p = header; *p; p++) {
+        if (p == header || p[-1] == '\n') {
             const char *a = name;
             const char *b = p;
             while (*a && *b) {
@@ -229,15 +229,15 @@ long http_get(const char *url, char *body, long cap, int *status_out) {
             return -4;
         }
 
-        long hdr_end = -1;
+        long header_end = -1;
         for (long i = 0; i + 3 < got; i++) {
             if (body[i] == '\r' && body[i + 1] == '\n' &&
                 body[i + 2] == '\r' && body[i + 3] == '\n') {
-                hdr_end = i + 4;
+                header_end = i + 4;
                 break;
             }
         }
-        if (hdr_end < 0 || hdr_end > HTTP_HDR_MAX) {
+        if (header_end < 0 || header_end > HTTP_HDR_MAX) {
             return -4;
         }
 
@@ -245,21 +245,21 @@ long http_get(const char *url, char *body, long cap, int *status_out) {
             return -4;
         }
         int status = 0;
-        for (long i = 9; i < hdr_end && body[i] >= '0' && body[i] <= '9'; i++) {
+        for (long i = 9; i < header_end && body[i] >= '0' && body[i] <= '9'; i++) {
             status = status * 10 + (body[i] - '0');
         }
         if (status_out) {
             *status_out = status;
         }
 
-        char hdr[HTTP_HDR_MAX + 1];
-        long hlen = hdr_end < HTTP_HDR_MAX ? hdr_end : HTTP_HDR_MAX;
-        memcpy(hdr, body, (size_t)hlen);
-        hdr[hlen] = '\0';
+        char header[HTTP_HDR_MAX + 1];
+        long hlen = header_end < HTTP_HDR_MAX ? header_end : HTTP_HDR_MAX;
+        memcpy(header, body, (size_t)hlen);
+        header[hlen] = '\0';
 
         if (status >= 300 && status < 400) {
             const char *loc;
-            if (!header_has(hdr, "location", &loc)) {
+            if (!header_has(header, "location", &loc)) {
                 return -4;
             }
             int n = 0;
@@ -270,18 +270,18 @@ long http_get(const char *url, char *body, long cap, int *status_out) {
             continue;
         }
 
-        long blen = got - hdr_end;
-        memmove(body, body + hdr_end, (size_t)blen);
+        long blen = got - header_end;
+        memmove(body, body + header_end, (size_t)blen);
 
         const char *te;
-        if (header_has(hdr, "transfer-encoding", &te) && strncmp(te, "chunked", 7) == 0) {
+        if (header_has(header, "transfer-encoding", &te) && strncmp(te, "chunked", 7) == 0) {
             blen = dechunk(body, blen);
             if (blen < 0) {
                 return -4;
             }
         } else {
             const char *cl;
-            if (header_has(hdr, "content-length", &cl)) {
+            if (header_has(header, "content-length", &cl)) {
                 long want = 0;
                 while (*cl >= '0' && *cl <= '9') {
                     want = want * 10 + (*cl++ - '0');

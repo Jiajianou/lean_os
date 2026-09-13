@@ -72,8 +72,8 @@ TEST(pci, a_32_bit_memory_bar_decodes_to_its_base) {
 
     pci_device_t dev;
     REQUIRE(pci_find_class(AHCI_CLASS, AHCI_SUB, AHCI_PROG, 0, &dev) == 1);
-    CHECK_EQ(pci_bar_mem_base(&dev, 5), 0xFEBF0000ULL);
-    CHECK_EQ(pci_bar_mem_size(&dev, 5), 0x1000ULL);
+    CHECK_EQ(pci_bar_memory_base(&dev, 5), 0xFEBF0000ULL);
+    CHECK_EQ(pci_bar_memory_size(&dev, 5), 0x1000ULL);
 }
 
 TEST(pci, a_64_bit_bar_joins_its_two_registers) {
@@ -84,7 +84,7 @@ TEST(pci, a_64_bit_bar_joins_its_two_registers) {
 
     pci_device_t dev;
     REQUIRE(pci_find_class(0x01, 0x08, 0x02, 0, &dev) == 1);
-    CHECK_EQ(pci_bar_mem_base(&dev, 0), 0x000000C000000000ULL);
+    CHECK_EQ(pci_bar_memory_base(&dev, 0), 0x000000C000000000ULL);
 }
 
 TEST(pci, the_upper_half_of_a_64_bit_bar_is_not_a_bar) {
@@ -95,8 +95,8 @@ TEST(pci, the_upper_half_of_a_64_bit_bar_is_not_a_bar) {
 
     pci_device_t dev;
     REQUIRE(pci_find_class(0x01, 0x08, 0x02, 0, &dev) == 1);
-    CHECK_EQ(pci_bar_mem_base(&dev, 1), 0ULL);
-    CHECK_EQ(pci_bar_mem_size(&dev, 1), 0ULL);
+    CHECK_EQ(pci_bar_memory_base(&dev, 1), 0ULL);
+    CHECK_EQ(pci_bar_memory_size(&dev, 1), 0ULL);
 }
 
 TEST(pci, an_io_bar_is_not_a_memory_bar) {
@@ -106,8 +106,8 @@ TEST(pci, an_io_bar_is_not_a_memory_bar) {
 
     pci_device_t dev;
     REQUIRE(pci_find_device(0x10EC, 0x8139, &dev) == 1);
-    CHECK_EQ(pci_bar_mem_base(&dev, 0), 0ULL);
-    CHECK_EQ(pci_bar_mem_size(&dev, 0), 0ULL);
+    CHECK_EQ(pci_bar_memory_base(&dev, 0), 0ULL);
+    CHECK_EQ(pci_bar_memory_size(&dev, 0), 0ULL);
     CHECK_EQ(pci_bar0_io_base(&dev), 0xC500);
 }
 
@@ -117,8 +117,8 @@ TEST(pci, an_unimplemented_bar_decodes_to_nothing) {
     (void)h;
     pci_device_t dev;
     REQUIRE(pci_find_class(0x01, 0x06, 0x01, 0, &dev) == 1);
-    CHECK_EQ(pci_bar_mem_base(&dev, 2), 0ULL);
-    CHECK_EQ(pci_bar_mem_size(&dev, 2), 0ULL);
+    CHECK_EQ(pci_bar_memory_base(&dev, 2), 0ULL);
+    CHECK_EQ(pci_bar_memory_size(&dev, 2), 0ULL);
 }
 
 TEST(pci, an_out_of_range_bar_index_is_refused) {
@@ -126,8 +126,8 @@ TEST(pci, an_out_of_range_bar_index_is_refused) {
     fake_pci_add(0, 7, 0, 0x1234, 0x5678, 0x01, 0x06, 0x01);
     pci_device_t dev;
     REQUIRE(pci_find_class(0x01, 0x06, 0x01, 0, &dev) == 1);
-    CHECK_EQ(pci_bar_mem_base(&dev, 6), 0ULL);
-    CHECK_EQ(pci_bar_mem_base(&dev, 200), 0ULL);
+    CHECK_EQ(pci_bar_memory_base(&dev, 6), 0ULL);
+    CHECK_EQ(pci_bar_memory_base(&dev, 200), 0ULL);
 }
 
 TEST(pci, sizing_a_bar_restores_its_value) {
@@ -137,9 +137,9 @@ TEST(pci, sizing_a_bar_restores_its_value) {
 
     pci_device_t dev;
     REQUIRE(pci_find_class(AHCI_CLASS, AHCI_SUB, AHCI_PROG, 0, &dev) == 1);
-    CHECK_EQ(pci_bar_mem_size(&dev, 5), 0x10000ULL);
+    CHECK_EQ(pci_bar_memory_size(&dev, 5), 0x10000ULL);
     CHECK_EQ(fake_pci_get_config(h, 0x14 + 4 * 4), 0xFEBF0000u);
-    CHECK_EQ(pci_bar_mem_base(&dev, 5), 0xFEBF0000ULL);
+    CHECK_EQ(pci_bar_memory_base(&dev, 5), 0xFEBF0000ULL);
 }
 
 TEST(pci, sizing_a_64_bit_bar_restores_both_registers) {
@@ -150,10 +150,10 @@ TEST(pci, sizing_a_64_bit_bar_restores_both_registers) {
 
     pci_device_t dev;
     REQUIRE(pci_find_class(0x01, 0x08, 0x02, 0, &dev) == 1);
-    CHECK_EQ(pci_bar_mem_size(&dev, 0), 0x4000ULL);
+    CHECK_EQ(pci_bar_memory_size(&dev, 0), 0x4000ULL);
     CHECK_EQ(fake_pci_get_config(h, 0x10), 0x00000004u);
     CHECK_EQ(fake_pci_get_config(h, 0x14), 0x000000C0u);
-    CHECK_EQ(pci_bar_mem_base(&dev, 0), 0x000000C000000000ULL);
+    CHECK_EQ(pci_bar_memory_base(&dev, 0), 0x000000C000000000ULL);
 }
 
 TEST(pci, a_device_with_no_capability_list_has_no_capabilities) {

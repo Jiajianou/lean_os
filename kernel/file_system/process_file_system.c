@@ -22,12 +22,12 @@ typedef struct {
     uint32_t len;
     uint32_t cap;
     char *buf;
-} proc_file_t;
+} process_file_t;
 
-static proc_file_t proc_files[PROC_MAX_OPEN];
+static process_file_t process_files[PROC_MAX_OPEN];
 
 void procfs_init(void) {
-    k_memset(proc_files, 0, sizeof(proc_files));
+    k_memset(process_files, 0, sizeof(process_files));
 }
 
 static uint32_t put_str(char *dst, uint32_t at, uint32_t cap, const char *s) {
@@ -38,17 +38,17 @@ static uint32_t put_str(char *dst, uint32_t at, uint32_t cap, const char *s) {
 }
 
 static uint32_t put_dec(char *dst, uint32_t at, uint32_t cap, uint64_t v) {
-    char tmp[24];
+    char temporary[24];
     int n = 0;
     if (v == 0) {
-        tmp[n++] = '0';
+        temporary[n++] = '0';
     }
     while (v > 0) {
-        tmp[n++] = (char)('0' + (v % 10));
+        temporary[n++] = (char)('0' + (v % 10));
         v /= 10;
     }
     while (n > 0 && at < cap - 1) {
-        dst[at++] = tmp[--n];
+        dst[at++] = temporary[--n];
     }
     return at;
 }
@@ -70,7 +70,7 @@ enum {
     P_SYSCALLS,
 };
 
-static uint32_t buf_cap_for(int kind) {
+static uint32_t buffer_cap_for(int kind) {
     return (kind == P_PROFILE || kind == P_SYSCALLS || kind == P_INTERRUPTS)
                ? PROC_BUF_LARGE
                : PROC_BUF_SMALL;
@@ -108,7 +108,7 @@ static int classify(const char *rel, int *out_pid) {
     const char *rest = p;
     if (p[0] == 's' && p[1] == 'e' && p[2] == 'l' && p[3] == 'f' &&
         (p[4] == '\0' || p[4] == '/')) {
-        pid = sched_current()->id;
+        pid = scheduler_current()->id;
         rest = p + 4;
     } else {
         int v = 0;
@@ -123,7 +123,7 @@ static int classify(const char *rel, int *out_pid) {
         }
         pid = v;
     }
-    if (!sched_task_by_id(pid)) {
+    if (!scheduler_task_by_id(pid)) {
         return P_NONE;
     }
     *out_pid = pid;
@@ -155,7 +155,7 @@ static const char *state_name(int state) {
     }
 }
 
-static void generate(proc_file_t *f, int kind, int pid) {
+static void generate(process_file_t *f, int kind, int pid) {
     uint32_t at = 0;
     uint32_t cap = f->cap;
     switch (kind) {
@@ -167,7 +167,7 @@ static void generate(proc_file_t *f, int kind, int pid) {
         at = put_str(f->buf, at, cap, "\n");
         break;
     case P_MEMINFO: {
-        uint64_t free_kb = pmm_free_frame_count() * 4;
+        uint64_t free_kb = physical_memory_free_frame_count() * 4;
         at = put_str(f->buf, at, cap, "MemFree:        ");
         at = put_dec(f->buf, at, cap, free_kb);
         at = put_str(f->buf, at, cap, " kB\n");
@@ -176,7 +176,7 @@ static void generate(proc_file_t *f, int kind, int pid) {
     case P_MOUNTS: {
         const char *prefix;
         const char *type;
-        for (int i = 0; vfs_mount_info(i, &prefix, &type); i++) {
+        for (int i = 0; virtual_file_system_mount_info(i, &prefix, &type); i++) {
             at = put_str(f->buf, at, cap, type);
             at = put_str(f->buf, at, cap, " ");
             at = put_str(f->buf, at, cap, prefix);
@@ -213,7 +213,7 @@ static void generate(proc_file_t *f, int kind, int pid) {
         break;
     }
     case P_STATUS: {
-        task_t *t = sched_task_by_id(pid);
+        task_t *t = scheduler_task_by_id(pid);
         if (!t) {
             break;
         }
@@ -233,14 +233,14 @@ static void generate(proc_file_t *f, int kind, int pid) {
         break;
     }
     case P_CMDLINE: {
-        task_t *t = sched_task_by_id(pid);
+        task_t *t = scheduler_task_by_id(pid);
         if (t) {
             at = put_str(f->buf, at, cap, t->name);
         }
         break;
     }
     case P_EXE: {
-        task_t *t = sched_task_by_id(pid);
+        task_t *t = scheduler_task_by_id(pid);
         if (t) {
             at = put_str(f->buf, at, cap, "/bin/");
             at = put_str(f->buf, at, cap, t->name);
@@ -249,7 +249,7 @@ static void generate(proc_file_t *f, int kind, int pid) {
     }
     case P_PROFILE: {
         prof_stats_t st;
-        profile_get_stats(&st);
+        profile_get_statistics(&st);
         at = put_str(f->buf, at, cap, "running: ");
         at = put_dec(f->buf, at, cap, (uint64_t)(st.running ? 1 : 0));
         at = put_str(f->buf, at, cap, "\nsamples: ");
@@ -270,8 +270,8 @@ static void generate(proc_file_t *f, int kind, int pid) {
     case P_SYSCALLS: {
         at = put_str(f->buf, at, cap, "# num calls cycles\n");
         for (int i = 0; i < SYSCALL_COUNT; i++) {
-            syscount_entry_t e;
-            syscount_get(i, &e);
+            syscall_counters_entry_t e;
+            syscall_counters_get(i, &e);
             if (e.calls == 0) {
                 continue;
             }
@@ -291,18 +291,18 @@ static void generate(proc_file_t *f, int kind, int pid) {
     f->len = at;
 }
 
-static int proc_exists(const char *rel) {
+static int process_exists(const char *rel) {
     int pid = 0;
     return classify(rel, &pid) != P_NONE;
 }
 
-static int proc_is_dir(const char *rel) {
+static int process_is_directory(const char *rel) {
     int pid = 0;
     int k = classify(rel, &pid);
     return k == P_ROOT || k == P_PIDDIR;
 }
 
-static int proc_stat(const char *rel, leanfs_stat_t *out) {
+static int process_stat(const char *rel, leanfs_stat_t *out) {
     int pid = 0;
     int k = classify(rel, &pid);
     if (k == P_NONE) {
@@ -316,16 +316,16 @@ static int proc_stat(const char *rel, leanfs_stat_t *out) {
         out->size = 0;
         return 0;
     }
-    static char probe_buf[PROC_BUF_LARGE];
-    static proc_file_t probe;
-    probe.buf = probe_buf;
+    static char probe_buffer[PROC_BUF_LARGE];
+    static process_file_t probe;
+    probe.buf = probe_buffer;
     probe.cap = PROC_BUF_LARGE;
     generate(&probe, k, pid);
     out->size = probe.len;
     return 0;
 }
 
-static int proc_open(const char *rel, int create) {
+static int process_open(const char *rel, int create) {
     (void)create;
     int pid = 0;
     int k = classify(rel, &pid);
@@ -333,38 +333,38 @@ static int proc_open(const char *rel, int create) {
         return -1;
     }
     for (int i = 0; i < PROC_MAX_OPEN; i++) {
-        if (!proc_files[i].used) {
-            uint32_t cap = buf_cap_for(k);
+        if (!process_files[i].used) {
+            uint32_t cap = buffer_cap_for(k);
             char *buf = (char *)kmalloc(cap);
             if (!buf) {
                 return -1;
             }
-            proc_files[i].used = 1;
-            proc_files[i].buf = buf;
-            proc_files[i].cap = cap;
-            generate(&proc_files[i], k, pid);
+            process_files[i].used = 1;
+            process_files[i].buf = buf;
+            process_files[i].cap = cap;
+            generate(&process_files[i], k, pid);
             return i;
         }
     }
     return -1;
 }
 
-static void proc_close(int handle) {
-    if (handle < 0 || handle >= PROC_MAX_OPEN || !proc_files[handle].used) {
+static void process_close(int handle) {
+    if (handle < 0 || handle >= PROC_MAX_OPEN || !process_files[handle].used) {
         return;
     }
-    kfree(proc_files[handle].buf);
-    proc_files[handle].buf = (char *)0;
-    proc_files[handle].cap = 0;
-    proc_files[handle].len = 0;
-    proc_files[handle].used = 0;
+    kfree(process_files[handle].buf);
+    process_files[handle].buf = (char *)0;
+    process_files[handle].cap = 0;
+    process_files[handle].len = 0;
+    process_files[handle].used = 0;
 }
 
-static int64_t proc_read(int handle, void *buf, size_t len, uint32_t off) {
-    if (handle < 0 || handle >= PROC_MAX_OPEN || !proc_files[handle].used) {
+static int64_t process_read(int handle, void *buf, size_t len, uint32_t off) {
+    if (handle < 0 || handle >= PROC_MAX_OPEN || !process_files[handle].used) {
         return -1;
     }
-    proc_file_t *f = &proc_files[handle];
+    process_file_t *f = &process_files[handle];
     if (off >= f->len) {
         return 0;
     }
@@ -374,7 +374,7 @@ static int64_t proc_read(int handle, void *buf, size_t len, uint32_t off) {
     return (int64_t)n;
 }
 
-static int64_t proc_write(int handle, const void *buf, size_t len, uint32_t off) {
+static int64_t process_write(int handle, const void *buf, size_t len, uint32_t off) {
     (void)handle;
     (void)buf;
     (void)len;
@@ -382,18 +382,18 @@ static int64_t proc_write(int handle, const void *buf, size_t len, uint32_t off)
     return -1;
 }
 
-static uint32_t proc_size(int handle) {
-    if (handle < 0 || handle >= PROC_MAX_OPEN || !proc_files[handle].used) {
+static uint32_t process_size(int handle) {
+    if (handle < 0 || handle >= PROC_MAX_OPEN || !process_files[handle].used) {
         return 0;
     }
-    return proc_files[handle].len;
+    return process_files[handle].len;
 }
 
-static int proc_handle_stat(int handle, leanfs_stat_t *out) {
-    if (handle < 0 || handle >= PROC_MAX_OPEN || !proc_files[handle].used) {
+static int process_handle_stat(int handle, leanfs_stat_t *out) {
+    if (handle < 0 || handle >= PROC_MAX_OPEN || !process_files[handle].used) {
         return -1;
     }
-    out->size = proc_files[handle].len;
+    out->size = process_files[handle].len;
     out->mtime = 0;
     out->is_dir = 0;
     out->is_link = 0;
@@ -406,7 +406,7 @@ static const char *const ROOT_FILES[] = {"uptime", "meminfo", "mounts",
                                          "interrupts", "profile", "syscalls"};
 #define ROOT_FILE_COUNT ((uint32_t)(sizeof(ROOT_FILES) / sizeof(ROOT_FILES[0])))
 
-static int proc_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *out) {
+static int process_readdir(const char *rel, uint32_t *cookie, leanfs_directory_entry_t *out) {
     int pid = 0;
     int k = classify(rel, &pid);
     uint32_t i = *cookie;
@@ -434,9 +434,9 @@ static int proc_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *o
         return 1;
     }
     uint32_t slot = i - ROOT_FILE_COUNT;
-    int total = sched_task_count();
+    int total = scheduler_task_count();
     while ((int)slot < total) {
-        task_t *t = sched_task_by_slot((int)slot);
+        task_t *t = scheduler_task_by_slot((int)slot);
         if (t && t->state != TASK_TERMINATED) {
             out->inode = (uint32_t)t->id;
             out->is_dir = 1;
@@ -454,19 +454,19 @@ static int proc_readdir(const char *rel, uint32_t *cookie, leanfs_dir_entry_t *o
     return 0;
 }
 
-static const vfs_ops_t PROCFS_OPS = {
-    .stat = proc_stat,
-    .is_dir = proc_is_dir,
-    .exists = proc_exists,
-    .open = proc_open,
-    .read = proc_read,
-    .write = proc_write,
-    .size = proc_size,
-    .handle_stat = proc_handle_stat,
-    .readdir = proc_readdir,
-    .close = proc_close,
+static const virtual_file_system_ops_t PROCFS_OPS = {
+    .stat = process_stat,
+    .is_dir = process_is_directory,
+    .exists = process_exists,
+    .open = process_open,
+    .read = process_read,
+    .write = process_write,
+    .size = process_size,
+    .handle_stat = process_handle_stat,
+    .readdir = process_readdir,
+    .close = process_close,
 };
 
-const vfs_ops_t *procfs_ops(void) {
+const virtual_file_system_ops_t *procfs_ops(void) {
     return &PROCFS_OPS;
 }

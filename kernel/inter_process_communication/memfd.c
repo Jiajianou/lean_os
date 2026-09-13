@@ -29,7 +29,7 @@ void memfd_init(void) {
     spin_unlock_irqrestore(&memfd_lock, f);
 }
 
-struct memfd *memfd_create_obj(const char *name) {
+struct memfd *memfd_create_object(const char *name) {
     uint64_t f = spin_lock_irqsave(&memfd_lock);
     for (int i = 0; i < MEMFD_MAX; i++) {
         if (table[i].used) {
@@ -72,7 +72,7 @@ struct memfd *memfd_by_tag(uint8_t slot, uint16_t generation) {
     return ok ? m : (memfd_t *)0;
 }
 
-void memfd_ref(struct memfd *m) {
+void memfd_reference(struct memfd *m) {
     if (!m) {
         return;
     }
@@ -101,12 +101,12 @@ void memfd_unref(struct memfd *m) {
     spin_unlock_irqrestore(&memfd_lock, f);
 
     for (uint32_t i = 0; i < pages; i++) {
-        pmm_free_frame(frames[i]);
+        physical_memory_free_frame(frames[i]);
     }
     kfree(frames);
 }
 
-void memfd_region_ref(struct memfd *m) { memfd_ref(m); }
+void memfd_region_reference(struct memfd *m) { memfd_reference(m); }
 void memfd_region_unref(struct memfd *m) { memfd_unref(m); }
 
 int memfd_truncate(struct memfd *m, uint64_t size) {
@@ -144,10 +144,10 @@ int memfd_truncate(struct memfd *m, uint64_t size) {
         grown[i] = m->frames[i];
     }
     for (uint64_t i = m->pages; i < want_pages; i++) {
-        uint64_t phys = pmm_try_alloc_frame();
+        uint64_t phys = physical_memory_try_alloc_frame();
         if (phys == 0) {
             for (uint64_t j = m->pages; j < i; j++) {
-                pmm_free_frame(grown[j]);
+                physical_memory_free_frame(grown[j]);
             }
             kfree(grown);
             spin_unlock_irqrestore(&memfd_lock, f);

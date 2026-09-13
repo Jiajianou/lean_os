@@ -11,6 +11,6 @@
 
 extern const uint8_t eth_broadcast_mac[ETH_ADDR_LEN];
 
-void eth_send(const uint8_t dst_mac[ETH_ADDR_LEN], uint16_t ethertype, const uint8_t *payload, uint16_t payload_len);
+void eth_send(const uint8_t destination_mac[ETH_ADDR_LEN], uint16_t ethertype, const uint8_t *payload, uint16_t payload_length);
 
 void eth_receive(const uint8_t *frame, uint16_t len);

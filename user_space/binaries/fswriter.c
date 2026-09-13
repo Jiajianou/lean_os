@@ -71,18 +71,18 @@ int main(int argc, char **argv) {
         return 3;
     }
 
-    char tmp[96], final[96];
+    char temporary[96], final[96];
 
     for (int f = 0; f < FILES; f++) {
         fill(id, f);
-        snprintf(tmp, sizeof(tmp), "%s/t%d", dir, f);
+        snprintf(temporary, sizeof(temporary), "%s/t%d", dir, f);
         snprintf(final, sizeof(final), "%s/f%d", dir, f);
 
-        if (write_all(tmp, buf, FILE_BYTES) != 0) {
+        if (write_all(temporary, buf, FILE_BYTES) != 0) {
             return 5;
         }
         unlink(final);
-        if (rename(tmp, final) != 0) {
+        if (rename(temporary, final) != 0) {
             return 7;
         }
 

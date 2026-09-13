@@ -31,13 +31,13 @@ static void *grow_heap(uint64_t pages) {
     uint64_t start = heap_virt_end;
     uint64_t mapped = 0;
     for (uint64_t i = 0; i < pages; i++) {
-        uint64_t phys = pmm_try_alloc_frame();
+        uint64_t phys = physical_memory_try_alloc_frame();
         if (!phys) {
             break;
         }
-        if (vmm_try_map_page_in(vmm_kernel_pml4_phys(), heap_virt_end, phys,
+        if (virtual_memory_try_map_page_in(virtual_memory_kernel_pml4_phys(), heap_virt_end, phys,
                                 VMM_FLAG_WRITABLE) != 0) {
-            pmm_free_frame(phys);
+            physical_memory_free_frame(phys);
             break;
         }
         heap_virt_end += PAGE_SIZE;
@@ -48,9 +48,9 @@ static void *grow_heap(uint64_t pages) {
     }
     for (uint64_t i = 0; i < mapped; i++) {
         heap_virt_end -= PAGE_SIZE;
-        uint64_t phys = vmm_unmap_page_take(vmm_kernel_pml4_phys(), heap_virt_end);
+        uint64_t phys = virtual_memory_unmap_page_take(virtual_memory_kernel_pml4_phys(), heap_virt_end);
         if (phys) {
-            pmm_free_frame(phys);
+            physical_memory_free_frame(phys);
         }
     }
     return (void *)0;
@@ -74,13 +74,13 @@ size_t heap_total_bytes(void) {
 }
 
 void heap_init(void) {
-    heap_virt_end = vmm_kernel_heap_base();
+    heap_virt_end = virtual_memory_kernel_heap_base();
     heap_head = (block_header_t *)0;
     heap_used = 0;
     heap_total = 0;
-    klog_puts("[heap] kernel heap starts at 0x");
-    klog_put_hex64(heap_virt_end);
-    klog_putc('\n');
+    kernel_log_puts("[heap] kernel heap starts at 0x");
+    kernel_log_put_hex64(heap_virt_end);
+    kernel_log_putc('\n');
 }
 
 void *kmalloc(size_t size) {

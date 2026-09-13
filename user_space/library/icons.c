@@ -2,7 +2,7 @@
 
 #include "icon.h"
 
-void icon_draw(gfx_ctx_t *ctx, int32_t x, int32_t y, const uint8_t *blob, int32_t scale) {
+void icon_draw(graphics_context_t *context, int32_t x, int32_t y, const uint8_t *blob, int32_t scale) {
     if (!icon_valid(blob) || scale < 1) {
         return;
     }
@@ -23,7 +23,7 @@ void icon_draw(gfx_ctx_t *ctx, int32_t x, int32_t y, const uint8_t *blob, int32_
             uint32_t color = ((uint32_t)pal[idx * 3] << 16) |
                               ((uint32_t)pal[idx * 3 + 1] << 8) |
                               (uint32_t)pal[idx * 3 + 2];
-            gfx_fill_rect(ctx, x + col * scale, y + row * scale, scale, scale, color);
+            graphics_fill_rect(context, x + col * scale, y + row * scale, scale, scale, color);
         }
     }
 }

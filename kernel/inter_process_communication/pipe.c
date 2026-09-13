@@ -28,7 +28,7 @@ pipe_t *pipe_create(void) {
     return p;
 }
 
-void pipe_ref_read(pipe_t *p) {
+void pipe_reference_read(pipe_t *p) {
     if (!p) {
         return;
     }
@@ -37,7 +37,7 @@ void pipe_ref_read(pipe_t *p) {
     spin_unlock_irqrestore(&pipe_lock, f);
 }
 
-void pipe_ref_write(pipe_t *p) {
+void pipe_reference_write(pipe_t *p) {
     if (!p) {
         return;
     }
@@ -51,8 +51,8 @@ void pipe_unref_read(pipe_t *p) {
         return;
     }
     if (p->persistent) {
-        sched_wake_all(PIPE_SPACE_CHAN(p));
-        sched_wake_all(SCHED_POLL_CHAN);
+        scheduler_wake_all(PIPE_SPACE_CHAN(p));
+        scheduler_wake_all(SCHED_POLL_CHAN);
         return;
     }
     uint64_t f = spin_lock_irqsave(&pipe_lock);
@@ -63,8 +63,8 @@ void pipe_unref_read(pipe_t *p) {
     }
     spin_unlock_irqrestore(&pipe_lock, f);
     if (closed) {
-        sched_wake_all(PIPE_SPACE_CHAN(p));
-        sched_wake_all(SCHED_POLL_CHAN);
+        scheduler_wake_all(PIPE_SPACE_CHAN(p));
+        scheduler_wake_all(SCHED_POLL_CHAN);
     }
 }
 
@@ -73,8 +73,8 @@ void pipe_unref_write(pipe_t *p) {
         return;
     }
     if (p->persistent) {
-        sched_wake_all(PIPE_DATA_CHAN(p));
-        sched_wake_all(SCHED_POLL_CHAN);
+        scheduler_wake_all(PIPE_DATA_CHAN(p));
+        scheduler_wake_all(SCHED_POLL_CHAN);
         return;
     }
     uint64_t f = spin_lock_irqsave(&pipe_lock);
@@ -85,8 +85,8 @@ void pipe_unref_write(pipe_t *p) {
     }
     spin_unlock_irqrestore(&pipe_lock, f);
     if (closed) {
-        sched_wake_all(PIPE_DATA_CHAN(p));
-        sched_wake_all(SCHED_POLL_CHAN);
+        scheduler_wake_all(PIPE_DATA_CHAN(p));
+        scheduler_wake_all(SCHED_POLL_CHAN);
     }
 }
 
@@ -94,8 +94,8 @@ void pipe_close_write(pipe_t *p) {
     uint64_t f = spin_lock_irqsave(&pipe_lock);
     p->write_closed = 1;
     spin_unlock_irqrestore(&pipe_lock, f);
-    sched_wake_all(PIPE_DATA_CHAN(p));
-    sched_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(PIPE_DATA_CHAN(p));
+    scheduler_wake_all(SCHED_POLL_CHAN);
 }
 
 void pipe_reset(pipe_t *p) {
@@ -194,13 +194,13 @@ long pipe_write(pipe_t *p, const void *buf, size_t len, int nonblock) {
             return written > 0 ? (long)written : -1;
         }
         if (p->count == PIPE_BUF_SIZE) {
-            sched_wake_all(PIPE_DATA_CHAN(p));
-            sched_wake_all(SCHED_POLL_CHAN);
+            scheduler_wake_all(PIPE_DATA_CHAN(p));
+            scheduler_wake_all(SCHED_POLL_CHAN);
             if (nonblock) {
                 spin_unlock_irqrestore(&pipe_lock, f);
                 return written ? (long)written : -OS_ERR_AGAIN;
             }
-            sched_block_on(PIPE_SPACE_CHAN(p), 0, &pipe_lock, &f);
+            scheduler_block_on(PIPE_SPACE_CHAN(p), 0, &pipe_lock, &f);
             continue;
         }
         p->buf[p->head] = src[written];
@@ -209,8 +209,8 @@ long pipe_write(pipe_t *p, const void *buf, size_t len, int nonblock) {
         written++;
     }
     spin_unlock_irqrestore(&pipe_lock, f);
-    sched_wake_all(PIPE_DATA_CHAN(p));
-    sched_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(PIPE_DATA_CHAN(p));
+    scheduler_wake_all(SCHED_POLL_CHAN);
     return (long)written;
 }
 
@@ -228,8 +228,8 @@ long pipe_read(pipe_t *p, void *buf, size_t maxlen, int nonblock) {
                 spin_unlock_irqrestore(&pipe_lock, f);
                 return n ? (long)n : -OS_ERR_AGAIN;
             }
-            sched_block_on(PIPE_DATA_CHAN(p), 0, &pipe_lock, &f);
-            if (sched_signal_pending()) {
+            scheduler_block_on(PIPE_DATA_CHAN(p), 0, &pipe_lock, &f);
+            if (scheduler_signal_pending()) {
                 spin_unlock_irqrestore(&pipe_lock, f);
                 return n ? (long)n : -OS_ERR_INTR;
             }
@@ -245,7 +245,7 @@ long pipe_read(pipe_t *p, void *buf, size_t maxlen, int nonblock) {
     }
     spin_unlock_irqrestore(&pipe_lock, f);
     if (n > 0) {
-        sched_wake_all(PIPE_SPACE_CHAN(p));
+        scheduler_wake_all(PIPE_SPACE_CHAN(p));
     }
     return (long)n;
 }

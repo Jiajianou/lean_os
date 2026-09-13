@@ -55,7 +55,7 @@ void pty_slave_closed(int n) {
         pairs[n].slave_open--;
     }
     if (pairs[n].slave_open == 0 && pairs[n].master_open) {
-        sched_wake_all(SCHED_POLL_CHAN);
+        scheduler_wake_all(SCHED_POLL_CHAN);
     }
     maybe_free(n);
 }
@@ -66,7 +66,7 @@ void pty_master_closed(int n) {
     }
     pairs[n].master_open = 0;
     pairs[n].tty.hup = 1;
-    sched_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHED_POLL_CHAN);
     maybe_free(n);
 }
 
@@ -85,7 +85,7 @@ int64_t pty_master_write(int n, const char *buf, uint32_t len) {
     for (uint32_t i = 0; i < len; i++) {
         tty_input_char(&pairs[n].tty, buf[i]);
     }
-    sched_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHED_POLL_CHAN);
     return (int64_t)len;
 }
 
@@ -105,7 +105,7 @@ int64_t pty_slave_write(int n, const char *buf, uint32_t len) {
         return -1;
     }
     tty_write(&pairs[n].tty, buf, len);
-    sched_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHED_POLL_CHAN);
     return (int64_t)len;
 }
 

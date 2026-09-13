@@ -12,7 +12,7 @@ void eventfd_init(void);
 
 struct eventfd *eventfd_create(uint64_t initval, int semaphore);
 
-void eventfd_ref(struct eventfd *e);
+void eventfd_reference(struct eventfd *e);
 void eventfd_unref(struct eventfd *e);
 
 int eventfd_read(struct eventfd *e, uint64_t *out);

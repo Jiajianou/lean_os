@@ -7,7 +7,7 @@
 int main(void) {
     void *handles[N];
     char path[128];
-    char sym[64];
+    char symbol[64];
 
     for (int i = 0; i < N; i++) {
         snprintf(path, sizeof(path), "/lib/many/manylib%d.so", i);
@@ -20,16 +20,16 @@ int main(void) {
     printf("manydyn: %d objects open at once\n", N);
 
     for (int i = 0; i < N; i++) {
-        snprintf(sym, sizeof(sym), "many_answer_%d", i);
-        int (*fn)(void) = (int (*)(void))dlsym(handles[i], sym);
+        snprintf(symbol, sizeof(symbol), "many_answer_%d", i);
+        int (*fn)(void) = (int (*)(void))dlsym(handles[i], symbol);
         if (!fn) {
-            printf("manydyn: FAIL dlsym %s: %s\n", sym, dlerror());
+            printf("manydyn: FAIL dlsym %s: %s\n", symbol, dlerror());
             return 2;
         }
         int want = (int)strlen("manylib") * i + i;
         int got = fn();
         if (got != want) {
-            printf("manydyn: FAIL %s returned %d, wanted %d\n", sym, got, want);
+            printf("manydyn: FAIL %s returned %d, wanted %d\n", symbol, got, want);
             return 3;
         }
     }

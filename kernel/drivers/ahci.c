@@ -62,7 +62,7 @@ typedef struct __attribute__((packed)) {
     uint32_t ctba;
     uint32_t ctbau;
     uint32_t reserved[4];
-} ahci_cmd_header_t;
+} ahci_command_header_t;
 
 typedef struct __attribute__((packed)) {
     uint64_t dba;
@@ -75,7 +75,7 @@ typedef struct __attribute__((packed)) {
     uint8_t acmd[16];
     uint8_t reserved[48];
     ahci_prdt_entry_t prdt[1];
-} ahci_cmd_table_t;
+} ahci_command_table_t;
 
 typedef struct __attribute__((packed)) {
     uint8_t fis_type;
@@ -94,14 +94,14 @@ typedef struct __attribute__((packed)) {
 #define FIS_TYPE_REG_H2D 0x27
 
 static volatile uint8_t *abar;
-static uint32_t port_num;
+static uint32_t port_number;
 static int present;
 static uint64_t capacity_sectors;
 static uint32_t errors;
 
-static ahci_cmd_header_t *cmd_list;
-static ahci_cmd_table_t *cmd_table;
-static uint64_t cmd_list_phys, cmd_table_phys, fis_phys, bounce_phys;
+static ahci_command_header_t *command_list;
+static ahci_command_table_t *command_table;
+static uint64_t command_list_phys, command_table_phys, fis_phys, bounce_phys;
 static uint8_t *bounce;
 
 static uint32_t hba_read(uint32_t off) {
@@ -113,11 +113,11 @@ static void hba_write(uint32_t off, uint32_t val) {
 }
 
 static uint32_t port_read(uint32_t off) {
-    return hba_read(PORT_BASE(port_num) + off);
+    return hba_read(PORT_BASE(port_number) + off);
 }
 
 static void port_write(uint32_t off, uint32_t val) {
-    hba_write(PORT_BASE(port_num) + off, val);
+    hba_write(PORT_BASE(port_number) + off, val);
 }
 
 #define SPIN_LIMIT 100000000u
@@ -159,9 +159,9 @@ static int issue_command(uint8_t command, uint64_t lba, uint32_t sectors,
     port_write(PX_SERR, port_read(PX_SERR));
     port_write(PX_IS, port_read(PX_IS));
 
-    k_memset(cmd_table, 0, sizeof(*cmd_table));
+    k_memset(command_table, 0, sizeof(*command_table));
 
-    ahci_h2d_fis_t *fis = (ahci_h2d_fis_t *)cmd_table->cfis;
+    ahci_h2d_fis_t *fis = (ahci_h2d_fis_t *)command_table->cfis;
     fis->fis_type = FIS_TYPE_REG_H2D;
     fis->pm_flags = 0x80;
     fis->command = command;
@@ -176,16 +176,16 @@ static int issue_command(uint8_t command, uint64_t lba, uint32_t sectors,
     fis->counth = (uint8_t)((sectors >> 8) & 0xFF);
 
     if (byte_count > 0) {
-        cmd_table->prdt[0].dba = bounce_phys;
-        cmd_table->prdt[0].dbc = byte_count - 1;
+        command_table->prdt[0].dba = bounce_phys;
+        command_table->prdt[0].dbc = byte_count - 1;
     }
 
-    cmd_list[0].flags = (uint16_t)((sizeof(ahci_h2d_fis_t) / sizeof(uint32_t)) |
+    command_list[0].flags = (uint16_t)((sizeof(ahci_h2d_fis_t) / sizeof(uint32_t)) |
                                    (write ? (1u << 6) : 0));
-    cmd_list[0].prdtl = byte_count > 0 ? 1 : 0;
-    cmd_list[0].prdbc = 0;
-    cmd_list[0].ctba = (uint32_t)(cmd_table_phys & 0xFFFFFFFFu);
-    cmd_list[0].ctbau = (uint32_t)(cmd_table_phys >> 32);
+    command_list[0].prdtl = byte_count > 0 ? 1 : 0;
+    command_list[0].prdbc = 0;
+    command_list[0].ctba = (uint32_t)(command_table_phys & 0xFFFFFFFFu);
+    command_list[0].ctbau = (uint32_t)(command_table_phys >> 32);
 
     port_write(PX_CI, 1u);
 
@@ -200,13 +200,13 @@ static int issue_command(uint8_t command, uint64_t lba, uint32_t sectors,
     }
 
     if ((port_read(PX_CI) & 1u) != 0 || (port_read(PX_TFD) & TFD_ERR)) {
-        klog_puts("[ahci] command 0x");
-        klog_put_hex32(command);
-        klog_puts(" failed: TFD 0x");
-        klog_put_hex32(port_read(PX_TFD));
-        klog_puts(" SERR 0x");
-        klog_put_hex32(port_read(PX_SERR));
-        klog_putc('\n');
+        kernel_log_puts("[ahci] command 0x");
+        kernel_log_put_hex32(command);
+        kernel_log_puts(" failed: TFD 0x");
+        kernel_log_put_hex32(port_read(PX_TFD));
+        kernel_log_puts(" SERR 0x");
+        kernel_log_put_hex32(port_read(PX_SERR));
+        kernel_log_putc('\n');
         port_write(PX_SERR, port_read(PX_SERR));
         errors++;
         return -1;
@@ -222,7 +222,7 @@ static int identify(void) {
     uint64_t lba48 = (uint64_t)id[100] | ((uint64_t)id[101] << 16) |
                      ((uint64_t)id[102] << 32) | ((uint64_t)id[103] << 48);
     if (lba48 == 0) {
-        klog_puts("[ahci] the disk reports no 48-bit sector count - declining it.\n");
+        kernel_log_puts("[ahci] the disk reports no 48-bit sector count - declining it.\n");
         return -1;
     }
     capacity_sectors = lba48;
@@ -237,14 +237,14 @@ int ahci_init(void) {
         }
         pci_enable_device(&dev);
 
-        uint64_t bar = pci_bar_mem_base(&dev, 5);
-        uint64_t bar_len = pci_bar_mem_size(&dev, 5);
-        if (bar == 0 || bar_len == 0) {
+        uint64_t bar = pci_bar_memory_base(&dev, 5);
+        uint64_t bar_length = pci_bar_memory_size(&dev, 5);
+        if (bar == 0 || bar_length == 0) {
             continue;
         }
-        abar = (volatile uint8_t *)vmm_map_mmio(bar, bar_len);
+        abar = (volatile uint8_t *)virtual_memory_map_mmio(bar, bar_length);
         if (abar == 0) {
-            klog_puts("[ahci] ABAR is not mappable - declining this controller.\n");
+            kernel_log_puts("[ahci] ABAR is not mappable - declining this controller.\n");
             continue;
         }
 
@@ -257,7 +257,7 @@ int ahci_init(void) {
             if (!(pi & (1u << p))) {
                 continue;
             }
-            port_num = p;
+            port_number = p;
             uint32_t ssts = port_read(PX_SSTS);
             if ((ssts & 0x0F) != 3 || ((ssts >> 8) & 0x0F) != 1) {
                 continue;
@@ -271,24 +271,24 @@ int ahci_init(void) {
         if (found < 0) {
             continue;
         }
-        port_num = (uint32_t)found;
+        port_number = (uint32_t)found;
 
-        uint64_t page = pmm_alloc_contiguous(1);
+        uint64_t page = physical_memory_alloc_contiguous(1);
         k_memset((void *)page, 0, 4096);
-        cmd_list_phys = page;
-        cmd_list = (ahci_cmd_header_t *)page;
+        command_list_phys = page;
+        command_list = (ahci_command_header_t *)page;
         fis_phys = page + 1024;
 
-        cmd_table_phys = pmm_alloc_contiguous(1);
-        cmd_table = (ahci_cmd_table_t *)cmd_table_phys;
-        k_memset(cmd_table, 0, 4096);
+        command_table_phys = physical_memory_alloc_contiguous(1);
+        command_table = (ahci_command_table_t *)command_table_phys;
+        k_memset(command_table, 0, 4096);
 
-        bounce_phys = pmm_alloc_contiguous(BOUNCE_BYTES / 4096);
+        bounce_phys = physical_memory_alloc_contiguous(BOUNCE_BYTES / 4096);
         bounce = (uint8_t *)bounce_phys;
 
         port_stop();
-        port_write(PX_CLB, (uint32_t)(cmd_list_phys & 0xFFFFFFFFu));
-        port_write(PX_CLBU, (uint32_t)(cmd_list_phys >> 32));
+        port_write(PX_CLB, (uint32_t)(command_list_phys & 0xFFFFFFFFu));
+        port_write(PX_CLBU, (uint32_t)(command_list_phys >> 32));
         port_write(PX_FB, (uint32_t)(fis_phys & 0xFFFFFFFFu));
         port_write(PX_FBU, (uint32_t)(fis_phys >> 32));
         port_write(PX_SERR, port_read(PX_SERR));
@@ -297,7 +297,7 @@ int ahci_init(void) {
         port_start();
 
         if (wait_clear(PX_TFD, TFD_BSY | TFD_DRQ) != 0) {
-            klog_puts("[ahci] the port never came out of BSY - declining it.\n");
+            kernel_log_puts("[ahci] the port never came out of BSY - declining it.\n");
             port_stop();
             continue;
         }
@@ -308,15 +308,15 @@ int ahci_init(void) {
         }
 
         present = 1;
-        klog_puts("[ahci] AHCI ");
-        klog_put_hex32(hba_read(HBA_VS));
-        klog_puts(", port ");
-        klog_put_dec(port_num);
-        klog_puts(", ");
-        klog_put_dec(capacity_sectors);
-        klog_puts(" sectors, ");
-        klog_put_dec((cap & 0x1F) + 1);
-        klog_puts(" command slots (1 used - see ahci.h)\n");
+        kernel_log_puts("[ahci] AHCI ");
+        kernel_log_put_hex32(hba_read(HBA_VS));
+        kernel_log_puts(", port ");
+        kernel_log_put_dec(port_number);
+        kernel_log_puts(", ");
+        kernel_log_put_dec(capacity_sectors);
+        kernel_log_puts(" sectors, ");
+        kernel_log_put_dec((cap & 0x1F) + 1);
+        kernel_log_puts(" command slots (1 used - see ahci.h)\n");
         return 1;
     }
     return 0;

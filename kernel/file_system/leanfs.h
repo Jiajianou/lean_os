@@ -26,7 +26,7 @@
 
 typedef struct __attribute__((packed)) {
     uint32_t inode;
-    uint16_t rec_len;
+    uint16_t rec_length;
     uint8_t  name_len;
     uint8_t  type;
 } leanfs_dirent_t;
@@ -42,12 +42,12 @@ typedef struct {
     uint8_t  is_dir;
     uint8_t  is_link;
     char     name[LEANFS_MAX_NAME + 1];
-} leanfs_dir_entry_t;
+} leanfs_directory_entry_t;
 
-int leanfs_readdir(const char *path, uint32_t *cookie, leanfs_dir_entry_t *out);
+int leanfs_readdir(const char *path, uint32_t *cookie, leanfs_directory_entry_t *out);
 
-int leanfs_dir_open(const char *path);
-int leanfs_readdir_at(int handle, uint32_t *cookie, leanfs_dir_entry_t *out);
+int leanfs_directory_open(const char *path);
+int leanfs_readdir_at(int handle, uint32_t *cookie, leanfs_directory_entry_t *out);
 
 void leanfs_init(void);
 
@@ -59,7 +59,7 @@ int leanfs_exists(const char *path);
 
 uint32_t leanfs_free_scratch_lba(uint32_t blocks);
 
-int leanfs_is_dir(const char *path);
+int leanfs_is_directory(const char *path);
 
 int leanfs_mkdir(const char *path);
 

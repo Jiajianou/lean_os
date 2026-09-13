@@ -23,7 +23,7 @@ static uint32_t conf_dns;
 static int conf_ok = 1;
 
 static const char *resolv_text;
-static long resolv_len;
+static long resolv_length;
 static int resolv_present;
 
 static long fake_now_ms;
@@ -44,7 +44,7 @@ void fake_user_net_reset(void) {
     conf_dns = 0;
     conf_ok = 1;
     resolv_text = 0;
-    resolv_len = 0;
+    resolv_length = 0;
     resolv_present = 0;
     fake_now_ms = 1000;
     socket_open = 0;
@@ -68,13 +68,13 @@ void fake_user_net_set_netconf_fails(int fails) { conf_ok = !fails; }
 
 void fake_user_net_set_resolv_conf(const char *text, long len) {
     resolv_text = text;
-    resolv_len = len;
+    resolv_length = len;
     resolv_present = 1;
 }
 
 void fake_user_net_no_resolv_conf(void) {
     resolv_text = 0;
-    resolv_len = 0;
+    resolv_length = 0;
     resolv_present = 0;
 }
 
@@ -110,11 +110,11 @@ long sys_readfile(const char *name, void *buf, size_t maxlen) {
     if (!resolv_present) {
         return -1;
     }
-    size_t n = (size_t)resolv_len < maxlen ? (size_t)resolv_len : maxlen;
+    size_t n = (size_t)resolv_length < maxlen ? (size_t)resolv_length : maxlen;
     if (buf && n) {
         memcpy(buf, resolv_text, n);
     }
-    return resolv_len;
+    return resolv_length;
 }
 
 long sys_socket(int type) {

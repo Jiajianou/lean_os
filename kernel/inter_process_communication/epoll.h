@@ -31,18 +31,18 @@ typedef struct {
 void epoll_init(void);
 
 struct epoll *epoll_create_set(void);
-void epoll_ref(struct epoll *ep);
+void epoll_reference(struct epoll *ep);
 void epoll_unref(struct epoll *ep);
 
-int epoll_ctl_set(struct epoll *ep, int op, int fd, const void *obj,
+int epoll_control_set(struct epoll *ep, int op, int fd, const void *object,
                   uint32_t events, uint64_t data);
 
 int epoll_watch_count(const struct epoll *ep);
 
 #define EPOLL_STALE 0xFFFFFFFFu
-typedef uint32_t (*epoll_mask_fn)(void *ctx, int fd, const void *obj);
+typedef uint32_t (*epoll_mask_function)(void *context, int fd, const void *object);
 
-int epoll_scan(struct epoll *ep, epoll_mask_fn mask_fn, void *ctx,
+int epoll_scan(struct epoll *ep, epoll_mask_function mask_function, void *context,
                epoll_ev_t *out, int max);
 
 int epoll_in_use(void);

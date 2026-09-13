@@ -19,10 +19,10 @@ static long read_exact(int fd, void *buf, size_t len) {
 #define WM_CONNECT_TIMEOUT_MS 400
 #define WM_CONNECT_ATTEMPTS   12
 
-static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h, uint8_t panel, uint8_t translucent, uint8_t desktop, uint8_t confirm_close, const char *title, wm_window_t *out) {
-    int req_fds[2];
-    int resp_fds[2];
-    if (sys_pipe_open(WM_REQUEST_PIPE, req_fds) != 0 || sys_pipe_open(WM_RESPONSE_PIPE, resp_fds) != 0) {
+static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h, uint8_t panel, uint8_t translucent, uint8_t desktop, uint8_t confirm_close, const char *title, window_manager_window_t *out) {
+    int request_file_descriptors[2];
+    int response_file_descriptors[2];
+    if (sys_pipe_open(WM_REQUEST_PIPE, request_file_descriptors) != 0 || sys_pipe_open(WM_RESPONSE_PIPE, response_file_descriptors) != 0) {
         return -1;
     }
 
@@ -40,140 +40,140 @@ static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h
         req.title[i] = title[i];
     }
     req.title[i] = '\0';
-    wm_create_response_t resp;
+    wm_create_response_t response;
     int got_response = 0;
     for (int attempt = 0; attempt < WM_CONNECT_ATTEMPTS && !got_response; attempt++) {
         long room_deadline = sys_uptime_ms() + WM_CONNECT_TIMEOUT_MS;
-        while (sys_pipe_poll(req_fds[0]) + (long)sizeof(req) > SYS_PIPE_CAPACITY &&
+        while (sys_pipe_poll(request_file_descriptors[0]) + (long)sizeof(req) > SYS_PIPE_CAPACITY &&
                sys_uptime_ms() < room_deadline) {
             sys_yield();
         }
-        if (sys_pipe_poll(req_fds[0]) + (long)sizeof(req) > SYS_PIPE_CAPACITY) {
+        if (sys_pipe_poll(request_file_descriptors[0]) + (long)sizeof(req) > SYS_PIPE_CAPACITY) {
             continue;
         }
-        if (sys_write(req_fds[1], &req, sizeof(req)) != (long)sizeof(req)) {
-            sys_close(req_fds[0]);
-            sys_close(req_fds[1]);
-            sys_close(resp_fds[0]);
-            sys_close(resp_fds[1]);
+        if (sys_write(request_file_descriptors[1], &req, sizeof(req)) != (long)sizeof(req)) {
+            sys_close(request_file_descriptors[0]);
+            sys_close(request_file_descriptors[1]);
+            sys_close(response_file_descriptors[0]);
+            sys_close(response_file_descriptors[1]);
             return -1;
         }
         long deadline = sys_uptime_ms() + WM_CONNECT_TIMEOUT_MS;
         while (!got_response && sys_uptime_ms() < deadline) {
-            if (sys_pipe_poll(resp_fds[0]) < (long)sizeof(resp)) {
+            if (sys_pipe_poll(response_file_descriptors[0]) < (long)sizeof(response)) {
                 sys_yield();
                 continue;
             }
-            if (read_exact(resp_fds[0], &resp, sizeof(resp)) != (long)sizeof(resp)) {
+            if (read_exact(response_file_descriptors[0], &response, sizeof(response)) != (long)sizeof(response)) {
                 break;
             }
-            got_response = (resp.client_pid == req.client_pid);
+            got_response = (response.client_pid == req.client_pid);
         }
     }
-    if (!got_response || resp.shm_id < 0) {
-        sys_close(req_fds[0]);
-        sys_close(req_fds[1]);
-        sys_close(resp_fds[0]);
-        sys_close(resp_fds[1]);
+    if (!got_response || response.shm_id < 0) {
+        sys_close(request_file_descriptors[0]);
+        sys_close(request_file_descriptors[1]);
+        sys_close(response_file_descriptors[0]);
+        sys_close(response_file_descriptors[1]);
         return -1;
     }
 
-    long vaddr = sys_shm_map(resp.shm_id);
+    long vaddr = sys_shared_memory_map(response.shm_id);
     if (vaddr < 0) {
         return -1;
     }
 
     char evt_name[WM_EVENT_PIPE_NAME_LEN];
-    wm_event_pipe_name(resp.window_id, evt_name);
-    int evt_fds[2];
-    if (sys_pipe_open(evt_name, evt_fds) != 0) {
+    wm_event_pipe_name(response.window_id, evt_name);
+    int evt_file_descriptors[2];
+    if (sys_pipe_open(evt_name, evt_file_descriptors) != 0) {
         return -1;
     }
 
-    out->window_id = resp.window_id;
-    out->width = resp.width;
-    out->height = resp.height;
-    out->gfx.pixels = (uint32_t *)vaddr;
-    out->gfx.width = (int32_t)resp.width;
-    out->gfx.height = (int32_t)resp.height;
-    out->evt_fd = evt_fds[0];
-    out->req_width = width;
-    out->req_height = height;
-    out->req_panel_dock_h = panel_dock_h;
-    out->req_panel = panel;
-    out->req_translucent = translucent;
-    out->req_desktop = desktop;
-    out->req_confirm_close = confirm_close;
+    out->window_id = response.window_id;
+    out->width = response.width;
+    out->height = response.height;
+    out->graphics.pixels = (uint32_t *)vaddr;
+    out->graphics.width = (int32_t)response.width;
+    out->graphics.height = (int32_t)response.height;
+    out->evt_file_descriptor = evt_file_descriptors[0];
+    out->request_width = width;
+    out->request_height = height;
+    out->request_panel_dock_h = panel_dock_h;
+    out->request_panel = panel;
+    out->request_translucent = translucent;
+    out->request_desktop = desktop;
+    out->request_confirm_close = confirm_close;
     for (int t = 0; t < WM_TITLE_MAX; t++) {
-        out->req_title[t] = req.title[t];
+        out->request_title[t] = req.title[t];
     }
-    out->compositor_pid = resp.compositor_pid;
-    out->shm_id = resp.shm_id;
-    out->shm_bytes = (unsigned long)resp.width * resp.height * sizeof(uint32_t);
+    out->compositor_pid = response.compositor_pid;
+    out->shm_id = response.shm_id;
+    out->shared_memory_bytes = (unsigned long)response.width * response.height * sizeof(uint32_t);
 
-    sys_close(req_fds[0]);
-    sys_close(req_fds[1]);
-    sys_close(resp_fds[0]);
-    sys_close(resp_fds[1]);
-    sys_close(evt_fds[1]);
+    sys_close(request_file_descriptors[0]);
+    sys_close(request_file_descriptors[1]);
+    sys_close(response_file_descriptors[0]);
+    sys_close(response_file_descriptors[1]);
+    sys_close(evt_file_descriptors[1]);
     return 0;
 }
 
-int wm_connect(uint32_t width, uint32_t height, const char *title, wm_window_t *out) {
+int window_manager_connect(uint32_t width, uint32_t height, const char *title, window_manager_window_t *out) {
     return connect_common(width, height, 0, WM_PANEL_NONE, 0, 0, 0, title, out);
 }
 
-int wm_connect_panel(uint32_t height, uint32_t dock_h, wm_window_t *out) {
+int window_manager_connect_panel(uint32_t height, uint32_t dock_h, window_manager_window_t *out) {
     return connect_common(0, height, dock_h, WM_PANEL_BOTTOM, 1, 0, 0, "", out);
 }
 
-int wm_connect_desktop(wm_window_t *out) {
+int window_manager_connect_desktop(window_manager_window_t *out) {
     return connect_common(0, 0, 0, WM_PANEL_NONE, 0, 1, 0, "", out);
 }
 
-int wm_connect_confirm_close(uint32_t width, uint32_t height, const char *title, wm_window_t *out) {
+int window_manager_connect_confirm_close(uint32_t width, uint32_t height, const char *title, window_manager_window_t *out) {
     return connect_common(width, height, 0, WM_PANEL_NONE, 0, 0, 1, title, out);
 }
 
-static int rehandshake(wm_window_t *win) {
-    if (win->gfx.pixels && win->shm_bytes) {
-        sys_shm_unmap(win->gfx.pixels, win->shm_bytes);
-        win->gfx.pixels = (uint32_t *)0;
-        win->gfx.width = 0;
-        win->gfx.height = 0;
+static int rehandshake(window_manager_window_t *win) {
+    if (win->graphics.pixels && win->shared_memory_bytes) {
+        sys_shared_memory_unmap(win->graphics.pixels, win->shared_memory_bytes);
+        win->graphics.pixels = (uint32_t *)0;
+        win->graphics.width = 0;
+        win->graphics.height = 0;
     }
-    if (win->evt_fd >= 0) {
-        sys_close(win->evt_fd);
-        win->evt_fd = -1;
+    if (win->evt_file_descriptor >= 0) {
+        sys_close(win->evt_file_descriptor);
+        win->evt_file_descriptor = -1;
     }
 
-    wm_window_t fresh;
-    if (connect_common(win->req_width, win->req_height, win->req_panel_dock_h,
-                        win->req_panel, win->req_translucent, win->req_desktop,
-                        win->req_confirm_close, win->req_title, &fresh) != 0) {
+    window_manager_window_t fresh;
+    if (connect_common(win->request_width, win->request_height, win->request_panel_dock_h,
+                        win->request_panel, win->request_translucent, win->request_desktop,
+                        win->request_confirm_close, win->request_title, &fresh) != 0) {
         return 0;
     }
     *win = fresh;
     return 1;
 }
 
-int wm_reconnect_if_needed(wm_window_t *win) {
+int window_manager_reconnect_if_needed(window_manager_window_t *win) {
     if (win->compositor_pid < 0 || sys_task_alive(win->compositor_pid) == 1) {
         return 0;
     }
     return rehandshake(win);
 }
 
-int wm_wait_event(wm_window_t *win, wm_event_t *out) {
+int window_manager_wait_event(window_manager_window_t *win, wm_event_t *out) {
     for (;;) {
-        if (wm_poll_event(win, out)) {
+        if (window_manager_poll_event(win, out)) {
             return 0;
         }
     }
 }
 
-int wm_poll_event(wm_window_t *win, wm_event_t *out) {
-    if (wm_reconnect_if_needed(win)) {
+int window_manager_poll_event(window_manager_window_t *win, wm_event_t *out) {
+    if (window_manager_reconnect_if_needed(win)) {
         out->type = WM_EVENT_EXPOSE;
         out->x = 0;
         out->y = 0;
@@ -183,11 +183,11 @@ int wm_poll_event(wm_window_t *win, wm_event_t *out) {
         out->wheel = 0;
         return 1;
     }
-    if (sys_pipe_poll(win->evt_fd) < (long)sizeof(*out)) {
+    if (sys_pipe_poll(win->evt_file_descriptor) < (long)sizeof(*out)) {
         sys_yield();
         return 0;
     }
-    if (read_exact(win->evt_fd, out, sizeof(*out)) != (long)sizeof(*out)) {
+    if (read_exact(win->evt_file_descriptor, out, sizeof(*out)) != (long)sizeof(*out)) {
         sys_yield();
         return 0;
     }
@@ -197,27 +197,27 @@ int wm_poll_event(wm_window_t *win, wm_event_t *out) {
     return 1;
 }
 
-static int query_fds[2] = {-1, -1};
-static int query_resp_fds[2] = {-1, -1};
-static int action_fds[2] = {-1, -1};
+static int query_file_descriptors[2] = {-1, -1};
+static int query_response_file_descriptors[2] = {-1, -1};
+static int action_file_descriptors[2] = {-1, -1};
 
-int wm_query_windows(wm_query_response_t *out) {
-    if (query_fds[0] < 0) {
-        if (sys_pipe_open(WM_QUERY_PIPE, query_fds) != 0 ||
-            sys_pipe_open(WM_QUERY_RESP_PIPE, query_resp_fds) != 0) {
+int window_manager_query_windows(wm_query_response_t *out) {
+    if (query_file_descriptors[0] < 0) {
+        if (sys_pipe_open(WM_QUERY_PIPE, query_file_descriptors) != 0 ||
+            sys_pipe_open(WM_QUERY_RESP_PIPE, query_response_file_descriptors) != 0) {
             return -1;
         }
     }
     uint8_t ping = 1;
-    if (sys_write(query_fds[1], &ping, sizeof(ping)) != (long)sizeof(ping)) {
+    if (sys_write(query_file_descriptors[1], &ping, sizeof(ping)) != (long)sizeof(ping)) {
         return -1;
     }
-    return read_exact(query_resp_fds[0], out, sizeof(*out)) == (long)sizeof(*out) ? 0 : -1;
+    return read_exact(query_response_file_descriptors[0], out, sizeof(*out)) == (long)sizeof(*out) ? 0 : -1;
 }
 
-int wm_send_action_value(int32_t window_id, uint32_t action, int32_t value) {
-    if (action_fds[0] < 0) {
-        if (sys_pipe_open(WM_ACTION_PIPE, action_fds) != 0) {
+int window_manager_send_action_value(int32_t window_id, uint32_t action, int32_t value) {
+    if (action_file_descriptors[0] < 0) {
+        if (sys_pipe_open(WM_ACTION_PIPE, action_file_descriptors) != 0) {
             return -1;
         }
     }
@@ -225,29 +225,29 @@ int wm_send_action_value(int32_t window_id, uint32_t action, int32_t value) {
     req.window_id = window_id;
     req.action = action;
     req.value = value;
-    return sys_write(action_fds[1], &req, sizeof(req)) == (long)sizeof(req) ? 0 : -1;
+    return sys_write(action_file_descriptors[1], &req, sizeof(req)) == (long)sizeof(req) ? 0 : -1;
 }
 
-int wm_send_action(int32_t window_id, uint32_t action) {
-    return wm_send_action_value(window_id, action, 0);
+int window_manager_send_action(int32_t window_id, uint32_t action) {
+    return window_manager_send_action_value(window_id, action, 0);
 }
 
-int wm_present(wm_window_t *win) {
+int window_manager_present(window_manager_window_t *win) {
     if (!win || win->window_id < 0) {
         return -1;
     }
-    return wm_send_action(win->window_id, WM_ACTION_PRESENT);
+    return window_manager_send_action(win->window_id, WM_ACTION_PRESENT);
 }
 
-int wm_wait_ms(wm_window_t *win, const int *extra_fds, int n_extra, int timeout_ms) {
+int window_manager_wait_ms(window_manager_window_t *win, const int *extra_file_descriptors, int n_extra, int timeout_ms) {
     int fds[1 + 8];
     int n = 0;
-    if (win && win->evt_fd >= 0) {
-        fds[n++] = win->evt_fd;
+    if (win && win->evt_file_descriptor >= 0) {
+        fds[n++] = win->evt_file_descriptor;
     }
     for (int i = 0; i < n_extra && n < (int)(sizeof(fds) / sizeof(fds[0])); i++) {
-        if (extra_fds[i] >= 0) {
-            fds[n++] = extra_fds[i];
+        if (extra_file_descriptors[i] >= 0) {
+            fds[n++] = extra_file_descriptors[i];
         }
     }
     if (timeout_ms < 0 || timeout_ms > WM_WAIT_CAP_MS) {
@@ -257,31 +257,31 @@ int wm_wait_ms(wm_window_t *win, const int *extra_fds, int n_extra, int timeout_
     return r >= 0 ? 1 : 0;
 }
 
-int wm_set_panel_overhang(int32_t window_id, int32_t rows) {
-    return wm_send_action_value(window_id, WM_ACTION_SET_PANEL_OVERHANG, rows);
+int window_manager_set_panel_overhang(int32_t window_id, int32_t rows) {
+    return window_manager_send_action_value(window_id, WM_ACTION_SET_PANEL_OVERHANG, rows);
 }
 
-int wm_veto_shutdown(int32_t window_id) {
-    return wm_send_action(window_id, WM_ACTION_VETO_SHUTDOWN);
+int window_manager_veto_shutdown(int32_t window_id) {
+    return window_manager_send_action(window_id, WM_ACTION_VETO_SHUTDOWN);
 }
 
-int wm_toggle_launcher(void) {
-    return wm_send_action(-1, WM_ACTION_TOGGLE_LAUNCHER);
+int window_manager_toggle_launcher(void) {
+    return window_manager_send_action(-1, WM_ACTION_TOGGLE_LAUNCHER);
 }
 
-static int notify_fds[2] = {-1, -1};
+static int notify_file_descriptors[2] = {-1, -1};
 
-int wm_set_display_mode(uint32_t width, uint32_t height) {
-    return wm_send_action_value(-1, WM_ACTION_SET_MODE, wm_pack_mode(width, height));
+int window_manager_set_display_mode(uint32_t width, uint32_t height) {
+    return window_manager_send_action_value(-1, WM_ACTION_SET_MODE, wm_pack_mode(width, height));
 }
 
-int wm_confirm_display_mode(void) {
-    return wm_send_action_value(-1, WM_ACTION_CONFIRM_MODE, 0);
+int window_manager_confirm_display_mode(void) {
+    return window_manager_send_action_value(-1, WM_ACTION_CONFIRM_MODE, 0);
 }
 
-int wm_notify(uint32_t level, const char *title, const char *body) {
-    if (notify_fds[0] < 0) {
-        if (sys_pipe_open(WM_NOTIFY_PIPE, notify_fds) != 0) {
+int window_manager_notify(uint32_t level, const char *title, const char *body) {
+    if (notify_file_descriptors[0] < 0) {
+        if (sys_pipe_open(WM_NOTIFY_PIPE, notify_file_descriptors) != 0) {
             return -1;
         }
     }
@@ -297,15 +297,15 @@ int wm_notify(uint32_t level, const char *title, const char *body) {
         req.body[i] = body[i];
     }
     req.body[i] = '\0';
-    return sys_write(notify_fds[1], &req, sizeof(req)) == (long)sizeof(req) ? 0 : -1;
+    return sys_write(notify_file_descriptors[1], &req, sizeof(req)) == (long)sizeof(req) ? 0 : -1;
 }
 
-static int drag_fds[2] = {-1, -1};
-static int drag_data_fds[2] = {-1, -1};
+static int drag_file_descriptors[2] = {-1, -1};
+static int drag_data_file_descriptors[2] = {-1, -1};
 
-int wm_drag_begin(const char *payload) {
-    if (drag_fds[0] < 0) {
-        if (sys_pipe_open(WM_DRAG_PIPE, drag_fds) != 0) {
+int window_manager_drag_begin(const char *payload) {
+    if (drag_file_descriptors[0] < 0) {
+        if (sys_pipe_open(WM_DRAG_PIPE, drag_file_descriptors) != 0) {
             return -1;
         }
     }
@@ -315,20 +315,20 @@ int wm_drag_begin(const char *payload) {
         req.payload[i] = payload[i];
     }
     req.payload[i] = '\0';
-    return sys_write(drag_fds[1], &req, sizeof(req)) == (long)sizeof(req) ? 0 : -1;
+    return sys_write(drag_file_descriptors[1], &req, sizeof(req)) == (long)sizeof(req) ? 0 : -1;
 }
 
-int wm_drag_payload(char *out, uint32_t max) {
-    if (drag_data_fds[0] < 0) {
-        if (sys_pipe_open(WM_DRAG_DATA_PIPE, drag_data_fds) != 0) {
+int window_manager_drag_payload(char *out, uint32_t max) {
+    if (drag_data_file_descriptors[0] < 0) {
+        if (sys_pipe_open(WM_DRAG_DATA_PIPE, drag_data_file_descriptors) != 0) {
             return -1;
         }
     }
     wm_drag_request_t req;
-    if (sys_pipe_poll(drag_data_fds[0]) < (long)sizeof(req)) {
+    if (sys_pipe_poll(drag_data_file_descriptors[0]) < (long)sizeof(req)) {
         return -1;
     }
-    if (read_exact(drag_data_fds[0], &req, sizeof(req)) != (long)sizeof(req)) {
+    if (read_exact(drag_data_file_descriptors[0], &req, sizeof(req)) != (long)sizeof(req)) {
         return -1;
     }
     req.payload[WM_DRAG_PAYLOAD_MAX - 1] = '\0';
@@ -340,44 +340,44 @@ int wm_drag_payload(char *out, uint32_t max) {
     return 0;
 }
 
-static int settings_fds[2] = {-1, -1};
-static int settings_query_fds[2] = {-1, -1};
-static int settings_query_resp_fds[2] = {-1, -1};
+static int settings_file_descriptors[2] = {-1, -1};
+static int settings_query_file_descriptors[2] = {-1, -1};
+static int settings_query_response_file_descriptors[2] = {-1, -1};
 
-int wm_set_settings(const wm_settings_request_t *in) {
-    if (settings_fds[0] < 0) {
-        if (sys_pipe_open(WM_SETTINGS_PIPE, settings_fds) != 0) {
+int window_manager_set_settings(const wm_settings_request_t *in) {
+    if (settings_file_descriptors[0] < 0) {
+        if (sys_pipe_open(WM_SETTINGS_PIPE, settings_file_descriptors) != 0) {
             return -1;
         }
     }
-    return sys_write(settings_fds[1], in, sizeof(*in)) == (long)sizeof(*in) ? 0 : -1;
+    return sys_write(settings_file_descriptors[1], in, sizeof(*in)) == (long)sizeof(*in) ? 0 : -1;
 }
 
-int wm_set_theme(uint32_t bg_color, uint32_t accent_color, uint32_t wallpaper) {
+int window_manager_set_theme(uint32_t bg_color, uint32_t accent_color, uint32_t wallpaper) {
     wm_settings_request_t req;
     req.volume = 70;
     req.animations = 1;
     req.bg_color = bg_color;
     req.accent_color = accent_color;
     req.wallpaper = wallpaper;
-    return wm_set_settings(&req);
+    return window_manager_set_settings(&req);
 }
 
-int wm_set_taskbar_slot(int32_t window_id, int32_t x, int32_t width) {
-    return wm_send_action_value(window_id, WM_ACTION_SET_TASKBAR_SLOT,
+int window_manager_set_taskbar_slot(int32_t window_id, int32_t x, int32_t width) {
+    return window_manager_send_action_value(window_id, WM_ACTION_SET_TASKBAR_SLOT,
                                  (int32_t)(((uint32_t)x << 16) | ((uint32_t)width & 0xFFFFu)));
 }
 
-int wm_query_settings(wm_settings_request_t *out) {
-    if (settings_query_fds[0] < 0) {
-        if (sys_pipe_open(WM_SETTINGS_QUERY_PIPE, settings_query_fds) != 0 ||
-            sys_pipe_open(WM_SETTINGS_QUERY_RESP_PIPE, settings_query_resp_fds) != 0) {
+int window_manager_query_settings(wm_settings_request_t *out) {
+    if (settings_query_file_descriptors[0] < 0) {
+        if (sys_pipe_open(WM_SETTINGS_QUERY_PIPE, settings_query_file_descriptors) != 0 ||
+            sys_pipe_open(WM_SETTINGS_QUERY_RESP_PIPE, settings_query_response_file_descriptors) != 0) {
             return -1;
         }
     }
     uint8_t ping = 1;
-    if (sys_write(settings_query_fds[1], &ping, sizeof(ping)) != (long)sizeof(ping)) {
+    if (sys_write(settings_query_file_descriptors[1], &ping, sizeof(ping)) != (long)sizeof(ping)) {
         return -1;
     }
-    return read_exact(settings_query_resp_fds[0], out, sizeof(*out)) == (long)sizeof(*out) ? 0 : -1;
+    return read_exact(settings_query_response_file_descriptors[0], out, sizeof(*out)) == (long)sizeof(*out) ? 0 : -1;
 }

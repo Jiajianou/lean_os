@@ -148,8 +148,8 @@ static uint16_t submit_sync(nvme_queue_t *q, const nvme_sqe_t *cmd) {
 }
 
 static int alloc_queue(nvme_queue_t *q, uint32_t id) {
-    q->sq_phys = pmm_alloc_contiguous(1);
-    q->cq_phys = pmm_alloc_contiguous(1);
+    q->sq_phys = physical_memory_alloc_contiguous(1);
+    q->cq_phys = physical_memory_alloc_contiguous(1);
     if (!q->sq_phys || !q->cq_phys) {
         return -1;
     }
@@ -218,14 +218,14 @@ int nvme_init(void) {
         }
         pci_enable_device(&dev);
 
-        uint64_t bar = pci_bar_mem_base(&dev, 0);
-        uint64_t bar_len = pci_bar_mem_size(&dev, 0);
-        if (bar == 0 || bar_len == 0) {
+        uint64_t bar = pci_bar_memory_base(&dev, 0);
+        uint64_t bar_length = pci_bar_memory_size(&dev, 0);
+        if (bar == 0 || bar_length == 0) {
             continue;
         }
-        regs = (volatile uint8_t *)vmm_map_mmio(bar, bar_len);
+        regs = (volatile uint8_t *)virtual_memory_map_mmio(bar, bar_length);
         if (regs == 0) {
-            klog_puts("[nvme] BAR0 is not mappable - declining this controller.\n");
+            kernel_log_puts("[nvme] BAR0 is not mappable - declining this controller.\n");
             continue;
         }
 
@@ -234,23 +234,23 @@ int nvme_init(void) {
         uint32_t mqes = (uint32_t)(cap & 0xFFFF) + 1;
         uint32_t mpsmin = (uint32_t)((cap >> 48) & 0xF);
         if (mqes < QUEUE_DEPTH) {
-            klog_puts("[nvme] the controller's maximum queue is shorter than this driver's - declining.\n");
+            kernel_log_puts("[nvme] the controller's maximum queue is shorter than this driver's - declining.\n");
             continue;
         }
         if (mpsmin != 0) {
-            klog_puts("[nvme] the controller's minimum page size is not 4 KiB - declining.\n");
+            kernel_log_puts("[nvme] the controller's minimum page size is not 4 KiB - declining.\n");
             continue;
         }
 
         reg_write32(REG_CC, reg_read32(REG_CC) & ~CC_EN);
         if (wait_ready(0) != 0) {
-            klog_puts("[nvme] the controller never became not-ready - declining.\n");
+            kernel_log_puts("[nvme] the controller never became not-ready - declining.\n");
             continue;
         }
         reg_write32(REG_INTMS, 0xFFFFFFFFu);
 
         if (alloc_queue(&admin_q, 0) != 0 || alloc_queue(&io_q, IO_QID) != 0) {
-            klog_puts("[nvme] no memory for the queues - declining.\n");
+            kernel_log_puts("[nvme] no memory for the queues - declining.\n");
             continue;
         }
 
@@ -261,17 +261,17 @@ int nvme_init(void) {
         uint32_t cc = CC_EN | (6u << 16) | (4u << 20);
         reg_write32(REG_CC, cc);
         if (wait_ready(1) != 0) {
-            klog_puts("[nvme] the controller never became ready - declining.\n");
+            kernel_log_puts("[nvme] the controller never became ready - declining.\n");
             continue;
         }
 
-        bounce_phys = pmm_alloc_contiguous(BOUNCE_BYTES / 4096);
+        bounce_phys = physical_memory_alloc_contiguous(BOUNCE_BYTES / 4096);
         bounce = (uint8_t *)bounce_phys;
-        scratch_phys = pmm_alloc_contiguous(1);
+        scratch_phys = physical_memory_alloc_contiguous(1);
         scratch = (uint8_t *)scratch_phys;
-        prp_list_phys = pmm_alloc_contiguous(1);
+        prp_list_phys = physical_memory_alloc_contiguous(1);
         if (!bounce_phys || !scratch_phys || !prp_list_phys) {
-            klog_puts("[nvme] no memory for the transfer buffers - declining.\n");
+            kernel_log_puts("[nvme] no memory for the transfer buffers - declining.\n");
             continue;
         }
         uint64_t *prp = (uint64_t *)prp_list_phys;
@@ -281,7 +281,7 @@ int nvme_init(void) {
         }
 
         if (create_io_queues() != 0) {
-            klog_puts("[nvme] the controller refused to create an I/O queue - declining.\n");
+            kernel_log_puts("[nvme] the controller refused to create an I/O queue - declining.\n");
             continue;
         }
 
@@ -299,7 +299,7 @@ int nvme_init(void) {
             uint32_t fmt = lbaf[flbas & 0x0F];
             uint32_t lbads = (fmt >> 16) & 0xFF;
             if (lbads < 9 || lbads > 12) {
-                klog_puts("[nvme] namespace block size is not between 512 and 4096 - skipping it.\n");
+                kernel_log_puts("[nvme] namespace block size is not between 512 and 4096 - skipping it.\n");
                 continue;
             }
             nsid = candidate;
@@ -309,22 +309,22 @@ int nvme_init(void) {
             got_ns = 1;
         }
         if (!got_ns) {
-            klog_puts("[nvme] the controller has no active namespace - declining.\n");
+            kernel_log_puts("[nvme] the controller has no active namespace - declining.\n");
             continue;
         }
 
         present = 1;
-        klog_puts("[nvme] NVMe ");
-        klog_put_hex32(reg_read32(REG_VS));
-        klog_puts(", namespace ");
-        klog_put_dec(nsid);
-        klog_puts(", ");
-        klog_put_dec(ns_blocks << ns_shift);
-        klog_puts(" sectors of 512 (");
-        klog_put_dec(ns_block_size);
-        klog_puts("-byte blocks), doorbell stride ");
-        klog_put_dec(doorbell_stride);
-        klog_putc('\n');
+        kernel_log_puts("[nvme] NVMe ");
+        kernel_log_put_hex32(reg_read32(REG_VS));
+        kernel_log_puts(", namespace ");
+        kernel_log_put_dec(nsid);
+        kernel_log_puts(", ");
+        kernel_log_put_dec(ns_blocks << ns_shift);
+        kernel_log_puts(" sectors of 512 (");
+        kernel_log_put_dec(ns_block_size);
+        kernel_log_puts("-byte blocks), doorbell stride ");
+        kernel_log_put_dec(doorbell_stride);
+        kernel_log_putc('\n');
         return 1;
     }
     return 0;
@@ -348,13 +348,13 @@ static int io_command(int write, uint64_t block, uint32_t blocks, uint32_t bytes
 
     uint16_t status = submit_sync(&io_q, &cmd);
     if (status != 0) {
-        klog_puts("[nvme] ");
-        klog_puts(write ? "write" : "read");
-        klog_puts(" failed at block 0x");
-        klog_put_hex64(block);
-        klog_puts(", status 0x");
-        klog_put_hex32(status);
-        klog_putc('\n');
+        kernel_log_puts("[nvme] ");
+        kernel_log_puts(write ? "write" : "read");
+        kernel_log_puts(" failed at block 0x");
+        kernel_log_put_hex64(block);
+        kernel_log_puts(", status 0x");
+        kernel_log_put_hex32(status);
+        kernel_log_putc('\n');
         return -1;
     }
     return 0;

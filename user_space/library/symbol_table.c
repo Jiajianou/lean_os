@@ -13,7 +13,7 @@ static int hex_value(char c) {
     return -1;
 }
 
-int symtab_parse(symtab_t *out, symtab_entry_t *storage, int capacity,
+int symbol_table_parse(symbol_table_t *out, symbol_table_entry_t *storage, int capacity,
                  const char *text, size_t len) {
     if (!out || !storage || capacity <= 0 || !text) {
         return -1;
@@ -59,7 +59,7 @@ int symtab_parse(symtab_t *out, symtab_entry_t *storage, int capacity,
             continue;
         }
 
-        symtab_entry_t *e = &out->entries[out->count++];
+        symbol_table_entry_t *e = &out->entries[out->count++];
         e->addr = addr;
         e->name = &text[p];
         e->name_len = (uint32_t)(line_end - p);
@@ -67,7 +67,7 @@ int symtab_parse(symtab_t *out, symtab_entry_t *storage, int capacity,
     return out->count;
 }
 
-int symtab_is_sorted(const symtab_t *st) {
+int symbol_table_is_sorted(const symbol_table_t *st) {
     if (!st || st->count <= 1) {
         return 1;
     }
@@ -79,15 +79,15 @@ int symtab_is_sorted(const symtab_t *st) {
     return 1;
 }
 
-const symtab_entry_t *symtab_lookup(const symtab_t *st, uint64_t addr) {
+const symbol_table_entry_t *symbol_table_lookup(const symbol_table_t *st, uint64_t addr) {
     if (!st || st->count == 0) {
-        return (const symtab_entry_t *)0;
+        return (const symbol_table_entry_t *)0;
     }
     if (addr < st->entries[0].addr) {
-        return (const symtab_entry_t *)0;
+        return (const symbol_table_entry_t *)0;
     }
     if (addr >= st->entries[st->count - 1].addr) {
-        return (const symtab_entry_t *)0;
+        return (const symbol_table_entry_t *)0;
     }
 
     int lo = 0;

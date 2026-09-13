@@ -24,7 +24,7 @@ typedef struct {
 } usb_hid_mouse_t;
 
 void usb_hid_decode_mouse(usb_hid_state_t *state, const uint8_t *report,
-                          uint8_t report_len, usb_hid_mouse_t *out);
+                          uint8_t report_length, usb_hid_mouse_t *out);
 
 extern const char usb_hid_ascii[104];
 extern const char usb_hid_ascii_shift[104];

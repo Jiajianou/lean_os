@@ -12,20 +12,20 @@ typedef struct __attribute__((packed)) {
 
 extern uint64_t isr_stub_table[32];
 extern uint64_t irq_stub_table[16];
-extern uint64_t syscall_stub_addr;
+extern uint64_t syscall_stub_address;
 
 #define IPI_SCHEDULE_VECTOR   0xF0
 #define LAPIC_SPURIOUS_VECTOR 0xFF
-extern uint64_t isr_ipi_schedule_addr;
-extern uint64_t isr_lapic_spurious_addr;
+extern uint64_t isr_ipi_schedule_address;
+extern uint64_t isr_lapic_spurious_address;
 
-typedef void (*irq_handler_fn)(isr_regs_t *regs);
+typedef void (*irq_handler_function)(isr_regs_t *regs);
 
 void isr_handler(isr_regs_t *regs);
 void irq_handler(isr_regs_t *regs);
 
 void lapic_vector_handler(isr_regs_t *regs);
 
-void irq_register_handler(uint8_t irq, irq_handler_fn handler);
+void irq_register_handler(uint8_t irq, irq_handler_function handler);
 
 void irq_enable_line(uint8_t irq);

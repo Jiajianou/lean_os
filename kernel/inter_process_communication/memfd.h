@@ -17,9 +17,9 @@ struct memfd;
 
 void memfd_init(void);
 
-struct memfd *memfd_create_obj(const char *name);
+struct memfd *memfd_create_object(const char *name);
 
-void memfd_ref(struct memfd *m);
+void memfd_reference(struct memfd *m);
 void memfd_unref(struct memfd *m);
 
 uint8_t memfd_slot(const struct memfd *m);
@@ -38,7 +38,7 @@ uint32_t memfd_get_seals(const struct memfd *m);
 
 int memfd_may_write(const struct memfd *m);
 
-void memfd_region_ref(struct memfd *m);
+void memfd_region_reference(struct memfd *m);
 void memfd_region_unref(struct memfd *m);
 
 const char *memfd_name(const struct memfd *m);

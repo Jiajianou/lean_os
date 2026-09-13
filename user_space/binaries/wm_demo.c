@@ -11,9 +11,9 @@
 #define ACCENT_SIZE   40
 
 int main(void) {
-    int req_fds[2];
-    int resp_fds[2];
-    if (sys_pipe_open(WM_REQUEST_PIPE, req_fds) != 0 || sys_pipe_open(WM_RESPONSE_PIPE, resp_fds) != 0) {
+    int request_file_descriptors[2];
+    int response_file_descriptors[2];
+    if (sys_pipe_open(WM_REQUEST_PIPE, request_file_descriptors) != 0 || sys_pipe_open(WM_RESPONSE_PIPE, response_file_descriptors) != 0) {
         sys_exit(1);
     }
 
@@ -23,29 +23,29 @@ int main(void) {
     req.height = WIN_H;
     req.client_pid = (int32_t)sys_getpid();
 
-    wm_create_response_t resp;
+    wm_create_response_t response;
     int got_response = 0;
     for (int attempt = 0; attempt < 4 && !got_response; attempt++) {
-        if (sys_write(req_fds[1], &req, sizeof(req)) != (long)sizeof(req)) {
+        if (sys_write(request_file_descriptors[1], &req, sizeof(req)) != (long)sizeof(req)) {
             sys_exit(1);
         }
         long deadline = sys_uptime_ms() + 500;
         while (!got_response && sys_uptime_ms() < deadline) {
-            if (sys_pipe_poll(resp_fds[0]) < (long)sizeof(resp)) {
+            if (sys_pipe_poll(response_file_descriptors[0]) < (long)sizeof(response)) {
                 sys_yield();
                 continue;
             }
-            if (sys_read(resp_fds[0], &resp, sizeof(resp)) != (long)sizeof(resp)) {
+            if (sys_read(response_file_descriptors[0], &response, sizeof(response)) != (long)sizeof(response)) {
                 sys_exit(1);
             }
-            got_response = (resp.client_pid == req.client_pid);
+            got_response = (response.client_pid == req.client_pid);
         }
     }
-    if (!got_response || resp.shm_id < 0) {
+    if (!got_response || response.shm_id < 0) {
         sys_exit(1);
     }
 
-    long vaddr = sys_shm_map(resp.shm_id);
+    long vaddr = sys_shared_memory_map(response.shm_id);
     if (vaddr < 0) {
         sys_exit(1);
     }

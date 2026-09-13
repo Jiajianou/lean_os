@@ -122,7 +122,7 @@ TEST(flock, unlocking_the_middle_splits_and_unlocking_the_edges_trims) {
     clean();
 }
 
-TEST(flock, len_zero_means_to_end_of_file) {
+TEST(flock, length_zero_means_to_end_of_file) {
     clean();
     CHECK_EQ(flock_set(7, 1, OS_FLOCK_WR, 1000, 0), 0);
     CHECK_EQ(held_by(7, 2, OS_FLOCK_RD, 999, 1), 0);

@@ -10,7 +10,7 @@ void panic(const char *msg);
 #define MAX_FRAME 2048
 
 static uint8_t tx[MAX_TX][MAX_FRAME];
-static uint32_t tx_len[MAX_TX];
+static uint32_t tx_length[MAX_TX];
 static int tx_count;
 
 static const uint8_t local_mac[6] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
@@ -25,7 +25,7 @@ const uint8_t *fake_net_tx_frame(int i, uint32_t *len_out);
 
 void fake_net_reset(void) {
     tx_count = 0;
-    memset(tx_len, 0, sizeof(tx_len));
+    memset(tx_length, 0, sizeof(tx_length));
 }
 
 int fake_net_tx_count(void) { return tx_count; }
@@ -35,7 +35,7 @@ const uint8_t *fake_net_tx_frame(int i, uint32_t *len_out) {
         return NULL;
     }
     if (len_out) {
-        *len_out = tx_len[i];
+        *len_out = tx_length[i];
     }
     return tx[i];
 }
@@ -48,7 +48,7 @@ int rtl8139_send(const uint8_t *frame, uint16_t len) {
         panic("fake_net: a frame longer than the fake can hold");
     }
     memcpy(tx[tx_count], frame, len);
-    tx_len[tx_count] = len;
+    tx_length[tx_count] = len;
     tx_count++;
     return 0;
 }

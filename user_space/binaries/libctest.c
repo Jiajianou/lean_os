@@ -885,23 +885,23 @@ int main(void) {
     }
 
     {
-        struct statvfs vfs;
-        if (statvfs("/", &vfs) != 0) {
+        struct statvfs virtual_file_system;
+        if (statvfs("/", &virtual_file_system) != 0) {
             fail("statvfs(\"/\")");
         }
-        if (vfs.f_bsize == 0 || vfs.f_blocks == 0 || vfs.f_bfree > vfs.f_blocks) {
+        if (virtual_file_system.f_bsize == 0 || virtual_file_system.f_blocks == 0 || virtual_file_system.f_bfree > virtual_file_system.f_blocks) {
             fail("statvfs reported an impossible filesystem");
         }
-        if (vfs.f_files == 0 || vfs.f_ffree > vfs.f_files) {
+        if (virtual_file_system.f_files == 0 || virtual_file_system.f_ffree > virtual_file_system.f_files) {
             fail("statvfs reported an impossible inode count");
         }
-        if (vfs.f_namemax == 0) {
+        if (virtual_file_system.f_namemax == 0) {
             fail("statvfs did not report a name limit");
         }
-        if (statvfs("/no/such/path", &vfs) != -1) {
+        if (statvfs("/no/such/path", &virtual_file_system) != -1) {
             fail("statvfs answered about a path that does not exist");
         }
-        if (statvfs("/proc", &vfs) != -1) {
+        if (statvfs("/proc", &virtual_file_system) != -1) {
             fail("statvfs described a synthetic filesystem with numbers");
         }
 

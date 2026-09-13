@@ -15,9 +15,9 @@
 
 #define TCP_HEADER_LEN 20
 
-static int seq_leq(uint32_t a, uint32_t b) { return (int32_t)(a - b) <= 0; }
-static int seq_gt(uint32_t a, uint32_t b)  { return (int32_t)(a - b) > 0; }
-static int seq_geq(uint32_t a, uint32_t b) { return (int32_t)(a - b) >= 0; }
+static int sequence_leq(uint32_t a, uint32_t b) { return (int32_t)(a - b) <= 0; }
+static int sequence_gt(uint32_t a, uint32_t b)  { return (int32_t)(a - b) > 0; }
+static int sequence_geq(uint32_t a, uint32_t b) { return (int32_t)(a - b) >= 0; }
 
 struct tcpcb {
     int in_use;
@@ -31,11 +31,11 @@ struct tcpcb {
 
     uint16_t mss;
 
-    uint8_t send_buf[TCP_SEND_BUF];
-    uint32_t send_len;
+    uint8_t send_buffer[TCP_SEND_BUF];
+    uint32_t send_length;
 
-    uint8_t recv_buf[TCP_RECV_BUF];
-    uint32_t recv_len;
+    uint8_t receive_buffer[TCP_RECV_BUF];
+    uint32_t receive_length;
 
     uint32_t cwnd, ssthresh;
     uint32_t dup_acks;
@@ -46,7 +46,7 @@ struct tcpcb {
     uint32_t rto;
     int      backoff;
     int      rtt_timing;
-    uint32_t rtt_seq;
+    uint32_t rtt_sequence;
     uint32_t rtt_started;
     int32_t  srtt, rttvar;
 
@@ -54,7 +54,7 @@ struct tcpcb {
     uint32_t connect_deadline;
 
     int fin_sent;
-    uint32_t fin_seq;
+    uint32_t fin_sequence;
     int peer_fin;
     int connect_failed;
     int reset;
@@ -80,35 +80,35 @@ int tcp_debug_retransmits(void) { return debug_retransmits; }
 static uint32_t checksum_failures;
 uint32_t tcp_checksum_failures(void) { return checksum_failures; }
 
-static uint32_t pseudo_sum(uint32_t src, uint32_t dst, uint16_t seg_len) {
+static uint32_t pseudo_sum(uint32_t src, uint32_t dst, uint16_t seg_length) {
     uint8_t p[12];
     net_write_be32(p + 0, src);
     net_write_be32(p + 4, dst);
     p[8] = 0;
     p[9] = IP_PROTO_TCP;
-    net_write_be16(p + 10, seg_len);
+    net_write_be16(p + 10, seg_length);
     return net_sum16(0, p, sizeof(p));
 }
 
 static uint16_t window_of(const struct tcpcb *t) {
-    uint32_t free_space = TCP_RECV_BUF - t->recv_len;
+    uint32_t free_space = TCP_RECV_BUF - t->receive_length;
     return free_space > 0xFFFF ? 0xFFFF : (uint16_t)free_space;
 }
 
 static int emit(struct tcpcb *t, uint32_t seq, uint8_t flags,
-                const uint8_t *payload, uint16_t payload_len, int with_mss) {
+                const uint8_t *payload, uint16_t payload_length, int with_mss) {
     static uint8_t seg[TCP_HEADER_LEN + 4 + TCP_MAX_MSS];
-    uint16_t hdr_len = TCP_HEADER_LEN + (with_mss ? 4 : 0);
+    uint16_t header_length = TCP_HEADER_LEN + (with_mss ? 4 : 0);
 
-    if (payload_len > TCP_MAX_MSS) {
-        payload_len = TCP_MAX_MSS;
+    if (payload_length > TCP_MAX_MSS) {
+        payload_length = TCP_MAX_MSS;
     }
 
     net_write_be16(seg + 0, t->local_port);
     net_write_be16(seg + 2, t->remote_port);
     net_write_be32(seg + 4, seq);
     net_write_be32(seg + 8, (flags & TCP_ACK) ? t->rcv_nxt : 0);
-    seg[12] = (uint8_t)((hdr_len / 4) << 4);
+    seg[12] = (uint8_t)((header_length / 4) << 4);
     seg[13] = flags;
     net_write_be16(seg + 14, window_of(t));
     seg[16] = 0;
@@ -120,15 +120,15 @@ static int emit(struct tcpcb *t, uint32_t seq, uint8_t flags,
         seg[21] = 4;
         net_write_be16(seg + 22, TCP_MAX_MSS);
     }
-    if (payload_len) {
-        k_memcpy(seg + hdr_len, payload, payload_len);
+    if (payload_length) {
+        k_memcpy(seg + header_length, payload, payload_length);
     }
 
-    uint16_t total = (uint16_t)(hdr_len + payload_len);
+    uint16_t total = (uint16_t)(header_length + payload_length);
     uint16_t csum = net_fold16(net_sum16(pseudo_sum(t->local_ip, t->remote_ip, total), seg, total));
     net_write_be16(seg + 16, csum);
 
-    if (payload_len > 0 && debug_drop_remaining > 0) {
+    if (payload_length > 0 && debug_drop_remaining > 0) {
         debug_drop_remaining--;
         return 0;
     }
@@ -136,24 +136,24 @@ static int emit(struct tcpcb *t, uint32_t seq, uint8_t flags,
     return ip_send_from(t->local_ip, t->remote_ip, IP_PROTO_TCP, seg, total);
 }
 
-static void send_reset(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uint16_t len) {
+static void send_reset(uint32_t source_ip, uint32_t destination_ip, const uint8_t *seg, uint16_t len) {
     if (seg[13] & TCP_RST) {
         return;
     }
-    klog_puts("[tcp] rst: no connection for a segment to port ");
-    klog_put_dec(net_read_be16(seg + 2));
-    klog_puts(" from port ");
-    klog_put_dec(net_read_be16(seg + 0));
-    klog_puts(" flags ");
-    klog_put_hex32(seg[13]);
-    klog_putc('\n');
+    kernel_log_puts("[tcp] rst: no connection for a segment to port ");
+    kernel_log_put_dec(net_read_be16(seg + 2));
+    kernel_log_puts(" from port ");
+    kernel_log_put_dec(net_read_be16(seg + 0));
+    kernel_log_puts(" flags ");
+    kernel_log_put_hex32(seg[13]);
+    kernel_log_putc('\n');
     uint8_t out[TCP_HEADER_LEN];
     uint16_t data_off = (uint16_t)((seg[12] >> 4) * 4);
-    uint32_t their_seq = net_read_be32(seg + 4);
+    uint32_t their_sequence = net_read_be32(seg + 4);
     uint32_t their_ack = net_read_be32(seg + 8);
-    uint16_t seg_len = (uint16_t)(len - data_off);
-    if (seg[13] & TCP_SYN) { seg_len++; }
-    if (seg[13] & TCP_FIN) { seg_len++; }
+    uint16_t seg_length = (uint16_t)(len - data_off);
+    if (seg[13] & TCP_SYN) { seg_length++; }
+    if (seg[13] & TCP_FIN) { seg_length++; }
 
     net_write_be16(out + 0, net_read_be16(seg + 2));
     net_write_be16(out + 2, net_read_be16(seg + 0));
@@ -168,13 +168,13 @@ static void send_reset(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uin
         out[13] = TCP_RST;
     } else {
         net_write_be32(out + 4, 0);
-        net_write_be32(out + 8, their_seq + seg_len);
+        net_write_be32(out + 8, their_sequence + seg_length);
         out[13] = TCP_RST | TCP_ACK;
     }
 
-    uint16_t csum = net_fold16(net_sum16(pseudo_sum(dst_ip, src_ip, TCP_HEADER_LEN), out, TCP_HEADER_LEN));
+    uint16_t csum = net_fold16(net_sum16(pseudo_sum(destination_ip, source_ip, TCP_HEADER_LEN), out, TCP_HEADER_LEN));
     net_write_be16(out + 16, csum);
-    ip_send_from(dst_ip, src_ip, IP_PROTO_TCP, out, TCP_HEADER_LEN);
+    ip_send_from(destination_ip, source_ip, IP_PROTO_TCP, out, TCP_HEADER_LEN);
 }
 
 static void send_ack(struct tcpcb *t) {
@@ -199,8 +199,8 @@ static void note_rtt(struct tcpcb *t, uint32_t measured) {
     } else {
         int32_t err = r - (t->srtt >> 3);
         t->srtt += err;
-        int32_t abs_err = err < 0 ? -err : err;
-        t->rttvar += (abs_err - (t->rttvar >> 2));
+        int32_t abs_error = err < 0 ? -err : err;
+        t->rttvar += (abs_error - (t->rttvar >> 2));
     }
     uint32_t rto = (uint32_t)((t->srtt >> 3) + (t->rttvar >> 1));
     if (rto < 10) { rto = 10; }
@@ -227,7 +227,7 @@ static void try_send(struct tcpcb *t) {
             break;
         }
         uint32_t room = usable - in_flight;
-        uint32_t unsent = t->send_len - in_flight;
+        uint32_t unsent = t->send_length - in_flight;
         if (unsent == 0) {
             break;
         }
@@ -237,11 +237,11 @@ static void try_send(struct tcpcb *t) {
         uint8_t flags = TCP_ACK;
         if (n == unsent) { flags |= TCP_PSH; }
 
-        emit(t, t->snd_nxt, flags, t->send_buf + in_flight, (uint16_t)n, 0);
+        emit(t, t->snd_nxt, flags, t->send_buffer + in_flight, (uint16_t)n, 0);
 
         if (!t->rtt_timing) {
             t->rtt_timing = 1;
-            t->rtt_seq = t->snd_nxt + n;
+            t->rtt_sequence = t->snd_nxt + n;
             t->rtt_started = tick_count;
         }
 
@@ -251,7 +251,7 @@ static void try_send(struct tcpcb *t) {
         }
     }
 
-    if (t->fin_sent && seq_geq(t->snd_nxt, t->fin_seq) && t->snd_nxt == t->fin_seq) {
+    if (t->fin_sent && sequence_geq(t->snd_nxt, t->fin_sequence) && t->snd_nxt == t->fin_sequence) {
         emit(t, t->snd_nxt, TCP_FIN | TCP_ACK, (const uint8_t *)0, 0, 0);
         t->snd_nxt++;
         if (!t->rtx_pending) {
@@ -451,31 +451,31 @@ int tcp_send(struct tcpcb *t, const uint8_t *data, uint16_t len) {
     if (t->state != TCP_ESTABLISHED && t->state != TCP_CLOSE_WAIT) {
         return -1;
     }
-    uint32_t room = TCP_SEND_BUF - t->send_len;
+    uint32_t room = TCP_SEND_BUF - t->send_length;
     uint32_t n = len < room ? len : room;
     if (n) {
-        k_memcpy(t->send_buf + t->send_len, data, n);
-        t->send_len += n;
+        k_memcpy(t->send_buffer + t->send_length, data, n);
+        t->send_length += n;
         try_send(t);
     }
     return (int)n;
 }
 
-int tcp_recv(struct tcpcb *t, uint8_t *out, uint16_t max) {
+int tcp_receive(struct tcpcb *t, uint8_t *out, uint16_t max) {
     if (!t || !t->in_use) {
         return -1;
     }
-    if (t->recv_len == 0) {
+    if (t->receive_length == 0) {
         if (t->peer_fin || t->reset || t->state == TCP_CLOSED) {
             return -1;
         }
         return 0;
     }
-    uint32_t n = t->recv_len < max ? t->recv_len : max;
-    k_memcpy(out, t->recv_buf, n);
-    t->recv_len -= n;
-    if (t->recv_len) {
-        k_memmove(t->recv_buf, t->recv_buf + n, t->recv_len);
+    uint32_t n = t->receive_length < max ? t->receive_length : max;
+    k_memcpy(out, t->receive_buffer, n);
+    t->receive_length -= n;
+    if (t->receive_length) {
+        k_memmove(t->receive_buffer, t->receive_buffer + n, t->receive_length);
     }
     if (t->state == TCP_ESTABLISHED || t->state == TCP_FIN_WAIT_1 || t->state == TCP_FIN_WAIT_2) {
         send_ack(t);
@@ -484,11 +484,11 @@ int tcp_recv(struct tcpcb *t, uint8_t *out, uint16_t max) {
 }
 
 int tcp_bytes_available(const struct tcpcb *t) {
-    return (t && t->in_use) ? (int)t->recv_len : 0;
+    return (t && t->in_use) ? (int)t->receive_length : 0;
 }
 
 int tcp_send_space(const struct tcpcb *t) {
-    return (t && t->in_use) ? (int)(TCP_SEND_BUF - t->send_len) : 0;
+    return (t && t->in_use) ? (int)(TCP_SEND_BUF - t->send_length) : 0;
 }
 
 tcp_state_t tcp_state(const struct tcpcb *t) {
@@ -532,13 +532,13 @@ void tcp_close(struct tcpcb *t) {
         return;
     case TCP_ESTABLISHED:
         t->fin_sent = 1;
-        t->fin_seq = t->snd_una + t->send_len;
+        t->fin_sequence = t->snd_una + t->send_length;
         t->state = TCP_FIN_WAIT_1;
         try_send(t);
         return;
     case TCP_CLOSE_WAIT:
         t->fin_sent = 1;
-        t->fin_seq = t->snd_una + t->send_len;
+        t->fin_sequence = t->snd_una + t->send_length;
         t->state = TCP_LAST_ACK;
         try_send(t);
         return;
@@ -552,13 +552,13 @@ void tcp_abort(struct tcpcb *t) {
         return;
     }
     if (t->state != TCP_LISTEN && t->state != TCP_CLOSED && t->remote_port) {
-        klog_puts("[tcp] rst: aborting local port ");
-        klog_put_dec(t->local_port);
-        klog_puts(" to port ");
-        klog_put_dec(t->remote_port);
-        klog_puts(" in state ");
-        klog_put_dec((uint32_t)t->state);
-        klog_putc('\n');
+        kernel_log_puts("[tcp] rst: aborting local port ");
+        kernel_log_put_dec(t->local_port);
+        kernel_log_puts(" to port ");
+        kernel_log_put_dec(t->remote_port);
+        kernel_log_puts(" in state ");
+        kernel_log_put_dec((uint32_t)t->state);
+        kernel_log_putc('\n');
         emit(t, t->snd_nxt, TCP_RST, (const uint8_t *)0, 0, 0);
     }
     t->released = 1;
@@ -588,14 +588,14 @@ static int process_ack(struct tcpcb *t, uint32_t ack, uint32_t window) {
     int window_moved = window != t->snd_wnd;
     t->snd_wnd = window;
 
-    if (seq_leq(ack, t->snd_una)) {
-        if (ack == t->snd_una && t->send_len > 0 && !window_moved) {
+    if (sequence_leq(ack, t->snd_una)) {
+        if (ack == t->snd_una && t->send_length > 0 && !window_moved) {
             t->dup_acks++;
             if (t->dup_acks == 3) {
                 t->ssthresh = (t->snd_nxt - t->snd_una) / 2;
                 if (t->ssthresh < 2u * t->mss) { t->ssthresh = 2u * t->mss; }
                 t->recover = t->snd_nxt;
-                emit(t, t->snd_una, TCP_ACK | TCP_PSH, t->send_buf, (uint16_t)(t->send_len < t->mss ? t->send_len : t->mss), 0);
+                emit(t, t->snd_una, TCP_ACK | TCP_PSH, t->send_buffer, (uint16_t)(t->send_length < t->mss ? t->send_length : t->mss), 0);
                 debug_retransmits++;
                 t->cwnd = t->ssthresh + 3u * t->mss;
                 arm_rtx(t);
@@ -606,23 +606,23 @@ static int process_ack(struct tcpcb *t, uint32_t ack, uint32_t window) {
         }
         return 0;
     }
-    if (seq_gt(ack, t->snd_nxt)) {
+    if (sequence_gt(ack, t->snd_nxt)) {
         return 0;
     }
 
     uint32_t acked = ack - t->snd_una;
 
     uint32_t data_acked = acked;
-    if (t->fin_sent && seq_gt(ack, t->fin_seq)) {
+    if (t->fin_sent && sequence_gt(ack, t->fin_sequence)) {
         data_acked = acked - 1;
     }
-    if (data_acked > t->send_len) {
-        data_acked = t->send_len;
+    if (data_acked > t->send_length) {
+        data_acked = t->send_length;
     }
     if (data_acked) {
-        t->send_len -= data_acked;
-        if (t->send_len) {
-            k_memmove(t->send_buf, t->send_buf + data_acked, t->send_len);
+        t->send_length -= data_acked;
+        if (t->send_length) {
+            k_memmove(t->send_buffer, t->send_buffer + data_acked, t->send_length);
         }
     }
     t->snd_una = ack;
@@ -637,7 +637,7 @@ static int process_ack(struct tcpcb *t, uint32_t ack, uint32_t window) {
     }
     t->dup_acks = 0;
 
-    if (t->rtt_timing && seq_geq(ack, t->rtt_seq)) {
+    if (t->rtt_timing && sequence_geq(ack, t->rtt_sequence)) {
         note_rtt(t, tick_count - t->rtt_started);
         t->rtt_timing = 0;
     }
@@ -651,27 +651,27 @@ static int process_ack(struct tcpcb *t, uint32_t ack, uint32_t window) {
 }
 
 static void deliver(struct tcpcb *t, const uint8_t *data, uint16_t len) {
-    uint32_t room = TCP_RECV_BUF - t->recv_len;
+    uint32_t room = TCP_RECV_BUF - t->receive_length;
     uint32_t n = len < room ? len : room;
     if (n) {
-        k_memcpy(t->recv_buf + t->recv_len, data, n);
-        t->recv_len += n;
+        k_memcpy(t->receive_buffer + t->receive_length, data, n);
+        t->receive_length += n;
         t->rcv_nxt += n;
     }
     if (n < len) {
-        klog_puts("[tcp] window: port ");
-        klog_put_dec(t->local_port);
-        klog_puts(" refused ");
-        klog_put_dec(len - n);
-        klog_puts(" of ");
-        klog_put_dec(len);
-        klog_puts(" bytes, buffer ");
-        klog_put_dec(t->recv_len);
-        klog_putc('\n');
+        kernel_log_puts("[tcp] window: port ");
+        kernel_log_put_dec(t->local_port);
+        kernel_log_puts(" refused ");
+        kernel_log_put_dec(len - n);
+        kernel_log_puts(" of ");
+        kernel_log_put_dec(len);
+        kernel_log_puts(" bytes, buffer ");
+        kernel_log_put_dec(t->receive_length);
+        kernel_log_putc('\n');
     }
 }
 
-static void tcp_handle_packet_locked(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uint16_t len) {
+static void tcp_handle_packet_locked(uint32_t source_ip, uint32_t destination_ip, const uint8_t *seg, uint16_t len) {
     if (len < TCP_HEADER_LEN) {
         return;
     }
@@ -679,49 +679,49 @@ static void tcp_handle_packet_locked(uint32_t src_ip, uint32_t dst_ip, const uin
     if (data_off < TCP_HEADER_LEN || data_off > len) {
         return;
     }
-    if (net_fold16(net_sum16(pseudo_sum(src_ip, dst_ip, len), seg, len)) != 0) {
+    if (net_fold16(net_sum16(pseudo_sum(source_ip, destination_ip, len), seg, len)) != 0) {
         checksum_failures++;
         if (checksum_failures <= 4 || checksum_failures % 256 == 0) {
-            klog_puts("[tcp] checksum: dropped a corrupt segment to port ");
-            klog_put_dec(net_read_be16(seg + 2));
-            klog_puts(" from port ");
-            klog_put_dec(net_read_be16(seg + 0));
-            klog_puts(", ");
-            klog_put_dec(checksum_failures);
-            klog_puts(" since boot\n");
+            kernel_log_puts("[tcp] checksum: dropped a corrupt segment to port ");
+            kernel_log_put_dec(net_read_be16(seg + 2));
+            kernel_log_puts(" from port ");
+            kernel_log_put_dec(net_read_be16(seg + 0));
+            kernel_log_puts(", ");
+            kernel_log_put_dec(checksum_failures);
+            kernel_log_puts(" since boot\n");
         }
         return;
     }
 
-    uint16_t src_port = net_read_be16(seg + 0);
-    uint16_t dst_port = net_read_be16(seg + 2);
+    uint16_t source_port = net_read_be16(seg + 0);
+    uint16_t destination_port = net_read_be16(seg + 2);
     uint32_t seq = net_read_be32(seg + 4);
     uint32_t ack = net_read_be32(seg + 8);
     uint8_t flags = seg[13];
     uint16_t window = net_read_be16(seg + 14);
     const uint8_t *data = seg + data_off;
-    uint16_t data_len = (uint16_t)(len - data_off);
+    uint16_t data_length = (uint16_t)(len - data_off);
 
-    struct tcpcb *t = find_tcb(dst_ip, dst_port, src_ip, src_port);
+    struct tcpcb *t = find_tcb(destination_ip, destination_port, source_ip, source_port);
     if (!t) {
-        send_reset(src_ip, dst_ip, seg, len);
+        send_reset(source_ip, destination_ip, seg, len);
         return;
     }
 
     if (t->state == TCP_LISTEN) {
         if (!(flags & TCP_SYN) || (flags & TCP_ACK)) {
-            send_reset(src_ip, dst_ip, seg, len);
+            send_reset(source_ip, destination_ip, seg, len);
             return;
         }
         struct tcpcb *c = alloc_tcb();
         if (!c) {
-            send_reset(src_ip, dst_ip, seg, len);
+            send_reset(source_ip, destination_ip, seg, len);
             return;
         }
-        c->local_ip = dst_ip;
-        c->local_port = dst_port;
-        c->remote_ip = src_ip;
-        c->remote_port = src_port;
+        c->local_ip = destination_ip;
+        c->local_port = destination_port;
+        c->remote_ip = source_ip;
+        c->remote_port = source_port;
         c->irs = seq;
         c->rcv_nxt = seq + 1;
         c->snd_wnd = window;
@@ -773,7 +773,7 @@ static void tcp_handle_packet_locked(uint32_t src_ip, uint32_t dst_ip, const uin
         return;
     }
 
-    int carries_no_sequence = (data_len == 0) && !(flags & (TCP_SYN | TCP_FIN));
+    int carries_no_sequence = (data_length == 0) && !(flags & (TCP_SYN | TCP_FIN));
     if (seq != t->rcv_nxt && !carries_no_sequence) {
         if (t->state == TCP_ESTABLISHED || t->state == TCP_FIN_WAIT_1 ||
             t->state == TCP_FIN_WAIT_2 || t->state == TCP_CLOSE_WAIT) {
@@ -784,18 +784,18 @@ static void tcp_handle_packet_locked(uint32_t src_ip, uint32_t dst_ip, const uin
 
     if (flags & TCP_ACK) {
         process_ack(t, ack, window);
-        if (t->state == TCP_SYN_RECEIVED && seq_geq(t->snd_una, t->iss + 1)) {
+        if (t->state == TCP_SYN_RECEIVED && sequence_geq(t->snd_una, t->iss + 1)) {
             t->state = TCP_ESTABLISHED;
         }
     }
 
-    uint32_t fin_at = seq + data_len;
+    uint32_t fin_at = seq + data_length;
     int fin_now = (flags & TCP_FIN) != 0;
 
-    if (data_len && seq == t->rcv_nxt &&
+    if (data_length && seq == t->rcv_nxt &&
         (t->state == TCP_ESTABLISHED || t->state == TCP_FIN_WAIT_1 ||
          t->state == TCP_FIN_WAIT_2)) {
-        deliver(t, data, data_len);
+        deliver(t, data, data_length);
         if (!(fin_now && t->rcv_nxt == fin_at)) {
             send_ack(t);
         }
@@ -811,7 +811,7 @@ static void tcp_handle_packet_locked(uint32_t src_ip, uint32_t dst_ip, const uin
             t->state = TCP_CLOSE_WAIT;
             break;
         case TCP_FIN_WAIT_1:
-            t->state = (t->fin_sent && seq_gt(t->snd_una, t->fin_seq)) ? TCP_TIME_WAIT : TCP_CLOSING;
+            t->state = (t->fin_sent && sequence_gt(t->snd_una, t->fin_sequence)) ? TCP_TIME_WAIT : TCP_CLOSING;
             if (t->state == TCP_TIME_WAIT) {
                 t->time_wait_deadline = tick_count + 20;
             }
@@ -826,7 +826,7 @@ static void tcp_handle_packet_locked(uint32_t src_ip, uint32_t dst_ip, const uin
         return;
     }
 
-    if (t->fin_sent && seq_gt(t->snd_una, t->fin_seq)) {
+    if (t->fin_sent && sequence_gt(t->snd_una, t->fin_sequence)) {
         switch (t->state) {
         case TCP_FIN_WAIT_1:
             t->state = TCP_FIN_WAIT_2;
@@ -847,9 +847,9 @@ static void tcp_handle_packet_locked(uint32_t src_ip, uint32_t dst_ip, const uin
     try_send(t);
 }
 
-void tcp_handle_packet(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg, uint16_t len) {
-    tcp_handle_packet_locked(src_ip, dst_ip, seg, len);
-    sched_wake_all(SCHED_POLL_CHAN);
+void tcp_handle_packet(uint32_t source_ip, uint32_t destination_ip, const uint8_t *seg, uint16_t len) {
+    tcp_handle_packet_locked(source_ip, destination_ip, seg, len);
+    scheduler_wake_all(SCHED_POLL_CHAN);
 
 }
 
@@ -863,25 +863,25 @@ void tcp_tick(void) {
             continue;
         }
 
-        if (t->released && t->linger_deadline && seq_geq(tick_count, t->linger_deadline)) {
+        if (t->released && t->linger_deadline && sequence_geq(tick_count, t->linger_deadline)) {
             tcb_dispose(t);
             continue;
         }
 
         if (t->state == TCP_TIME_WAIT) {
-            if (seq_geq(tick_count, t->time_wait_deadline)) {
+            if (sequence_geq(tick_count, t->time_wait_deadline)) {
                 tcb_dispose(t);
             }
             continue;
         }
 
-        if (t->state == TCP_SYN_SENT && seq_geq(tick_count, t->connect_deadline)) {
+        if (t->state == TCP_SYN_SENT && sequence_geq(tick_count, t->connect_deadline)) {
             t->connect_failed = 1;
             tcb_dispose(t);
             continue;
         }
 
-        if (t->rtx_pending && seq_geq(tick_count, t->rtx_deadline)) {
+        if (t->rtx_pending && sequence_geq(tick_count, t->rtx_deadline)) {
             t->ssthresh = (t->snd_nxt - t->snd_una) / 2;
             if (t->ssthresh < 2u * t->mss) { t->ssthresh = 2u * t->mss; }
             t->cwnd = t->mss;
@@ -899,31 +899,31 @@ void tcp_tick(void) {
             t->rtt_timing = 0;
 
             debug_retransmits++;
-            klog_puts("[tcp] rto: port ");
-            klog_put_dec(t->local_port);
-            klog_puts(" backoff ");
-            klog_put_dec(t->backoff);
-            klog_puts(" in flight ");
-            klog_put_dec(t->snd_nxt - t->snd_una);
-            klog_puts(" buffered ");
-            klog_put_dec(t->send_len);
-            klog_puts(" snd_wnd ");
-            klog_put_dec(t->snd_wnd);
-            klog_putc('\n');
+            kernel_log_puts("[tcp] rto: port ");
+            kernel_log_put_dec(t->local_port);
+            kernel_log_puts(" backoff ");
+            kernel_log_put_dec(t->backoff);
+            kernel_log_puts(" in flight ");
+            kernel_log_put_dec(t->snd_nxt - t->snd_una);
+            kernel_log_puts(" buffered ");
+            kernel_log_put_dec(t->send_length);
+            kernel_log_puts(" snd_wnd ");
+            kernel_log_put_dec(t->snd_wnd);
+            kernel_log_putc('\n');
 
-            if (t->send_len) {
-                uint32_t n = t->send_len < t->mss ? t->send_len : t->mss;
-                emit(t, t->snd_una, TCP_ACK | TCP_PSH, t->send_buf, (uint16_t)n, 0);
+            if (t->send_length) {
+                uint32_t n = t->send_length < t->mss ? t->send_length : t->mss;
+                emit(t, t->snd_una, TCP_ACK | TCP_PSH, t->send_buffer, (uint16_t)n, 0);
             } else if (t->state == TCP_SYN_SENT) {
                 emit(t, t->iss, TCP_SYN, (const uint8_t *)0, 0, 1);
             } else if (t->state == TCP_SYN_RECEIVED) {
                 emit(t, t->iss, TCP_SYN | TCP_ACK, (const uint8_t *)0, 0, 1);
             } else if (t->fin_sent) {
-                emit(t, t->fin_seq, TCP_FIN | TCP_ACK, (const uint8_t *)0, 0, 0);
+                emit(t, t->fin_sequence, TCP_FIN | TCP_ACK, (const uint8_t *)0, 0, 0);
             }
             t->rtx_deadline = tick_count + t->rto;
         }
     }
     net_lock_release();
-    sched_wake_all(SCHED_POLL_CHAN);
+    scheduler_wake_all(SCHED_POLL_CHAN);
 }

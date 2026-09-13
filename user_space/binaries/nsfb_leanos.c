@@ -16,7 +16,7 @@
 #include "syscall_wrappers.h"
 
 struct leanos_priv {
-    wm_window_t win;
+    window_manager_window_t win;
     int damaged;
     uint8_t buttons;
 };
@@ -37,14 +37,14 @@ static int leanos_initialise(nsfb_t *nsfb) {
     if (!p) {
         return -1;
     }
-    if (wm_connect((uint32_t)nsfb->width, (uint32_t)nsfb->height,
+    if (window_manager_connect((uint32_t)nsfb->width, (uint32_t)nsfb->height,
                    "NetSurf", &p->win) != 0) {
         free(p);
         return -1;
     }
-    nsfb->width = p->win.gfx.width;
-    nsfb->height = p->win.gfx.height;
-    nsfb->ptr = (uint8_t *)p->win.gfx.pixels;
+    nsfb->width = p->win.graphics.width;
+    nsfb->height = p->win.graphics.height;
+    nsfb->ptr = (uint8_t *)p->win.graphics.pixels;
     nsfb->linelen = nsfb->width * 4;
     nsfb->surface_priv = p;
     select_plotters(nsfb);
@@ -107,14 +107,14 @@ static enum nsfb_key_code_e translate_key(char ch) {
 }
 
 static void resync(nsfb_t *nsfb, struct leanos_priv *p) {
-    if (nsfb->ptr == (uint8_t *)p->win.gfx.pixels &&
-        nsfb->width == p->win.gfx.width &&
-        nsfb->height == p->win.gfx.height) {
+    if (nsfb->ptr == (uint8_t *)p->win.graphics.pixels &&
+        nsfb->width == p->win.graphics.width &&
+        nsfb->height == p->win.graphics.height) {
         return;
     }
-    nsfb->ptr = (uint8_t *)p->win.gfx.pixels;
-    nsfb->width = p->win.gfx.width;
-    nsfb->height = p->win.gfx.height;
+    nsfb->ptr = (uint8_t *)p->win.graphics.pixels;
+    nsfb->width = p->win.graphics.width;
+    nsfb->height = p->win.graphics.height;
     nsfb->linelen = nsfb->width * 4;
     select_plotters(nsfb);
 }
@@ -173,8 +173,8 @@ static int convert(struct leanos_priv *p, const wm_event_t *in,
     case WM_EVENT_EXPOSE:
     case WM_EVENT_DISPLAY_CHANGED:
         event->type = NSFB_EVENT_RESIZE;
-        event->value.resize.w = p->win.gfx.width;
-        event->value.resize.h = p->win.gfx.height;
+        event->value.resize.w = p->win.graphics.width;
+        event->value.resize.h = p->win.graphics.height;
         return 1;
     case WM_EVENT_CLOSE_REQUEST:
         event->type = NSFB_EVENT_CONTROL;
@@ -198,13 +198,13 @@ static bool leanos_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout) {
 
     if (p->damaged) {
         p->damaged = 0;
-        wm_present(&p->win);
+        window_manager_present(&p->win);
     }
 
     long started = sys_uptime_ms();
     for (;;) {
         wm_event_t in;
-        while (wm_poll_event(&p->win, &in) == 1) {
+        while (window_manager_poll_event(&p->win, &in) == 1) {
             resync(nsfb, p);
             if (convert(p, &in, event)) {
                 return true;
@@ -221,7 +221,7 @@ static bool leanos_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout) {
             }
             remaining = timeout - (int)waited;
         }
-        wm_wait_ms(&p->win, NULL, 0, remaining);
+        window_manager_wait_ms(&p->win, NULL, 0, remaining);
     }
 }
 

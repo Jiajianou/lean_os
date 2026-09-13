@@ -15,7 +15,7 @@ TEST(wallclock, monotonic_accurate_and_locked_at_every_phase) {
     for (long long phase = 0; phase < 1000; phase++) {
         wallclock_t w = {0, 0};
         long long boot = EPOCH_MS + phase;
-        long long prev = 0, old_prev = 0;
+        long long prev = 0, old_previous = 0;
         int seen_edge = 0;
         long long first_rtc = boot / 1000;
         for (long long up = 5000; up < 8000; up++) {
@@ -38,10 +38,10 @@ TEST(wallclock, monotonic_accurate_and_locked_at_every_phase) {
             prev = t;
 
             long long o = old_formula(rtc, up);
-            if (up > 5000 && o < old_prev) {
+            if (up > 5000 && o < old_previous) {
                 old_went_backwards = 1;
             }
-            old_prev = o;
+            old_previous = o;
         }
     }
     CHECK(old_went_backwards);

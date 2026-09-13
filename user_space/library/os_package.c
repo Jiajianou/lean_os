@@ -39,7 +39,7 @@ const char *osp_strerror(int err) {
     }
 }
 
-int ospkg_check_path(const char *path) {
+int os_package_check_path(const char *path) {
     if (!path || !path[0]) {
         return -OSP_E_PATH;
     }
@@ -98,7 +98,7 @@ static int field_matches(const char *key, size_t keylen, const char *name) {
     return 1;
 }
 
-int ospkg_parse_manifest(const char *text, size_t len, osp_manifest_t *out) {
+int os_package_parse_manifest(const char *text, size_t len, osp_manifest_t *out) {
     for (size_t i = 0; i < sizeof(*out); i++) {
         ((char *)out)[i] = '\0';
     }
@@ -165,8 +165,8 @@ int ospkg_parse_manifest(const char *text, size_t len, osp_manifest_t *out) {
     if (!out->name[0] || !out->version[0]) {
         return -OSP_E_MANIFEST;
     }
-    if (ospkg_check_path(out->name) != OSP_OK ||
-        ospkg_check_path(out->version) != OSP_OK) {
+    if (os_package_check_path(out->name) != OSP_OK ||
+        os_package_check_path(out->version) != OSP_OK) {
         return -OSP_E_MANIFEST;
     }
     for (const char *p = out->name; *p; p++) {
@@ -182,7 +182,7 @@ int ospkg_parse_manifest(const char *text, size_t len, osp_manifest_t *out) {
     return OSP_OK;
 }
 
-int ospkg_open(const uint8_t *bytes, size_t len, osp_t *out) {
+int os_package_open(const uint8_t *bytes, size_t len, osp_t *out) {
     if (len < OSP_HEADER_BYTES) {
         return -OSP_E_SHORT;
     }
@@ -242,7 +242,7 @@ int ospkg_open(const uint8_t *bytes, size_t len, osp_t *out) {
     const uint8_t *payload = table + table_bytes;
 
     osp_manifest_t man;
-    int rc = ospkg_parse_manifest((const char *)meta, h.meta_bytes, &man);
+    int rc = os_package_parse_manifest((const char *)meta, h.meta_bytes, &man);
     if (rc != OSP_OK) {
         return rc;
     }
@@ -251,7 +251,7 @@ int ospkg_open(const uint8_t *bytes, size_t len, osp_t *out) {
 
     for (uint32_t i = 0; i < h.file_count; i++) {
         const osp_file_t *f = &files[i];
-        if (ospkg_check_path(f->path) != OSP_OK) {
+        if (os_package_check_path(f->path) != OSP_OK) {
             return -OSP_E_PATH;
         }
         uint64_t off = f->offset;
@@ -288,14 +288,14 @@ int ospkg_open(const uint8_t *bytes, size_t len, osp_t *out) {
     return OSP_OK;
 }
 
-const uint8_t *ospkg_file_data(const osp_t *pkg, uint32_t i) {
+const uint8_t *os_package_file_data(const osp_t *pkg, uint32_t i) {
     if (i >= pkg->file_count) {
         return (const uint8_t *)0;
     }
     return pkg->payload + pkg->files[i].offset;
 }
 
-uint32_t ospkg_caps_from_names(const char *names, int *unknown_out) {
+uint32_t os_package_caps_from_names(const char *names, int *unknown_out) {
     uint32_t mask = 0;
     if (unknown_out) {
         *unknown_out = 0;
@@ -328,7 +328,7 @@ uint32_t ospkg_caps_from_names(const char *names, int *unknown_out) {
     return mask;
 }
 
-void ospkg_caps_to_names(uint32_t caps, char *out, size_t cap) {
+void os_package_caps_to_names(uint32_t caps, char *out, size_t cap) {
     size_t n = 0;
     for (int k = 0; k < CAP_NAME_COUNT; k++) {
         if (!(caps & CAP_NAMES[k].bit)) {

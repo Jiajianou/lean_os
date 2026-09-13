@@ -31,8 +31,8 @@ static const char *const CTX_MENU_ITEMS[] = {"Terminal", "Settings"};
 static const char *const CTX_MENU_PROGRAMS[] = {PATH_BIN_DIR "gui_terminal", PATH_BIN_DIR "settings"};
 #define CTX_MENU_COUNT ((int)(sizeof(CTX_MENU_ITEMS) / sizeof(CTX_MENU_ITEMS[0])))
 
-static int ctx_menu_open;
-static int32_t ctx_menu_x, ctx_menu_y;
+static int context_menu_open;
+static int32_t context_menu_x, context_menu_y;
 
 #define DEFAULT_BG_COLOR 0x001A1A2Eu
 #define THEME_POLL_MS 500
@@ -42,7 +42,7 @@ static int theme_wallpaper = WALLPAPER_GRADIENT;
 
 static int refresh_theme(void) {
     wm_settings_request_t settings;
-    if (wm_query_settings(&settings) != 0) {
+    if (window_manager_query_settings(&settings) != 0) {
         return 0;
     }
     if (settings.bg_color == theme_bg && (int)settings.wallpaper == theme_wallpaper) {
@@ -56,7 +56,7 @@ static int refresh_theme(void) {
 static void launch_with(const char *label, const char *program, const char *arg) {
     long rc = sys_spawn(program, arg ? arg : "");
     if (rc < 0) {
-        wm_notify(WM_NOTIFY_ERROR, label, spawn_error_message(rc));
+        window_manager_notify(WM_NOTIFY_ERROR, label, spawn_error_message(rc));
     }
     child_track(rc);
 }
@@ -150,34 +150,34 @@ static void layout_icons(int32_t win_h) {
 }
 
 static int point_in_icon(int i, int32_t x, int32_t y) {
-    return gfx_point_in_rect(x, y, icon_x[i], icon_y[i] - LABEL_H - 4,
+    return graphics_point_in_rect(x, y, icon_x[i], icon_y[i] - LABEL_H - 4,
                               ICON_SIZE, ICON_SIZE + 2 * (LABEL_H + 4));
 }
 
-static void redraw_icon(wm_window_t *self, int i, int pressed) {
+static void redraw_icon(window_manager_window_t *self, int i, int pressed) {
     uint32_t box_color = pressed ? ICON_HOVER_COLOR : ICON_BOX_COLOR;
-    gfx_fill_rect_rounded(&self->gfx, icon_x[i], icon_y[i], ICON_SIZE, ICON_SIZE, box_color);
+    graphics_fill_rect_rounded(&self->graphics, icon_x[i], icon_y[i], ICON_SIZE, ICON_SIZE, box_color);
 
     {
         const uint8_t *blob = icon_image[i];
         int32_t drawn = 24 * ICON_IMAGE_SCALE;
-        icon_draw(&self->gfx, icon_x[i] + (ICON_SIZE - drawn) / 2,
+        icon_draw(&self->graphics, icon_x[i] + (ICON_SIZE - drawn) / 2,
                    icon_y[i] + (ICON_SIZE - drawn) / 2, blob, ICON_IMAGE_SCALE);
     }
 
-    int32_t label_w = gfx_text_width(gfx_ui_font(), ICONS[i].label);
+    int32_t label_w = graphics_text_width(graphics_ui_font(), ICONS[i].label);
     int32_t label_x = icon_x[i] + ICON_SIZE / 2 - label_w / 2;
-    gfx_draw_text(&self->gfx, label_x, icon_y[i] + ICON_SIZE + 4, ICONS[i].label, LABEL_COLOR);
+    graphics_draw_text(&self->graphics, label_x, icon_y[i] + ICON_SIZE + 4, ICONS[i].label, LABEL_COLOR);
 }
 
-static void redraw(wm_window_t *self, int pressed_icon) {
-    wallpaper_fill(&self->gfx, 0, 0, (int32_t)self->width, (int32_t)self->height,
+static void redraw(window_manager_window_t *self, int pressed_icon) {
+    wallpaper_fill(&self->graphics, 0, 0, (int32_t)self->width, (int32_t)self->height,
                     theme_wallpaper, theme_bg);
     for (int i = 0; i < ICON_COUNT; i++) {
         redraw_icon(self, i, i == pressed_icon);
     }
-    if (ctx_menu_open) {
-        gfx_draw_menu(&self->gfx, ctx_menu_x, ctx_menu_y, CTX_MENU_ITEM_W, CTX_MENU_ITEM_H,
+    if (context_menu_open) {
+        graphics_draw_menu(&self->graphics, context_menu_x, context_menu_y, CTX_MENU_ITEM_W, CTX_MENU_ITEM_H,
                       CTX_MENU_ITEMS, CTX_MENU_COUNT, -1,
                       CTX_MENU_BG, CTX_MENU_HOVER, CTX_MENU_BORDER, CTX_MENU_TEXT);
     }
@@ -186,8 +186,8 @@ static void redraw(wm_window_t *self, int pressed_icon) {
 int main(void) {
     load_icons();
 
-    wm_window_t win;
-    if (wm_connect_desktop(&win) != 0) {
+    window_manager_window_t win;
+    if (window_manager_connect_desktop(&win) != 0) {
         const char msg[] = "desktop_icons: no window from the compositor - exiting so init restarts the session\n";
         sys_write(1, msg, sizeof(msg) - 1);
         sys_exit(1);
@@ -203,41 +203,41 @@ int main(void) {
     int pressed_icon = -1;
 
     redraw(&win, -1);
-    wm_present(&win);
+    window_manager_present(&win);
 
     for (;;) {
         child_reap();
         wm_event_t ev;
         int changed = 0;
-        while (wm_poll_event(&win, &ev)) {
+        while (window_manager_poll_event(&win, &ev)) {
             if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
                 changed = 1;
             } else if (ev.type == WM_EVENT_DROP) {
                 char dropped[WM_DRAG_PAYLOAD_MAX];
-                if (wm_drag_payload(dropped, sizeof(dropped)) == 0 && dropped[0]) {
+                if (window_manager_drag_payload(dropped, sizeof(dropped)) == 0 && dropped[0]) {
                     long rc = sys_spawn(PATH_BIN_DIR "text_editor", dropped);
                     if (rc < 0) {
-                        wm_notify(WM_NOTIFY_ERROR, dropped, spawn_error_message(rc));
+                        window_manager_notify(WM_NOTIFY_ERROR, dropped, spawn_error_message(rc));
                     }
                     child_track(rc);
                 }
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
-                ctx_menu_open = 1;
-                ctx_menu_x = ev.x;
-                ctx_menu_y = ev.y;
+                context_menu_open = 1;
+                context_menu_x = ev.x;
+                context_menu_y = ev.y;
                 int32_t max_x = (int32_t)win.width - CTX_MENU_ITEM_W;
                 int32_t max_y = (int32_t)win.height - CTX_MENU_ITEM_H * CTX_MENU_COUNT;
-                if (ctx_menu_x > max_x) {
-                    ctx_menu_x = max_x;
+                if (context_menu_x > max_x) {
+                    context_menu_x = max_x;
                 }
-                if (ctx_menu_y > max_y) {
-                    ctx_menu_y = max_y;
+                if (context_menu_y > max_y) {
+                    context_menu_y = max_y;
                 }
                 changed = 1;
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && ctx_menu_open) {
-                int idx = gfx_menu_hit_test(ev.x, ev.y, ctx_menu_x, ctx_menu_y,
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && context_menu_open) {
+                int idx = graphics_menu_hit_test(ev.x, ev.y, context_menu_x, context_menu_y,
                                              CTX_MENU_ITEM_W, CTX_MENU_ITEM_H, CTX_MENU_COUNT);
-                ctx_menu_open = 0;
+                context_menu_open = 0;
                 if (idx >= 0) {
                     launch(CTX_MENU_ITEMS[idx], CTX_MENU_PROGRAMS[idx]);
                 }
@@ -276,8 +276,8 @@ int main(void) {
         if (changed || pressed != was_pressed_icon) {
             redraw(&win, pressed);
             was_pressed_icon = pressed;
-            wm_present(&win);
+            window_manager_present(&win);
         }
-        wm_wait_ms(&win, NULL, 0, pressed >= 0 ? 50 : (int)(next_theme_poll - now));
+        window_manager_wait_ms(&win, NULL, 0, pressed >= 0 ? 50 : (int)(next_theme_poll - now));
     }
 }

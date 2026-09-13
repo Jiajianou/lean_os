@@ -62,7 +62,7 @@ static acpi_ioapic_t *ioapic_for_gsi(uint32_t gsi, uint32_t *out_index) {
 
     for (int i = 0; i < madt.ioapic_count; i++) {
         acpi_ioapic_t *io = &madt.ioapics[i];
-        vmm_map_page((uint64_t)io->address & ~0xFFFull,
+        virtual_memory_map_page((uint64_t)io->address & ~0xFFFull,
                      (uint64_t)io->address & ~0xFFFull, VMM_FLAG_WRITABLE);
         uint32_t count = ioapic_entries(io);
         if (gsi >= io->gsi_base && gsi < io->gsi_base + count) {
@@ -75,7 +75,7 @@ static acpi_ioapic_t *ioapic_for_gsi(uint32_t gsi, uint32_t *out_index) {
 
 void ioapic_init(void) {
     if (!boot_ioapic_enabled()) {
-        klog_puts("[ioapic] not requested for this boot - on the 8259 PIC. "
+        kernel_log_puts("[ioapic] not requested for this boot - on the 8259 PIC. "
                    "-fw_cfg name=opt/leanos/ioapic,string=1 selects it; "
                    "kernel/device/fwcfg.h has the numbers.\n");
         usable = 0;
@@ -83,7 +83,7 @@ void ioapic_init(void) {
     }
     have_madt = acpi_find_madt(&madt);
     if (!have_madt || madt.ioapic_count == 0) {
-        klog_puts("[ioapic] no I/O APIC in the MADT - staying on the 8259 PIC.\n");
+        kernel_log_puts("[ioapic] no I/O APIC in the MADT - staying on the 8259 PIC.\n");
         usable = 0;
         return;
     }
@@ -91,22 +91,22 @@ void ioapic_init(void) {
 
     for (int i = 0; i < madt.ioapic_count; i++) {
         acpi_ioapic_t *io = &madt.ioapics[i];
-        vmm_map_page((uint64_t)io->address & ~0xFFFull,
+        virtual_memory_map_page((uint64_t)io->address & ~0xFFFull,
                      (uint64_t)io->address & ~0xFFFull, VMM_FLAG_WRITABLE);
         uint32_t count = ioapic_entries(io);
         for (uint32_t e = 0; e < count; e++) {
             ioapic_write(io, IOAPIC_REG_REDTBL + 2 * e, REDIR_MASKED);
             ioapic_write(io, IOAPIC_REG_REDTBL + 2 * e + 1, 0);
         }
-        klog_puts("[ioapic] id=0x");
-        klog_put_hex32(io->id);
-        klog_puts(" at 0x");
-        klog_put_hex32(io->address);
-        klog_puts(" gsi_base=0x");
-        klog_put_hex32(io->gsi_base);
-        klog_puts(" entries=0x");
-        klog_put_hex32(count);
-        klog_putc('\n');
+        kernel_log_puts("[ioapic] id=0x");
+        kernel_log_put_hex32(io->id);
+        kernel_log_puts(" at 0x");
+        kernel_log_put_hex32(io->address);
+        kernel_log_puts(" gsi_base=0x");
+        kernel_log_put_hex32(io->gsi_base);
+        kernel_log_puts(" entries=0x");
+        kernel_log_put_hex32(count);
+        kernel_log_putc('\n');
     }
     usable = 1;
 }
@@ -125,9 +125,9 @@ void ioapic_route_irq(uint8_t irq, uint8_t lapic_id) {
     uint32_t index = 0;
     acpi_ioapic_t *io = ioapic_for_gsi(gsi, &index);
     if (!io) {
-        klog_puts("[ioapic] no controller serves gsi 0x");
-        klog_put_hex32(gsi);
-        klog_puts(" - falling back to the PIC for this line\n");
+        kernel_log_puts("[ioapic] no controller serves gsi 0x");
+        kernel_log_put_hex32(gsi);
+        kernel_log_puts(" - falling back to the PIC for this line\n");
         pic_clear_mask(irq);
         return;
     }

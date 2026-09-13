@@ -41,7 +41,7 @@
 #define TRAY_ICONS_W  (TRAY_PAD + WM_WORKSPACE_COUNT * WS_DOT + (WM_WORKSPACE_COUNT - 1) * WS_DOT_GAP + TRAY_PAD)
 
 static int32_t clock_text_w(void) {
-    return gfx_text_width(gfx_ui_font(), "00:00");
+    return graphics_text_width(graphics_ui_font(), "00:00");
 }
 
 static int32_t tray_w(void) {
@@ -90,12 +90,12 @@ static int running_count;
 static int hovered = HOVER_NONE;
 static long start_pressed_until_ms;
 
-static int ctx_slot = -1;
-static int32_t ctx_x, ctx_y;
-static int ctx_hover = -1;
-static int32_t ctx_overhang;
+static int context_slot = -1;
+static int32_t context_x, context_y;
+static int context_hover = -1;
+static int32_t context_overhang;
 
-static gfx_ctx_t bar_gfx;
+static graphics_context_t bar_graphics;
 
 static int shown_workspace;
 
@@ -136,9 +136,9 @@ static void copy_label(char *dst, const char *src) {
     dst[i] = '\0';
 }
 
-static void refresh_running_slots(wm_window_t *self) {
+static void refresh_running_slots(window_manager_window_t *self) {
     wm_query_response_t q;
-    if (wm_query_windows(&q) != 0) {
+    if (window_manager_query_windows(&q) != 0) {
         running_count = 0;
         return;
     }
@@ -171,7 +171,7 @@ static void refresh_running_slots(wm_window_t *self) {
     for (int i = 0; i < running_count; i++) {
         running_slot_t *slot = &running_slots[i];
         if (slot->window_id != slot->reported_id || slot->x != slot->reported_x) {
-            wm_set_taskbar_slot(slot->window_id, slot->x, slot->w);
+            window_manager_set_taskbar_slot(slot->window_id, slot->x, slot->w);
             slot->reported_id = slot->window_id;
             slot->reported_x = slot->x;
         }
@@ -208,88 +208,88 @@ static void draw_start_button(int pressed) {
     uint32_t bg = pressed ? START_PRESS_BG
                           : (hovered == HOVER_START ? START_HOVER_BG : START_BG);
     uint32_t glyph = pressed ? START_PRESS_GLYPH_FG : START_GLYPH_FG;
-    gfx_fill_rect_rounded(&bar_gfx, START_X, BTN_Y, START_W, BTN_H, bg);
-    gfx_draw_rect_rounded(&bar_gfx, START_X, BTN_Y, START_W, BTN_H, SLOT_BORDER_COLOR);
+    graphics_fill_rect_rounded(&bar_graphics, START_X, BTN_Y, START_W, BTN_H, bg);
+    graphics_draw_rect_rounded(&bar_graphics, START_X, BTN_Y, START_W, BTN_H, SLOT_BORDER_COLOR);
 
     int32_t gy = BTN_Y + (BTN_H - (2 * START_TILE + START_TILE_GAP)) / 2;
     for (int row = 0; row < 2; row++) {
         for (int col = 0; col < 2; col++) {
-            gfx_fill_rect(&bar_gfx,
+            graphics_fill_rect(&bar_graphics,
                           START_GLYPH_X + col * (START_TILE + START_TILE_GAP),
                           gy + row * (START_TILE + START_TILE_GAP),
                           START_TILE, START_TILE, glyph);
         }
     }
-    gfx_draw_text(&bar_gfx, START_TEXT_X, BTN_Y + (BTN_H - (int32_t)gfx_ui_font()->height) / 2, "Start", LABEL_COLOR);
+    graphics_draw_text(&bar_graphics, START_TEXT_X, BTN_Y + (BTN_H - (int32_t)graphics_ui_font()->height) / 2, "Start", LABEL_COLOR);
 }
 
-static void draw_tray(wm_window_t *self) {
+static void draw_tray(window_manager_window_t *self) {
     int32_t tray_x = (int32_t)self->width - tray_w();
-    gfx_draw_line(&bar_gfx, tray_x, BTN_Y + 2, tray_x, BTN_Y + BTN_H - 3, TRAY_SEP_COLOR);
+    graphics_draw_line(&bar_graphics, tray_x, BTN_Y + 2, tray_x, BTN_Y + BTN_H - 3, TRAY_SEP_COLOR);
 
     int32_t dot_y = (PANEL_HEIGHT - WS_DOT) / 2;
     for (int i = 0; i < WM_WORKSPACE_COUNT; i++) {
         int32_t dx = tray_x + TRAY_PAD + i * (WS_DOT + WS_DOT_GAP);
         if (i == shown_workspace) {
-            gfx_fill_rect(&bar_gfx, dx, dot_y, WS_DOT, WS_DOT, WS_DOT_ON);
+            graphics_fill_rect(&bar_graphics, dx, dot_y, WS_DOT, WS_DOT, WS_DOT_ON);
         } else {
-            gfx_draw_rect(&bar_gfx, dx, dot_y, WS_DOT, WS_DOT, WS_DOT_OFF);
+            graphics_draw_rect(&bar_graphics, dx, dot_y, WS_DOT, WS_DOT, WS_DOT_OFF);
         }
     }
 
     char clock_text[CLOCK_CHARS + 1];
     format_clock(sys_uptime_ms(), clock_text);
-    gfx_draw_text(&bar_gfx, (int32_t)self->width - TRAY_PAD - clock_text_w(),
-                  (PANEL_HEIGHT - (int32_t)gfx_ui_font()->height) / 2, clock_text, CLOCK_FG);
+    graphics_draw_text(&bar_graphics, (int32_t)self->width - TRAY_PAD - clock_text_w(),
+                  (PANEL_HEIGHT - (int32_t)graphics_ui_font()->height) / 2, clock_text, CLOCK_FG);
 }
 
-static int32_t ctx_needed_overhang(void) {
-    if (ctx_slot < 0) {
+static int32_t context_needed_overhang(void) {
+    if (context_slot < 0) {
         return 0;
     }
-    return ctx_y < 0 ? -ctx_y : 0;
+    return context_y < 0 ? -context_y : 0;
 }
 
-static const char *ctx_label(int i) {
+static const char *context_label(int i) {
     if (i == 0) {
-        return running_slots[ctx_slot].minimized ? "Restore" : "Minimize";
+        return running_slots[context_slot].minimized ? "Restore" : "Minimize";
     }
     return i == 1 ? "Close" : "Force Quit";
 }
 
-static void draw_ctx_menu(wm_window_t *self) {
-    int32_t by = PANEL_OVERHANG_MAX + ctx_y;
+static void draw_context_menu(window_manager_window_t *self) {
+    int32_t by = PANEL_OVERHANG_MAX + context_y;
     int32_t h = CTX_ITEM_H * CTX_COUNT;
-    gfx_fill_rect_rounded(&self->gfx, ctx_x, by, CTX_W, h, CTX_BG);
-    gfx_draw_rect_rounded(&self->gfx, ctx_x, by, CTX_W, h, CTX_BORDER);
+    graphics_fill_rect_rounded(&self->graphics, context_x, by, CTX_W, h, CTX_BG);
+    graphics_draw_rect_rounded(&self->graphics, context_x, by, CTX_W, h, CTX_BORDER);
     for (int i = 0; i < CTX_COUNT; i++) {
         int32_t ry = by + i * CTX_ITEM_H;
-        if (i == ctx_hover) {
-            gfx_fill_rect_rounded(&self->gfx, ctx_x + 2, ry + 1, CTX_W - 4, CTX_ITEM_H - 2, CTX_HOVER_BG);
+        if (i == context_hover) {
+            graphics_fill_rect_rounded(&self->graphics, context_x + 2, ry + 1, CTX_W - 4, CTX_ITEM_H - 2, CTX_HOVER_BG);
         }
-        gfx_draw_text(&self->gfx, ctx_x + 8, ry + (CTX_ITEM_H - (int32_t)gfx_ui_font()->height) / 2, ctx_label(i), CTX_TEXT);
+        graphics_draw_text(&self->graphics, context_x + 8, ry + (CTX_ITEM_H - (int32_t)graphics_ui_font()->height) / 2, context_label(i), CTX_TEXT);
     }
 }
 
-static int ctx_row_at(int32_t x, int32_t y) {
-    if (ctx_slot < 0 ||
-        !gfx_point_in_rect(x, y, ctx_x, ctx_y, CTX_W, CTX_ITEM_H * CTX_COUNT)) {
+static int context_row_at(int32_t x, int32_t y) {
+    if (context_slot < 0 ||
+        !graphics_point_in_rect(x, y, context_x, context_y, CTX_W, CTX_ITEM_H * CTX_COUNT)) {
         return -1;
     }
-    return (y - ctx_y) / CTX_ITEM_H;
+    return (y - context_y) / CTX_ITEM_H;
 }
 
-static void bar_gfx_bind(const wm_window_t *self) {
-    bar_gfx.pixels = self->gfx.pixels + (int32_t)self->width * PANEL_OVERHANG_MAX;
-    bar_gfx.width = (int32_t)self->width;
-    bar_gfx.height = PANEL_HEIGHT;
+static void bar_graphics_bind(const window_manager_window_t *self) {
+    bar_graphics.pixels = self->graphics.pixels + (int32_t)self->width * PANEL_OVERHANG_MAX;
+    bar_graphics.width = (int32_t)self->width;
+    bar_graphics.height = PANEL_HEIGHT;
 }
 
-static void redraw(wm_window_t *self) {
-    bar_gfx_bind(self);
-    gfx_fill_rect(&bar_gfx, 0, 0, (int32_t)self->width, PANEL_HEIGHT, PANEL_BG);
-    gfx_draw_line(&bar_gfx, 0, 0, (int32_t)self->width - 1, 0, PANEL_BORDER_COLOR);
-    gfx_draw_line(&bar_gfx, 0, 1, (int32_t)self->width - 1, 1, PANEL_BEVEL_COLOR);
+static void redraw(window_manager_window_t *self) {
+    bar_graphics_bind(self);
+    graphics_fill_rect(&bar_graphics, 0, 0, (int32_t)self->width, PANEL_HEIGHT, PANEL_BG);
+    graphics_draw_line(&bar_graphics, 0, 0, (int32_t)self->width - 1, 0, PANEL_BORDER_COLOR);
+    graphics_draw_line(&bar_graphics, 0, 1, (int32_t)self->width - 1, 1, PANEL_BEVEL_COLOR);
 
     draw_start_button(sys_uptime_ms() < start_pressed_until_ms);
 
@@ -300,16 +300,16 @@ static void redraw(wm_window_t *self) {
                                                        : (i == hovered ? RUNNING_SLOT_HOVER_BG : RUNNING_SLOT_BG));
         uint32_t border = slot->focused ? RUNNING_SLOT_FOCUS_BORDER
                                         : (slot->frontmost ? RUNNING_SLOT_FRONT_BORDER : SLOT_BORDER_COLOR);
-        gfx_fill_rect_rounded(&bar_gfx, slot->x, BTN_Y, slot->w, SLOT_H, bg);
-        gfx_draw_rect_rounded(&bar_gfx, slot->x, BTN_Y, slot->w, SLOT_H, border);
-        gfx_draw_text(&bar_gfx, slot->x + LABEL_PAD, BTN_Y + 4, slot->name, LABEL_COLOR);
+        graphics_fill_rect_rounded(&bar_graphics, slot->x, BTN_Y, slot->w, SLOT_H, bg);
+        graphics_draw_rect_rounded(&bar_graphics, slot->x, BTN_Y, slot->w, SLOT_H, border);
+        graphics_draw_text(&bar_graphics, slot->x + LABEL_PAD, BTN_Y + 4, slot->name, LABEL_COLOR);
     }
 
     draw_tray(self);
 
-    gfx_fill_rect(&self->gfx, 0, 0, (int32_t)self->width, PANEL_OVERHANG_MAX, PANEL_BG);
-    if (ctx_slot >= 0) {
-        draw_ctx_menu(self);
+    graphics_fill_rect(&self->graphics, 0, 0, (int32_t)self->width, PANEL_OVERHANG_MAX, PANEL_BG);
+    if (context_slot >= 0) {
+        draw_context_menu(self);
     }
 }
 
@@ -317,48 +317,48 @@ static int button_at(int32_t x, int32_t y) {
     if (y < BTN_Y || y >= BTN_Y + BTN_H) {
         return HOVER_NONE;
     }
-    if (gfx_point_in_rect(x, y, START_X, BTN_Y, START_W, BTN_H)) {
+    if (graphics_point_in_rect(x, y, START_X, BTN_Y, START_W, BTN_H)) {
         return HOVER_START;
     }
     for (int i = 0; i < running_count; i++) {
-        if (gfx_point_in_rect(x, y, running_slots[i].x, BTN_Y, running_slots[i].w, SLOT_H)) {
+        if (graphics_point_in_rect(x, y, running_slots[i].x, BTN_Y, running_slots[i].w, SLOT_H)) {
             return i;
         }
     }
     return HOVER_NONE;
 }
 
-static void ctx_open_on(int slot, int32_t x, int32_t win_w) {
-    ctx_slot = slot;
-    ctx_hover = -1;
-    ctx_x = x;
-    if (ctx_x > win_w - CTX_W) {
-        ctx_x = win_w - CTX_W;
+static void context_open_on(int slot, int32_t x, int32_t win_w) {
+    context_slot = slot;
+    context_hover = -1;
+    context_x = x;
+    if (context_x > win_w - CTX_W) {
+        context_x = win_w - CTX_W;
     }
-    if (ctx_x < 0) {
-        ctx_x = 0;
+    if (context_x < 0) {
+        context_x = 0;
     }
-    ctx_y = -(CTX_ITEM_H * CTX_COUNT);
+    context_y = -(CTX_ITEM_H * CTX_COUNT);
 }
 
-static void ctx_close(void) {
-    ctx_slot = -1;
-    ctx_hover = -1;
+static void context_close(void) {
+    context_slot = -1;
+    context_hover = -1;
 }
 
-static void ctx_activate(int row) {
-    if (ctx_slot < 0 || ctx_slot >= running_count) {
-        ctx_close();
+static void context_activate(int row) {
+    if (context_slot < 0 || context_slot >= running_count) {
+        context_close();
         return;
     }
-    int32_t window_id = running_slots[ctx_slot].window_id;
-    ctx_close();
+    int32_t window_id = running_slots[context_slot].window_id;
+    context_close();
     if (row == 0) {
-        wm_send_action(window_id, WM_ACTION_TOGGLE_MINIMIZE);
+        window_manager_send_action(window_id, WM_ACTION_TOGGLE_MINIMIZE);
     } else if (row == 1) {
-        wm_send_action(window_id, WM_ACTION_CLOSE);
+        window_manager_send_action(window_id, WM_ACTION_CLOSE);
     } else if (row == 2) {
-        wm_send_action(window_id, WM_ACTION_KILL);
+        window_manager_send_action(window_id, WM_ACTION_KILL);
     }
 }
 
@@ -366,49 +366,49 @@ static void handle_click(int32_t x, int32_t y) {
     int hit = button_at(x, y);
     if (hit == HOVER_START) {
         start_pressed_until_ms = sys_uptime_ms() + PRESS_FLASH_MS;
-        wm_toggle_launcher();
+        window_manager_toggle_launcher();
         return;
     }
     if (hit >= 0) {
         const running_slot_t *slot = &running_slots[hit];
-        wm_send_action(slot->window_id, slot->focused ? WM_ACTION_TOGGLE_MINIMIZE : WM_ACTION_FOCUS);
+        window_manager_send_action(slot->window_id, slot->focused ? WM_ACTION_TOGGLE_MINIMIZE : WM_ACTION_FOCUS);
     }
 }
 
 int main(void) {
-    wm_window_t win;
-    if (wm_connect_panel(PANEL_BUF_H, PANEL_HEIGHT, &win) != 0) {
+    window_manager_window_t win;
+    if (window_manager_connect_panel(PANEL_BUF_H, PANEL_HEIGHT, &win) != 0) {
         const char msg[] = "desktop_shell: no window from the compositor - exiting so init restarts the session\n";
         sys_write(1, msg, sizeof(msg) - 1);
         sys_exit(1);
     }
-    bar_gfx_bind(&win);
+    bar_graphics_bind(&win);
 
     refresh_running_slots(&win);
     redraw(&win);
-    wm_present(&win);
+    window_manager_present(&win);
 
     long next_refresh = 0;
     for (;;) {
         wm_event_t ev;
         int changed = 0;
-        while (wm_poll_event(&win, &ev)) {
+        while (window_manager_poll_event(&win, &ev)) {
             if (ev.type == WM_EVENT_EXPOSE || ev.type == WM_EVENT_DISPLAY_CHANGED) {
                 changed = 1;
             } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 2)) {
                 int hit = button_at(ev.x, ev.y);
                 if (hit >= 0) {
-                    ctx_open_on(hit, running_slots[hit].x, (int32_t)win.width);
+                    context_open_on(hit, running_slots[hit].x, (int32_t)win.width);
                 } else {
-                    ctx_close();
+                    context_close();
                 }
                 changed = 1;
-            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && ctx_slot >= 0) {
-                int row = ctx_row_at(ev.x, ev.y);
+            } else if (ev.type == WM_EVENT_MOUSE_BUTTON && (ev.buttons & 1) && context_slot >= 0) {
+                int row = context_row_at(ev.x, ev.y);
                 if (row >= 0) {
-                    ctx_activate(row);
+                    context_activate(row);
                 } else {
-                    ctx_close();
+                    context_close();
                 }
                 refresh_running_slots(&win);
                 changed = 1;
@@ -417,10 +417,10 @@ int main(void) {
                 refresh_running_slots(&win);
                 changed = 1;
             } else if (ev.type == WM_EVENT_MOUSE_MOVE) {
-                if (ctx_slot >= 0) {
-                    int row = ctx_row_at(ev.x, ev.y);
-                    if (row != ctx_hover) {
-                        ctx_hover = row;
+                if (context_slot >= 0) {
+                    int row = context_row_at(ev.x, ev.y);
+                    if (row != context_hover) {
+                        context_hover = row;
                         changed = 1;
                     }
                 }
@@ -446,13 +446,13 @@ int main(void) {
         }
         if (changed) {
             redraw(&win);
-            wm_present(&win);
+            window_manager_present(&win);
         }
-        int32_t want = ctx_needed_overhang();
-        if (want != ctx_overhang) {
-            ctx_overhang = want;
-            wm_set_panel_overhang(win.window_id, want);
+        int32_t want = context_needed_overhang();
+        if (want != context_overhang) {
+            context_overhang = want;
+            window_manager_set_panel_overhang(win.window_id, want);
         }
-        wm_wait_ms(&win, NULL, 0, (pressed || ctx_overhang) ? 50 : (int)(next_refresh - now));
+        window_manager_wait_ms(&win, NULL, 0, (pressed || context_overhang) ? 50 : (int)(next_refresh - now));
     }
 }

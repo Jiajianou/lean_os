@@ -88,7 +88,7 @@ static int rtl8139_reset(void) {
             return 1;
         }
     }
-    klog_puts("[rtl8139] reset did not complete - carrying on without a network.\n");
+    kernel_log_puts("[rtl8139] reset did not complete - carrying on without a network.\n");
     return 0;
 }
 
@@ -100,7 +100,7 @@ int rtl8139_init(void) {
     pci_enable_device(&dev);
     io_base = pci_bar0_io_base(&dev);
     if (io_base == 0) {
-        klog_puts("[rtl8139] BAR0 is memory-mapped - this driver speaks port I/O only.\n");
+        kernel_log_puts("[rtl8139] BAR0 is memory-mapped - this driver speaks port I/O only.\n");
         return 0;
     }
 
@@ -113,13 +113,13 @@ int rtl8139_init(void) {
         mac[i] = inb(io_base + REG_IDR0 + i);
     }
 
-    uint64_t rx_phys = pmm_alloc_contiguous(RX_BUFFER_FRAMES);
+    uint64_t rx_phys = physical_memory_alloc_contiguous(RX_BUFFER_FRAMES);
     rx_buffer = (uint8_t *)(uintptr_t)rx_phys;
     rx_read_offset = 0;
     outl(io_base + REG_RBSTART, (uint32_t)rx_phys);
 
     for (int i = 0; i < TX_DESCRIPTORS; i++) {
-        uint64_t tx_phys = pmm_alloc_contiguous(1);
+        uint64_t tx_phys = physical_memory_alloc_contiguous(1);
         tx_buffer[i] = (uint8_t *)(uintptr_t)tx_phys;
     }
     tx_next_descriptor = 0;
@@ -134,23 +134,23 @@ int rtl8139_init(void) {
     irq_enable_line(dev.irq_line);
 
     random_feed(mac, sizeof(mac));
-    klog_puts("[net] rtl8139 found at PCI ");
-    klog_put_hex32(dev.bus);
-    klog_puts(":");
-    klog_put_hex32(dev.slot);
-    klog_puts(":");
-    klog_put_hex32(dev.func);
-    klog_puts(", io_base=0x");
-    klog_put_hex32(io_base);
-    klog_puts(", irq=");
-    klog_put_hex32(dev.irq_line);
-    klog_puts(", mac=0x");
+    kernel_log_puts("[net] rtl8139 found at PCI ");
+    kernel_log_put_hex32(dev.bus);
+    kernel_log_puts(":");
+    kernel_log_put_hex32(dev.slot);
+    kernel_log_puts(":");
+    kernel_log_put_hex32(dev.func);
+    kernel_log_puts(", io_base=0x");
+    kernel_log_put_hex32(io_base);
+    kernel_log_puts(", irq=");
+    kernel_log_put_hex32(dev.irq_line);
+    kernel_log_puts(", mac=0x");
     uint64_t mac_packed = 0;
     for (int i = 0; i < 6; i++) {
         mac_packed = (mac_packed << 8) | mac[i];
     }
-    klog_put_hex64(mac_packed);
-    klog_putc('\n');
+    kernel_log_put_hex64(mac_packed);
+    kernel_log_putc('\n');
     return 1;
 }
 

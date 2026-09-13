@@ -102,7 +102,7 @@ static const struct entry TABLE[] = {
     {.name = "llroundf", .oursllf = lean_llroundf, .theirsllf = llroundf},
 };
 
-static double err_of(double got, double want) {
+static double error_of(double got, double want) {
     if (isnan(want)) {
         return isnan(got) ? 0.0 : 1.0;
     }
@@ -169,7 +169,7 @@ int main(int argc, char **argv) {
                     want = (double)TABLE[i].theirsf((float)values[v]);
                 }
                 double special_tol = TABLE[i].ours1 ? 1e-12 : 1.2e-7;
-                if (err_of(got, want) <= special_tol) {
+                if (error_of(got, want) <= special_tol) {
                     continue;
                 }
                 const char *why = 0;
@@ -259,7 +259,7 @@ int main(int argc, char **argv) {
             for (int i = 0; i < n; i++) {
                 float x = (float)(lo + step * (double)i);
                 double got = (double)e->oursf(x), want = (double)e->theirsf(x);
-                double err = err_of(got, want);
+                double err = error_of(got, want);
                 if (err > worst) {
                     worst = err; worst_x = (double)x; worst_got = got; worst_want = want;
                 }
@@ -270,7 +270,7 @@ int main(int argc, char **argv) {
                 for (int j = 0; j < n; j++) {
                     float y = (float)(lo + step * (double)j);
                     double got = (double)e->oursF(x, y), want = (double)e->theirsF(x, y);
-                    double err = err_of(got, want);
+                    double err = error_of(got, want);
                     if (err > worst) {
                         worst = err; worst_x = (double)x; worst_y = (double)y;
                         worst_got = got; worst_want = want;
@@ -301,7 +301,7 @@ int main(int argc, char **argv) {
             for (int i = 0; i < n; i++) {
                 double x = lo + step * (double)i;
                 double got = e->ours1(x), want = e->theirs1(x);
-                double err = err_of(got, want);
+                double err = error_of(got, want);
                 if (err > worst) {
                     worst = err; worst_x = x; worst_got = got; worst_want = want;
                 }
@@ -312,7 +312,7 @@ int main(int argc, char **argv) {
                 for (int j = 0; j < n; j++) {
                     double y = lo + step * (double)j;
                     double got = e->ours2(x, y), want = e->theirs2(x, y);
-                    double err = err_of(got, want);
+                    double err = error_of(got, want);
                     if (err > worst) {
                         worst = err; worst_x = x; worst_y = y;
                         worst_got = got; worst_want = want;
@@ -328,7 +328,7 @@ int main(int argc, char **argv) {
                         double z = lo + step * (double)k;
                         double got = e->ours3(x, y, z);
                         double want = e->theirs3(x, y, z);
-                        double err = err_of(got, want);
+                        double err = error_of(got, want);
                         if (err > worst) {
                             worst = err; worst_x = x; worst_y = y;
                             worst_got = got; worst_want = want;

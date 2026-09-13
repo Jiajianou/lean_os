@@ -34,30 +34,30 @@ typedef struct {
 } want_file_t;
 
 static blob_t build(const char *manifest, const want_file_t *files, int nfiles) {
-    size_t meta_len = (strlen(manifest) + 7u) & ~(size_t)7u;
-    size_t payload_len = 0;
+    size_t meta_length = (strlen(manifest) + 7u) & ~(size_t)7u;
+    size_t payload_length = 0;
     for (int i = 0; i < nfiles; i++) {
-        payload_len += strlen(files[i].content);
+        payload_length += strlen(files[i].content);
     }
-    size_t table_len = (size_t)nfiles * REC;
-    size_t total = HDR + meta_len + table_len + payload_len;
+    size_t table_length = (size_t)nfiles * REC;
+    size_t total = HDR + meta_length + table_length + payload_length;
 
     unsigned char *b = calloc(total ? total : 1, 1);
     REQUIRE(b != NULL);
 
     memcpy(b, "LEANPKG1", 8);
     put32(b + 8, 1);
-    put32(b + 12, (uint32_t)meta_len);
+    put32(b + 12, (uint32_t)meta_length);
     put32(b + 16, (uint32_t)nfiles);
     put32(b + 20, 0);
-    put64(b + 24, (uint64_t)payload_len);
+    put64(b + 24, (uint64_t)payload_length);
     memcpy(b + HDR, manifest, strlen(manifest));
-    for (size_t i = strlen(manifest); i < meta_len; i++) {
+    for (size_t i = strlen(manifest); i < meta_length; i++) {
         b[HDR + i] = '\n';
     }
 
-    unsigned char *table = b + HDR + meta_len;
-    unsigned char *payload = table + table_len;
+    unsigned char *table = b + HDR + meta_length;
+    unsigned char *payload = table + table_length;
     size_t off = 0;
     for (int i = 0; i < nfiles; i++) {
         size_t n = strlen(files[i].content);
@@ -93,45 +93,45 @@ static want_file_t TOY_FILES[] = {
     {"share/readme", "read me", 0},
 };
 
-TEST(ospkg, a_well_formed_package_opens) {
+TEST(os_package, a_well_formed_package_opens) {
     blob_t p = build(MANIFEST, TOY_FILES, 2);
     osp_t pkg;
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), OSP_OK);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), OSP_OK);
     CHECK(strcmp(pkg.manifest.name, "toy") == 0);
     CHECK(strcmp(pkg.manifest.version, "1.0") == 0);
     CHECK_EQ(pkg.file_count, 2u);
     CHECK(strcmp(pkg.files[0].path, "bin/toy") == 0);
     CHECK_EQ(pkg.files[0].flags & OSP_F_EXEC, OSP_F_EXEC);
-    CHECK(memcmp(ospkg_file_data(&pkg, 1), "read me", 7) == 0);
+    CHECK(memcmp(os_package_file_data(&pkg, 1), "read me", 7) == 0);
     free(p.bytes);
 }
 
-TEST(ospkg, not_a_package_at_all) {
+TEST(os_package, not_a_package_at_all) {
     unsigned char junk[HDR + 16];
     memset(junk, 0xAB, sizeof(junk));
     osp_t pkg;
-    CHECK_EQ(ospkg_open(junk, sizeof(junk), &pkg), -OSP_E_MAGIC);
-    CHECK_EQ(ospkg_open(junk, 8, &pkg), -OSP_E_SHORT);
-    CHECK_EQ(ospkg_open(junk, 0, &pkg), -OSP_E_SHORT);
+    CHECK_EQ(os_package_open(junk, sizeof(junk), &pkg), -OSP_E_MAGIC);
+    CHECK_EQ(os_package_open(junk, 8, &pkg), -OSP_E_SHORT);
+    CHECK_EQ(os_package_open(junk, 0, &pkg), -OSP_E_SHORT);
 }
 
-TEST(ospkg, a_format_from_the_future) {
+TEST(os_package, a_format_from_the_future) {
     blob_t p = build(MANIFEST, TOY_FILES, 2);
     put32(p.bytes + 8, 2);
     reseal(&p);
     osp_t pkg;
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), -OSP_E_FORMAT);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), -OSP_E_FORMAT);
     free(p.bytes);
 }
 
-TEST(ospkg, one_flipped_bit_is_refused) {
+TEST(os_package, one_flipped_bit_is_refused) {
     size_t probes[] = {HDR, HDR + 5, HDR + 40, HDR + 90, HDR + 200, HDR + 400};
     for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
         blob_t p = build(MANIFEST, TOY_FILES, 2);
         REQUIRE(probes[i] < p.len);
         p.bytes[probes[i]] ^= 0x01;
         osp_t pkg;
-        int rc = ospkg_open(p.bytes, p.len, &pkg);
+        int rc = os_package_open(p.bytes, p.len, &pkg);
         if (rc != -OSP_E_BODY_HASH) {
             test_fail(__FILE__, __LINE__,
                       "a flipped bit at offset %zu gave %d, not -OSP_E_BODY_HASH",
@@ -141,21 +141,21 @@ TEST(ospkg, one_flipped_bit_is_refused) {
     }
 }
 
-TEST(ospkg, a_file_that_is_not_what_its_record_says) {
+TEST(os_package, a_file_that_is_not_what_its_record_says) {
     blob_t p = build(MANIFEST, TOY_FILES, 2);
     size_t payload = HDR + ((strlen(MANIFEST) + 7u) & ~(size_t)7u) + 2 * REC;
     p.bytes[payload] = 'X';
     reseal(&p);
     osp_t pkg;
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), -OSP_E_FILE_HASH);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), -OSP_E_FILE_HASH);
     free(p.bytes);
 }
 
-TEST(ospkg, truncated_after_the_header) {
+TEST(os_package, truncated_after_the_header) {
     blob_t p = build(MANIFEST, TOY_FILES, 2);
     osp_t pkg;
     for (size_t len = HDR; len < p.len; len += 37) {
-        int rc = ospkg_open(p.bytes, len, &pkg);
+        int rc = os_package_open(p.bytes, len, &pkg);
         if (rc != -OSP_E_SHORT) {
             test_fail(__FILE__, __LINE__,
                       "a %zu-byte prefix of a %zu-byte package gave %d",
@@ -163,57 +163,57 @@ TEST(ospkg, truncated_after_the_header) {
             break;
         }
     }
-    CHECK_EQ(ospkg_open(p.bytes, p.len - 1, &pkg), -OSP_E_SHORT);
+    CHECK_EQ(os_package_open(p.bytes, p.len - 1, &pkg), -OSP_E_SHORT);
     free(p.bytes);
 }
 
-TEST(ospkg, lengths_that_would_wrap) {
+TEST(os_package, lengths_that_would_wrap) {
     blob_t p = build(MANIFEST, TOY_FILES, 2);
     osp_t pkg;
 
     put32(p.bytes + 16, 0x10000000u);
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), -OSP_E_HUGE);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), -OSP_E_HUGE);
 
     put32(p.bytes + 16, 2);
     put64(p.bytes + 24, 0xFFFFFFFFFFFFFF00ull);
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), -OSP_E_HUGE);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), -OSP_E_HUGE);
 
     put64(p.bytes + 24, 15);
     put32(p.bytes + 12, 0xFFFFFF00u);
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), -OSP_E_HUGE);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), -OSP_E_HUGE);
 
     free(p.bytes);
 }
 
-TEST(ospkg, a_file_that_points_outside_the_payload) {
+TEST(os_package, a_file_that_points_outside_the_payload) {
     blob_t p = build(MANIFEST, TOY_FILES, 2);
     unsigned char *rec0 = p.bytes + HDR + ((strlen(MANIFEST) + 7u) & ~(size_t)7u);
     put64(rec0 + OSP_MAX_PATH, 1u << 20);
     reseal(&p);
     osp_t pkg;
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), -OSP_E_OVERLAP);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), -OSP_E_OVERLAP);
     free(p.bytes);
 
     p = build(MANIFEST, TOY_FILES, 2);
     rec0 = p.bytes + HDR + ((strlen(MANIFEST) + 7u) & ~(size_t)7u);
     put64(rec0 + OSP_MAX_PATH + 8, 1u << 20);
     reseal(&p);
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), -OSP_E_OVERLAP);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), -OSP_E_OVERLAP);
     free(p.bytes);
 }
 
-TEST(ospkg, two_records_naming_one_path) {
+TEST(os_package, two_records_naming_one_path) {
     want_file_t dup[] = {
         {"bin/toy", "one", 0},
         {"bin/toy", "another", 0},
     };
     blob_t p = build(MANIFEST, dup, 2);
     osp_t pkg;
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), -OSP_E_DUP);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), -OSP_E_DUP);
     free(p.bytes);
 }
 
-TEST(ospkg, paths_a_package_may_not_contain) {
+TEST(os_package, paths_a_package_may_not_contain) {
     static const char *bad[] = {
         "/etc/passwd",
         "../../bin/sh",
@@ -229,7 +229,7 @@ TEST(ospkg, paths_a_package_may_not_contain) {
         "bin/\x01toy",
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
-        if (ospkg_check_path(bad[i]) != -OSP_E_PATH) {
+        if (os_package_check_path(bad[i]) != -OSP_E_PATH) {
             test_fail(__FILE__, __LINE__, "path %zu ('%s') was accepted", i, bad[i]);
         }
     }
@@ -240,51 +240,51 @@ TEST(ospkg, paths_a_package_may_not_contain) {
         "bin/to.y",
     };
     for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
-        if (ospkg_check_path(good[i]) != OSP_OK) {
+        if (os_package_check_path(good[i]) != OSP_OK) {
             test_fail(__FILE__, __LINE__, "path '%s' was refused", good[i]);
         }
     }
 }
 
-TEST(ospkg, a_traversing_path_in_a_real_archive) {
+TEST(os_package, a_traversing_path_in_a_real_archive) {
     want_file_t escape[] = {{"../../bin/sh", "gotcha", OSP_F_EXEC}};
     blob_t p = build(MANIFEST, escape, 1);
     osp_t pkg;
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), -OSP_E_PATH);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), -OSP_E_PATH);
     free(p.bytes);
 }
 
-TEST(ospkg, an_unterminated_path_field) {
+TEST(os_package, an_unterminated_path_field) {
     blob_t p = build(MANIFEST, TOY_FILES, 2);
     unsigned char *rec0 = p.bytes + HDR + ((strlen(MANIFEST) + 7u) & ~(size_t)7u);
     memset(rec0, 'a', OSP_MAX_PATH);
     reseal(&p);
     osp_t pkg;
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), -OSP_E_PATH);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), -OSP_E_PATH);
     free(p.bytes);
 }
 
-TEST(ospkg, a_manifest_needs_a_name_and_a_version) {
+TEST(os_package, a_manifest_needs_a_name_and_a_version) {
     osp_manifest_t man;
-    CHECK_EQ(ospkg_parse_manifest("version: 1.0\n", 13, &man), -OSP_E_MANIFEST);
-    CHECK_EQ(ospkg_parse_manifest("name: toy\n", 10, &man), -OSP_E_MANIFEST);
-    CHECK_EQ(ospkg_parse_manifest("", 0, &man), -OSP_E_MANIFEST);
-    CHECK_EQ(ospkg_parse_manifest("name: toy\nversion: 1.0\n", 23, &man), OSP_OK);
+    CHECK_EQ(os_package_parse_manifest("version: 1.0\n", 13, &man), -OSP_E_MANIFEST);
+    CHECK_EQ(os_package_parse_manifest("name: toy\n", 10, &man), -OSP_E_MANIFEST);
+    CHECK_EQ(os_package_parse_manifest("", 0, &man), -OSP_E_MANIFEST);
+    CHECK_EQ(os_package_parse_manifest("name: toy\nversion: 1.0\n", 23, &man), OSP_OK);
 }
 
-TEST(ospkg, a_name_that_would_escape_pkg) {
+TEST(os_package, a_name_that_would_escape_pkg) {
     osp_manifest_t man;
-    CHECK_EQ(ospkg_parse_manifest("name: ../bin\nversion: 1.0\n", 26, &man),
+    CHECK_EQ(os_package_parse_manifest("name: ../bin\nversion: 1.0\n", 26, &man),
              -OSP_E_MANIFEST);
-    CHECK_EQ(ospkg_parse_manifest("name: a/b\nversion: 1.0\n", 23, &man),
+    CHECK_EQ(os_package_parse_manifest("name: a/b\nversion: 1.0\n", 23, &man),
              -OSP_E_MANIFEST);
-    CHECK_EQ(ospkg_parse_manifest("name: toy\nversion: ../..\n", 25, &man),
+    CHECK_EQ(os_package_parse_manifest("name: toy\nversion: ../..\n", 25, &man),
              -OSP_E_MANIFEST);
-    CHECK_EQ(ospkg_parse_manifest("name: /abs\nversion: 1.0\n", 24, &man),
+    CHECK_EQ(os_package_parse_manifest("name: /abs\nversion: 1.0\n", 24, &man),
              -OSP_E_MANIFEST);
 }
 
-TEST(ospkg, manifest_grammar) {
+TEST(os_package, manifest_grammar) {
     osp_manifest_t man;
     const char *text =
         "# a comment\n"
@@ -294,16 +294,16 @@ TEST(ospkg, manifest_grammar) {
         "summary: with: a colon in it\n"
         "unknown-key: ignored on purpose\n"
         "provides: a b c\n";
-    CHECK_EQ(ospkg_parse_manifest(text, strlen(text), &man), OSP_OK);
+    CHECK_EQ(os_package_parse_manifest(text, strlen(text), &man), OSP_OK);
     CHECK(strcmp(man.name, "toy") == 0);
     CHECK(strcmp(man.version, "1.0") == 0);
     CHECK(strcmp(man.summary, "with: a colon in it") == 0);
     CHECK(strcmp(man.provides, "a b c") == 0);
     const char *bad = "name: toy\nversion: 1.0\nthis line has no colon\n";
-    CHECK_EQ(ospkg_parse_manifest(bad, strlen(bad), &man), -OSP_E_MANIFEST);
+    CHECK_EQ(os_package_parse_manifest(bad, strlen(bad), &man), -OSP_E_MANIFEST);
 }
 
-TEST(ospkg, an_overlong_field_is_truncated_safely) {
+TEST(os_package, an_overlong_field_is_truncated_safely) {
     char text[1024];
     int n = snprintf(text, sizeof(text), "name: toy\nversion: 1.0\nsummary: ");
     for (int i = 0; i < 400; i++) {
@@ -311,32 +311,32 @@ TEST(ospkg, an_overlong_field_is_truncated_safely) {
     }
     text[n++] = '\n';
     osp_manifest_t man;
-    CHECK_EQ(ospkg_parse_manifest(text, (size_t)n, &man), OSP_OK);
+    CHECK_EQ(os_package_parse_manifest(text, (size_t)n, &man), OSP_OK);
     CHECK_EQ(strlen(man.summary), OSP_MAX_SUMMARY - 1);
 }
 
-TEST(ospkg, capability_names) {
+TEST(os_package, capability_names) {
     int unknown = 0;
-    CHECK_EQ(ospkg_caps_from_names("network", &unknown), (long long)CAP_NETWORK);
+    CHECK_EQ(os_package_caps_from_names("network", &unknown), (long long)CAP_NETWORK);
     CHECK_EQ(unknown, 0);
-    CHECK_EQ(ospkg_caps_from_names("fs-write network", &unknown),
+    CHECK_EQ(os_package_caps_from_names("fs-write network", &unknown),
              (long long)(CAP_FS_WRITE | CAP_NETWORK));
     CHECK_EQ(unknown, 0);
-    CHECK_EQ(ospkg_caps_from_names("", &unknown), 0);
+    CHECK_EQ(os_package_caps_from_names("", &unknown), 0);
     CHECK_EQ(unknown, 0);
 }
 
-TEST(ospkg, an_unknown_capability_is_reported) {
+TEST(os_package, an_unknown_capability_is_reported) {
     int unknown = 0;
-    uint32_t mask = ospkg_caps_from_names("network raw-disk", &unknown);
+    uint32_t mask = os_package_caps_from_names("network raw-disk", &unknown);
     CHECK_EQ(unknown, 1);
     CHECK_EQ(mask, (long long)CAP_NETWORK);
     unknown = 0;
-    ospkg_caps_from_names("framebuffer2", &unknown);
+    os_package_caps_from_names("framebuffer2", &unknown);
     CHECK_EQ(unknown, 1);
 }
 
-TEST(ospkg, the_ceiling_on_what_a_package_may_hold) {
+TEST(os_package, the_ceiling_on_what_a_package_may_hold) {
     CHECK_EQ(CAP_PKG_MAX & CAP_FRAMEBUFFER, 0);
     CHECK_EQ(CAP_PKG_MAX & CAP_POWER, 0);
     CHECK_EQ(CAP_PKG_MAX & CAP_KILL_ANY, 0);
@@ -349,18 +349,18 @@ TEST(ospkg, the_ceiling_on_what_a_package_may_hold) {
     CHECK_EQ(CAP_PKG_UNLISTED, 0);
 }
 
-TEST(ospkg, caps_to_names_round_trip) {
+TEST(os_package, caps_to_names_round_trip) {
     char buf[OSP_MAX_TEXT];
-    ospkg_caps_to_names(CAP_FS_WRITE | CAP_NETWORK, buf, sizeof(buf));
+    os_package_caps_to_names(CAP_FS_WRITE | CAP_NETWORK, buf, sizeof(buf));
     int unknown = 0;
-    CHECK_EQ(ospkg_caps_from_names(buf, &unknown),
+    CHECK_EQ(os_package_caps_from_names(buf, &unknown),
              (long long)(CAP_FS_WRITE | CAP_NETWORK));
     CHECK_EQ(unknown, 0);
-    ospkg_caps_to_names(0, buf, sizeof(buf));
+    os_package_caps_to_names(0, buf, sizeof(buf));
     CHECK_EQ(strlen(buf), 0u);
 }
 
-TEST(ospkg, what_counts_as_under_pkg) {
+TEST(os_package, what_counts_as_under_pkg) {
     CHECK_EQ(path_is_under_pkg("/pkg"), 1);
     CHECK_EQ(path_is_under_pkg("/pkg/"), 1);
     CHECK_EQ(path_is_under_pkg("/pkg/grep/3.11/bin/grep"), 1);
@@ -375,55 +375,55 @@ TEST(ospkg, what_counts_as_under_pkg) {
     CHECK_EQ(path_is_under_pkg(NULL), 0);
 }
 
-TEST(ospkg, the_name_that_makes_the_rule_necessary) {
+TEST(os_package, the_name_that_makes_the_rule_necessary) {
     CHECK_EQ(caps_for_program("compositor"), (long long)CAP_ALL);
     CHECK_EQ(caps_for_program("/bin/compositor"), (long long)CAP_ALL);
     CHECK_EQ(path_is_under_pkg("/pkg/impostor/1.0/bin/compositor"), 1);
 }
 
-TEST(ospkg, the_boundary_between_a_space_and_a_control_byte) {
-    CHECK_EQ(ospkg_check_path("share/a file with spaces"), OSP_OK);
-    CHECK_EQ(ospkg_check_path("share/ leading-space"), OSP_OK);
-    CHECK_EQ(ospkg_check_path("share/trailing-space "), OSP_OK);
-    CHECK_EQ(ospkg_check_path("share/a\x1f" "b"), -OSP_E_PATH);
-    CHECK_EQ(ospkg_check_path("share/a\x7f" "b"), -OSP_E_PATH);
+TEST(os_package, the_boundary_between_a_space_and_a_control_byte) {
+    CHECK_EQ(os_package_check_path("share/a file with spaces"), OSP_OK);
+    CHECK_EQ(os_package_check_path("share/ leading-space"), OSP_OK);
+    CHECK_EQ(os_package_check_path("share/trailing-space "), OSP_OK);
+    CHECK_EQ(os_package_check_path("share/a\x1f" "b"), -OSP_E_PATH);
+    CHECK_EQ(os_package_check_path("share/a\x7f" "b"), -OSP_E_PATH);
     want_file_t spaced[] = {{"share/a file", "content", 0}};
     blob_t p = build(MANIFEST, spaced, 1);
     osp_t pkg;
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), OSP_OK);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), OSP_OK);
     free(p.bytes);
 }
 
-TEST(ospkg, asking_for_a_file_that_is_not_there) {
+TEST(os_package, asking_for_a_file_that_is_not_there) {
     blob_t p = build(MANIFEST, TOY_FILES, 2);
     osp_t pkg;
-    REQUIRE(ospkg_open(p.bytes, p.len, &pkg) == OSP_OK);
-    CHECK(ospkg_file_data(&pkg, 0) != NULL);
-    CHECK(ospkg_file_data(&pkg, 1) != NULL);
-    CHECK(ospkg_file_data(&pkg, 2) == NULL);
-    CHECK(ospkg_file_data(&pkg, 3) == NULL);
-    CHECK(ospkg_file_data(&pkg, 0xFFFFFFFFu) == NULL);
+    REQUIRE(os_package_open(p.bytes, p.len, &pkg) == OSP_OK);
+    CHECK(os_package_file_data(&pkg, 0) != NULL);
+    CHECK(os_package_file_data(&pkg, 1) != NULL);
+    CHECK(os_package_file_data(&pkg, 2) == NULL);
+    CHECK(os_package_file_data(&pkg, 3) == NULL);
+    CHECK(os_package_file_data(&pkg, 0xFFFFFFFFu) == NULL);
     free(p.bytes);
 }
 
-TEST(ospkg, the_requires_field) {
+TEST(os_package, the_requires_field) {
     osp_manifest_t man;
     const char *text = "name: toy\nversion: 1.0\nrequires: zlib libpng\n";
-    CHECK_EQ(ospkg_parse_manifest(text, strlen(text), &man), OSP_OK);
+    CHECK_EQ(os_package_parse_manifest(text, strlen(text), &man), OSP_OK);
     CHECK(strcmp(man.requires, "zlib libpng") == 0);
     blob_t p = build("name: toy\nversion: 1.0\nrequires: zlib\n", TOY_FILES, 2);
     osp_t pkg;
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), OSP_OK);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), OSP_OK);
     CHECK(strcmp(pkg.manifest.requires, "zlib") == 0);
     free(p.bytes);
 }
 
-TEST(ospkg, capability_names_into_a_buffer_that_is_too_small) {
+TEST(os_package, capability_names_into_a_buffer_that_is_too_small) {
     char buf[8];
     for (size_t cap = 1; cap <= sizeof(buf); cap++) {
         char guard[16];
         memset(guard, '#', sizeof(guard));
-        ospkg_caps_to_names(CAP_FS_WRITE | CAP_NETWORK | CAP_AUDIO, guard, cap);
+        os_package_caps_to_names(CAP_FS_WRITE | CAP_NETWORK | CAP_AUDIO, guard, cap);
         int terminated = 0;
         for (size_t i = 0; i < cap; i++) {
             if (guard[i] == '\0') {
@@ -443,47 +443,47 @@ TEST(ospkg, capability_names_into_a_buffer_that_is_too_small) {
     }
 }
 
-TEST(ospkg, the_high_byte_of_a_length_is_read) {
+TEST(os_package, the_high_byte_of_a_length_is_read) {
     blob_t p = build(MANIFEST, TOY_FILES, 2);
     osp_t pkg;
     put64(p.bytes + 24, 0x0D000000ull);
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), -OSP_E_HUGE);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), -OSP_E_HUGE);
     put64(p.bytes + 24, 0x0000000100000000ull);
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), -OSP_E_HUGE);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), -OSP_E_HUGE);
     free(p.bytes);
 }
 
-TEST(ospkg, a_reserved_field_must_be_zero) {
+TEST(os_package, a_reserved_field_must_be_zero) {
     blob_t p = build(MANIFEST, TOY_FILES, 2);
     put32(p.bytes + 20, 1);
     reseal(&p);
     osp_t pkg;
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), -OSP_E_FORMAT);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), -OSP_E_FORMAT);
     free(p.bytes);
 }
 
-TEST(ospkg, a_manifest_that_does_not_end_in_a_newline) {
+TEST(os_package, a_manifest_that_does_not_end_in_a_newline) {
     osp_manifest_t man;
     const char *no_nl = "name: toy\nversion: 1.0";
-    CHECK_EQ(ospkg_parse_manifest(no_nl, strlen(no_nl), &man), OSP_OK);
+    CHECK_EQ(os_package_parse_manifest(no_nl, strlen(no_nl), &man), OSP_OK);
     CHECK(strcmp(man.version, "1.0") == 0);
 
     const char *trailing_ws = "name: toy\nversion: 1.0\n   \n";
-    CHECK_EQ(ospkg_parse_manifest(trailing_ws, strlen(trailing_ws), &man), OSP_OK);
+    CHECK_EQ(os_package_parse_manifest(trailing_ws, strlen(trailing_ws), &man), OSP_OK);
     CHECK(strcmp(man.version, "1.0") == 0);
 
     const char *ws_only = "   \n\t\n";
-    CHECK_EQ(ospkg_parse_manifest(ws_only, strlen(ws_only), &man), -OSP_E_MANIFEST);
+    CHECK_EQ(os_package_parse_manifest(ws_only, strlen(ws_only), &man), -OSP_E_MANIFEST);
 
     const char *empty_value = "name: toy\nversion: 1.0\nsummary:\n";
-    CHECK_EQ(ospkg_parse_manifest(empty_value, strlen(empty_value), &man), OSP_OK);
+    CHECK_EQ(os_package_parse_manifest(empty_value, strlen(empty_value), &man), OSP_OK);
     CHECK_EQ(strlen(man.summary), 0u);
 
     const char *colon_last = "name: toy\nversion: 1.0\nsummary:";
-    CHECK_EQ(ospkg_parse_manifest(colon_last, strlen(colon_last), &man), OSP_OK);
+    CHECK_EQ(os_package_parse_manifest(colon_last, strlen(colon_last), &man), OSP_OK);
 }
 
-TEST(ospkg, a_prefix_is_not_a_duplicate) {
+TEST(os_package, a_prefix_is_not_a_duplicate) {
     want_file_t prefixes[] = {
         {"bin/toy", "one", 0},
         {"bin/toy2", "two", 0},
@@ -491,28 +491,28 @@ TEST(ospkg, a_prefix_is_not_a_duplicate) {
     };
     blob_t p = build(MANIFEST, prefixes, 3);
     osp_t pkg;
-    CHECK_EQ(ospkg_open(p.bytes, p.len, &pkg), OSP_OK);
+    CHECK_EQ(os_package_open(p.bytes, p.len, &pkg), OSP_OK);
     CHECK_EQ(pkg.file_count, 3u);
     free(p.bytes);
 }
 
-TEST(ospkg, no_path_at_all) {
-    CHECK_EQ(ospkg_check_path(NULL), -OSP_E_PATH);
-    CHECK_EQ(ospkg_check_path(""), -OSP_E_PATH);
+TEST(os_package, no_path_at_all) {
+    CHECK_EQ(os_package_check_path(NULL), -OSP_E_PATH);
+    CHECK_EQ(os_package_check_path(""), -OSP_E_PATH);
 }
 
-TEST(ospkg, a_version_is_one_component) {
+TEST(os_package, a_version_is_one_component) {
     osp_manifest_t man;
-    CHECK_EQ(ospkg_parse_manifest("name: toy\nversion: 1/0\n", 22, &man),
+    CHECK_EQ(os_package_parse_manifest("name: toy\nversion: 1/0\n", 22, &man),
              -OSP_E_MANIFEST);
-    CHECK_EQ(ospkg_parse_manifest("name: toy\nversion: 1.0-rc1\n", 27, &man),
+    CHECK_EQ(os_package_parse_manifest("name: toy\nversion: 1.0-rc1\n", 27, &man),
              OSP_OK);
 }
 
-TEST(ospkg, the_license_field) {
+TEST(os_package, the_license_field) {
     osp_manifest_t man;
     const char *text = "name: toy\nversion: 1.0\nlicense: GPL-3.0-or-later\n";
-    CHECK_EQ(ospkg_parse_manifest(text, strlen(text), &man), OSP_OK);
+    CHECK_EQ(os_package_parse_manifest(text, strlen(text), &man), OSP_OK);
     CHECK(strcmp(man.license, "GPL-3.0-or-later") == 0);
     CHECK(strcmp(man.name, "toy") == 0);
 }

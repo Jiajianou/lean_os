@@ -58,11 +58,11 @@ void fwcfg_init(void) {
     fwcfg_read(sig, sizeof(sig));
     present = (sig[0] == 'Q' && sig[1] == 'E' && sig[2] == 'M' && sig[3] == 'U');
 
-    klog_puts("[fwcfg] ");
+    kernel_log_puts("[fwcfg] ");
     if (present) {
-        klog_puts("QEMU firmware config device present.\n");
+        kernel_log_puts("QEMU firmware config device present.\n");
     } else {
-        klog_puts("no firmware config device - self-tests default to off.\n");
+        kernel_log_puts("no firmware config device - self-tests default to off.\n");
     }
 }
 
@@ -75,10 +75,10 @@ int fwcfg_read_file(const char *name, void *dst, uint32_t max) {
         return -1;
     }
 
-    uint8_t hdr[4];
+    uint8_t header[4];
     fwcfg_select(FWCFG_FILE_DIR);
-    fwcfg_read(hdr, sizeof(hdr));
-    uint32_t count = be32(hdr);
+    fwcfg_read(header, sizeof(header));
+    uint32_t count = be32(header);
 
     if (count > 1024) {
         return -1;

@@ -50,10 +50,10 @@ static void push(tty_t *t, char c) {
 }
 
 static void commit_line(tty_t *t) {
-    for (uint32_t i = 0; i < t->line_len; i++) {
+    for (uint32_t i = 0; i < t->line_length; i++) {
         push(t, t->line[i]);
     }
-    t->line_len = 0;
+    t->line_length = 0;
 }
 
 static void out_push(tty_t *t, char c) {
@@ -69,7 +69,7 @@ static void sink(tty_t *t, char c) {
     if (t->is_pty) {
         out_push(t, c);
     } else {
-        klog_putc(c);
+        kernel_log_putc(c);
     }
 }
 
@@ -88,7 +88,7 @@ int tty_release_session(tty_t *t, int sid) {
         return 0;
     }
     if (t->fg_pgid != 0) {
-        sched_raise_signal_group(t->fg_pgid, SIGHUP);
+        scheduler_raise_signal_group(t->fg_pgid, SIGHUP);
     }
     t->sid = 0;
     t->fg_pgid = 0;
@@ -157,8 +157,8 @@ void tty_input_char(tty_t *t, char c) {
     }
 
     if (c == (char)t->tio.c_cc[VERASE] || c == '\b') {
-        if (t->line_len > 0) {
-            t->line_len--;
+        if (t->line_length > 0) {
+            t->line_length--;
             if (t->tio.c_lflag & ECHOE) {
                 echo(t, '\b');
                 echo(t, ' ');
@@ -168,8 +168,8 @@ void tty_input_char(tty_t *t, char c) {
         return;
     }
     if (c == (char)t->tio.c_cc[VKILL]) {
-        while (t->line_len > 0) {
-            t->line_len--;
+        while (t->line_length > 0) {
+            t->line_length--;
             if (t->tio.c_lflag & ECHOE) {
                 echo(t, '\b');
                 echo(t, ' ');
@@ -184,17 +184,17 @@ void tty_input_char(tty_t *t, char c) {
     }
 
     if (c == '\n') {
-        t->line[t->line_len < TTY_LINE_MAX ? t->line_len : TTY_LINE_MAX - 1] = '\n';
-        if (t->line_len < TTY_LINE_MAX) {
-            t->line_len++;
+        t->line[t->line_length < TTY_LINE_MAX ? t->line_length : TTY_LINE_MAX - 1] = '\n';
+        if (t->line_length < TTY_LINE_MAX) {
+            t->line_length++;
         }
         echo(t, '\n');
         commit_line(t);
         return;
     }
 
-    if (t->line_len < TTY_LINE_MAX - 1) {
-        t->line[t->line_len++] = c;
+    if (t->line_length < TTY_LINE_MAX - 1) {
+        t->line[t->line_length++] = c;
         echo(t, c);
     }
 }
@@ -219,7 +219,7 @@ static void tty_signal_foreground(tty_t *t, int sig) {
     if (!t || t->fg_pgid == 0) {
         return;
     }
-    sched_raise_signal_group(t->fg_pgid, sig);
+    scheduler_raise_signal_group(t->fg_pgid, sig);
 }
 
 int tty_may_read(tty_t *t, int sid, int pgid) {
@@ -229,6 +229,6 @@ int tty_may_read(tty_t *t, int sid, int pgid) {
     if (t->fg_pgid == 0 || t->fg_pgid == pgid) {
         return 1;
     }
-    sched_raise_signal_group(pgid, SIGTTIN);
+    scheduler_raise_signal_group(pgid, SIGTTIN);
     return 0;
 }

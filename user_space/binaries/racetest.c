@@ -65,22 +65,22 @@ int main(int argc, char **argv) {
         }
         check(fs_ok, "a file read back bytes this process did not write");
 
-        long id = sys_shm_create(SHM_BYTES);
+        long id = sys_shared_memory_create(SHM_BYTES);
         check(id >= 0, "shm_create failed");
         if (id >= 0) {
-            unsigned char *p = (unsigned char *)sys_shm_map(id);
+            unsigned char *p = (unsigned char *)sys_shared_memory_map(id);
             check(p != (unsigned char *)-1 && p != 0, "shm_map failed");
             if (p && p != (unsigned char *)-1) {
                 for (int i = 0; i < SHM_BYTES; i += 64) {
                     p[i] = stamp(pid, round, i);
                 }
                 sys_yield();
-                int shm_ok = 1;
+                int shared_memory_ok = 1;
                 for (int i = 0; i < SHM_BYTES; i += 64) {
-                    if (p[i] != stamp(pid, round, i)) { shm_ok = 0; break; }
+                    if (p[i] != stamp(pid, round, i)) { shared_memory_ok = 0; break; }
                 }
-                check(shm_ok, "a shared-memory segment came back holding another process's bytes");
-                check(sys_shm_free(id, p) == 0, "shm_free failed");
+                check(shared_memory_ok, "a shared-memory segment came back holding another process's bytes");
+                check(sys_shared_memory_free(id, p) == 0, "shm_free failed");
             }
         }
 

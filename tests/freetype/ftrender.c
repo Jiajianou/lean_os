@@ -70,7 +70,7 @@ int main(int argc, char **argv) {
     }
     printf("face %s / %s glyphs %ld upem %u ascender %d descender %d height %d "
            "bbox %ld %ld %ld %ld scalable %d kerning %d\n",
-           face->family_name, face->style_name, (long)face->num_glyphs,
+           face->family_name, face->style_name, (long)face->number_glyphs,
            (unsigned)face->units_per_EM, (int)face->ascender,
            (int)face->descender, (int)face->height,
            (long)face->bbox.xMin, (long)face->bbox.yMin,

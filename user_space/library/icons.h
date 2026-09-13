@@ -4,7 +4,7 @@
 
 #include "graphics.h"
 
-void icon_draw(gfx_ctx_t *ctx, int32_t x, int32_t y, const uint8_t *blob, int32_t scale);
+void icon_draw(graphics_context_t *context, int32_t x, int32_t y, const uint8_t *blob, int32_t scale);
 
 extern const uint8_t ICON_TERMINAL[];
 extern const uint8_t ICON_EDITOR[];

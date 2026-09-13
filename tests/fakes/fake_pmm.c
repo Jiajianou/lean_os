@@ -20,12 +20,12 @@ static uint64_t outstanding;
 static uint64_t total_allocs;
 static int64_t fail_after = -1;
 
-void fake_pmm_reset(void);
-void fake_pmm_fail_after(int64_t n);
-uint64_t fake_pmm_outstanding(void);
-uint64_t fake_pmm_total_allocs(void);
+void fake_physical_memory_reset(void);
+void fake_physical_memory_fail_after(int64_t n);
+uint64_t fake_physical_memory_outstanding(void);
+uint64_t fake_physical_memory_total_allocs(void);
 
-void fake_pmm_reset(void) {
+void fake_physical_memory_reset(void) {
     for (int i = 0; i < MAX_FRAMES; i++) {
         if (frames[i].live) {
             free(frames[i].base);
@@ -39,9 +39,9 @@ void fake_pmm_reset(void) {
     fail_after = -1;
 }
 
-void fake_pmm_fail_after(int64_t n) { fail_after = n; }
-uint64_t fake_pmm_outstanding(void) { return outstanding; }
-uint64_t fake_pmm_total_allocs(void) { return total_allocs; }
+void fake_physical_memory_fail_after(int64_t n) { fail_after = n; }
+uint64_t fake_physical_memory_outstanding(void) { return outstanding; }
+uint64_t fake_physical_memory_total_allocs(void) { return total_allocs; }
 
 static int slot_of(uint64_t phys) {
     for (int i = 0; i < MAX_FRAMES; i++) {
@@ -52,7 +52,7 @@ static int slot_of(uint64_t phys) {
     return -1;
 }
 
-uint64_t pmm_try_alloc_frame(void) {
+uint64_t physical_memory_try_alloc_frame(void) {
     if (fail_after >= 0 && (int64_t)total_allocs >= fail_after) {
         return 0;
     }
@@ -74,23 +74,23 @@ uint64_t pmm_try_alloc_frame(void) {
     return 0;
 }
 
-uint64_t pmm_alloc_frame(void) {
-    uint64_t f = pmm_try_alloc_frame();
+uint64_t physical_memory_alloc_frame(void) {
+    uint64_t f = physical_memory_try_alloc_frame();
     if (!f) {
         panic("pmm_alloc_frame: out of physical memory");
     }
     return f;
 }
 
-uint64_t pmm_alloc_frame_dma(void) { return pmm_alloc_frame(); }
+uint64_t physical_memory_alloc_frame_dma(void) { return physical_memory_alloc_frame(); }
 
-uint64_t pmm_alloc_frame_above(uint64_t min_phys) {
+uint64_t physical_memory_alloc_frame_above(uint64_t min_phys) {
     (void)min_phys;
-    return pmm_try_alloc_frame();
+    return physical_memory_try_alloc_frame();
 }
 
-void pmm_free_frame(uint64_t phys_addr) {
-    int i = slot_of(phys_addr);
+void physical_memory_free_frame(uint64_t phys_address) {
+    int i = slot_of(phys_address);
     if (i < 0) {
         panic("pmm_free_frame: double-free or invalid frame");
     }
@@ -105,8 +105,8 @@ void pmm_free_frame(uint64_t phys_addr) {
     outstanding--;
 }
 
-void pmm_frame_ref(uint64_t phys_addr) {
-    int i = slot_of(phys_addr);
+void physical_memory_frame_reference(uint64_t phys_address) {
+    int i = slot_of(phys_address);
     if (i < 0) {
         panic("pmm_frame_ref: no such allocated frame");
     }
@@ -116,8 +116,8 @@ void pmm_frame_ref(uint64_t phys_addr) {
     frames[i].refs++;
 }
 
-uint8_t pmm_frame_refs(uint64_t phys_addr) {
-    int i = slot_of(phys_addr);
+uint8_t physical_memory_frame_refs(uint64_t phys_address) {
+    int i = slot_of(phys_address);
     return i < 0 ? 0 : frames[i].refs;
 }
 
@@ -148,23 +148,23 @@ static uint64_t alloc_contiguous(uint64_t count, int may_fail) {
     return 0;
 }
 
-uint64_t pmm_alloc_contiguous(uint64_t count) {
+uint64_t physical_memory_alloc_contiguous(uint64_t count) {
     return alloc_contiguous(count, 0);
 }
 
-void pmm_free_contiguous(uint64_t phys_addr, uint64_t count) {
+void physical_memory_free_contiguous(uint64_t phys_address, uint64_t count) {
     (void)count;
-    pmm_free_frame(phys_addr);
+    physical_memory_free_frame(phys_address);
 }
 
-uint64_t pmm_try_alloc_contiguous(uint64_t count) {
+uint64_t physical_memory_try_alloc_contiguous(uint64_t count) {
     if (fail_after >= 0 && (int64_t)total_allocs >= fail_after) {
         return 0;
     }
     return alloc_contiguous(count, 1);
 }
 
-void pmm_init(const uint32_t *e820_map) { (void)e820_map; }
-uint64_t pmm_free_frame_count(void) { return MAX_FRAMES - outstanding; }
-uint64_t pmm_total_frame_count(void) { return MAX_FRAMES; }
-uint64_t pmm_tracked_limit(void) { return (uint64_t)MAX_FRAMES * FRAME_SIZE; }
+void physical_memory_init(const uint32_t *e820_map) { (void)e820_map; }
+uint64_t physical_memory_free_frame_count(void) { return MAX_FRAMES - outstanding; }
+uint64_t physical_memory_total_frame_count(void) { return MAX_FRAMES; }
+uint64_t physical_memory_tracked_limit(void) { return (uint64_t)MAX_FRAMES * FRAME_SIZE; }
