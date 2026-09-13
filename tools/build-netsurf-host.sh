@@ -1,41 +1,4 @@
 #!/bin/sh
-# tools/build-netsurf-host.sh - M117: the same NetSurf, built for THIS Mac.
-#
-# M116 left the browser's first crash with a condition: "the same NetSurf
-# 3.11, built for the host, against the page, decides whose failure it
-# is - upstream's, or this port's". Meeting it took a dozen workarounds
-# and, the first three times, produced a build that was NOT the same
-# NetSurf: the freetype and JPEG switches were being overwritten by the
-# script that set them, and the twin rendered apple.com for reasons that
-# had nothing to do with the guest. This script is that condition made
-# repeatable - one command, and the binary it produces differs from
-# /bin/netsurf in exactly the ways listed here and no others:
-#
-#   - clang for arm64 rather than x86_64-lean_os-gcc; macOS's libc, curl
-#     and iconv rather than this project's. That is the point: the
-#     framebuffer front end, libnsfb's display-less `ram` surface, the
-#     freetype font layer with the GUEST's own DejaVu files, the JPEG
-#     decoder from the same jpeg-9f tarball, Duktape, and the guest's
-#     Choices are all the same.
-#   - NETSURF_USE_OPENSSL=NO: Apple's libcurl carries LibreSSL and
-#     NetSurf's fetcher would poke its SSL context through Homebrew's
-#     OpenSSL 3 - a SIGBUS inside libssl before the first byte. Without
-#     the flag NetSurf leaves TLS to curl, which is what the guest does
-#     with mbedtls anyway.
-#
-# Everything it edits is a scratch copy under build/netsurf-host/. Two
-# NetSurf Makefiles get four edits for Apple's linker (no --whole-archive,
-# no --trace) and one for the monkey front end's -Werror under clang; the
-# source is not touched. build/thirdparty-src must already hold the
-# tarballs (tools/build-netsurf.sh fetches them) and `brew install bison`
-# is needed, as it is for the port itself.
-#
-#   tools/build-netsurf-host.sh              build (idempotent)
-#   tools/build-netsurf-host.sh run <url>    load <url> at 800x600 for 45 s
-#                                            and report rendered / crashed
-#
-# `run` is the instrument: it exits 1 on an assertion or a signal, 0 if
-# the page rendered, and leaves the full -v log in build/netsurf-host/run.log.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SRC="$ROOT/build/thirdparty-src"
@@ -52,7 +15,6 @@ for d in /opt/homebrew/opt/libpng /usr/local/opt/libpng; do
   [ -f "$d/include/png.h" ] && PNG_DIR="$d" && break
 done
 
-# ---- run --------------------------------------------------------------
 if [ "$1" = "run" ]; then
   URL="$2"
   [ -n "$URL" ] || { echo "usage: $0 run <url>" >&2; exit 2; }
@@ -77,19 +39,16 @@ PY
   exit $?
 fi
 
-# ---- build -------------------------------------------------------------
 mkdir -p "$HOST"
 if [ ! -d "$NSDIR" ]; then
   [ -f "$SRC/netsurf-all-$NS_VER.tar.gz" ] || { echo "build-netsurf-host: no $SRC/netsurf-all-$NS_VER.tar.gz - run tools/build-netsurf.sh first" >&2; exit 1; }
   tar xf "$SRC/netsurf-all-$NS_VER.tar.gz" -C "$HOST"
-  # Apple's ld: no --whole-archive (-all_load instead), no --trace.
   sed -i '' -e 's/^LDFLAGS += -Wl,--whole-archive$/LDFLAGS += -Wl,-all_load/' \
             -e '/^LDFLAGS += -Wl,--no-whole-archive$/d' "$NSDIR/netsurf/frontends/framebuffer/Makefile"
   sed -i '' -e 's/-Wl,--trace//' "$NSDIR/netsurf/Makefile"
   sed -i '' -e 's/^CWARNFLAGS += -Werror/CWARNFLAGS +=/' "$NSDIR/netsurf/frontends/monkey/Makefile"
 fi
 
-# The guest's freetype and libjpeg, from the same tarballs, static, private.
 if [ ! -f "$HOST/ft/lib/pkgconfig/freetype2.pc" ]; then
   rm -rf "$HOST/ft-src"; mkdir -p "$HOST/ft-src"
   tar xf "$SRC"/freetype-*.tar.xz -C "$HOST/ft-src"
@@ -102,9 +61,6 @@ if [ ! -f "$HOST/jpeg/lib/libjpeg.a" ]; then
   (cd "$HOST"/jpeg-src/jpeg-* && ./configure --prefix="$HOST/jpeg" --disable-shared >/dev/null && make -j8 >/dev/null && make install >/dev/null)
 fi
 
-# The switches, in the one file NetSurf reads for them. Written by THIS
-# script and only this script - the build once had two writers and the
-# second one won silently, which is how the first twins were not twins.
 cat > "$NSDIR/netsurf/Makefile.config" <<CONF
 COMMON_WARNFLAGS += -Wno-unknown-warning-option -Wno-missing-prototypes -include strings.h -D_DARWIN_C_SOURCE -I$HOST/jpeg/include
 NETSURF_USE_JPEG := YES
@@ -121,7 +77,6 @@ make TARGET=framebuffer ${PNG_DIR:+BUILD_LIBPNG_CFLAGS=-I$PNG_DIR/include} \
   echo "build-netsurf-host: the build failed:" >&2; tail -20 "$HOST/build.log" >&2; exit 1
 }
 
-# The guest's Choices, with the certificate bundle pointed at the host's.
 mkdir -p "$HOST/res"
 [ -f "$ROOT/build/netsurf/res/Choices" ] || { echo "build-netsurf-host: no build/netsurf/res/Choices - the port has not been built" >&2; exit 1; }
 grep -v '^ca_bundle' "$ROOT/build/netsurf/res/Choices" > "$HOST/res/Choices"

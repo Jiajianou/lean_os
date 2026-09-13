@@ -1,27 +1,8 @@
 #!/usr/bin/env python3
-"""tools/gen-iconv-tables.py - M100: the single-byte charset tables for
-user_space/libc/src/iconv.c.
-
-Same argument as tools/gen-font.c: a table of 3,584 numbers typed by hand
-is a table with a typo in it, and the typo is in the character nobody on
-this project ever types. So it is generated, checked in as generated
-source, and - the part that matters - graded on every `--fast` run by
-tools/iconv-test.sh against the HOST's iconv, which is a different
-implementation written by different people from different data.
-
-Two independent sources have to agree before a byte of this is believed:
-Python's codec tables produce it, and the host's libiconv checks it.
-
-Run it when the charset list below changes. It rewrites
-user_space/libc/src/iconv_tables.c in place - or writes the path given
-as its one argument instead, which is how the test compares without
-touching the tree.
-"""
 import codecs
 import os
 import sys
 
-# name in this libc          python codec
 CHARSETS = [
     ("iso-8859-2",   "iso8859_2"),
     ("iso-8859-3",   "iso8859_3"),
@@ -55,15 +36,9 @@ HEADER = '''#include "iconv_tables.h"
 
 '''
 
-
 def main():
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
     out = os.path.join(root, "user_space/libc/src/iconv_tables.c")
-    # M116: or somewhere else, which is what tools/iconv-test.sh asks
-    # for. It used to regenerate the checked-in file in place to compare
-    # it - identical bytes, new mtime - and that one timestamp made the
-    # next `make` relink every program on the machine, rebuild the
-    # kernel that embeds them and recreate the disk image. See M116.
     if len(sys.argv) > 1:
         out = sys.argv[1]
     body = []
@@ -106,7 +81,6 @@ def main():
     print("gen-iconv-tables: %s - %d charsets, %d entries"
           % (os.path.relpath(out, root), len(CHARSETS), len(CHARSETS) * 128))
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

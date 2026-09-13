@@ -1,21 +1,4 @@
 #!/usr/bin/env bash
-# tools/realpath-test.sh - M98: grade this project's realpath against a
-# real one.
-#
-# The fifth differential test. realpath's whole job is agreement - two
-# implementations that canonicalize the same tree differently break
-# every "is X the same file as Y" question a build system asks - and
-# the function is pure logic over lstat/readlink/getcwd, so compiling
-# realpath.c for the host (those three resolve to the host's own) and
-# walking a fixture tree of real directories and real symlinks grades
-# all of it. Nothing here says what the right answer is; the host's
-# realpath does.
-#
-# Why it exists: this libc had no realpath, and libiberty's lrealpath
-# handles that case by falling off the end of a non-void function. The
-# gcc driver compared the resulting garbage to more of it, decided
-# every input file was its own output file, and refused to compile
-# anything given -o. See realpath.c.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -71,21 +54,11 @@ if ! $HOSTCC -std=c11 -O1 -g -c -o "$BUILD/realpath-engine.o" \
   tail -20 "$BUILD/realpath-engine.log" >&2
   exit 1
 fi
-# Note: compiled against the HOST's headers and libc on purpose - the
-# lstat/readlink/getcwd inside are the host's, which is exactly what
-# makes the comparison meaningful.
 
 $HOSTCC -std=c11 -O1 -g -DUSE_OURS -o "$BUILD/realpath-ours" "$DRIVER" \
         "$BUILD/realpath-engine.o" || exit 1
 $HOSTCC -std=c11 -O1 -o "$BUILD/realpath-theirs" "$DRIVER" || exit 1
 
-# ---- the fixture tree --------------------------------------------------
-#
-# Built fresh every run in build/, because a tree that only exists in a
-# script cannot rot apart from it. Every shape realpath distinguishes:
-# plain nesting, links relative and absolute, a link chain, a loop,
-# dot and dot-dot (including through a link, the case that breaks
-# string-only implementations), and things that do not exist.
 T="$PWD/$BUILD/realpath-tree"
 rm -rf "$T"
 mkdir -p "$T/a/b/c" "$T/other"
@@ -120,8 +93,6 @@ relative-probe
 ..
 EOF
 
-# The relative cases run from inside the tree, so both binaries agree
-# on what "." is.
 A="$BUILD/realpath-ours.out"
 B="$BUILD/realpath-theirs.out"
 ( cd "$T/a" && "$PWD/../../realpath-ours"  < "$PWD/../../realpath-cases.txt" ) > "$A" 2>&1

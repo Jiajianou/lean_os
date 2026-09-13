@@ -1,41 +1,4 @@
 #!/usr/bin/env bash
-# tools/scanf-test.sh - M89: grade this project's scanf against a real one.
-#
-# ---- why this exists, and why it is the shape it is -------------------
-#
-# The third program in this tree whose whole job is to agree with every
-# other implementation of itself, after the shell (M86) and the regular
-# expression engine (M89's other half). The argument is the same one
-# tools/sh-test.sh makes and is worth restating because it is the reason
-# both of those found bugs on their first run: a test written here that
-# asserted what this scanf happens to do would pass forever while being
-# wrong, and the first thing to notice would be a ported program
-# misreading a number.
-#
-# So nothing in the fixture file says what the right answer is. The
-# host's own sscanf decides, and this one has to agree with it - on the
-# return value AND on every converted value, because a scanf that
-# returns 2 having written the wrong two is the failure that looks like
-# success.
-#
-# ---- how one driver can test a variadic function ---------------------
-#
-# sscanf's arguments are typed by its format string, which a driver
-# cannot build dynamically in portable C. So the driver always passes
-# four pointers to a union wide enough for any conversion, and then
-# re-reads the format to decide how to PRINT what was written. scanf
-# only touches as many arguments as it converts, so passing four is safe
-# for a format with one - and four is more conversions than any fixture
-# here needs.
-#
-# What this cannot see is anything about lean_os: sscanf over a string is
-# pure computation, so a host build tests all of it. That is why this is
-# a shell script and not a boot marker - the same reason the regex test
-# gives.
-#
-# Usage:
-#   tools/scanf-test.sh          # every case
-#   tools/scanf-test.sh '%x'     # only cases whose line matches this
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -207,11 +170,6 @@ EOF
 OURS="$BUILD/scanf-ours"
 THEIRS="$BUILD/scanf-theirs"
 
-# Two compile steps, for the reason tools/regex-test.sh gives at length:
-# the engine must see this project's headers and the driver must not.
-# scanf.c's `sscanf` is renamed on the way in so that the host's own is
-# still available to the driver's printf side, and so that the two
-# binaries differ in exactly one symbol.
 if ! $HOSTCC -std=c11 -O1 -g -c -o "$BUILD/scanf-engine.o" user_space/libc/src/scanf.c \
      -I user_space/libc/include -Dsscanf=lean_sscanf -Dvsscanf=lean_vsscanf \
      -Dfscanf=lean_fscanf -Dscanf=lean_scanf -Dstdin=lean_stdin \

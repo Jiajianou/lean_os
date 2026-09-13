@@ -1,19 +1,4 @@
 #!/usr/bin/env bash
-# Writes build/os-image.bin raw onto a real USB drive so real UEFI
-# firmware can boot it - the real-hardware counterpart to
-# tools/run-qemu.sh, which only ever boots the same image inside OVMF.
-# The image already carries everything a real machine's firmware needs
-# (kernel/boot/mbr.asm's legacy-MBR-with-a-0xEF-entry trick + the ESP
-# tools/run-qemu.sh's own build step formats at LBA 1024, containing
-# EFI/BOOT/BOOTX64.EFI - UEFI's default removable-media boot path), so
-# this script's only real job is "copy the bytes to the right device,
-# safely" - see docs/real-hardware.md for the full walkthrough this is
-# one step of.
-#
-# This overwrites the ENTIRE target device with no filesystem left
-# recoverable afterward - there is no undo. Usage:
-#   tools/write-usb.sh /dev/diskN        (macOS)
-#   tools/write-usb.sh /dev/sdX          (Linux)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -39,13 +24,6 @@ if [ ! -f "$IMAGE" ]; then
   exit 1
 fi
 
-# The single most damaging mistake this script could make is writing to
-# the machine's own system disk instead of the intended USB stick - so
-# refuse the most common ways that could happen by accident, on both
-# platforms this is likely to run on, before ever asking for
-# confirmation. Real safety here is the operator picking the right
-# device from the listing above; this is a backstop against typos, not a
-# substitute for reading that listing.
 case "$(uname -s)" in
   Darwin)
     if [ "$TARGET" = "/dev/disk0" ]; then
@@ -96,9 +74,6 @@ fi
 case "$(uname -s)" in
   Darwin)
     diskutil unmountDisk "$TARGET"
-    # The r-prefixed raw device node (bypassing the buffer cache) is
-    # dramatically faster for a sequential whole-disk write like this -
-    # the same substitution diskutil's own docs recommend for dd.
     RAW_TARGET="${TARGET/\/dev\/disk//dev/rdisk}"
     sudo dd if="$IMAGE" of="$RAW_TARGET" bs=4m status=progress
     diskutil eject "$TARGET"

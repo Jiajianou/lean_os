@@ -1,38 +1,4 @@
 #!/usr/bin/env bash
-# tools/run-tests.sh - Q1: the one command that tests lean_os.
-#
-# ---- Why this exists --------------------------------------------------
-#
-# There were two harnesses and no way to run them. `tools/run-qemu.sh`
-# built and booted the machine, and because the kernel ran every one of
-# its self-tests on every boot, booting *was* testing - which meant the
-# two were the same thing and neither was a command. Whether a commit had
-# been checked was a question about what a person remembered to type.
-#
-# So the tests moved here and the boot stayed there. Three tiers, and the
-# tier is chosen by how long you are willing to wait:
-#
-#   --fast    host unit tests only. No QEMU, no cross-toolchain, under a
-#             second. This is the one that runs while you type.
-#   (default) the fast tier, plus a full boot graded against every marker,
-#             plus the quick interactive subset. Minutes. Run before a
-#             commit.
-#   --full    everything: the slow host tests that exhaust real resources,
-#             the whole interactive suite, coverage and its ratchet, a
-#             sampled mutation score, a short fuzzing run, and sixteen
-#             power cuts to check the filesystem survives them. Tens of
-#             minutes. Run before a milestone, and nightly.
-#
-# Each tier is a superset of the one above it. A tier that passes never
-# means a broader one would - it means the checks in it passed, which is
-# the honest claim and the only one worth making.
-#
-# Usage:
-#   tools/run-tests.sh              # the pre-commit tier
-#   tools/run-tests.sh --fast       # host units only
-#   tools/run-tests.sh --full       # everything
-#   tools/run-tests.sh --host-only  # skip anything needing QEMU
-#   tools/run-tests.sh --no-build   # grade what is already built
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -52,24 +18,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# ---- Reporting --------------------------------------------------------
-#
-# Every stage records its own name, verdict and wall-clock, and the
-# summary prints all of them. A run that says "3 of 4 stages passed, and
-# here is which one did not and how long each took" is a report; "FAILED"
-# is a starting point for an investigation.
 STAGE_NAMES=()
 STAGE_VERDICTS=()
 STAGE_SECONDS=()
 OVERALL=0
 
-# M116: and every stage must leave the tracked tree exactly as it found
-# it - contents AND timestamps. iconv-test.sh regenerated a checked-in
-# file in place, which left `git status` clean and made the next `make`
-# relink every program and recreate the disk image; the person who ran
-# tools/run-qemu.sh afterwards got 135 KB of link lines and an empty
-# filesystem, after every test run since M100. tools/tree-stamps.py says
-# which stage and which files.
 STAMPS=$(mktemp -t leanos-stamps-XXXXXX)
 trap 'rm -f "$STAMPS"' EXIT
 
@@ -105,100 +58,37 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
     echo "build failed - nothing below would mean anything" >&2
     exit 1
   fi
-  # M116: and the build has to know it is finished. A second `make all`
-  # straight after the first must do nothing and say nothing; a rule that
-  # always rebuilds relinks the kernel, which recreates the disk image -
-  # the flood of output and the wiped filesystem tools/run-qemu.sh
-  # produced after every test run, from the other direction.
   run_stage "a second build does nothing" \
     bash -c 'out=$(make all 2>&1); [ -z "$out" ] || { echo "make all ran again:"; echo "$out" | head -20; exit 1; }'
-  # M89: and the ported userland, onto that image.
-  #
-  # `make toybox` is not part of `all` - see the Makefile for the inode
-  # ordering that keeps it out - but the graded boot below has a marker
-  # for it, and a tier that skipped the port would be grading an image
-  # that is missing the thing the milestone added. So it is a stage of
-  # its own here: visible in the summary, timed like every other, and
-  # failing loudly rather than turning the boot's M89 check into a skip.
   run_stage "the ported userland, onto the image" make toybox
   if [ "$OVERALL" -ne 0 ]; then
     echo "the toybox port failed to build or install - see tools/build-toybox.sh" >&2
     exit 1
   fi
-  # M94: and the program this project's own compiler produces, if that
-  # compiler has been built. Skips with a message otherwise - see
-  # tools/gcc-test.sh, which is also where the compile line lives.
   run_stage "a program from x86_64-lean_os-gcc" ./tools/gcc-test.sh
   if [ "$OVERALL" -ne 0 ]; then
     echo "the target port produced something that will not link or run" >&2
     exit 1
   fi
-  # M95: the dynamic linker, the shared libc, and the two fixtures. Same
-  # shape and the same reason as the stage above - it needs the compiler
-  # M94 built, and skips with a message when that is not there.
   run_stage "the dynamic loader and a program that needs it" ./tools/build-dynamic.sh
 
-  # M97: after build-dynamic.sh, and the order is not arbitrary - the
-  # cross-object C++ fixtures need ld-lean.so and libc.so on the image
-  # before an executable whose PT_INTERP names the loader can start at
-  # all, and a program that cannot start reports "command not found",
-  # which is a message about the shell.
   run_stage "C++, and an exception that crosses a library" ./tools/cxx-test.sh
   if [ "$OVERALL" -ne 0 ]; then
     echo "the dynamic linker or something it loads would not build" >&2
     exit 1
   fi
-  # M121: the second compiler, and the ABI between the two. Same shape and
-  # the same reason as the gcc stage above - it needs the clang
-  # tools/build-clang.sh builds, skips with a message when that is not
-  # there, and the [m121] boot marker downstream is what grades the
-  # programs it installs. After cxx-test.sh because that stage regenerates
-  # the sysroot and this one's libc++ link reads it.
   run_stage "a program from x86_64-lean_os-clang, and one from both" \
     ./tools/clang-test.sh
   if [ "$OVERALL" -ne 0 ]; then
     echo "the clang port produced something that will not link or run" >&2
     exit 1
   fi
-  # M98: the toolchain that runs ON the machine, if it has been built.
-  # Skips with a message otherwise, same as the three stages above; the
-  # [m98] boot marker downstream is what actually grades it.
   run_stage "the native binutils, onto the image" ./tools/install-native-toolchain.sh
 
-  # M99: CPython, its standard library as .py files, and CPython's own
-  # regression suite. Same shape as every stage above - it skips with a
-  # message when tools/build-python.sh has not run, and the [m99] boot
-  # marker downstream is what grades it.
   run_stage "python and its library, onto the image" ./tools/install-python.sh
 
-  # M113: and the browser, onto the image. Same shape and the same
-  # reason as every stage above - `make browser` is not part of `all`
-  # (the Makefile says why), and this is the install half only, so a tier
-  # that has never cross-built NetSurf reports that rather than starting
-  # a twenty-minute build inside a test run.
-  #
-  # This stage is why M113 exists. The input suite's
-  # `browser_renders_a_page` grades real framebuffer pixels from a real
-  # NetSurf, and it is the only instrument in this project that can grade
-  # a layout engine at all - but nothing between `make all` and that test
-  # ever put the browser on the image it runs against. It passed because
-  # a developer had installed one by hand at some point and the image had
-  # not been recreated since. The first kernel edit would have taken it
-  # away, and the failure would have looked like a rendering bug.
   run_stage "the browser, onto the image" make browser-if-built
 
-  # M111: and the package repository, so that `os install grep` has
-  # something to install. Same shape and the same reason as every stage
-  # above: `make packages` is not part of `all` (the Makefile says why),
-  # the [m111] boot marker downstream grades it, and a tier that skipped
-  # it would grade an image with no repository on it - which the
-  # self-test correctly reports as a skip rather than a failure, and a
-  # skip nobody notices is how a milestone stops being tested.
-  #
-  # The build is separate from the install for one reason worth stating:
-  # tools/build-packages.sh cross-compiles GNU grep, which takes minutes
-  # and needs the network the first time, so it is not run from here. If
-  # build/repo is empty this stage says so and the boot skips [m111].
   if [ -f build/repo/index ]; then
     run_stage "the package repository, onto the image" make packages
   else
@@ -206,87 +96,25 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
   fi
 fi
 
-# ---- Stage 1: the host tier ------------------------------------------
 if [ "$TIER" = "full" ]; then
-  # --slow includes the tests that exhaust the inode table and the data
-  # region. They are the most valuable tests in the suite and they take
-  # minutes, which is exactly why they are here and not in every tier.
   run_stage "host unit tests (including the slow ones)" \
     bash -c 'make --no-print-directory test-fast TEST_FILTER=--slow'
 else
   run_stage "host unit tests" make --no-print-directory test-fast
 fi
 
-# ---- M86: the shell, against a shell nobody here wrote ---------------
-#
-# In every tier including --fast, because it costs about a second and is
-# the only instrument that grades /bin/sh against an implementation this
-# project did not write. See tests/sh/README.md for why a shell in
-# particular needs that and a boot marker will not do.
 run_stage "the shell, against $(basename "${REFERENCE_SH:-/bin/sh}")" ./tools/sh-test.sh
 
-# ---- M89: the regex engine, against an engine nobody here wrote ------
-#
-# The same instrument and the same argument, applied to the other place
-# in this tree where "correct" means "agrees with everyone else". A
-# regular expression engine that decided its own spans would be wrong in
-# a way no self-written test could see - so the host's own <regex.h>
-# decides, and tests/regex/cases.tsv says nothing about what the answers
-# should be. In every tier for the same reason as the shell: about a
-# second, and it grades something a boot marker cannot.
 run_stage "the regex engine, against the host's" ./tools/regex-test.sh
-# M89: the third differential test, for the same reason as the other two -
-# see tools/scanf-test.sh. In the fast tier, next to them, because it is
-# a second and costs nothing.
 run_stage "scanf, against the host's" ./tools/scanf-test.sh
-# M99: and the fifth, libm - added when CPython's configure refused to
-# proceed without seven C99 functions this project did not have, which
-# made the accuracy of the other twenty-seven load-bearing for somebody
-# else's arithmetic. Its first run found fmod wrong by more than its own
-# modulus whenever the quotient was large; see tests/math/cases.tsv.
 run_stage "libm, against the host's" ./tools/math-test.sh
-# M98: and the fourth, printf - added when binutils made the format
-# engine load-bearing for programs nobody here wrote, and worth having
-# for the same reason as scanf's: its first run found five bug classes,
-# from %hx printing the whole promotion to %g not being %g at all.
 run_stage "printf, against the host's" ./tools/printf-test.sh
-# M98: the FILE layer's stream machinery, against C99's own guarantees -
-# ungetc above all, because gas pushes back a character it never read
-# and the seek-based ungetc that stood here handed it the disk's byte
-# instead. That failure cost a five-minute graded boot to see; this
-# reproduces it in milliseconds. See tools/stdio-test.sh.
 run_stage "the FILE layer, off the machine" ./tools/stdio-test.sh
-# M111: the package format, against something that is not this project -
-# the host's own sha256 over 250 real files, a round trip decided by
-# `cmp` and `diff -r`, and a corrupted archive refused. In the fast tier
-# for the same reason as the five above: about a second, and it grades
-# the one thing tests/test_ospkg.c cannot, which is whether the hash a
-# package's every claim rests on is actually SHA-256.
 run_stage "packages, against the host's sha256 and cmp" ./tools/pkg-test.sh
-# M100: and the seventh, iconv - added when NetSurf turned out to include
-# <iconv.h> unconditionally, so a browser on this machine needed one.
-# It grades 3,328 generated table entries that no amount of reading
-# finds a typo in: a wrong entry renders a plausible letter in a script
-# nobody here reads. Its first run found 144,589 disagreements and
-# almost none of them were bugs - macOS's iconv transliterates by
-# default - and the restructured version found the one that was: U+FFFF
-# shared a value with the table's "unassigned" sentinel, in thirteen
-# charsets at once. See tools/iconv-test.sh.
 run_stage "iconv, against the host's" ./tools/iconv-test.sh
-# M98: the fifth differential test. realpath is pure logic over
-# lstat/readlink/getcwd, so the host's own filesystem and the host's
-# own realpath grade all of it - see tools/realpath-test.sh for the
-# undefined behaviour its absence fed the gcc driver.
 run_stage "realpath, against the host's" ./tools/realpath-test.sh
-# M116: the screen sizes tools/set-resolution.sh accepts are the ones the
-# driver offers. Its header said this stage existed; it did not.
 run_stage "set-resolution's modes are the driver's" ./tools/set-resolution.sh --check
 
-# ---- Q11/Q12: the instruments that grade the tests themselves --------
-#
-# Only in --full. Both are minutes rather than seconds, and both answer a
-# question about the suite rather than about the machine - which is worth
-# asking regularly and not before every commit.
 if [ "$TIER" = "full" ]; then
   run_stage "coverage, and the ratchet" make --no-print-directory coverage-check
   run_stage "mutation score (sampled)" \
@@ -297,92 +125,37 @@ fi
 if [ "$TIER" = "fast" ] || [ "$HOST_ONLY" -eq 1 ]; then
   :
 else
-  # ---- Stage 2: the boot, graded --------------------------------------
-  #
-  # This is where the kernel's own self-tests run. They are off on an
-  # ordinary boot as of Q1 (see kernel/dev/fwcfg.h); qemu-serial-test.sh
-  # is what turns them on.
   run_stage "boot self-tests, graded against every marker" \
     ./tools/qemu-serial-test.sh
 
-  # M106: four cores. A separate harness rather than a flag on the one
-  # above, and tools/smp-test.sh's own header says why at length - the
-  # short version is that this kernel had never started a second core in
-  # a test, and what that hid was five real bugs. In the default tier
-  # because it is a two-minute boot and it is the only thing standing
-  # between the multi-core path and rotting again the same way.
   run_stage "four cores, and the work shared between them" ./tools/smp-test.sh
 
-  # M103: and the same battery again with every legacy line routed
-  # through the I/O APIC instead of the 8259. In `--full` only, because
-  # it is a second ~400-second boot (M100 raised the default ceiling to
-  # 600 and this one, on the path that costs 2x, to 900) and because the default path is the
-  # one this machine actually runs on - see kernel/dev/fwcfg.h for the
-  # measurement that decided which is which.
   if [ "$TIER" = "full" ]; then
     run_stage "the same battery, through the I/O APIC" \
-      bash -c 'LEANOS_IOAPIC=1 ./tools/qemu-serial-test.sh 1200' # M117: the default battery is 405-423 s on a populated image and this path costs 2x; at 900 it timed out inside [m100]'s library suites
+      bash -c 'LEANOS_IOAPIC=1 ./tools/qemu-serial-test.sh 1200'
   fi
 
-  # ---- Stage 3: real clicks on real pixels ----------------------------
   if [ "$TIER" = "full" ]; then
-    # M99: the shell against a 33,000-line configure script, twice, and
-    # the two runs must produce the same files. Here rather than in
-    # --fast because it is two full configure runs and several minutes;
-    # it is a differential test like the six in --fast, but its fixture
-    # is somebody else's program rather than one written here, which is
-    # what let it find eleven bugs the fixtures could not.
     run_stage "somebody else's configure, under this shell" \
       ./tools/configure-test.sh
     run_stage "interactive suite (all tests)" ./tools/qemu-input-test.sh
-    # Q17: the one guarantee the filesystem makes, tested by taking the
-    # power away rather than by reading the code that provides it.
     run_stage "crash consistency (16 power cuts)" ./tools/crash-test.sh
-    # Q16: and a disk that refuses, from BELOW the driver. The [q16] boot
-    # marker injects at the block layer, which grades the filesystem and
-    # the recovery; this grades the two drivers themselves, because a
-    # fault above ata_read_sectors never reaches the ERR bit it polls
-    # for. Both backends, because they fail in completely different
-    # places - a status byte and a status register.
     run_stage "a disk that refuses, below the driver" ./tools/disk-fault-test.sh
     run_stage "the same, through ATA" \
       bash -c 'QEMU_DISK=ide ./tools/disk-fault-test.sh'
-    # M98: the machine builds somebody else's program with its own
-    # toolchain, and reports what that costs. In --full and nowhere else,
-    # because it is twenty minutes of real compiling - and it is here at
-    # all rather than left as a script somebody remembers to run, because
-    # every one of the four bugs it has found so far was invisible to
-    # every other instrument in this file: an mmap ceiling a compiler
-    # reaches and nothing else does, a read that returned 0 where POSIX
-    # says EINTR, a printf flag no case list had, and an assembler fed
-    # the result of that flag.
     run_stage "the toolchain, building somebody else's program here" \
       ./tools/bootstrap-test.sh
-    # M99: and what a build that does NOT fit would cost, which is the
-    # other half of the same question and the only answer M99's last box
-    # asks for. A minute, next to the twenty above, because it measures
-    # the units rather than running the build - see the script.
     run_stage "what CPython's own build would cost here" \
       ./tools/python-build-test.sh
   else
     run_stage "interactive suite (--quick subset)" ./tools/qemu-input-test.sh --quick
   fi
-  # Q19: the snapshot the two stages above now start from is only worth
-  # having if a stale one cannot be used by mistake. Costs no boot - it
-  # manufactures a stale snapshot and requires the harness to refuse it.
   run_stage "a stale snapshot is refused, not used" \
     ./tools/qemu-input-test.sh --check-stale
 
-  # M116: and the window a person sees, which nothing above looks at. A
-  # Homebrew upgrade of QEMU halved it on a Retina screen with every
-  # test here green, because every test here grades the guest and the
-  # guest had not changed. Boots through tools/run-qemu.sh with its real
-  # display, so it opens a window for about fifteen seconds; it says so
-  # and skips on a host with no cocoa display or no window server.
   run_stage "the window run-qemu.sh opens is full size" ./tools/window-test.sh
 fi
 
-# ---- Summary ----------------------------------------------------------
 echo
 echo "=============================================================="
 echo "  summary - $TIER tier"
@@ -394,8 +167,6 @@ for i in "${!STAGE_NAMES[@]}"; do
 done
 printf '  %-6s %5ss  total\n' "" "$total"
 
-# Q6: the run itself, recorded. A single verdict says whether today is
-# broken; a file of them says when it broke and how the cost is trending.
 mkdir -p build
 if [ ! -f build/test-history.tsv ]; then
   printf 'when\tcommit\tharness\tverdict\twall_s\tboot_s\n' > build/test-history.tsv

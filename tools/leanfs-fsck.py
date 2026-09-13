@@ -1,66 +1,10 @@
 #!/usr/bin/env python3
-"""tools/leanfs-fsck.py - Q17: an independent check of a leanfs image.
-
----- Why a second implementation, when Q3 spent a milestone deleting one
-
-Q3's whole point was that two copies of the on-disk format, kept in
-agreement by a comment, is a data-corruption bug with a long fuse - and
-it was right, because they had already drifted. This reader is a
-deliberate exception to that rule and the reason is specific.
-
-The thing being checked here is whether the kernel's filesystem survives
-having power cut mid-write. A checker built from the kernel's own code
-shares the kernel's own assumptions, so a bug in those assumptions is
-invisible to it in exactly the case it is most needed: `leanfs_check`
-cannot find a corruption that `leanfs.c` does not believe is possible.
-An independent reader can.
-
-The drift risk is real and is handled the only honest way available: this
-file asserts the geometry it expects against the superblock it finds, and
-refuses rather than guessing if they disagree. A format change breaks
-this loudly on the next run instead of quietly passing a broken image.
-
----- What it checks ---------------------------------------------------
-
-Structural invariants, none of which the kernel is asked about:
-
-  * the superblock's geometry is this build's
-  * every block referenced by an inode is inside the data region
-  * no block is referenced by two inodes, or twice by one
-  * every referenced block is marked allocated in the bitmap
-  * every directory entry names an allocated inode
-  * directory records tile their block exactly and none straddles one
-  * the directory tree is a tree: reachable from the root, no cycles
-  * every inode with a nonzero type is reachable by some name
-  * a file's size agrees with the blocks it holds
-
----- M93 (second attempt): --compare-tree -----------------------------
-
-The structural checks above answer "is this image well-formed". A
-host-side image builder needs the other question answered too: "is this
-the tree it was given". Those are different claims and the first does not
-imply the second - an image that dropped every file whose name contained
-a non-ASCII byte would pass every check in the list above.
-
-So --compare-tree walks the image and the host directory together and
-compares names, types, sizes, contents, symlink targets, and which names
-share an inode. It lives here rather than in a new tool because this is
-already the reader that does not share the writer's assumptions, which is
-the whole property the comparison needs.
-
-Usage:
-    tools/leanfs-fsck.py build/os-image.bin
-    tools/leanfs-fsck.py --quiet image      # exit status only
-    tools/leanfs-fsck.py image --compare-tree ./gcc-15.1.0 --at /src
-"""
 
 import argparse
 import os
 import struct
 import sys
 
-# The geometry this build expects. Checked against the superblock rather
-# than assumed - see the header.
 START_LBA = 8192
 SECTOR = 512
 BLOCK = 4096
@@ -71,7 +15,7 @@ DATA_BLOCKS = 524288
 INODE_SIZE = 128
 DIRECT_BLOCKS = 16
 INDIRECT_POINTERS = BLOCK // 4
-MAGIC = 0x3553464C          # "LFS5"
+MAGIC = 0x3553464C
 VERSION = 5
 STATE_CLEAN = 0
 STATE_DIRTY = 0x4449525A
@@ -79,7 +23,6 @@ STATE_DIRTY = 0x4449525A
 TYPE_FREE, TYPE_FILE, TYPE_DIR, TYPE_LINK = 0, 1, 2, 3
 DIRENT_HDR = 8
 ROOT_INODE = 0
-
 
 class Image:
     def __init__(self, path):
@@ -92,14 +35,12 @@ class Image:
             b += b"\0" * (BLOCK - len(b))
         return b
 
-
 class Fsck:
     def __init__(self, path, compare_against=None):
         self.img = Image(path)
         self.problems = []
         self.notes = []
         self.compared = None
-        # (host directory, image path) to compare, or None.
         self.compare_against = compare_against
 
     def bad(self, fmt, *a):
@@ -107,8 +48,6 @@ class Fsck:
 
     def note(self, fmt, *a):
         self.notes.append(fmt % a if a else fmt)
-
-    # ---- superblock ----------------------------------------------------
 
     def read_super(self):
         raw = self.img.block(START_BLOCK)[:36]
@@ -125,9 +64,6 @@ class Fsck:
             self.bad("on-disk version is %d, this checker knows %d",
                      self.version, VERSION)
             return False
-        # Geometry, checked rather than assumed. A mismatch means this
-        # file has drifted from kernel/fs/leanfs_format.h and every
-        # check below would be reading the wrong offsets.
         expect = {
             "inode_table_blocks": (self.inode_table_blocks,
                                    MAX_INODES * INODE_SIZE // BLOCK),
@@ -148,8 +84,6 @@ class Fsck:
             self.bad("superblock state is 0x%08X, which is neither CLEAN nor "
                      "DIRTY", self.state)
         return ok
-
-    # ---- inodes and the bitmap ------------------------------------------
 
     def read_inodes(self):
         raw = b"".join(self.img.block(self.inode_table_block + i)
@@ -178,9 +112,6 @@ class Fsck:
         return (self.bitmap[n // 8] >> (n % 8)) & 1
 
     def blocks_of(self, idx):
-        """Every data-region block number this inode references, including
-        its own indirect tables - those are blocks too and a checker that
-        forgets them reports every one as leaked."""
         ino = self.inodes[idx]
         out = []
 
@@ -239,34 +170,17 @@ class Fsck:
                              "free in the bitmap - the allocator can hand it "
                              "out again", b, idx)
         self.referenced = owner
-        # Block 0 is reserved forever so a zero pointer can mean "nothing".
         if not self.bit(0):
             self.bad("block 0 is marked free; it is reserved so that a zero "
                      "block pointer means 'no block'")
         allocated = sum(self.bit(b) for b in range(self.data_blocks))
-        leaked = allocated - len(owner) - 1   # -1 for the reserved block 0
+        leaked = allocated - len(owner) - 1
         if leaked > 0:
             self.note("%d block(s) marked allocated but referenced by no "
                       "inode. Storage that cannot be reused; not corruption, "
                       "and expected after an interrupted write", leaked)
 
-    # ---- directories -----------------------------------------------------
-
     def logical_blocks(self, idx, count):
-        """The first `count` blocks of an inode, in logical order.
-
-        M93 (second attempt): this did not exist, and dir_entries below
-        walked `ino["direct"]` - the sixteen direct blocks and nothing
-        else. A directory bigger than 64 KiB therefore had most of its
-        entries silently unread, and the inodes they name were then
-        reported as unreachable under a note reading "expected after an
-        interrupted create", with the image still declared consistent.
-
-        A checker that under-reads and then explains away what it missed
-        is worse than one that cannot read at all, because the second kind
-        gets fixed. It was found by the host-side image builder writing a
-        directory of twenty thousand files, which is the first directory
-        in this project's history to need a single indirect block."""
         out = []
         ino = self.inodes[idx]
 
@@ -305,8 +219,6 @@ class Fsck:
         return out
 
     def dir_entries(self, idx):
-        """(name, inode, type) for a directory, checking the record
-        invariants as it walks."""
         ino = self.inodes[idx]
         out = []
         nblocks = (ino["size"] + BLOCK - 1) // BLOCK
@@ -392,11 +304,7 @@ class Fsck:
                          "%d block(s) - reading it would run off the end",
                          idx, ino["size"], need, have)
 
-    # ---- M93 (second attempt): the image against the tree it came from --
-
     def read_file(self, idx):
-        """An inode's contents, by the same block map a directory walk
-        uses. Returns bytes of exactly `size`."""
         ino = self.inodes[idx]
         nblocks = (ino["size"] + BLOCK - 1) // BLOCK
         data = bytearray()
@@ -408,8 +316,6 @@ class Fsck:
         return bytes(data[:ino["size"]])
 
     def resolve(self, path):
-        """The inode an absolute path names, or None. Does not follow a
-        final symlink - a comparison is about the link, not its target."""
         idx = ROOT_INODE
         for comp in [c for c in path.split("/") if c]:
             if self.inodes[idx]["type"] != TYPE_DIR:
@@ -425,10 +331,6 @@ class Fsck:
         if idx is None:
             self.bad("--compare-tree: %s does not exist in this image", at)
             return
-        # (host dev, host ino) -> image inode, so that two host names for
-        # one file are required to be two image names for one inode. A
-        # builder that silently copied the data instead would otherwise
-        # compare equal on every byte.
         self.shared = {}
         self.compared = {"dirs": 0, "files": 0, "links": 0, "bytes": 0}
         self._compare_dir(host_dir, idx, at)
@@ -512,7 +414,6 @@ class Fsck:
             self.compare_tree(*self.compare_against)
         return not self.problems
 
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("image")
@@ -542,7 +443,6 @@ def main():
                           "consistent" if ok else
                           "%d problem(s)" % len(fs.problems)))
     return 0 if ok else 1
-
 
 if __name__ == "__main__":
     sys.exit(main())

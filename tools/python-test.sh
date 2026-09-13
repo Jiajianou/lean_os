@@ -1,34 +1,4 @@
 #!/usr/bin/env bash
-# tools/python-test.sh - M99's fourth bullet: CPython's own suite, here.
-#
-# Boots the real image with `opt/leanos/pytest=1` and NOT
-# `opt/leanos/selftest`, so the machine comes up in seconds and then
-# spends its time running somebody else's test suite over somebody
-# else's language. tests/python/run.sh is what runs; this passes the
-# switch, waits, and reads the counts back out of the log.
-#
-# ---- what it grades, and what it deliberately does not ---------------
-#
-# It does NOT require every module to pass. M99's own bullet says the
-# pass/fail counts are "recorded rather than summarized", and a harness
-# that failed the run on the first failing assertion in somebody else's
-# suite would be a harness that gets disabled the first time it is
-# right. What it requires is that the report is REAL:
-#
-#   - the interpreter started and said which version it is
-#   - every module in tests/python/run.sh's list was reached (a run cut
-#     short is not a run with fewer tests in it)
-#   - CPython's own runner printed a result line for each of them, so
-#     the numbers below were written by it and not inferred here
-#   - the script reached its own last line
-#   - the machine did not panic
-#
-# Then it prints the totals, and `--require-clean` is there for the day
-# the honest expectation is zero failures. It is not passed by default,
-# and the reason is written in milestones.md next to the first run's
-# numbers rather than here.
-#
-# Usage: tools/python-test.sh [SECONDS] [--require-clean]
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -62,11 +32,6 @@ else
              -device virtio-blk-pci,drive=disk0)
 fi
 
-# One core, and 2 GiB. The core count is one for the reason
-# tools/bootstrap-test.sh gives at length - the battery is green on one
-# core and not yet on more - and the memory is what a test suite that
-# forks subprocesses and allocates freely wants without making the
-# measurement about swap, which M102 already refused.
 QEMU_MEM=${QEMU_MEM:-2048}
 QEMU_CPUS=${QEMU_CPUS:-1}
 
@@ -121,8 +86,6 @@ grep -qF "m99pytest: interpreter" "$LOG" || \
 grep -qF "== m99pytest done ==" "$LOG" || \
   say_missing "the script's own last line - the run did not finish"
 
-# Every module in the list was reached. The list is read from the
-# fixture rather than repeated here, so the two cannot drift.
 MODULES=$(sed -n '/^MODULES=/,/"$/p' tests/python/run.sh | \
           sed 's/^MODULES="//; s/"$//' | tr -s ' \n' '\n' | grep -E '^test_')
 nmod=0
@@ -134,11 +97,6 @@ for m in $MODULES; do
     say_missing "module $m produced no exit status - it did not come back"
 done
 
-# ---- the numbers, as CPython's own runner wrote them ------------------
-#
-# `Total tests: run=N failures=F errors=E skipped=S` is regrtest's line,
-# printed once per module. Nothing here decides what a test is or whether
-# it passed - this adds up what it said.
 echo "What CPython's own test runner reported, module by module:"
 printf '  %-20s %8s %8s %8s %8s\n' module run failures errors skipped
 total_run=0; total_fail=0; total_err=0; total_skip=0; reported=0

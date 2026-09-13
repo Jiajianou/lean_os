@@ -1,41 +1,4 @@
 #!/usr/bin/env bash
-# tools/printf-test.sh - M98: grade this project's printf against a real one.
-#
-# The fourth program in this tree whose whole job is to agree with every
-# other implementation of itself, after the shell (M86), the regex
-# engine (M89) and sscanf (M89). The argument is unchanged from
-# tools/scanf-test.sh and is not restated at length: nothing in the
-# fixture file says what the right answer is, the host's own snprintf
-# decides, and this one has to agree on the return value AND on every
-# byte produced - because printf's return value is its least interesting
-# output.
-#
-# Why now: M98's binutils port made the libc's format engine load-bearing
-# for programs nobody here wrote (readelf is one long printf), and the
-# first fix it forced - %hx of a negative short printing eight bytes of
-# promotion instead of two of value - is exactly the class of bug a
-# fixture written here would have blessed forever. See scanf-test.sh.
-#
-# ---- how one driver can test a variadic function ----------------------
-#
-# The inverse of scanf's problem: the argument's C type is decided by the
-# format string, so the driver re-reads the format's length modifiers to
-# decide what to PASS rather than what to print. One conversion per
-# fixture; a fixture that needs two arguments is two fixtures.
-#
-# ---- how the engine is isolated ---------------------------------------
-#
-# stdio.c compiles for the host as-is (it is sink-based computation over
-# a buffer; the file layer above it wants only sys_* wrappers, faked
-# below and never called). Every symbol it exports is renamed lean_* on
-# the way in so the driver's own printf still belongs to the host, and
-# the rename list is CHECKED after the compile: a new public symbol in
-# stdio.c that this script does not rename is a loud failure here, not a
-# silent shadowing of the host's libc.
-#
-# Usage:
-#   tools/printf-test.sh          # every case
-#   tools/printf-test.sh '%g'    # only cases whose line matches this
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -173,8 +136,6 @@ EOF
 OURS="$BUILD/printf-ours"
 THEIRS="$BUILD/printf-theirs"
 
-# Every external symbol stdio.c defines, renamed on the way in - see the
-# header comment for why the list is checked rather than trusted.
 RENAMES=""
 for s in __assert_fail __fpending __lean_stdio_flush_all \
          clearerr dprintf fclose fdopen feof \
@@ -196,7 +157,6 @@ if ! $HOSTCC -std=c11 -O1 -g -c -o "$BUILD/printf-engine.o" \
   exit 1
 fi
 
-# The check: nothing this object exports may collide with the host libc.
 STRAY=$(nm -gU "$BUILD/printf-engine.o" | awk '{print $3}' | sed 's/^_//' \
         | grep -v '^lean_' || true)
 if [ -n "$STRAY" ]; then

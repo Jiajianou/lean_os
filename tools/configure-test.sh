@@ -1,38 +1,4 @@
 #!/usr/bin/env bash
-# tools/configure-test.sh - M99: this shell, against somebody else's
-# configure.
-#
-# Runs CPython's `./configure` twice against the same source tree with
-# the same arguments - once with this project's own /bin/sh compiled for
-# the host, once with the host's own /bin/sh - and requires the two runs
-# to produce the same files.
-#
-# ---- why this is a different instrument from tools/sh-test.sh ---------
-#
-# sh-test grades fixtures somebody here wrote, against an oracle nobody
-# here wrote. That is the right shape and it has a ceiling: a fixture can
-# only test a construct someone thought of, and the whole difficulty with
-# a shell is the constructs nobody thinks of. Every one of the eleven
-# bugs M99 found in this shell was in that category - a here-document on
-# a line with `||`, a backtick inside double quotes inside a
-# here-document, `${*-Setup}`, `set -e` on line 2 of a script. None of
-# them was reachable from anything this project had written, and all of
-# them are ordinary in a generated script.
-#
-# A 33,000-line configure is not a fixture. It is a program that uses the
-# shell the way shell scripts are actually written, and it comes with its
-# own definition of correct: **the same answers.** 753 checks, a 56 KB
-# pyconfig.h, a 113 KB Makefile and a config.c - byte for byte.
-#
-# ---- what it does NOT prove -------------------------------------------
-#
-# That configure runs on lean_os. It runs the shell on the machine you
-# are sitting at, so what it grades is the shell's own logic - the same
-# separation tools/sh-test.sh's header draws, and for the same reason:
-# what happens on the machine is the kernel's fork, its pipes, its
-# `#!` handling, and a boot marker is what grades those.
-#
-# Usage: tools/configure-test.sh
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -54,9 +20,6 @@ if [ ! -x "$REFERENCE_SH" ]; then
   exit 1
 fi
 
-# The same build of the shell tools/sh-test.sh grades, produced the same
-# way - one file on the include path, for the reason that script's own
-# comment gives.
 SHINC="$ROOT/build/sh-host-include"
 mkdir -p "$SHINC"
 cp system_api/include/paths.h "$SHINC/paths.h"
@@ -67,12 +30,6 @@ if ! ${HOSTCC:-cc} -std=c11 -O1 -Wall -Wextra -Werror \
   exit 1
 fi
 
-# ---- the arguments -----------------------------------------------------
-#
-# --without-ensurepip and --disable-ipv6 for no reason to do with this
-# test: they are what tools/build-python.sh passes, so the path being
-# exercised is the one this project actually uses. A configure run with
-# no arguments would be a different 753 checks.
 ARGS=(--without-ensurepip --disable-ipv6)
 
 run_one() {
@@ -102,11 +59,6 @@ if [ "$CHECKS" != "$REFCHECKS" ]; then
   exit 1
 fi
 
-# ---- the comparison ----------------------------------------------------
-#
-# Three generated files, and the build directory's own path is
-# normalised out of all of them - it is in the Makefile by design and is
-# the one thing that is SUPPOSED to differ between two directories.
 FAIL=0
 for f in pyconfig.h Modules/config.c Makefile; do
   sed "s,$OUT/ours,BUILDDIR,g" "$OUT/ours/$f"      > "$OUT/a.txt" 2>/dev/null

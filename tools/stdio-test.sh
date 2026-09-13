@@ -1,26 +1,4 @@
 #!/usr/bin/env bash
-# tools/stdio-test.sh - M98: the FILE layer, off the machine.
-#
-# printf-test.sh grades the format engine by agreement with the host;
-# this grades the stream machinery - ungetc, the read functions that
-# must honour it, and the position functions that must account for it -
-# against C99 directly, because "what does the host's FILE do" is not
-# observable through a FILE built over lean_os syscalls. The oracle here
-# is the standard's own guarantees, written as assertions.
-#
-# Why it exists: the machine's own `as` could not assemble a comment.
-# gas's first act on every input file is getc, getc, ungetc('#') - it
-# reads two characters and pushes back a DIFFERENT one, which C
-# explicitly permits (one character of pushback is guaranteed). This
-# libc's ungetc was lseek(pos-1), which hands back whatever byte is on
-# disk, not what the caller pushed. The '#' became a space, line one of
-# tests/binutils/hello.s became code, and the [m98] boot test caught it
-# at the first `nm`. The fake syscall layer below is what lets that
-# five-minute boot failure be a five-millisecond host test.
-#
-# Compiles user_space/libc/src/stdio.c for the host with every exported
-# symbol renamed lean_* (printf-test.sh's isolation, same rename list,
-# same stray-symbol check) over an in-memory file.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -323,7 +301,6 @@ int main(void) {
 }
 EOF
 
-# The same rename list printf-test.sh uses, checked the same way.
 RENAMES=""
 for s in __assert_fail __fpending __lean_stdio_flush_all \
          clearerr dprintf fclose fdopen feof \

@@ -1,19 +1,4 @@
 #!/usr/bin/env bash
-# Compiles a single third-party .c file against this project's user-space
-# runtime (crt0 + syscall wrappers + str/malloc/gfx/font/wmclient - the
-# same USER_LIBOBJS every one of this project's own programs links
-# against) into a standalone ELF64 executable, without touching the
-# Makefile's USER_PROGRAMS list, kernel/proc/embed_programs.asm, or
-# kernel.c's FOR_EACH_EMBEDDED_PROGRAM - none of which a third-party
-# author should have to edit just to try their own program. See
-# tools/leanfs-put.c for how the resulting .elf actually gets onto a
-# disk image, and docs/third-party-programs.md for the full workflow.
-#
-# Usage: tools/build-user-program.sh <source.c> [output-name]
-#   output-name defaults to source.c's basename (no extension) and
-#   becomes both build/<output-name>.elf and, conventionally, the
-#   leanfs name you'd pass to leanfs-put (as /bin/NAME - leanfs has
-#   directories since M53, and a path is what names a file now).
 set -euo pipefail
 
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then
@@ -34,10 +19,6 @@ USER_LD="user_space/lib/user.ld"
 CC="x86_64-elf-gcc"
 LD="x86_64-elf-ld"
 
-# Pulls USER_CFLAGS/USER_LIBOBJS straight from the Makefile (via its
-# print-% debug target) rather than hardcoding a second copy here that
-# could silently drift from what this project's own programs actually
-# build with.
 USER_CFLAGS=$(make -s print-USER_CFLAGS)
 USER_LIBOBJS=$(make -s print-USER_LIBOBJS)
 

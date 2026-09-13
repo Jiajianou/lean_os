@@ -1,59 +1,26 @@
 #!/usr/bin/env python3
-"""tools/coverage-ratchet.py - Q11: coverage may not go down.
-
-Q8 measured coverage and deliberately set no target, on the argument that
-a target chosen before a measurement is how a project ends up testing
-getters. That argument is about the *absolute* number and it does not
-apply to the direction: whatever the number is today, a change that
-lowers it should have to say so.
-
-So this is a ratchet rather than a target. The floor per file lives in
-tests/coverage-floor.tsv with the commit that set it, exactly like
-tests/budgets.tsv, and raising one is a deliberate edit. Lowering one is
-allowed too - deleting a test can be the right call - and is equally
-deliberate, which is the whole point.
-
-Usage:  tools/coverage-ratchet.py <llvm-cov report> <floor file>
-"""
 
 import re
 import subprocess
 import sys
 
-
 def parse_report(path):
-    """{file: line_coverage_percent} from an llvm-cov report."""
     out = {}
     with open(path) as f:
         for line in f:
-            # Filename Regions Missed Cover Functions Missed Executed
-            #   Lines Missed Cover Branches Missed Cover
             cols = line.split()
             if len(cols) < 10 or cols[0] in ("Filename", "TOTAL") or set(cols[0]) == {"-"}:
                 continue
             pcts = [c for c in cols if c.endswith("%")]
             if len(pcts) < 3:
                 continue
-            # Region, function, line, branch - line coverage is the third.
             try:
                 out[cols[0]] = float(pcts[2].rstrip("%"))
             except ValueError:
                 continue
     return out
 
-
 def parse_floor(path):
-    """{file: (percent, commit)} - the commit column included.
-
-    M100: it used to drop everything after the number, and the "FELL"
-    line then printed `commit()` - the CURRENT HEAD - under the words
-    "set at". So a floor set four milestones ago and quietly broken ever
-    since reported itself as having been set by the commit that was
-    failing, which is the opposite of the truth and hides the only thing
-    that distinguishes "you just broke this" from "this has been broken
-    for a while and nobody looked". Both of the floors that had actually
-    fallen were set at b7bb520 and were being reported as cdbca6e's.
-    """
     out = {}
     try:
         with open(path) as f:
@@ -68,14 +35,12 @@ def parse_floor(path):
         pass
     return out
 
-
 def commit():
     try:
         return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"],
                                        stderr=subprocess.DEVNULL).decode().strip()
     except Exception:
         return "unknown"
-
 
 def main():
     if len(sys.argv) != 3:
@@ -89,20 +54,6 @@ def main():
         print("coverage-ratchet: could not parse %s - no rows found" % report)
         return 2
 
-    # M101: a floor with no row in the report is an error, not a silence.
-    #
-    # The names in the floor file are whatever llvm-cov printed, and
-    # llvm-cov strips the longest common prefix of the sources it was
-    # given - so adding one source from a different top-level directory
-    # renames every other file in the report. When that happened, every
-    # floor stopped matching, all ten files were reported as "new", and
-    # the ratchet printed "nothing fell". It had stopped enforcing
-    # anything and said so in a way that reads like success.
-    #
-    # This is the same failure Q11 built the ratchet against, one level
-    # up: an instrument that cannot fail. A floor that names a file the
-    # report does not have is either a drifted name or a deleted test,
-    # and both are things a person has to decide about.
     missing = sorted(set(floor) - set(got))
     fell = []
     rose = []
@@ -110,7 +61,7 @@ def main():
     for name, pct in sorted(got.items()):
         if name not in floor:
             new.append((name, pct))
-        elif pct < floor[name][0] - 0.05:   # a hair of tolerance for rounding
+        elif pct < floor[name][0] - 0.05:
             fell.append((name, pct, floor[name][0], floor[name][1]))
         elif pct > floor[name][0] + 0.05:
             rose.append((name, pct, floor[name][0]))
@@ -143,20 +94,6 @@ def main():
               "and the commit message will say why." % (len(fell), floor_path))
         return 1
 
-    # M100: and a file in the report with NO floor row is an error too,
-    # for the reason the block above it gives one level down.
-    #
-    # This used to print "new" and carry on, and what that bought was a
-    # 2,157-line scheduler sitting in the host tier at 49.86% with
-    # nothing constraining the direction, for as long as nobody read past
-    # the summary line. It was one of eight. Meanwhile the seven "raise
-    # it" lines printed on every single run, so the output a person
-    # actually skims was seven pieces of advice nobody was going to take,
-    # and the two real regressions were underneath them.
-    #
-    # A ratchet whose report is mostly advisory is a ratchet that trains
-    # people not to read its report. Adding a row is one line and the
-    # number is printed right there.
     if new:
         print("\ncoverage-ratchet: %d file(s) in the report have no floor. "
               "Add a row to %s for each - the measured number is printed "
@@ -170,7 +107,6 @@ def main():
     else:
         print("\ncoverage-ratchet: nothing fell.")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

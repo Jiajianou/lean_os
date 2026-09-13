@@ -1,31 +1,4 @@
 #!/usr/bin/env bash
-# tools/regex-test.sh - M89: grade this project's regex engine against a
-# real one.
-#
-# ---- why this exists, and why it is the shape it is -------------------
-#
-# The same argument tools/sh-test.sh (M86) makes about the shell, applied
-# to the one other place in this tree where "correct" is defined by
-# agreement rather than by taste. A regular expression engine's whole job
-# is to decide the same spans every other engine decides; a test written
-# here that asserts what this engine happens to do would pass forever
-# while being wrong, and nobody would find out until sed replaced the
-# wrong half of a line.
-#
-# So nothing in the fixture list says what the right answer is. The
-# host's own <regex.h> - which on this machine is a BSD implementation
-# nobody here wrote - decides, and this engine has to agree with it
-# character for character, including the offsets of every captured
-# subexpression.
-#
-# What this CANNOT see is anything about lean_os: the engine is pure
-# computation over a string, so a host build tests all of it. That is
-# unusual in this tree and is the reason this is a shell script rather
-# than a boot marker.
-#
-# Usage:
-#   tools/regex-test.sh            # every case
-#   tools/regex-test.sh 'a*'       # only cases whose pattern matches this
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -35,10 +8,6 @@ BUILD=build
 FILTER="${1:-}"
 mkdir -p "$BUILD"
 
-# Two programs, same source, different engine. -DUSE_HOST_REGEX picks the
-# host's <regex.h>; without it, this project's own is compiled straight
-# in. The driver is identical either way, which is what makes a
-# difference in output a difference in the engine.
 DRIVER="$BUILD/regex-driver.c"
 cat > "$DRIVER" <<'EOF'
 /* Built twice - see tools/regex-test.sh. Reads "flags<TAB>pattern<TAB>
@@ -116,12 +85,6 @@ EOF
 OURS="$BUILD/regex-ours"
 THEIRS="$BUILD/regex-theirs"
 
-# Two compile steps rather than one, and the reason is worth a line: the
-# engine has to see this project's <regex.h>, <ctype.h> and <string.h>,
-# and the driver must NOT - it uses the host's stdio, and our <stdio.h>
-# declares a `stdin` that nothing on the host defines. So the engine is
-# compiled with -Iuser_space/libc/include and the driver without it,
-# reaching our header by relative path instead.
 if ! $HOSTCC -std=c11 -O1 -g -c -o "$BUILD/regex-engine.o" user_space/libc/src/regex.c \
      -I user_space/libc/include 2>"$BUILD/regex-ours.log"; then
   echo "regex-test: this project's engine does not compile for the host:" >&2
@@ -144,9 +107,6 @@ FIXTURES=tests/regex/cases.tsv
 pass=0
 fail=0
 failed=""
-# Lines beginning '#' are comments, and two of them are cases this file
-# deliberately does not grade - see the note in cases.tsv about the
-# questions POSIX leaves undefined.
 while IFS= read -r line; do
   case "$line" in ''|'#'*) continue;; esac
   if [ -n "$FILTER" ]; then

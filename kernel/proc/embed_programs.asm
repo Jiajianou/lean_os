@@ -1,23 +1,3 @@
-; kernel/proc/embed_programs.asm
-;
-; Embeds every user program this project ships (see the Makefile's
-; USER_PROGRAMS list) as byte blobs inside the kernel image, since
-; there's no way to get them onto the disk filesystem (kernel/fs/
-; leanfs.c) other than the kernel seeding them there itself on first
-; boot - the boot loader has no filesystem driver of its own, and
-; nothing outside this kernel has ever written to the disk. incbin's
-; paths are relative to the Makefile's working directory (repo root),
-; matching every other build-relative path in this project.
-;
-; Written out longhand rather than via a macro over a name list: nasm
-; doesn't substitute macro parameters inside a double-quoted string
-; literal, so a parameterized `incbin "build/%1.elf"` doesn't work.
-;
-; The Makefile adds an explicit extra prerequisite (every build/*.elf
-; this file incbins) on this object's target, on top of the normal
-; *.asm pattern rule - incbin needs each of those files to exist before
-; nasm can even assemble this one.
-
 section .rodata
 
 global hello_elf_start
@@ -266,13 +246,6 @@ reboot_elf_start:
     incbin "build/reboot.elf"
 reboot_elf_end:
 
-; M75: `env` prints what a process inherited, and `envtest` is the
-; self-test fixture that proves it landed somewhere real. Appended at the
-; end of this list rather than beside the other coreutils on purpose -
-; kernel.c seeds files in FOR_EACH_EMBEDDED_PROGRAM order and the M22
-; self-test grades "launcher slot 0 is hello, the first file ever
-; seeded", so an insertion anywhere above shifts an inode this project
-; asserts on.
 global env_elf_start
 global env_elf_end
 env_elf_start:
@@ -339,25 +312,18 @@ jobtest_elf_start:
     incbin "build/jobtest.elf"
 jobtest_elf_end:
 
-; M85 (second attempt): the pty fixture. Drives both ends of one
-; pseudo-terminal - see user_space/bin/ptytest.c for what each of its
-; seven checks proves.
 global ptytest_elf_start
 global ptytest_elf_end
 ptytest_elf_start:
     incbin "build/ptytest.elf"
 ptytest_elf_end:
 
-; Q9: runs the machine out of every fixed table a program can exhaust,
-; and requires each one to refuse, recover, and work again.
 global exhausttest_elf_start
 global exhausttest_elf_end
 exhausttest_elf_start:
     incbin "build/exhausttest.elf"
 exhausttest_elf_end:
 
-; M99: a fault a program can catch. Three signals, twice each, and a
-; child whose own handler faults - which is the loop being cut.
 global faulttest_elf_start
 global faulttest_elf_end
 faulttest_elf_start:
@@ -406,17 +372,12 @@ measure_elf_start:
     incbin "build/measure.elf"
 measure_elf_end:
 
-; M111: the package manager. Embedded like every other shipped program,
-; which matters more here than usual - `os` is what the machine uses to
-; install things, so a machine that cannot find it is a machine that
-; cannot be repaired from inside itself.
 global os_elf_start
 global os_elf_end
 os_elf_start:
     incbin "build/os.elf"
 os_elf_end:
 
-; M111: the package manager's own self-test - see user_space/bin/pkgtest.c.
 global pkgtest_elf_start
 global pkgtest_elf_end
 pkgtest_elf_start:
@@ -429,40 +390,30 @@ dirtest_elf_start:
     incbin "build/dirtest.elf"
 dirtest_elf_end:
 
-; M100: the four things the browser port added to this system - see
-; user_space/bin/browsertest.c.
 global browsertest_elf_start
 global browsertest_elf_end
 browsertest_elf_start:
     incbin "build/browsertest.elf"
 browsertest_elf_end:
 
-; M116: a stream from the host, through the NIC, byte for byte - see
-; user_space/bin/netrecv.c.
 global netrecv_elf_start
 global netrecv_elf_end
 netrecv_elf_start:
     incbin "build/netrecv.elf"
 netrecv_elf_end:
 
-; M118: AF_UNIX and SCM_RIGHTS in two real processes - see
-; user_space/bin/unixtest.c.
 global unixtest_elf_start
 global unixtest_elf_end
 unixtest_elf_start:
     incbin "build/unixtest.elf"
 unixtest_elf_end:
 
-; M119: epoll, eventfd and timerfd on the machine - see
-; user_space/bin/epolltest.c.
 global epolltest_elf_start
 global epolltest_elf_end
 epolltest_elf_start:
     incbin "build/epolltest.elf"
 epolltest_elf_end:
 
-; M120: shared memory a descriptor names, across a channel - see
-; user_space/bin/memfdtest.c.
 global memfdtest_elf_start
 global memfdtest_elf_end
 memfdtest_elf_start:

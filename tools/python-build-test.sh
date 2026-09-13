@@ -1,34 +1,4 @@
 #!/usr/bin/env bash
-# tools/python-build-test.sh - M99's last box: what CPython's own build
-# would cost on this machine, and by how much it does not fit.
-#
-# Boots the real image with `opt/leanos/pybuild=1` (and NOT the self-test
-# switch, so the machine comes up in seconds and the measurement is not
-# taken on a machine that has just spawned two hundred processes), runs
-# tests/pybuild/run.sh, and does the arithmetic here where it can be
-# read.
-#
-# ---- the method, stated because the method is the deliverable ---------
-#
-# M98's rule: when a build does not fit, the number that says by how much
-# is the deliverable. This one does not fit by a wide margin, and running
-# it to find that out would be a day of wall clock. So:
-#
-#   measured ON the machine, by the fixture:
-#     - what one configure probe costs, compiled and linked
-#     - what one C translation unit of CPython's size class costs
-#
-#   counted OFF the machine, from the real thing, by this script:
-#     - how many checks CPython's configure runs
-#     - how many C files its Makefile compiles
-#
-#   multiplied here, with every input printed beside the answer.
-#
-# Nothing in that chain is an estimate. What it is NOT is a measurement
-# of the build itself - the machine has never run it - and the difference
-# is stated rather than blurred: an extrapolation is an argument about
-# numbers, not an observation, and the two must not be quoted as though
-# they were the same thing.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -109,7 +79,6 @@ need() { grep -qF "$1" "$LOG" || { echo "MISSING: $1"; fail=1; }; }
 need "== m99build:"
 need "m99build: done"
 
-# `measure` writes: [measure] <label>: wall N ms  user ...  peak-rss N KiB  exit 0
 ms_of() {
   awk -v label="$1" '
     $0 ~ ("\\[measure\\] " label ":") {
@@ -134,20 +103,6 @@ done
 
 PROBE_WARM=$(( (P1 + P2 + P3) / 3 ))
 
-# ---- the counts, from the real thing -----------------------------------
-#
-# Read out of CPython's own source rather than remembered, so that a
-# different release changes the answer instead of making it stale.
-# Counted from RUNS rather than from the source, and the difference
-# matters in both directions. Grepping configure for the string
-# "checking " undercounts badly - many checks are inside loops and run
-# once per header or per function - and counting *.c under the source
-# tree overcounts, because a configured build compiles the modules it
-# was configured for and not every file that exists.
-#
-# Both real numbers are already on this disk from work this project
-# does anyway: tools/configure-test.sh's own configure run, and the
-# cross build tools/build-python.sh produced.
 CHECKS=""
 CFILES=""
 CFGOUT="$ROOT/build/configure-test/ours/configure.out"

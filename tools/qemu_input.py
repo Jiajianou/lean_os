@@ -1,47 +1,4 @@
 #!/usr/bin/env python3
-"""tools/qemu_input.py - M40's real interactive-input harness engine.
-
-Every click/drag/double-click feature this project has shipped since M18
-has only ever been proven by a self-test *calling the action directly*
-(`apply_window_action()` / a hand-written `WM_ACTION_PIPE` request).
-Nothing has ever driven a real mouse to a real pixel coordinate and
-pressed a real button, which is exactly the gap the M40 section of
-milestones.md opens on: a bug (double-clicking the Editor/Clock desktop
-icons doing nothing) that hid behind it for several milestones because
-no test could see it.
-
-This module closes that gap. It drives a booted `build/os-image.bin`
-through QEMU's own HMP monitor - `sendkey`, `mouse_move`, `mouse_button`
-- and reads results back out of real framebuffer pixels via `screendump`
-(a P6 PPM of exactly what the display device holds). No guest-side
-cooperation of any kind: the guest cannot tell these events from a
-human's, because at the PS/2 controller they *are* the same events.
-
-Deliberately a Python module rather than another bash script (the shape
-tools/qemu-serial-test.sh has): pixel readback means parsing a binary
-PPM and comparing 32-bit colors, and a monitor conversation means
-speaking to a Unix socket with timeouts - both things bash can only do
-badly. tools/qemu-input-test.sh is the thin `run the suite` wrapper that
-keeps this reachable the same way every other tool here is.
-
-Two facts about QEMU that shape the API below, both learned the hard way
-rather than assumed:
-
-  * The guest's mouse is a *relative* PS/2 device (kernel/drivers/
-    mouse.c), so `mouse_move` takes deltas, not absolute coordinates.
-    QEMU's ps2 model additionally clamps each packet's delta to +/-127
-    and carries the remainder over to the next one, so a single large
-    move silently arrives short. `move_to` therefore homes the pointer
-    into the top-left corner (both the kernel's cursor.c and the
-    compositor's own cursor_x/y clamp there, so over-shooting is the
-    reliable way to reach a known origin) and then steps to the target
-    in <= MAX_STEP chunks.
-
-  * A HMP monitor echoes every character back, plus readline escape
-    sequences. Nothing here parses that echo for meaning - commands are
-    fire-and-forget and results are read from pixels or the serial log,
-    which are the only two things that actually prove guest behavior.
-"""
 
 import hashlib
 import os
@@ -52,37 +9,17 @@ import tempfile
 import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# The image to boot. Overridable so a long suite run can be pointed at a
-# *frozen copy* while development carries on in the same tree - a `make`
-# rewrites build/os-image.bin under any guest still reading it, which
-# silently invalidates every test that has not started yet. Snapshot the
-# image, export LEANOS_IMAGE, and the two are independent.
 IMAGE = os.environ.get("LEANOS_IMAGE") or os.path.join(REPO_ROOT, "build", "os-image.bin")
-# Where a failure's evidence is kept once the guest that produced it is
-# gone - the same directory tools/qemu_input_suite.py saves screendumps
-# into, since both answer the same question.
 ARTIFACT_DIR = os.environ.get("LEANOS_INPUT_ARTIFACTS", "/tmp/leanos-input-failures")
 OVMF_CODE = os.path.join(REPO_ROOT, "build", "ovmf", "OVMF_CODE.fd")
 OVMF_VARS = os.path.join(REPO_ROOT, "build", "ovmf", "OVMF_VARS.fd")
 
-# The "desktop is up and steady" marker, same literal-substring convention
-# tools/qemu-serial-test.sh's REQUIRED_MARKERS uses - a wording change in
-# kernel/kernel.c is a visible one-line diff here too.
 BOOT_MARKER = "[init] PID 1 spawned"
 
-# Per-`mouse_move` delta cap. QEMU's own ps2 packet clamp is 127; staying
-# under it means one command == one fully-delivered packet, so a caller
-# counting steps can reason about where the pointer ended up.
 MAX_STEP = 100
 
-# How far past the screen's own dimensions `home()` pushes. Anything
-# >= the display size works; the clamp does the rest.
 HOME_OVERSHOOT = 1200
 
-# The pointer the compositor draws (user_space/bin/compositor.c's
-# cursor_shape / CURSOR_COLOR / CURSOR_SIZE), as the list of pixels that
-# are actually part of the arrow. Used to locate the real pointer in a
-# screendump - see Machine.find_cursor.
 CURSOR_COLOR = 0xFFFFFF
 CURSOR_W = CURSOR_H = 8
 _CURSOR_ROWS = (
@@ -100,15 +37,6 @@ CURSOR_PIXELS = tuple((x, y)
                       for x in range(CURSOR_W)
                       if bits & (0x80 >> x))
 
-# M46: the arrow is no longer the only shape the compositor ever draws.
-# M38 already gave it resize cursors and M46 adds a move cursor for the
-# titlebar band, which broke move_to outright: its verification finds the
-# pointer by matching the arrow's bitmap, so it simply could not locate a
-# pointer parked on a window edge or titlebar. Every shape compositor.c
-# can select lives here now, mirrored from its own tables (cursor_shape,
-# cursor_shape_horizontal/vertical/diag_*/move), and find_cursor tries all
-# of them. The name is worth having as well as the position: "which
-# cursor is drawn here" is exactly what M46's resize-zone test asks.
 _CURSOR_SHAPE_ROWS = {
     "arrow": _CURSOR_ROWS,
     "horizontal": (0b00011000, 0b00111100, 0b01100110, 0b11000011,
@@ -131,12 +59,7 @@ CURSOR_SHAPES = {
     for name, rows in _CURSOR_SHAPE_ROWS.items()
 }
 
-
 class Ppm:
-    """A parsed P6 screendump. px(x, y) returns 0x00RRGGBB, the same
-    packed form every color constant in this project's user space is
-    written in (gfx.h), so a comparison here reads like the source it's
-    checking against."""
 
     def __init__(self, path):
         with open(path, "rb") as f:
@@ -160,7 +83,7 @@ class Ppm:
         maxval = int(token())
         if maxval != 255:
             raise ValueError("unexpected PPM maxval %d" % maxval)
-        pos += 1  # the single whitespace byte before the pixel data
+        pos += 1
         self._pixels = data[pos:]
 
     def px(self, x, y):
@@ -171,10 +94,6 @@ class Ppm:
         return (self._pixels[off] << 16) | (self._pixels[off + 1] << 8) | self._pixels[off + 2]
 
     def count_color(self, color, x0, y0, w, h):
-        """How many pixels in the given rect are exactly `color`. Used
-        instead of single-point probes wherever the thing being checked
-        is "did a region change", which tolerates a one-pixel cursor
-        overlap that a single probe point would fail on."""
         n = 0
         for y in range(y0, y0 + h):
             for x in range(x0, x0 + w):
@@ -182,62 +101,14 @@ class Ppm:
                     n += 1
         return n
 
-
-# ---- Q19: boot once, test many ----------------------------------------
-#
-# Every test in this suite boots its own guest, which is what makes them
-# independent and is also two thirds of what a run costs: the boot is
-# about eight seconds of each test's twenty-five.
-#
-# So the boot happens once. A guest is brought to a painted desktop, its
-# whole state - RAM, devices, disk - is written into a qcow2 snapshot,
-# and every test after that starts by restoring it. Restoring is a file
-# clone plus a `-loadvm`, and on APFS the clone is copy-on-write and
-# costs nothing measurable.
-#
-# ---- the failure this must not have -----------------------------------
-#
-# A stale snapshot silently testing yesterday's kernel. It would pass,
-# which is the worst possible way to be wrong, and nothing downstream
-# could notice.
-#
-# It fails closed twice over. The snapshot's *name* contains a hash of
-# the image it was taken from, so a rebuilt image asks for a file that
-# does not exist. And a sidecar records the full hash, which is checked
-# before the snapshot is used at all - so a file that somehow has the
-# right name and the wrong contents is deleted rather than trusted. The
-# key covers everything that changes what a boot IS: the image, the disk
-# backend, the core count, the memory size and (M107) whether the guest's
-# input devices are PS/2 or USB, because a snapshot taken on one of those
-# cannot be resumed under another.
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "build", "snapshot")
 SNAPSHOT_TAG = "desktop"
 
-# ---- M116: a web page on another machine --------------------------------
-#
-# Every guest this module starts can reach an HTTP server that is not on
-# it: QEMU's guestfwd runs `cat` on this file for each connection to
-# 10.0.2.100:7778, so the browser fetches it through SLIRP, the RTL8139
-# and the whole of kernel/net - the path google.com takes, which no test
-# in this suite had ever put a page through. The page ends in a coloured
-# block, and everything before it is filler the stylesheet hides - so the
-# block is the first thing on the page, it cannot appear until the LAST
-# byte has arrived and been parsed, and what is timed is the network and
-# the fetch loop rather than layout. An ordinary block, not a positioned
-# one: the first version put it at `position:absolute; top:0` and NetSurf
-# did not paint an empty absolutely positioned box at all, which failed
-# this test on a page that had loaded in 0.3 s.
-#
-# In the build tree at a fixed path rather than a temporary one, because
-# the guest's snapshot is restored with exactly the command line it was
-# saved with, and a guestfwd naming a different file each run would be a
-# different machine.
 NET_PAGE_PORT = 7778
 NET_PAGE_URL = "http://10.0.2.100:%d/" % NET_PAGE_PORT
-NET_PAGE_BLOCK = 0x2AA198   # the block's colour, #2aa198
+NET_PAGE_BLOCK = 0x2AA198
 NET_PAGE_BYTES = 120 * 1024
-
 
 def _write_if_changed(path, data, mode=0o644):
     try:
@@ -252,16 +123,6 @@ def _write_if_changed(path, data, mode=0o644):
         f.write(data)
     os.chmod(path, mode)
 
-
-# The server half. It reads the request up to its blank line and only
-# then answers - because the first version was `cat page.http`, which
-# never read the request at all, and a socket closed with unread data in
-# it is RESET rather than closed. The forward threw away everything it
-# had not yet delivered and the browser got 58 KB of a 123 KB page, every
-# time. Reading first is also what a real server does, and so it is the
-# honest shape for this fixture. (The cat version found a real bug on
-# the way: see tests/test_poll.c - a server that speaks first left the
-# browser waiting for a connect that had already finished.)
 _NET_PAGE_SERVER = b"""#!/bin/sh
 # Generated by tools/qemu_input.py (M116) - a one-request HTTP server.
 cr=$(printf '\\r')
@@ -272,10 +133,7 @@ done
 exec cat "$(dirname "$0")/page.http"
 """
 
-
 def net_page_server():
-    """The command QEMU's guestfwd runs per connection, with the page it
-    serves beside it. Returns the command's path."""
     base = os.path.join(REPO_ROOT, "build", "input-fixtures")
     filler = []
     size = 0
@@ -298,36 +156,26 @@ def net_page_server():
     _write_if_changed(server, _NET_PAGE_SERVER, 0o755)
     return server
 
-
 def _qemu_disk_kind():
     return "ide" if os.environ.get("LEANOS_QEMU_DISK") == "ide" else "virtio"
 
-
 def snapshot_key():
-    """What this snapshot is OF. Any change here is a different file."""
     h = hashlib.sha256()
     with open(IMAGE, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
-    # M107: the input mode joins the key. A snapshot is the guest's
-    # DEVICES as well as its RAM, and one taken on a machine with an 8042
-    # cannot be restored onto a machine without one - QEMU refuses, or
-    # worse, restores into a device model the guest is not expecting.
     h.update(("|%s|%s|%s|%s" % (_qemu_disk_kind(),
                                 os.environ.get("QEMU_CPUS", "1"),
                                 os.environ.get("LEANOS_QEMU_MEM", "4096"),
                                 os.environ.get("LEANOS_QEMU_INPUT", "ps2"))).encode())
     return h.hexdigest()
 
-
 def snapshot_paths(key=None):
     key = key or snapshot_key()
     base = os.path.join(SNAPSHOT_DIR, "desktop-%s" % key[:16])
     return base + ".qcow2", base + ".key"
 
-
 def snapshot_is_valid(key=None):
-    """The sidecar half of failing closed - see the note above."""
     key = key or snapshot_key()
     qcow, meta = snapshot_paths(key)
     if not (os.path.exists(qcow) and os.path.exists(meta)):
@@ -338,7 +186,6 @@ def snapshot_is_valid(key=None):
     except OSError:
         return False
 
-
 def discard_snapshot(key=None):
     for path in snapshot_paths(key):
         try:
@@ -346,12 +193,7 @@ def discard_snapshot(key=None):
         except OSError:
             pass
 
-
 def _clone(src, dst):
-    """A copy-on-write clone where the filesystem has one, a copy where it
-    does not. `cp -c` is APFS's and `--reflink` is Linux's; both turn a
-    50 MiB snapshot into a few milliseconds, and the fallback is correct
-    everywhere and merely slower."""
     for args in (["cp", "-c", src, dst], ["cp", "--reflink=auto", src, dst]):
         try:
             if subprocess.call(args, stdout=subprocess.DEVNULL,
@@ -361,33 +203,12 @@ def _clone(src, dst):
             pass
     shutil.copyfile(src, dst)
 
-
 def build_snapshot(painted, boot_timeout=300, quiet=False):
-    """Boot one guest to a painted desktop and freeze it.
-
-    `painted(shot)` is the suite's own "is the desktop finished" check,
-    passed in rather than imported: this file knows how to drive a guest
-    and the suite knows what a finished desktop looks like, and the
-    snapshot must not be taken a frame early - every test after it would
-    start from a half-drawn screen.
-
-    The disk is a qcow2 overlay on the image rather than the image
-    itself. Two reasons, and both matter: `savevm` needs a block device
-    that can hold a snapshot and a raw file cannot, and an overlay keeps
-    the real image read-only, so a run holds no write lock on
-    build/os-image.bin - which is the property the cold path already had
-    through `snapshot=on` and must not lose.
-    """
     key = snapshot_key()
     qcow, meta = snapshot_paths(key)
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
     discard_snapshot(key)
 
-    # Every other snapshot in here is for an image that no longer exists.
-    # Keeping them costs 50 MiB apiece for nothing - the key is a hash,
-    # so an old one can never be asked for again. Swept on the way in
-    # rather than on the way out: a run that is killed halfway through
-    # still leaves a clean directory behind the next one.
     for name in os.listdir(SNAPSHOT_DIR):
         if name.startswith("desktop-") and not name.startswith("desktop-%s" % key[:16]):
             try:
@@ -415,19 +236,11 @@ def build_snapshot(painted, boot_timeout=300, quiet=False):
         else:
             raise RuntimeError("the snapshot guest never finished painting - see %s"
                                % m.save_log("snapshot-never-painted"))
-        # A moment past "painted" on purpose. Every test starts here, so
-        # a frame of settling bought once is a frame every test does not
-        # have to wait for.
         time.sleep(2.0)
         said = m.savevm(SNAPSHOT_TAG, timeout=180)
     finally:
         m.kill()
 
-    # Verified against the FILE rather than against what the monitor said.
-    # The monitor echoes every keystroke back and interleaves its own
-    # prompt, so parsing it for success is parsing a terminal; the
-    # question that matters is whether the snapshot is in the qcow2, and
-    # qemu-img answers exactly that.
     listing = subprocess.run(["qemu-img", "snapshot", "-l", qcow],
                              capture_output=True, text=True).stdout
     if SNAPSHOT_TAG not in listing:
@@ -439,9 +252,7 @@ def build_snapshot(painted, boot_timeout=300, quiet=False):
         f.write(key + "\n")
     return qcow
 
-
 class Machine:
-    """One booted guest, driven through its HMP monitor."""
 
     def __init__(self, extra_args=(), quiet=False, boot_timeout=None,
                  snapshot=None, snapshot_build=None):
@@ -450,38 +261,16 @@ class Machine:
         if not os.path.exists(OVMF_CODE):
             raise RuntimeError("no OVMF at build/ovmf - run tools/build-ovmf.sh")
 
-        # A short base dir on purpose: a Unix socket path has a hard
-        # ~104-byte limit, and this project's own scratch/temp paths can
-        # already exceed that on their own.
         self._dir = tempfile.mkdtemp(prefix="leanos-input-", dir="/tmp")
         self._mon_path = os.path.join(self._dir, "mon.sock")
         self.log_path = os.path.join(self._dir, "serial.log")
         self._quiet = quiet
-        # M63 stretch goal (a faster suite): how long this guest is
-        # allowed to take to reach the desktop. Set by the runner rather
-        # than fixed, because it depends on how many other guests are
-        # competing for the same cores - see qemu_input_suite.py's own
-        # note on why a boot timeout is the harness giving up rather than
-        # a verdict about the desktop.
         self.boot_timeout = boot_timeout
 
-        # Q19: restored, or booted. Everything below that differs between
-        # the two is here, so the rest of this class - and every test -
-        # cannot tell which kind of guest it has.
-        #
-        # The OVMF variable store is READ-ONLY on the restored path, and
-        # that is not a detail: `savevm` refuses to run while any
-        # writable block device cannot hold a snapshot, and a raw pflash
-        # cannot. Read-only costs nothing here because this machine boots
-        # the same way every time and has no boot variables worth
-        # keeping.
         self.restored = snapshot is not None
         vars_rt = os.path.join(self._dir, "OVMF_VARS.fd")
         shutil.copyfile(OVMF_VARS, vars_rt)
         if self.restored or snapshot_build:
-            # The build guest writes the snapshot file itself; a test
-            # guest gets its own clone of it. Same devices either way,
-            # which is what makes the restore legal.
             if snapshot_build:
                 disk = snapshot_build
             else:
@@ -502,21 +291,6 @@ class Machine:
             pflash_vars = ["-drive", "if=pflash,format=raw,file=" + vars_rt]
             restore_args = []
 
-        # ---- M107: the same suite, with no PS/2 controller at all -------
-        #
-        # LEANOS_QEMU_INPUT=usb removes the 8042 from the machine and
-        # attaches an xHCI controller with a boot keyboard and a boot
-        # mouse on it. Every test in this suite then grades the USB path,
-        # with not one of them changed - which is the whole argument for
-        # kernel/drivers/xhci.c delivering through keyboard_inject() and
-        # mouse_inject() rather than through an input path of its own.
-        #
-        # `i8042=off` is what makes it a proof rather than a coincidence.
-        # With the PS/2 devices merely unused, a suite that passed would
-        # say nothing: QEMU routes a `sendkey` to one keyboard handler,
-        # and which one it picks is not this suite's business to know.
-        # With no 8042 in the machine, a key that reaches the guest
-        # reached it over USB.
         input_mode = os.environ.get("LEANOS_QEMU_INPUT", "ps2")
         if input_mode == "usb":
             machine_args = ["-machine", "pc,i8042=off"]
@@ -531,50 +305,15 @@ class Machine:
             "qemu-system-x86_64",
             *machine_args,
             *usb_args,
-            # M106: stated rather than defaulted, for the reason
-            # tools/qemu-serial-test.sh's QEMU_CPUS note gives at length.
-            # This suite grades real pixels, so it is the instrument that
-            # would notice a compositor racing with itself across cores -
-            # and it has never had the chance. QEMU_CPUS=4 gives it one,
-            # and is not the default because the battery is not green
-            # there yet.
             "-smp", os.environ.get("QEMU_CPUS", "1"),
             "-drive", "if=pflash,format=raw,readonly=on,file=" + OVMF_CODE,
             *pflash_vars,
-            # snapshot=on: guest writes (leanfs formats the disk on its
-            # first boot, so this can't be a read-only device) land in a
-            # throwaway overlay and the real image is opened read-only.
-            # That means a run holds no write lock on build/os-image.bin -
-            # so `make`, tools/qemu-serial-test.sh and a second copy of
-            # this suite can all proceed while one is in flight - and
-            # every test starts from the same pristine, never-booted image
-            # rather than from whatever the previous one left on disk.
-            # M92: a virtio block device rather than the IDE drive a
-            # bare -drive gives on the `pc` machine - see
-            # tools/run-qemu.sh for why, and LEANOS_QEMU_DISK=ide for the
-            # ATA path. snapshot=on still means guest writes land in a
-            # throwaway overlay.
             *disk_args,
             "-display", "none",
-            # M90: the guest's memory size, stated rather than defaulted -
-            # see tools/run-qemu.sh for why 4 GiB specifically. Overridable
-            # because this suite runs several guests at once: QEMU only
-            # commits pages the guest touches, so three 4 GiB guests cost
-            # what three small ones do, but a machine short on RAM can set
-            # LEANOS_QEMU_MEM lower without editing anything.
             "-m", os.environ.get("LEANOS_QEMU_MEM", "4096"),
-            # Same SLIRP NAT tools/run-qemu.sh explains: the boot self-test
-            # pings the gateway and panics with no NIC attached at all.
-            # M116: and a web page on another machine - see NET_PAGE_URL.
             "-netdev", "user,id=net0,guestfwd=tcp:10.0.2.100:%d-cmd:%s"
                        % (NET_PAGE_PORT, net_page_server()),
             "-device", "rtl8139,netdev=net0",
-            # M62: an AC'97 controller, with a null backend - nothing here
-            # listens to the guest's audio, and the point is that the
-            # device exists for the driver to find and drive. Without it
-            # the boot's own [m62] self-test correctly reports no sound
-            # hardware and skips, which is not what this suite should be
-            # exercising.
             "-audiodev", "none,id=snd0", "-device", "AC97,audiodev=snd0",
             "-serial", "file:" + self.log_path,
             "-monitor", "unix:" + self._mon_path + ",server,nowait",
@@ -597,23 +336,9 @@ class Machine:
         self._drain()
 
         self._shot_seq = 0
-        # Mirrors the compositor's own starting cursor_x/y (fb center).
-        # Only ever a hint: home() re-establishes it for real.
         self.cursor = None
 
-    # ---- monitor plumbing -------------------------------------------
-
     def _drain(self):
-        """Non-blocking on purpose. The monitor echoes every keystroke
-        back plus readline escapes, and none of it means anything here
-        (results are read from pixels and the serial log) - but a
-        *blocking* drain would add its own timeout to every single
-        command, and input timing is load-bearing: desktop_icons.c's
-        DOUBLE_CLICK_MS is 500ms, so a harness that spends a quarter
-        second per monitor command can't produce a double-click the
-        guest would ever recognize as one. This is the difference
-        between the harness measuring the guest and the harness
-        measuring itself."""
         self._sock.setblocking(False)
         try:
             while self._sock.recv(65536):
@@ -630,19 +355,6 @@ class Machine:
             time.sleep(settle)
 
     def savevm(self, tag, timeout=180):
-        """Q19: freeze this guest into its qcow2, and WAIT for it.
-
-        A fixed sleep would be a guess about how long writing fifty
-        megabytes of guest state takes on a machine that is also running
-        the tests. The monitor prints its `(qemu)` prompt when the
-        command is done, so that is what this waits for - and the
-        artifact is checked afterwards by build_snapshot, because a
-        prompt means "finished", not "succeeded"."""
-        # Drained FIRST, and that is the bug this line exists for: the
-        # monitor echoes every keystroke of every previous command and
-        # prints its prompt after each, so a read that starts on a dirty
-        # buffer finds a `(qemu)` belonging to the last screendump and
-        # concludes savevm is finished before it has begun.
         self._drain()
         self._sock.sendall(("savevm %s\n" % tag).encode())
         deadline = time.time() + timeout
@@ -659,12 +371,6 @@ class Machine:
                 if not chunk:
                     break
                 seen += chunk.decode(errors="replace")
-                # The command is echoed back first, so the prompt that
-                # ends it is the one AFTER the echoed newline.
-                # The echoed command ends with a newline; the prompt that
-                # follows the OUTPUT is the one that means "done". Both
-                # arrive, so wait for the prompt that comes after the
-                # echoed tag rather than for the first one seen.
                 tail = seen.split(tag, 1)[-1]
                 if "(qemu)" in tail:
                     return seen
@@ -672,8 +378,6 @@ class Machine:
             self._sock.settimeout(None)
         raise RuntimeError("savevm did not finish within %ds; monitor said %r"
                            % (timeout, seen[-400:]))
-
-    # ---- boot / logs -------------------------------------------------
 
     def read_log(self):
         try:
@@ -691,26 +395,14 @@ class Machine:
         return False
 
     def boot_to_desktop(self, settle=4.0, timeout=90):
-        """Waits for init's handoff, then lets the compositor, the
-        desktop background and the panel all connect and paint their
-        first frame. `settle` is a real budget measured against the
-        boot this project actually does, not a magic number - every
-        pixel assertion downstream depends on the first frame being up."""
         if self.restored:
-            # Q19: this guest is already there. The marker it would wait
-            # for was printed before the snapshot was taken and will
-            # never appear in this guest's log, so waiting for it is a
-            # guaranteed timeout rather than a check.
             return
         if not self.wait_for_marker(timeout=timeout):
             raise RuntimeError("guest never reached %r - see %s"
                                % (BOOT_MARKER, self.save_log("boot-timeout")))
         time.sleep(settle)
 
-    # ---- input -------------------------------------------------------
-
     def sendkey(self, keys, hold_ms=None):
-        """`keys` is QEMU's own key syntax, e.g. "a", "ret", "alt-tab"."""
         if hold_ms is None:
             self.monitor("sendkey %s" % keys)
         else:
@@ -722,9 +414,6 @@ class Machine:
             time.sleep(0.03)
 
     def home(self):
-        """Pins the pointer at (0, 0) by over-shooting the top-left
-        clamp. The only way to get a known absolute position out of a
-        relative device - see this module's header."""
         steps = (HOME_OVERSHOOT + MAX_STEP - 1) // MAX_STEP
         for _ in range(steps):
             self.monitor("mouse_move -%d -%d" % (MAX_STEP, MAX_STEP), settle=0.02)
@@ -740,53 +429,22 @@ class Machine:
             dy -= sy
 
     def find_cursor_shape(self, shot, near, radius=48):
-        """Where the compositor is actually drawing the pointer and which
-        of its shapes it is drawing - matched against every bitmap in
-        CURSOR_SHAPES inside a window around where we believe it to be.
-        Returns (x, y, name) or None.
-
-        Only a shape's own lit pixels are matched, never its gaps - the
-        gaps show whatever is underneath, so requiring them to be
-        non-white would make this fail over pale content. The flip side is
-        that one shape's pixel set can be a subset of another's, so ties
-        are broken toward the shape with the most lit pixels: the move
-        cursor's 24 pixels contain the vertical resize cursor's 20, and
-        answering "vertical" for a move cursor would be wrong in exactly
-        the test that cares."""
         cx, cy = near
         best = None
         for oy in range(max(0, cy - radius), min(shot.height - CURSOR_H, cy + radius + 1)):
             for ox in range(max(0, cx - radius), min(shot.width - CURSOR_W, cx + radius + 1)):
                 for name, pixels in CURSOR_SHAPES.items():
                     if all(shot.px(ox + px, oy + py) == CURSOR_COLOR for px, py in pixels):
-                        # Nearest match to the expected point wins, so a
-                        # white glyph elsewhere in the window can't outrank
-                        # the real pointer.
                         key = (abs(ox - cx) + abs(oy - cy), -len(pixels))
                         if best is None or key < best[0]:
                             best = (key, ox, oy, name)
         return None if best is None else (best[1], best[2], best[3])
 
     def find_cursor(self, shot, near, radius=48):
-        """find_cursor_shape without the shape name - the position is all
-        move_to's verification loop needs."""
         found = self.find_cursor_shape(shot, near, radius)
         return None if found is None else (found[0], found[1])
 
     def move_to(self, x, y, verify=True):
-        """Puts the pointer at exactly (x, y), then checks that it got
-        there and corrects if it didn't.
-
-        The checking is not belt-and-braces. The device is relative, the
-        emulated PS/2 controller coalesces and clamps deltas, and the
-        guest is a software compositor that can be mid-redraw when a
-        packet lands - so "I sent moves totalling (x, y)" is genuinely not
-        the same claim as "the pointer is at (x, y)". Skipping this
-        produced a real, confusing failure: a right-click meant for the
-        empty desktop landed 100px short, opened the context menu
-        somewhere else entirely, and read as a guest bug rather than a
-        harness one. A test suite that can't say where it clicked can't
-        blame the guest for what happened."""
         if self.cursor != (0, 0):
             self.home()
         self._step_by(x, y)
@@ -806,28 +464,11 @@ class Machine:
             time.sleep(0.15)
         raise RuntimeError("could not place the pointer at (%d, %d)" % (x, y))
 
-    # `help mouse_button` in the QEMU monitor describes this bitmask as
-    # "1=L, 2=M, 4=R". That help string is wrong - verified against the
-    # guest, not assumed: pressing 2 is what reaches kernel/drivers/mouse.c
-    # as the right button (packet status bit 1), and 4 as the middle one.
-    # QEMU's own MOUSE_EVENT_* constants are ordered L/R/M, and the help
-    # text simply doesn't match them. Named constants here so the one
-    # place that knows this is the only place that has to.
     BTN_LEFT = 1
     BTN_RIGHT = 2
     BTN_MIDDLE = 4
 
     def wheel(self, detents):
-        """M49: `detents` clicks of the scroll wheel, through QEMU's own
-        `mouse_move dx dy dz` third argument - the same emulated
-        IntelliMouse packet a real wheel produces, so the guest cannot
-        tell this from hardware.
-
-        One monitor command per detent rather than one with a large dz:
-        the PS/2 wheel field is a 4-bit signed value, so a big dz is not
-        a bigger scroll, it is a wrapped one - and a test that scrolled
-        the wrong distance because the harness overflowed a nibble would
-        look exactly like a guest bug."""
         step = 1 if detents > 0 else -1
         for _ in range(abs(detents)):
             self.monitor("mouse_move 0 0 %d" % step, settle=0.06)
@@ -848,10 +489,6 @@ class Machine:
         self.click(x, y, mask=self.BTN_RIGHT)
 
     def double_click(self, x=None, y=None, gap=0.05):
-        """Two presses at the same point, well inside desktop_icons.c's
-        own DOUBLE_CLICK_MS (500) window as the guest measures it. The
-        whole sequence has to fit in that budget in *guest* time, which
-        is why `monitor` refuses to block - see _drain."""
         if x is not None:
             self.move_to(x, y)
         self.click()
@@ -859,22 +496,12 @@ class Machine:
         self.click()
 
     def press(self, x=None, y=None, mask=BTN_LEFT):
-        """Button down, and stay down. Pair with move_held/release for a
-        drag a test needs to look at *mid*-gesture (M43's snap preview) -
-        drag() below is the whole gesture in one call for the common case
-        where only the end state matters."""
         if x is not None:
             self.move_to(x, y)
         self.button(mask)
         time.sleep(0.1)
 
     def move_held(self, x, y, steps=8):
-        """Steps the pointer to (x, y) without move_to's verification.
-        Deliberately unverified: verification re-homes the pointer against
-        the top-left clamp, which mid-drag would drag the window there
-        with it. Stepped rather than one jump so the guest sees real
-        intermediate motion - a drag state machine that only ever gets
-        press-then-release-far-away isn't being tested at all."""
         x0, y0 = self.cursor
         for i in range(1, steps + 1):
             nx = x0 + (x - x0) * i // steps
@@ -889,20 +516,14 @@ class Machine:
         time.sleep(0.25)
 
     def drag(self, x0, y0, x1, y1, steps=8):
-        """Press at (x0,y0), move to (x1,y1) with the button held, release."""
         self.press(x0, y0)
         self.move_held(x1, y1, steps=steps)
         self.release()
-
-    # ---- readback ----------------------------------------------------
 
     def screenshot(self):
         self._shot_seq += 1
         path = os.path.join(self._dir, "shot%03d.ppm" % self._shot_seq)
         self.monitor("screendump %s" % path, settle=0.0)
-        # screendump is asynchronous with respect to the monitor echo, so
-        # wait for the file to both exist and stop growing rather than
-        # guessing a fixed sleep.
         deadline = time.time() + 10
         last = -1
         while time.time() < deadline:
@@ -914,18 +535,7 @@ class Machine:
             time.sleep(0.1)
         raise RuntimeError("screendump never produced %s" % path)
 
-    # ---- lifecycle ---------------------------------------------------
-
     def wait_for_exit(self, timeout=30.0):
-        """M47: how long the guest took to exit on its own, or None if it
-        never did.
-
-        Nothing in this harness had ever observed a clean guest exit -
-        every test before this one ends by killing QEMU - so "did S5
-        actually fire" had no way to be answered from inside the guest or
-        out. QEMU's own process terminating is the only real proof: a
-        guest that merely halted, or that wrote the wrong port and kept
-        running, leaves the process exactly where it was."""
         deadline = time.time() + timeout
         started = time.time()
         while time.time() < deadline:
@@ -936,7 +546,6 @@ class Machine:
 
     @property
     def exit_status(self):
-        """QEMU's exit status, or None if it is still running."""
         return self._proc.poll()
 
     def kill(self):
@@ -958,14 +567,6 @@ class Machine:
         return self
 
     def save_log(self, name):
-        """Copies this guest's serial log somewhere it will outlive the
-        guest, and returns that path (or the live one if the copy fails).
-
-        A boot that never finishes is the one failure whose *only*
-        evidence is this log - there are no pixels to screenshot and no
-        assertion that got far enough to say anything - and it used to be
-        deleted by __exit__ before anyone could read it. That is how an
-        intermittent hang stays intermittent."""
         try:
             os.makedirs(ARTIFACT_DIR, exist_ok=True)
             dest = os.path.join(ARTIFACT_DIR, "%s-%d.log" % (name, os.getpid()))
@@ -978,7 +579,6 @@ class Machine:
         self.kill()
         shutil.rmtree(self._dir, ignore_errors=True)
 
-
 _SHIFTED = {
     "_": "shift-minus", ":": "shift-semicolon", "?": "shift-slash",
     "!": "shift-1", "@": "shift-2", "#": "shift-3", "$": "shift-4",
@@ -989,7 +589,6 @@ _NAMED = {
     " ": "spc", ".": "dot", ",": "comma", "-": "minus", "=": "equal",
     "/": "slash", ";": "semicolon", "'": "apostrophe", "\n": "ret",
 }
-
 
 def _qemu_keyname(ch):
     if ch in _SHIFTED:
