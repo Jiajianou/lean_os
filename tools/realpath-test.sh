@@ -9,19 +9,11 @@ mkdir -p "$BUILD"
 
 DRIVER="$BUILD/realpath-driver.c"
 cat > "$DRIVER" <<'EOF'
-/* Built twice. Reads one path per line, prints what realpath said -
- * the canonical path, or NULL and errno's name. */
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* No rename trick here, unlike the printf and stdio harnesses: the
- * host's own <stdlib.h> gives realpath an asm-level alias on Darwin,
- * which follows any renamed prototype onto our definition and defeats
- * it. Instead the "ours" binary simply LINKS realpath.c in front of
- * the host libc - a symbol defined in the executable wins - and the
- * "theirs" binary does not. */
 #define REALPATH realpath
 
 int main(void) {

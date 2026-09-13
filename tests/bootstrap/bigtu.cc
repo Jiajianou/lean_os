@@ -36,7 +36,7 @@ struct Bag {
     std::string describe() const {
         std::ostringstream out;
         out << items.size() << ':' << buckets.size() << ':' << unique.size();
-        return out.string();
+        return out.str();
     }
 
     T fold() const {
@@ -134,9 +134,9 @@ long bigtu_total() {
     acc += exercise<Point>(Point(2), "p");
     acc += spread<8>(acc);
 
-    std::vector<std::unique_pointer<Bag<long> > > owned;
+    std::vector<std::unique_ptr<Bag<long> > > owned;
     for (int i = 0; i < 4; i++) {
-        owned.push_back(std::unique_pointer<Bag<long> >(new Bag<long>()));
+        owned.push_back(std::unique_ptr<Bag<long> >(new Bag<long>()));
         owned.back()->add(i, "own");
     }
     for (std::size_t i = 0; i < owned.size(); i++) {

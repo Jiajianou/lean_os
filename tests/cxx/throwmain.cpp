@@ -5,8 +5,8 @@ extern "C" {
 #include <stdio.h>
 }
 
-typedef void (*throw_function)(int *, int);
-typedef int (*catches_function)(void (*)());
+typedef void (*throw_fn)(int *, int);
+typedef int (*catches_fn)(void (*)());
 
 static void thrower_here() {
     throw LibError(31);
@@ -18,8 +18,8 @@ int main(void) {
         printf("throwmain: dlopen failed: %s\n", dlerror());
         return 2;
     }
-    throw_function lib_throw_p = (throw_function)dlsym(h, "lib_throw");
-    catches_function lib_catches_p = (catches_function)dlsym(h, "lib_catches");
+    throw_fn lib_throw_p = (throw_fn)dlsym(h, "lib_throw");
+    catches_fn lib_catches_p = (catches_fn)dlsym(h, "lib_catches");
     if (!lib_throw_p || !lib_catches_p) {
         printf("throwmain: dlsym failed\n");
         return 2;

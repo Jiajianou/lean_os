@@ -142,7 +142,7 @@ int main() {
 #else
     std::ostringstream os;
     os << "n=" << 42 << " d=" << 1.5;
-    check(os.string() == "n=42 d=1.5", "std::ostringstream formatting");
+    check(os.str() == "n=42 d=1.5", "std::ostringstream formatting");
     std::istringstream is("7 8");
     int a = 0, b = 0;
     is >> a >> b;

@@ -9,8 +9,6 @@ mkdir -p "$BUILD"
 
 FAKES="$BUILD/stdio-fakes.c"
 cat > "$FAKES" <<'EOF'
-/* One in-memory file, served through the sys_* surface stdio.c reads.
- * fd 100 is the file; writes to any fd are swallowed and counted. */
 #include <stddef.h>
 #include <string.h>
 
@@ -23,7 +21,6 @@ void fake_file(const char *data) {
     file_pos = 0;
 }
 
-/* M99: an open that can fail, so the errno contract can be graded. */
 static int open_fails;
 void fake_fail_open(int on) { open_fails = on; }
 long sys_open(const char *p, unsigned f) {
@@ -42,9 +39,6 @@ long sys_read(int fd, void *b, unsigned long n) {
     file_pos += take;
     return take;
 }
-/* M98: writes are recorded rather than swallowed, because the buffer
- * this libc grew is graded on two things a counter cannot see - WHAT
- * arrived and HOW MANY calls it took. */
 static char written[8192];
 static long written_len;
 static int write_calls;
@@ -73,20 +67,14 @@ long sys_lseek(int fd, long off, int whence) {
 long sys_unlink(const char *p) { (void)p; return -1; }
 long sys_rename(const char *a, const char *b) { (void)a; (void)b; return -1; }
 long sys_getpid(void) { return 1; }
-/* M98: perror reads errno through this libc's own accessor and names
- * it with this libc's strerror; the host build supplies both here. */
 static int fake_errno;
 int *__errno_location(void) { return &fake_errno; }
 char *strerror(int e) { (void)e; return "error"; }
 int fake_get_errno(void) { return fake_errno; }
 void fake_set_errno(int e) { fake_errno = e; }
-/* M99: fopen infers its errno through this, which lives in unistd.c and
- * is not part of this harness. ENOENT, so the driver can check that
- * fopen SET errno - the contract CPython's startup depends on - without
- * this harness having to reimplement the inference itself. */
 int __lean_path_errno(const char *p, int creating) {
     (void)p; (void)creating;
-    return 2; /* ENOENT */
+    return 2;
 }
 EOF
 
@@ -129,10 +117,6 @@ static int failures;
 } while (0)
 
 int main(void) {
-    /* 1. gas's opening move: read two characters, push back a DIFFERENT
-     * one. The pushed-back character - not the byte on disk - must be
-     * what the next read returns, and the reader that gets it is fread,
-     * not the fgetc that did the pushing. */
     fake_file("# hello\nmov\n");
     lean_FILE *f = lean_fopen("x", "r");
     CHECK(f != 0, "fopen");
@@ -145,8 +129,6 @@ int main(void) {
     CHECK(memcmp(buf, "#hello", 6) == 0, "fread yields pushback then stream");
     lean_fclose(f);
 
-    /* 2. One character of pushback is guaranteed; a second is refused,
-     * not silently dropped. */
     fake_file("ab");
     f = lean_fopen("x", "r");
     CHECK(lean_fgetc(f) == 'a', "getc before double unget");
@@ -156,19 +138,16 @@ int main(void) {
     CHECK(lean_fgetc(f) == 'b', "then the stream continues");
     lean_fclose(f);
 
-    /* 3. ftell counts the pushed-back character as unread, and a
-     * relative fseek lands where the caller's arithmetic says. */
     fake_file("abcdef");
     f = lean_fopen("x", "r");
-    lean_fgetc(f); lean_fgetc(f);              /* pos 2 */
+    lean_fgetc(f); lean_fgetc(f);
     CHECK(lean_ftell(f) == 2, "ftell before ungetc");
     lean_ungetc('X', f);
     CHECK(lean_ftell(f) == 1, "ftell counts pushback as unread");
-    CHECK(lean_fseek(f, 0, 1 /*SEEK_CUR*/) == 0, "relative seek with pushback");
+    CHECK(lean_fseek(f, 0, 1  ) == 0, "relative seek with pushback");
     CHECK(lean_fgetc(f) == 'b', "seek discarded pushback, landed right");
     lean_fclose(f);
 
-    /* 4. fgets and getdelim honour the pushback like any reader. */
     fake_file("line one\nline two\n");
     f = lean_fopen("x", "r");
     lean_fgetc(f);
@@ -176,14 +155,13 @@ int main(void) {
     CHECK(lean_fgets(buf, sizeof buf, f) != 0, "fgets after ungetc");
     CHECK(strcmp(buf, "Line one\n") == 0, "fgets starts with the pushback");
     char *line = 0; size_t cap = 0;
-    lean_fgetc(f); /* consume the 'l' this pushback replaces */
+    lean_fgetc(f);
     lean_ungetc('L', f);
     CHECK(lean_getdelim(&line, &cap, '\n', f) == 9, "getdelim after ungetc");
     CHECK(strcmp(line, "Line two\n") == 0, "getdelim starts with the pushback");
     free(line);
     lean_fclose(f);
 
-    /* 5. ungetc at end of file un-sets EOF, and EOF comes back after. */
     fake_file("z");
     f = lean_fopen("x", "r");
     CHECK(lean_fgetc(f) == 'z', "last char");
@@ -195,16 +173,6 @@ int main(void) {
     CHECK(lean_fgetc(f) == EOF, "EOF again after it");
     lean_fclose(f);
 
-    /* ---- M98: the write buffer ------------------------------------
-     *
-     * The measurement that asked for it: one C++ compile on the machine
-     * made 199,385 `write` syscalls, 89% of every syscall it made, to
-     * produce a 1.5 MB file - about seven bytes a call, because there
-     * was no buffer at all. These checks are what a buffer has to get
-     * right, and each one is a way of losing somebody's bytes. */
-
-    /* 6. Many small writes become few syscalls, and every byte arrives
-     * in order. */
     fake_file("");
     fake_write_reset();
     f = lean_fopen("x", "w");
@@ -220,8 +188,6 @@ int main(void) {
     CHECK(fake_written()[0] == 'a' && fake_written()[25] == 'z' &&
           fake_written()[26] == 'a', "in order");
 
-    /* 7. fflush is what a caller uses when order matters, and it empties
-     * the buffer rather than merely claiming to. */
     fake_write_reset();
     f = lean_fopen("x", "w");
     lean_fputs("half", f);
@@ -233,9 +199,6 @@ int main(void) {
     lean_fclose(f);
     CHECK(fake_write_calls() == 1, "an empty buffer does not write again");
 
-    /* 8. A write larger than the buffer goes straight through, in one
-     * call, after whatever was pending - which is the ordering rule that
-     * makes a mixed program's output make sense. */
     fake_write_reset();
     f = lean_fopen("x", "w");
     lean_fputs("first", f);
@@ -247,39 +210,23 @@ int main(void) {
     CHECK(memcmp(fake_written(), "firstBBB", 8) == 0, "in that order");
     lean_fclose(f);
 
-    /* 9. Line buffering: a newline is what makes a prompt appear before
-     * the read that follows it. */
     fake_write_reset();
     f = lean_fopen("x", "w");
-    CHECK(lean_setvbuf(f, 0, 1 /*_IOLBF*/, 1024) == 0, "setvbuf line mode");
+    CHECK(lean_setvbuf(f, 0, 1  , 1024) == 0, "setvbuf line mode");
     lean_fputs("no newline yet", f);
     CHECK(fake_write_calls() == 0, "still buffered");
     lean_fputc('\n', f);
     CHECK(fake_write_calls() == 1, "the newline flushed it");
     lean_fclose(f);
 
-    /* 10. Unbuffered means unbuffered, which is what stderr is. */
     fake_write_reset();
     f = lean_fopen("x", "w");
-    CHECK(lean_setvbuf(f, 0, 2 /*_IONBF*/, 0) == 0, "setvbuf unbuffered");
+    CHECK(lean_setvbuf(f, 0, 2  , 0) == 0, "setvbuf unbuffered");
     lean_fputs("a", f);
     lean_fputs("b", f);
     CHECK(fake_write_calls() == 2, "each write went out on its own");
     lean_fclose(f);
 
-    /* 11. M99: a failed fopen SETS ERRNO. Three ways to fail, and all
-     * three used to return NULL over whatever errno happened to hold.
-     *
-     * This is control flow rather than diagnostics, which is why it is
-     * a check rather than a nicety: CPython's startup opens a
-     * `pyvenv.cfg` that is not there and catches FileNotFoundError to
-     * mean "not a virtual environment". The C side builds that
-     * exception FROM ERRNO, so errno 0 produced a bare OSError, the
-     * except clause did not catch it, and the interpreter died before
-     * running a line of anything. The ordinary case was the fatal one.
-     *
-     * errno is set to a sentinel first, so this cannot pass because
-     * something earlier left the right value lying around. */
     fake_set_errno(0);
     fake_fail_open(1);
     CHECK(lean_fopen("nope", "r") == 0, "fopen of a missing file fails");
@@ -288,7 +235,7 @@ int main(void) {
 
     fake_set_errno(0);
     CHECK(lean_fopen("x", "z") == 0, "a mode string with no r, w or a fails");
-    CHECK(fake_get_errno() == 22 /*EINVAL*/, "and that failure is EINVAL");
+    CHECK(fake_get_errno() == 22  , "and that failure is EINVAL");
 
     if (failures) {
         printf("stdio-test: %d check(s) failed\n", failures);

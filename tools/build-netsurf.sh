@@ -163,11 +163,6 @@ for line in subprocess.run([readelf, "-x", ".init_array", binary],
     if m:
         for i, w in enumerate(m.group(1).split()):
             words.append(w)
-# `readelf -x` dumps RAW BYTES grouped in fours, not 32-bit words - so
-# the eight bytes of a pointer are in file order and the value is the
-# little-endian read of them. Getting this wrong is silent: it produces
-# plausible 64-bit numbers that match no symbol, and the check then
-# reports "no surface constructors found" rather than a parse error.
 ptrs = [int.from_bytes(bytes.fromhex(words[i] + words[i + 1]), "little")
         for i in range(0, len(words) - 1, 2)]
 registered = [syms[p] for p in ptrs if p in syms]

@@ -47,17 +47,17 @@ int main(void) {
     }
     printf("gcctest: constructor ran\n");
 
-    char *buffer = malloc(256);
-    if (!buffer) {
+    char *buf = malloc(256);
+    if (!buf) {
         printf("gcctest: FAIL malloc\n");
         return 2;
     }
-    strcpy(buffer, "allocated");
-    if (strcmp(buffer, "allocated") != 0) {
+    strcpy(buf, "allocated");
+    if (strcmp(buf, "allocated") != 0) {
         printf("gcctest: FAIL string round trip\n");
         return 3;
     }
-    free(buffer);
+    free(buf);
     printf("gcctest: malloc and string round trip\n");
 
     struct point p = make_point(3, 4);

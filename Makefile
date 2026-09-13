@@ -54,10 +54,10 @@ UEFI_BOOT_EFI := $(BUILD)/BOOTX64.EFI
 
 UOBJ      := $(BUILD)/user_obj
 USER_LD   := user_space/library/user.ld
-USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/str.o $(UOBJ)/malloc.o \
-                $(UOBJ)/gfx.o $(UOBJ)/font8x16.o $(UOBJ)/wmclient.o $(UOBJ)/wallpaper.o \
+USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/string_utilities.o $(UOBJ)/malloc.o \
+                $(UOBJ)/graphics.o $(UOBJ)/font8x16.o $(UOBJ)/window_manager_client.o $(UOBJ)/wallpaper.o \
                 $(UOBJ)/settings_file.o $(UOBJ)/children.o $(UOBJ)/icons.o \
-                $(UOBJ)/uifont.o $(UOBJ)/recent.o $(UOBJ)/sntp.o $(UOBJ)/dns.o $(UOBJ)/http.o \
+                $(UOBJ)/user_interface_font.o $(UOBJ)/recent.o $(UOBJ)/sntp.o $(UOBJ)/dns.o $(UOBJ)/http.o \
                 $(UOBJ)/libc_string.o $(UOBJ)/libc_stdlib.o $(UOBJ)/libc_stdio.o \
                 $(UOBJ)/libc_math.o $(UOBJ)/libc_time.o \
                 $(UOBJ)/libc_env.o $(UOBJ)/libc_unistd.o \
@@ -76,8 +76,8 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
                 $(UOBJ)/libc_pty.o $(UOBJ)/libc_select.o $(UOBJ)/libc_realpath.o $(UOBJ)/libc_popen.o \
                 $(UOBJ)/libc_iconv.o $(UOBJ)/libc_iconv_tables.o $(UOBJ)/libc_wallclock.o \
                 $(UOBJ)/libc_readyfds.o \
-                $(UOBJ)/sha256.o $(UOBJ)/ospkg.o $(UOBJ)/fsutil.o \
-                $(UOBJ)/setjmp.o $(UOBJ)/symtab.o $(UOBJ)/crtn.o
+                $(UOBJ)/sha256.o $(UOBJ)/os_package.o $(UOBJ)/file_system_utilities.o \
+                $(UOBJ)/setjmp.o $(UOBJ)/symbol_table.o $(UOBJ)/crtn.o
 
 THIRD_PARTY_PROGRAMS := whetstone
 
@@ -250,7 +250,7 @@ $(FONT_STAMP): tools/gen-font.c $(FONT_FILES) $(GEN_FONT) | $(BUILD)
 
 $(KOBJ)/drivers/font8x16.o: $(FONT_STAMP)
 $(UOBJ)/font8x16.o: $(FONT_STAMP)
-$(UOBJ)/uifont.o: $(FONT_STAMP)
+$(UOBJ)/user_interface_font.o: $(FONT_STAMP)
 
 preseed: $(IMAGE) $(LEANFS_PUT)
 	@for p in $(USER_PROGRAMS); do \
@@ -325,7 +325,7 @@ LIBC_SO_SRCS := $(wildcard user_space/libc/src/*.c) \
                 user_space/library/syscall_wrappers.c user_space/library/string_utilities.c \
                 user_space/library/malloc.c user_space/library/dns.c
 
-$(LIBC_SO): $(LIBC_SO_SRCS) $(UOBJ)/setjmp.o $(UOBJ)/symtab.o
+$(LIBC_SO): $(LIBC_SO_SRCS) $(UOBJ)/setjmp.o $(UOBJ)/symbol_table.o
 	@mkdir -p $(UOBJ)/pic
 	@for src in $(LIBC_SO_SRCS); do \
 	  obj=$(UOBJ)/pic/$$(echo $$src | tr / _ | sed 's/\.c$$/.o/'); \
@@ -335,7 +335,7 @@ $(LIBC_SO): $(LIBC_SO_SRCS) $(UOBJ)/setjmp.o $(UOBJ)/symtab.o
 	    -c $$src -o $$obj || exit 1; \
 	done
 	$(LD) -shared -soname libc.so -o $@ $(UOBJ)/pic/*.o \
-	  $(UOBJ)/setjmp.o $(UOBJ)/symtab.o
+	  $(UOBJ)/setjmp.o $(UOBJ)/symbol_table.o
 
 LD_SO := $(BUILD)/ld-lean.so
 

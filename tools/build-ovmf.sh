@@ -63,7 +63,6 @@ ln -sf "$(command -v lld-link)" "$SHIM_DIR/lld-link"
 ln -sf "$LLVM_PREFIX/bin/llvm-lib" "$SHIM_DIR/llvm-lib"
 
 cat > "$SHIM_DIR/llvm-rc" <<EOF
-#!/usr/bin/env bash
 args=()
 for a in "\$@"; do
     if [[ "\$a" == /Fo?* ]]; then

@@ -10,20 +10,12 @@ mkdir -p "$BUILD"
 
 DRIVER="$BUILD/scanf-driver.c"
 cat > "$DRIVER" <<'EOF'
-/* Built twice - see tools/scanf-test.sh. Reads "format<TAB>input" lines
- * and prints the return value and every converted value. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #ifdef USE_OURS
-/* Declared rather than included: this project's <stdio.h> declares a
- * `stdin` the host does not define, which is the same collision
- * tools/regex-test.sh documents and solves the same way. */
 int lean_sscanf(const char *str, const char *fmt, ...);
-/* scanf() reads this project's `stdin`, which is a FILE* this library
- * defines and the host does not. Nothing here calls scanf() - every
- * fixture goes through sscanf - so the symbol only has to exist. */
 void *lean_stdin;
 #define SSCANF lean_sscanf
 #else
@@ -43,11 +35,6 @@ typedef union {
     char s[512];
 } slot_t;
 
-/* Walks the format and reports, for conversion `want`, a letter saying
- * how to print what was written: 'd' signed, 'u' unsigned, 'f' float,
- * 'g' double, 's' string, 'c' one character, or 0 for none. Suppressed
- * conversions (%*d) consume no argument and are skipped, exactly as
- * scanf skips them. */
 static char slot_kind(const char *fmt, int want, int *out_width) {
     int n = 0;
     for (const char *p = fmt; *p; p++) {
@@ -78,8 +65,6 @@ static char slot_kind(const char *fmt, int want, int *out_width) {
     return 0;
 }
 
-/* How wide the object a conversion writes is, so the union can be read
- * back at the right width. Only the length modifier decides this. */
 static int slot_len(const char *fmt, int want) {
     int n = 0;
     for (const char *p = fmt; *p; p++) {
@@ -111,8 +96,6 @@ int main(void) {
         if (!input) continue;
         *input++ = 0;
 
-        /* "\t" and "\n" in a fixture are the real characters - a case
-         * file has to be one line each. */
         char ibuf[2048];
         size_t ii = 0;
         for (char *s = input; *s && ii < sizeof(ibuf)-1; s++) {

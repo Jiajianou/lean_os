@@ -10,8 +10,6 @@ mkdir -p "$BUILD"
 
 DRIVER="$BUILD/printf-driver.c"
 cat > "$DRIVER" <<'EOF'
-/* Built twice - see tools/printf-test.sh. Reads "format<TAB>kind<TAB>value"
- * lines and prints the return value and the produced bytes. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,10 +21,6 @@ int lean_snprintf(char *dst, size_t cap, const char *fmt, ...);
 #define SNPRINTF snprintf
 #endif
 
-/* The first non-suppressed conversion's length modifier: 0 none, 1 h,
- * 2 hh, 3 l, 4 ll, 5 z. The driver passes the C type a correct caller
- * would, promotions included - %hd is PASSED as int, because that is
- * what the language does to a short at a call site. */
 static int arg_len(const char *fmt) {
     for (const char *p = fmt; *p; p++) {
         if (*p != '%') continue;
@@ -55,7 +49,6 @@ int main(void) {
         char *val = strchr(kind, '\t');
         if (val) *val++ = 0; else val = kind + strlen(kind);
 
-        /* "\t" and "\n" in a fixture are the real characters. */
         char vbuf[2048];
         size_t ii = 0;
         for (char *s = val; *s && ii < sizeof(vbuf)-1; s++) {
@@ -90,8 +83,7 @@ int main(void) {
         case 'f': rc = SNPRINTF(out, sizeof out, fmt, strtod(vbuf, 0)); break;
         case 's': rc = SNPRINTF(out, sizeof out, fmt, vbuf); break;
         case 'c': rc = SNPRINTF(out, sizeof out, fmt, (int)vbuf[0]); break;
-        case 'w': { /* width from the argument list: %*d and kin.
-                       value is "width:number". */
+        case 'w': {
             char *colon = strchr(vbuf, ':');
             int w = atoi(vbuf);
             long long v = colon ? strtoll(colon + 1, 0, 0) : 0;
@@ -108,9 +100,6 @@ EOF
 
 FAKES="$BUILD/printf-fakes.c"
 cat > "$FAKES" <<'EOF'
-/* The file layer above the format engine wants these at link time; no
- * fixture ever reaches them. Failing (-1) rather than pretending, so a
- * fixture that somehow does reach one fails loudly. */
 #include <stddef.h>
 long sys_open(const char *p, unsigned f) { (void)p; (void)f; return -1; }
 long sys_close(int fd) { (void)fd; return -1; }
@@ -120,16 +109,12 @@ long sys_lseek(int fd, long o, int w) { (void)fd; (void)o; (void)w; return -1; }
 long sys_unlink(const char *p) { (void)p; return -1; }
 long sys_rename(const char *a, const char *b) { (void)a; (void)b; return -1; }
 long sys_getpid(void) { return 1; }
-/* M98: perror reads errno through this libc's own accessor and names
- * it with this libc's strerror; the host build supplies both here. */
 static int fake_errno;
 int *__errno_location(void) { return &fake_errno; }
 char *strerror(int e) { (void)e; return "error"; }
-/* M99: fopen infers its errno through this, which lives in unistd.c and
- * is not part of this harness - see the same stub in stdio-test.sh. */
 int __lean_path_errno(const char *p, int creating) {
     (void)p; (void)creating;
-    return 2; /* ENOENT */
+    return 2;
 }
 EOF
 

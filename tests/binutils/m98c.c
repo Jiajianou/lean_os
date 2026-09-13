@@ -3,13 +3,13 @@
 #include <string.h>
 
 int main(void) {
-    char *buffer = malloc(64);
-    if (!buffer) {
+    char *buf = malloc(64);
+    if (!buf) {
         printf("FAIL: malloc\n");
         return 1;
     }
-    strcpy(buffer, "gcc built this program on this machine");
-    printf("%s (%.1f%% self-hosted)\n", buffer, 99.5);
-    free(buffer);
+    strcpy(buf, "gcc built this program on this machine");
+    printf("%s (%.1f%% self-hosted)\n", buf, 99.5);
+    free(buf);
     return 0;
 }

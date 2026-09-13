@@ -23,9 +23,9 @@ static int render_range(FT_Face face, int px, int32_t flags, const char *mode) {
     }
     int failures = 0;
     for (int c = 0x20; c < 0x7f; c++) {
-        FT_Error error = FT_Load_Char(face, (FT_ULong)c, flags | FT_LOAD_RENDER);
-        if (error != 0) {
-            printf("%dpx %s U+%04X load error %d\n", px, mode, c, (int)error);
+        FT_Error err = FT_Load_Char(face, (FT_ULong)c, flags | FT_LOAD_RENDER);
+        if (err != 0) {
+            printf("%dpx %s U+%04X load error %d\n", px, mode, c, (int)err);
             failures++;
             continue;
         }
@@ -53,9 +53,9 @@ int main(int argc, char **argv) {
         return 2;
     }
     FT_Library lib;
-    FT_Error error = FT_Init_FreeType(&lib);
-    if (error != 0) {
-        printf("FT_Init_FreeType failed: %d\n", (int)error);
+    FT_Error err = FT_Init_FreeType(&lib);
+    if (err != 0) {
+        printf("FT_Init_FreeType failed: %d\n", (int)err);
         return 1;
     }
     FT_Int vmaj, vmin, vpatch;
@@ -63,14 +63,14 @@ int main(int argc, char **argv) {
     printf("freetype %d.%d.%d\n", (int)vmaj, (int)vmin, (int)vpatch);
 
     FT_Face face;
-    error = FT_New_Face(lib, argv[1], 0, &face);
-    if (error != 0) {
-        printf("FT_New_Face(%s) failed: %d\n", argv[1], (int)error);
+    err = FT_New_Face(lib, argv[1], 0, &face);
+    if (err != 0) {
+        printf("FT_New_Face(%s) failed: %d\n", argv[1], (int)err);
         return 1;
     }
     printf("face %s / %s glyphs %ld upem %u ascender %d descender %d height %d "
            "bbox %ld %ld %ld %ld scalable %d kerning %d\n",
-           face->family_name, face->style_name, (long)face->number_glyphs,
+           face->family_name, face->style_name, (long)face->num_glyphs,
            (unsigned)face->units_per_EM, (int)face->ascender,
            (int)face->descender, (int)face->height,
            (long)face->bbox.xMin, (long)face->bbox.yMin,
@@ -92,9 +92,9 @@ int main(int argc, char **argv) {
         FT_Vector k = {0, 0};
         FT_UInt l = FT_Get_Char_Index(face, (FT_ULong)PAIRS[i][0]);
         FT_UInt r = FT_Get_Char_Index(face, (FT_ULong)PAIRS[i][1]);
-        error = FT_Get_Kerning(face, l, r, FT_KERNING_DEFAULT, &k);
+        err = FT_Get_Kerning(face, l, r, FT_KERNING_DEFAULT, &k);
         printf("kern %c%c err %d x %ld y %ld\n", PAIRS[i][0], PAIRS[i][1],
-               (int)error, (long)k.x, (long)k.y);
+               (int)err, (long)k.x, (long)k.y);
         total = fnv1a(total, (const unsigned char *)&k, sizeof k);
     }
 

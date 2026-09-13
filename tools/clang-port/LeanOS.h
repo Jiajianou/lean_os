@@ -30,14 +30,14 @@ namespace toolchains {
 class LLVM_LIBRARY_VISIBILITY LeanOS : public Generic_ELF {
 public:
   LeanOS(const Driver &D, const llvm::Triple &Triple,
-         const llvm::opt::ArgList &Arguments);
+         const llvm::opt::ArgList &Args);
 
   bool IsMathErrnoDefault() const override { return true; }
 
   bool IsObjCNonFragileABIDefault() const override { return true; }
 
   bool isPICDefault() const override { return false; }
-  bool isPIEDefault(const llvm::opt::ArgList &Arguments) const override {
+  bool isPIEDefault(const llvm::opt::ArgList &Args) const override {
     return false;
   }
   bool isPICDefaultForced() const override { return false; }
@@ -80,7 +80,7 @@ public:
 
   std::string getTargetLibDir() const;
 
-  void AddCXXStdlibLibArgs(const llvm::opt::ArgList &Arguments,
+  void AddCXXStdlibLibArgs(const llvm::opt::ArgList &Args,
                            llvm::opt::ArgStringList &CmdArgs) const override;
 
 protected:

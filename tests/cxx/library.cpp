@@ -53,7 +53,7 @@ int main() {
 
     std::ostringstream os;
     os << "n=" << 42 << " s=" << s;
-    if (os.string() != "n=42 s=lean_os") {
+    if (os.str() != "n=42 s=lean_os") {
         return 4;
     }
     std::istringstream is("hello 7");

@@ -10,9 +10,6 @@ mkdir -p "$BUILD"
 
 DRIVER="$BUILD/regex-driver.c"
 cat > "$DRIVER" <<'EOF'
-/* Built twice - see tools/regex-test.sh. Reads "flags<TAB>pattern<TAB>
- * subject" lines and prints the match offsets, or "nomatch", or the
- * compile error. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,8 +42,6 @@ int main(void) {
             if (*f == 'b') eflags |= REG_NOTBOL;
             if (*f == 'e') eflags |= REG_NOTEOL;
         }
-        /* "\n" in a subject means a real newline - the fixtures have to
-         * be one line each. */
         char sbuf[4096];
         size_t si = 0;
         for (char *s = subj; *s && si < sizeof(sbuf)-1; s++) {
@@ -58,8 +53,6 @@ int main(void) {
         regex_t re;
         int rc = regcomp(&re, pat, cflags);
         if (rc) {
-            /* The message text differs between implementations by
-             * design; what must agree is THAT it failed. */
             printf("error\n");
             continue;
         }

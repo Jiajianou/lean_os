@@ -21,9 +21,6 @@ SHIM=$(cd "$(dirname "$0")/.." && pwd)/build/toybox-hostbin
 rm -rf "$SHIM"
 mkdir -p "$SHIM"
 cat > "$SHIM/od" <<'SHIMEOF'
-#!/bin/sh
-# GNU-shaped `od` output, for toybox's zhelp generation - see
-# tools/build-toybox.sh for why this exists.
 /usr/bin/od "$@" | sed -e 's/[[:space:]]*$//'                        -e 's/^[[:space:]][[:space:]]*/ /'                        -e 's/[[:space:]][[:space:]]*/ /g'
 SHIMEOF
 chmod +x "$SHIM/od"

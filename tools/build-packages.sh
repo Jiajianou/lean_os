@@ -116,9 +116,6 @@ build_impostor() {
         -I"$ROOT/user_space/library" || return 1
   done
   cat > "$stage/bin/writer" <<'SCRIPT'
-#!/bin/sh
-# A package script trying to write into the package database. It must
-# fail - see user_space/binaries/pkgtest.c and docs/packages.md.
 echo intruder > /pkg/db/intruder
 SCRIPT
   chmod +x "$stage/bin/writer"
