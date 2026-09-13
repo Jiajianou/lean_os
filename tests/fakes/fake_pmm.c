@@ -1,4 +1,4 @@
-#include "memory_management/pmm.h"
+#include "memory_management/physical_memory.h"
 
 #include <stdint.h>
 #include <stdlib.h>

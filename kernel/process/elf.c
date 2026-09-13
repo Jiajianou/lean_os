@@ -1,10 +1,10 @@
 #include "elf.h"
 
-#include "drivers/klog.h"
-#include "library/libk.h"
-#include "memory_management/pmm.h"
-#include "memory_management/vmm.h"
-#include "process/proc.h"
+#include "drivers/kernel_log.h"
+#include "library/kernel_library.h"
+#include "memory_management/physical_memory.h"
+#include "memory_management/virtual_memory.h"
+#include "process/process.h"
 
 #define EI_MAG0 0
 #define EI_MAG1 1

@@ -1,8 +1,8 @@
 #include "sampler.h"
 
 #include "library/spinlock.h"
-#include "library/libk.h"
-#include "scheduler/sched.h"
+#include "library/kernel_library.h"
+#include "scheduler/scheduler.h"
 
 static spinlock_t prof_lock;
 static prof_sample_t buckets[PROF_BUCKETS];

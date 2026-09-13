@@ -1,8 +1,8 @@
 #include "fwcfg.h"
 
 #include "architecture/x86_64/io.h"
-#include "drivers/klog.h"
-#include "library/libk.h"
+#include "drivers/kernel_log.h"
+#include "library/kernel_library.h"
 
 #define FWCFG_PORT_SEL  0x510
 #define FWCFG_PORT_DATA 0x511

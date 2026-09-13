@@ -1,8 +1,8 @@
 #include "lapic.h"
 
-#include "drivers/klog.h"
-#include "isr.h"
-#include "memory_management/vmm.h"
+#include "drivers/kernel_log.h"
+#include "interrupt_service_routines.h"
+#include "memory_management/virtual_memory.h"
 
 #define LAPIC_REG_ID       0x020u
 #define LAPIC_REG_SVR      0x0F0u

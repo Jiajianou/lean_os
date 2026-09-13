@@ -5,10 +5,10 @@
 #include "network/ethernet.h"
 #include "network/icmp.h"
 #include "network/ip.h"
-#include "network/net.h"
+#include "network/network.h"
 #include "network/tcp.h"
 #include "network/udp.h"
-#include "network/net.h"
+#include "network/network.h"
 
 #include <stdint.h>
 #include <stdlib.h>

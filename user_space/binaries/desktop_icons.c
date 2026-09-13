@@ -3,11 +3,11 @@
 #include "children.h"
 #include "paths.h"
 #define LABEL_H UI_FONT_UI_HEIGHT
-#include "str.h"
+#include "string_utilities.h"
 #include "spawn_error.h"
 #include "syscall_wrappers.h"
 #include "wallpaper.h"
-#include "wmclient.h"
+#include "window_manager_client.h"
 
 #define ICON_BOX_COLOR 0x004C99E6u
 #define ICON_HOVER_COLOR 0x006CB9FFu

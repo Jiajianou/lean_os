@@ -1,7 +1,7 @@
 #include "icmp.h"
 
 #include "ip.h"
-#include "library/libk.h"
+#include "library/kernel_library.h"
 #include "wire.h"
 
 #define ICMP_TYPE_ECHO_REPLY   0

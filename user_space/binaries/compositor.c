@@ -1,10 +1,10 @@
 #include "children.h"
 #include "paths.h"
-#include "uifont.h"
+#include "user_interface_font.h"
 
 #define UI_FONT        ui_font_ui
 #define UI_FONT_HEIGHT UI_FONT_UI_HEIGHT
-#include "gfx.h"
+#include "graphics.h"
 #include "power_mode.h"
 #include "spawn_error.h"
 #include "settings_file.h"
@@ -13,7 +13,7 @@
 #include <stdlib.h>
 
 #include "recent.h"
-#include "str.h"
+#include "string_utilities.h"
 #include "syscall_wrappers.h"
 #include "wm.h"
 

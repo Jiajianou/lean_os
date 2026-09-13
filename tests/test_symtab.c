@@ -1,6 +1,6 @@
 #include "check.h"
 
-#include "../user_space/library/symtab.h"
+#include "../user_space/library/symbol_table.h"
 
 #include <string.h>
 

@@ -1,4 +1,4 @@
-#include "str.h"
+#include "string_utilities.h"
 #include "syscall_wrappers.h"
 
 #define BUF_SIZE 4096

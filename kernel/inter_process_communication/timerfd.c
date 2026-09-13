@@ -3,7 +3,7 @@
 #include "drivers/pit.h"
 #include "library/spinlock.h"
 #include "memory_management/heap.h"
-#include "scheduler/sched.h"
+#include "scheduler/scheduler.h"
 
 static spinlock_t timerfd_lock;
 

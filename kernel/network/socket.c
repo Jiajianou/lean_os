@@ -1,8 +1,8 @@
 #include "socket.h"
 
-#include "library/libk.h"
-#include "net.h"
-#include "scheduler/sched.h"
+#include "library/kernel_library.h"
+#include "network.h"
+#include "scheduler/scheduler.h"
 
 typedef struct {
     uint32_t src_ip;

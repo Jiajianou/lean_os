@@ -2,9 +2,9 @@
 
 #include "paths.h"
 #include "font8x16.h"
-#include "str.h"
+#include "string_utilities.h"
 #include "syscall_wrappers.h"
-#include "wmclient.h"
+#include "window_manager_client.h"
 
 #define COLS 70
 #define ROWS 21

@@ -2,7 +2,7 @@
 
 #include "fakes.h"
 
-#include "../user_space/library/fsutil.h"
+#include "../user_space/library/file_system_utilities.h"
 
 #include <string.h>
 

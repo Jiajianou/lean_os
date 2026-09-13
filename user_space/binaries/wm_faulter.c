@@ -1,5 +1,5 @@
 #include "syscall_wrappers.h"
-#include "wmclient.h"
+#include "window_manager_client.h"
 
 #define WIN_W 200
 #define WIN_H 120

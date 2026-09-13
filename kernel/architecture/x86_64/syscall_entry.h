@@ -1,6 +1,6 @@
 #pragma once
 
-#include "architecture/x86_64/isr.h"
+#include "architecture/x86_64/interrupt_service_routines.h"
 
 void syscall_handler(isr_regs_t *regs);
 

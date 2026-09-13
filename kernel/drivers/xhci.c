@@ -1,14 +1,14 @@
 #include "xhci.h"
 
 #include "drivers/keyboard.h"
-#include "drivers/klog.h"
+#include "drivers/kernel_log.h"
 #include "drivers/mouse.h"
 #include "drivers/pci.h"
 #include "drivers/usb_hid.h"
 #include "drivers/xhci_ring.h"
-#include "library/libk.h"
-#include "memory_management/pmm.h"
-#include "memory_management/vmm.h"
+#include "library/kernel_library.h"
+#include "memory_management/physical_memory.h"
+#include "memory_management/virtual_memory.h"
 
 #define XHCI_CLASS    0x0C
 #define XHCI_SUBCLASS 0x03

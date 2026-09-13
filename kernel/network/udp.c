@@ -1,8 +1,8 @@
 #include "udp.h"
 
 #include "ip.h"
-#include "library/libk.h"
-#include "net.h"
+#include "library/kernel_library.h"
+#include "network.h"
 #include "socket.h"
 #include "wire.h"
 

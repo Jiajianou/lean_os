@@ -1,7 +1,7 @@
 #include "dispi.h"
 
 #include "architecture/x86_64/io.h"
-#include "klog.h"
+#include "kernel_log.h"
 
 #define DISPI_IOPORT_INDEX 0x01CE
 #define DISPI_IOPORT_DATA  0x01CF

@@ -1,8 +1,8 @@
 #include "arp.h"
 
 #include "ip.h"
-#include "library/libk.h"
-#include "net.h"
+#include "library/kernel_library.h"
+#include "network.h"
 #include "wire.h"
 
 #define ARP_HTYPE_ETHERNET 1

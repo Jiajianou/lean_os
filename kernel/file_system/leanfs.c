@@ -1,11 +1,11 @@
 #include "leanfs.h"
 
-#include "drivers/blk.h"
-#include "memory_management/pmm.h"
+#include "drivers/block.h"
+#include "memory_management/physical_memory.h"
 #include "panic.h"
-#include "drivers/klog.h"
+#include "drivers/kernel_log.h"
 #include "drivers/rtc.h"
-#include "library/libk.h"
+#include "library/kernel_library.h"
 
 #include "leanfs_format.h"
 

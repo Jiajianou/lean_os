@@ -1,5 +1,5 @@
 #include "syscall_wrappers.h"
-#include "wmclient.h"
+#include "window_manager_client.h"
 
 #define PANEL_HEIGHT      32
 

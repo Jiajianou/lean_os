@@ -3,7 +3,7 @@
 #include "inter_process_communication/epoll.h"
 #include "inter_process_communication/eventfd.h"
 #include "inter_process_communication/timerfd.h"
-#include "scheduler/sched.h"
+#include "scheduler/scheduler.h"
 
 #include <string.h>
 

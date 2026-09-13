@@ -12,7 +12,7 @@
 
 #include "input.h"
 #include "wm.h"
-#include "wmclient.h"
+#include "window_manager_client.h"
 #include "syscall_wrappers.h"
 
 struct leanos_priv {

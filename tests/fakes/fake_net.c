@@ -1,4 +1,4 @@
-#include "network/net.h"
+#include "network/network.h"
 #include "drivers/rtl8139.h"
 
 #include <stdint.h>

@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "gfx.h"
+#include "graphics.h"
 
 void icon_draw(gfx_ctx_t *ctx, int32_t x, int32_t y, const uint8_t *blob, int32_t scale);
 

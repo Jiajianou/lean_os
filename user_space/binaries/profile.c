@@ -1,4 +1,4 @@
-#include "symtab.h"
+#include "symbol_table.h"
 #include "syscall_wrappers.h"
 
 #include <profile.h>

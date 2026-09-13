@@ -1,13 +1,13 @@
 #include "paths.h"
 #define LIST_FONT   ui_font_small
 #define LIST_FONT_H UI_FONT_SMALL_HEIGHT
-#include "str.h"
-#include "fsutil.h"
+#include "string_utilities.h"
+#include "file_system_utilities.h"
 #include "os_fs.h"
 #include "spawn_error.h"
 #include "recent.h"
 #include "syscall_wrappers.h"
-#include "wmclient.h"
+#include "window_manager_client.h"
 
 #define WIN_W 340
 #define WIN_H 360

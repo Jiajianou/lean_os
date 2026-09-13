@@ -1,6 +1,6 @@
 #include "check.h"
 
-#include "ospkg.h"
+#include "os_package.h"
 #include "sha256.h"
 #include "caps.h"
 

@@ -1,9 +1,9 @@
 #include "panic.h"
 
-#include "architecture/x86_64/smp.h"
-#include "drivers/fb.h"
+#include "architecture/x86_64/symmetric_multiprocessing.h"
+#include "drivers/framebuffer.h"
 #include "drivers/font8x16.h"
-#include "drivers/klog.h"
+#include "drivers/kernel_log.h"
 
 static volatile int panic_broadcast_sent;
 

@@ -1,7 +1,7 @@
 #include "pty.h"
 
-#include "library/libk.h"
-#include "scheduler/sched.h"
+#include "library/kernel_library.h"
+#include "scheduler/scheduler.h"
 
 typedef struct {
     tty_t tty;

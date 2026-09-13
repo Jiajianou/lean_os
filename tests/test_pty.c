@@ -3,7 +3,7 @@
 
 #include "device/pty.h"
 #include "device/tty.h"
-#include "scheduler/sched.h"
+#include "scheduler/scheduler.h"
 #include "signal.h"
 
 #include <string.h>

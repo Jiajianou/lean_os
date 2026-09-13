@@ -1,8 +1,8 @@
 #include "rtc.h"
 
 #include "architecture/x86_64/io.h"
-#include "klog.h"
-#include "architecture/x86_64/tsc.h"
+#include "kernel_log.h"
+#include "architecture/x86_64/timestamp_counter.h"
 
 #define CMOS_ADDR 0x70
 #define CMOS_DATA 0x71

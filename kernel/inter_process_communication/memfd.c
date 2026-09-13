@@ -1,10 +1,10 @@
 #include "memfd.h"
 
-#include "library/libk.h"
+#include "library/kernel_library.h"
 #include "library/spinlock.h"
 #include "memory_management/heap.h"
-#include "memory_management/pmm.h"
-#include "process/proc.h"
+#include "memory_management/physical_memory.h"
+#include "process/process.h"
 
 static spinlock_t memfd_lock;
 

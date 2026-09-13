@@ -1,9 +1,9 @@
 #define LIST_FONT   ui_font_small
 #define LIST_FONT_H UI_FONT_SMALL_HEIGHT
 #include "signal.h"
-#include "str.h"
+#include "string_utilities.h"
 #include "syscall_wrappers.h"
-#include "wmclient.h"
+#include "window_manager_client.h"
 
 #define WIN_W 420
 #define WIN_H 360

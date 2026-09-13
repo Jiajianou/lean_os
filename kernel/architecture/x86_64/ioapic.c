@@ -5,9 +5,9 @@
 #include "architecture/x86_64/lapic.h"
 #include "architecture/x86_64/pic.h"
 #include "device/fwcfg.h"
-#include "drivers/klog.h"
-#include "library/libk.h"
-#include "memory_management/vmm.h"
+#include "drivers/kernel_log.h"
+#include "library/kernel_library.h"
+#include "memory_management/virtual_memory.h"
 
 #define IOAPIC_REGSEL 0x00
 #define IOAPIC_IOWIN  0x10

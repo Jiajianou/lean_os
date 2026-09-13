@@ -4,7 +4,7 @@
 #include "architecture/x86_64/cpu.h"
 #include "library/spinlock.h"
 #include "file_system/flock.h"
-#include "scheduler/sched.h"
+#include "scheduler/scheduler.h"
 #include "signal.h"
 
 #include <string.h>

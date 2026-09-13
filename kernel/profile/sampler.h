@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "architecture/x86_64/isr.h"
+#include "architecture/x86_64/interrupt_service_routines.h"
 #include "profile.h"
 
 #define PROF_BUCKETS 2048

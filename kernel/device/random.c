@@ -1,6 +1,6 @@
 #include "random.h"
 
-#include "library/libk.h"
+#include "library/kernel_library.h"
 #include "library/spinlock.h"
 
 static inline uint32_t rotl32(uint32_t v, int n) {

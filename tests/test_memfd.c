@@ -2,7 +2,7 @@
 
 #include "fakes/fakes.h"
 #include "inter_process_communication/memfd.h"
-#include "process/proc.h"
+#include "process/process.h"
 
 #include <string.h>
 
@@ -244,7 +244,7 @@ TEST(memfd, a_size_change_inside_one_page_is_recorded) {
     clean();
 }
 
-#include "scheduler/sched.h"
+#include "scheduler/scheduler.h"
 
 static task_t parent_task;
 static task_t child_task;

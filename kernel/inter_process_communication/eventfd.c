@@ -1,9 +1,9 @@
 #include "eventfd.h"
 
-#include "library/libk.h"
+#include "library/kernel_library.h"
 #include "library/spinlock.h"
 #include "memory_management/heap.h"
-#include "scheduler/sched.h"
+#include "scheduler/scheduler.h"
 
 static spinlock_t eventfd_lock;
 

@@ -3,10 +3,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "drivers/klog.h"
+#include "drivers/kernel_log.h"
 #include "library/spinlock.h"
-#include "memory_management/pmm.h"
-#include "memory_management/vmm.h"
+#include "memory_management/physical_memory.h"
+#include "memory_management/virtual_memory.h"
 #include "panic.h"
 
 #define PAGE_SIZE 4096ULL

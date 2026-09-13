@@ -1,8 +1,8 @@
 #include "tty.h"
 
-#include "drivers/klog.h"
-#include "library/libk.h"
-#include "scheduler/sched.h"
+#include "drivers/kernel_log.h"
+#include "library/kernel_library.h"
+#include "scheduler/scheduler.h"
 #include "signal.h"
 
 static void tty_signal_foreground(tty_t *t, int sig);

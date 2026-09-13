@@ -1,6 +1,6 @@
 #include "paths.h"
 #include "malloc.h"
-#include "str.h"
+#include "string_utilities.h"
 #include "syscall_wrappers.h"
 
 #define SHM_TEST_SIZE 4096

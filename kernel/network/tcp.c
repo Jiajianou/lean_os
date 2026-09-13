@@ -1,11 +1,11 @@
 #include "tcp.h"
 
 #include "ip.h"
-#include "drivers/klog.h"
-#include "library/libk.h"
-#include "net.h"
+#include "drivers/kernel_log.h"
+#include "library/kernel_library.h"
+#include "network.h"
 #include "wire.h"
-#include "scheduler/sched.h"
+#include "scheduler/scheduler.h"
 
 #define TCP_FIN 0x01
 #define TCP_SYN 0x02

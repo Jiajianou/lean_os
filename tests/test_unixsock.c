@@ -1,8 +1,8 @@
 #include "check.h"
 
 #include "fakes/fakes.h"
-#include "inter_process_communication/unixsock.h"
-#include "scheduler/sched.h"
+#include "inter_process_communication/unix_socket.h"
+#include "scheduler/scheduler.h"
 
 static fd_slot_t a_pipe(int which) {
     fd_slot_t s;

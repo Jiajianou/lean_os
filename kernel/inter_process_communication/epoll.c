@@ -1,6 +1,6 @@
 #include "epoll.h"
 
-#include "library/libk.h"
+#include "library/kernel_library.h"
 #include "library/spinlock.h"
 #include "memory_management/heap.h"
 

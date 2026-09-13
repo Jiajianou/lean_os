@@ -1,5 +1,5 @@
 #include "check.h"
-#include "library/libk.h"
+#include "library/kernel_library.h"
 
 #define PAD 8
 #define CANARY 0xA5

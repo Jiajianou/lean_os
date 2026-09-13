@@ -1,7 +1,7 @@
-#include "gfx.h"
-#include "str.h"
+#include "graphics.h"
+#include "string_utilities.h"
 #include "syscall_wrappers.h"
-#include "uifont.h"
+#include "user_interface_font.h"
 
 #define BUF_W 640
 #define BUF_H 32

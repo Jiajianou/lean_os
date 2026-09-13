@@ -1,9 +1,9 @@
 #include "shortcuts.h"
-#include "str.h"
+#include "string_utilities.h"
 #include "settings_file.h"
 #include "syscall_wrappers.h"
 #include "wallpaper.h"
-#include "wmclient.h"
+#include "window_manager_client.h"
 
 #define WIN_W 320
 #define WIN_H 680

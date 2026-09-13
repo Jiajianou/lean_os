@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "fb.h"
+#include "framebuffer.h"
 #include "font8x16.h"
 
 #define CONSOLE_FG 0x00E0E0E0u

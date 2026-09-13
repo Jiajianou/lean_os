@@ -31,7 +31,7 @@ GEN_FONT     := $(BUILD)/gen-font
 FONT_STAMP   := $(BUILD)/.font-check-stamp
 FONT_FILES   := kernel/drivers/font8x16.h kernel/drivers/font8x16.c \
                 user_space/library/font8x16.h user_space/library/font8x16.c \
-                user_space/library/uifont.h user_space/library/uifont.c
+                user_space/library/user_interface_font.h user_space/library/user_interface_font.c
 
 CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
           -mno-red-zone -mgeneral-regs-only -Wall -Wextra -Werror \
@@ -226,9 +226,9 @@ $(LEANFS_PUT): tools/leanfs-put.c | $(BUILD)
 leanfs-put: $(LEANFS_PUT)
 
 OS_PKG      := $(BUILD)/os-pkg
-OS_PKG_SRCS := tools/os-pkg.c user_space/library/ospkg.c user_space/library/sha256.c
+OS_PKG_SRCS := tools/os-pkg.c user_space/library/os_package.c user_space/library/sha256.c
 
-$(OS_PKG): $(OS_PKG_SRCS) user_space/library/ospkg.h user_space/library/sha256.h \
+$(OS_PKG): $(OS_PKG_SRCS) user_space/library/os_package.h user_space/library/sha256.h \
            system_api/include/caps.h | $(BUILD)
 	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -Iuser_space/library \
 	          -Isystem_api/include -o $@ $(OS_PKG_SRCS)
@@ -322,7 +322,7 @@ $(NETSURF_BIN): $(LIBC_A)
 
 LIBC_SO := $(BUILD)/libc.so
 LIBC_SO_SRCS := $(wildcard user_space/libc/src/*.c) \
-                user_space/library/syscall_wrappers.c user_space/library/str.c \
+                user_space/library/syscall_wrappers.c user_space/library/string_utilities.c \
                 user_space/library/malloc.c user_space/library/dns.c
 
 $(LIBC_SO): $(LIBC_SO_SRCS) $(UOBJ)/setjmp.o $(UOBJ)/symtab.o
@@ -456,20 +456,20 @@ TEST_FAKES := tests/fakes/fake_panic.c tests/fakes/fake_klog.c \
               tests/fakes/fake_user_syscalls.c tests/fakes/fake_user_fs.c \
               tests/fakes/fake_user_net.c
 
-TEST_KERNEL_SRCS := kernel/library/libk.c kernel/memory_management/heap.c kernel/file_system/leanfs.c \
+TEST_KERNEL_SRCS := kernel/library/kernel_library.c kernel/memory_management/heap.c kernel/file_system/leanfs.c \
                     kernel/network/arp.c kernel/network/ip.c kernel/network/icmp.c \
                     kernel/network/udp.c kernel/network/ethernet.c kernel/network/tcp.c \
                     kernel/device/fwcfg.c kernel/device/tty.c kernel/device/pty.c \
-                    kernel/scheduler/sched.c kernel/file_system/flock.c kernel/device/random.c \
-                    kernel/drivers/rtl8139_ring.c kernel/inter_process_communication/unixsock.c \
+                    kernel/scheduler/scheduler.c kernel/file_system/flock.c kernel/device/random.c \
+                    kernel/drivers/rtl8139_ring.c kernel/inter_process_communication/unix_socket.c \
                     kernel/drivers/usb_hid.c kernel/drivers/xhci_ring.c \
                     kernel/drivers/nvme_split.c kernel/drivers/pci.c \
                     kernel/inter_process_communication/eventfd.c kernel/inter_process_communication/timerfd.c kernel/inter_process_communication/epoll.c \
                     kernel/inter_process_communication/memfd.c
 
-TEST_USER_SRCS := user_space/library/symtab.c \
-                  user_space/library/sha256.c user_space/library/ospkg.c \
-                  user_space/library/fsutil.c user_space/library/dns.c \
+TEST_USER_SRCS := user_space/library/symbol_table.c \
+                  user_space/library/sha256.c user_space/library/os_package.c \
+                  user_space/library/file_system_utilities.c user_space/library/dns.c \
                   user_space/libc/src/wchar.c user_space/libc/src/errno.c \
                   user_space/libc/src/fnmatch.c user_space/libc/src/libgen.c \
                   user_space/libc/src/getopt.c user_space/libc/src/wallclock.c

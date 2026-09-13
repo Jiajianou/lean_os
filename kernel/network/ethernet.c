@@ -3,8 +3,8 @@
 #include "arp.h"
 #include "drivers/rtl8139.h"
 #include "ip.h"
-#include "library/libk.h"
-#include "net.h"
+#include "library/kernel_library.h"
+#include "network.h"
 
 const uint8_t eth_broadcast_mac[ETH_ADDR_LEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 

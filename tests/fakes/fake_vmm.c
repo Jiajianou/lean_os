@@ -1,4 +1,4 @@
-#include "memory_management/vmm.h"
+#include "memory_management/virtual_memory.h"
 
 #include <stdint.h>
 #include <stdio.h>

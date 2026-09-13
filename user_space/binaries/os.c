@@ -8,7 +8,7 @@
 #include <unistd.h>
 
 #include "caps.h"
-#include "ospkg.h"
+#include "os_package.h"
 #include "sha256.h"
 #include "syscall_wrappers.h"
 
@@ -330,7 +330,7 @@ static int rewrite_registry(void) {
     registry_overflowed = 0;
     const char *head =
         "# /pkg/db/caps - what each installed program may do.\n"
-        "# Written by /bin/os; read by the kernel at spawn (kernel/process/pkgcaps.c).\n"
+        "# Written by /bin/os; read by the kernel at spawn (kernel/process/package_capabilities.c).\n"
         "# <hex capability mask> <absolute path>. Masks are intersected with\n"
         "# CAP_PKG_MAX in the kernel, so a line here cannot grant more than a\n"
         "# package is ever allowed - see system_api/include/caps.h.\n";

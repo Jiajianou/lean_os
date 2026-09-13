@@ -1,6 +1,6 @@
 #include "settings_file.h"
 
-#include "str.h"
+#include "string_utilities.h"
 #include "syscall_wrappers.h"
 
 #define SETTINGS_BUF 256

@@ -21,7 +21,7 @@ mkdir -p "$SHINC"
 cp system_api/include/paths.h "$SHINC/paths.h"
 
 if ! $HOSTCC -std=c11 -O1 -Wall -Wextra -Werror \
-     -I"$SHINC" -o "$OURS" user_space/shell/sh.c 2>"$BUILD/sh-host.log"; then
+     -I"$SHINC" -o "$OURS" user_space/shell/shell.c 2>"$BUILD/sh-host.log"; then
   echo "sh-test: the shell does not compile for the host:" >&2
   cat "$BUILD/sh-host.log" >&2
   exit 1

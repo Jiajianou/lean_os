@@ -848,7 +848,7 @@ static void build_uifont_header(void) {
 
 static void build_uifont_source(void) {
     out_len = 0;
-    emit("#include \"uifont.h\"\n\n");
+    emit("#include \"user_interface_font.h\"\n\n");
     emit_uifont(&ui_small);
     emit_uifont(&ui_ui);
     emit_uifont(&ui_large);
@@ -911,8 +911,8 @@ int main(int argc, char **argv) {
     build_source(1); bad |= write_if("kernel/drivers/font8x16.c", check_only);
     build_header(0); bad |= write_if("user_space/library/font8x16.h", check_only);
     build_source(0); bad |= write_if("user_space/library/font8x16.c", check_only);
-    build_uifont_header(); bad |= write_if("user_space/library/uifont.h", check_only);
-    build_uifont_source(); bad |= write_if("user_space/library/uifont.c", check_only);
+    build_uifont_header(); bad |= write_if("user_space/library/user_interface_font.h", check_only);
+    build_uifont_source(); bad |= write_if("user_space/library/user_interface_font.c", check_only);
 
     if (bad) return 1;
     if (check_only) printf("gen-font: all six font files match the generator.\n");

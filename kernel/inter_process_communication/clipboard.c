@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "library/libk.h"
+#include "library/kernel_library.h"
 #include "library/spinlock.h"
 
 static uint8_t clipboard_buf[CLIPBOARD_MAX];

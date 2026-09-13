@@ -1,6 +1,6 @@
 #include "cursor.h"
 
-#include "fb.h"
+#include "framebuffer.h"
 
 #define CURSOR_SIZE  8
 #define CURSOR_COLOR 0x00FFFFFFu

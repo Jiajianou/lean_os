@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "gfx.h"
+#include "graphics.h"
 
 #define WALLPAPER_FLAT     0
 #define WALLPAPER_GRADIENT 1

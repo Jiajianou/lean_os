@@ -1,6 +1,6 @@
 #include "proc.h"
 #include "signal.h"
-#include "str.h"
+#include "string_utilities.h"
 #include "syscall_wrappers.h"
 
 static void put(const char *s) {

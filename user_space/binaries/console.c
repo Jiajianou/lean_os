@@ -1,9 +1,9 @@
 #include <string.h>
 
-#include "gfx.h"
+#include "graphics.h"
 #include "syscall_wrappers.h"
-#include "uifont.h"
-#include "wmclient.h"
+#include "user_interface_font.h"
+#include "window_manager_client.h"
 
 #define WIN_W 640
 #define WIN_H 400

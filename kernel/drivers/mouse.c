@@ -1,11 +1,11 @@
 #include "mouse.h"
 
-#include "scheduler/sched.h"
+#include "scheduler/scheduler.h"
 
 #include "architecture/x86_64/io.h"
-#include "architecture/x86_64/isr.h"
+#include "architecture/x86_64/interrupt_service_routines.h"
 #include "architecture/x86_64/pic.h"
-#include "drivers/klog.h"
+#include "drivers/kernel_log.h"
 #include "drivers/pit.h"
 
 #define PS2_DATA_PORT   0x60

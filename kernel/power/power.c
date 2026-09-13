@@ -2,11 +2,11 @@
 
 #include "acpi/acpi.h"
 #include "architecture/x86_64/io.h"
-#include "architecture/x86_64/smp.h"
-#include "drivers/klog.h"
+#include "architecture/x86_64/symmetric_multiprocessing.h"
+#include "drivers/kernel_log.h"
 #include "drivers/pit.h"
-#include "file_system/vfs.h"
-#include "scheduler/sched.h"
+#include "file_system/virtual_file_system.h"
+#include "scheduler/scheduler.h"
 #include "signal.h"
 
 static acpi_power_info_t power_info;

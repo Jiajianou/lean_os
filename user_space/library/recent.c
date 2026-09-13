@@ -1,6 +1,6 @@
 #include "recent.h"
 
-#include "str.h"
+#include "string_utilities.h"
 #include "syscall_wrappers.h"
 
 #define RECENT_BUF ((PATH_MAX_LEN + 1) * RECENT_MAX)
