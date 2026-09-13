@@ -1007,7 +1007,6 @@ static void usage(void) {
     printf("Packages install under /pkg/<name>/<version> and their commands\n");
     printf("appear in /pkg/bin - never in /bin, so a package cannot take over\n");
     printf("the name of a program this OS ships. Nothing runs at install time.\n");
-    printf("See docs/packages.md.\n");
 }
 
 static int command_caps(void) {

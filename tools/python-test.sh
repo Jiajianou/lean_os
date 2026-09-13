@@ -142,5 +142,5 @@ fi
 echo "PASS - CPython's own regression suite ran on this machine over"
 echo "       $reported modules and $total_run tests, and reported"
 echo "       $total_fail failures and $total_err errors in its own words."
-echo "       That is a report rather than a grade; milestones.md M99 is"
+echo "       That is a report rather than a grade; the M99 commit is"
 echo "       where the numbers and what they mean are written down."

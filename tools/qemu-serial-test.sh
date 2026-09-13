@@ -220,6 +220,8 @@ REQUIRED_MARKERS=(
   "[m118] AF_UNIX: a socketpair both ways,"
   "[m119] a message pump:"
   "[m120] a buffer shared across a channel:"
+  "[m125] lvgl rendered"
+  "[m125] a third-party toolkit on this compositor:"
   "[m121] a second compiler that knows this OS by name:"
   "ONE PROGRAM FROM TWO COMPILERS"
   "[q16] devices that fail, and a machine that keeps running:"

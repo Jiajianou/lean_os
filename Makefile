@@ -37,11 +37,13 @@ CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
           -mno-red-zone -mgeneral-regs-only -Wall -Wextra -Werror \
           -MMD -MP -Ikernel -Isystem_api/include -c
 
+LVGL_INCLUDES := -Ithird_party/lvgl -DLV_CONF_INCLUDE_SIMPLE
+
 USER_CFLAGS := -std=c11 -O1 -ffreestanding -fno-stack-protector -fno-pic \
                -mcmodel=large -mno-red-zone -Wall -Wextra -Werror \
                -ffunction-sections -fdata-sections \
                -MMD -MP -Iuser_space/library -Iuser_space/libc/include \
-               -Isystem_api/include -c
+               -Isystem_api/include $(LVGL_INCLUDES) -c
 
 MBR_BIN    := $(BUILD)/mbr.bin
 KERNEL_ELF := $(BUILD)/kernel.elf
@@ -83,7 +85,12 @@ THIRD_PARTY_PROGRAMS := whetstone
 
 USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest os pkgtest dirtest browsertest netrecv unixtest epolltest memfdtest
 USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
+
+LVGL_PROGRAMS := lvgl_demo
+USER_PROGRAMS += $(LVGL_PROGRAMS)
+
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
+LVGL_PROGRAM_ELFS := $(foreach p,$(LVGL_PROGRAMS),$(BUILD)/$(p).elf)
 
 KERNEL_C_SRCS := $(shell find kernel -name '*.c' -not -path 'kernel/boot/*')
 KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*' -not -name 'ap_trampoline.asm')
@@ -123,6 +130,21 @@ THIRD_PARTY_CFLAGS := $(filter-out -Wall -Wextra -Werror,$(USER_CFLAGS)) -Wno-fo
 $(UOBJ)/whetstone.o: third_party/whetstone/whetstone.c | $(UOBJ)
 	$(CC) $(THIRD_PARTY_CFLAGS) $< -o $@
 
+LVGL_DIR  := third_party/lvgl
+LVGL_A    := $(BUILD)/liblvgl.a
+LVGL_SRCS := $(shell find $(LVGL_DIR)/src -name '*.c')
+LVGL_OBJS := $(patsubst $(LVGL_DIR)/%.c,$(UOBJ)/lvgl/%.o,$(LVGL_SRCS))
+LVGL_CFLAGS := $(THIRD_PARTY_CFLAGS) $(LVGL_INCLUDES)
+
+$(UOBJ)/lvgl/%.o: $(LVGL_DIR)/%.c | $(UOBJ)
+	@mkdir -p $(dir $@)
+	$(if $(V),,@echo "  CC      $@")
+	$(if $(V),,@)$(CC) $(LVGL_CFLAGS) $< -o $@
+
+$(LVGL_A): $(LVGL_OBJS)
+	$(if $(V),,@echo "  AR      $@")
+	$(if $(V),,@)$(AR) rcs $@ $(LVGL_OBJS)
+
 $(UOBJ)/%.o: user_space/library/%.asm | $(UOBJ)
 	$(AS) -f elf64 $< -o $@
 
@@ -140,6 +162,12 @@ $(UOBJ)/%.o: user_space/shell/%.c | $(UOBJ)
 $(BUILD)/%.elf: $(UOBJ)/%.o $(USER_LIBOBJS) $(USER_LD)
 	$(if $(V),,@echo "  LD      $@")
 	$(if $(V),,@)$(LD) --gc-sections -T $(USER_LD) -o $@ $(USER_LIBOBJS) $(UOBJ)/$*.o
+
+LVGL_PORT_OBJS := $(UOBJ)/lvgl_leanos.o $(UOBJ)/lvgl_keys.o
+
+$(LVGL_PROGRAM_ELFS): $(BUILD)/%.elf: $(UOBJ)/%.o $(USER_LIBOBJS) $(LVGL_PORT_OBJS) $(LVGL_A) $(USER_LD)
+	$(if $(V),,@echo "  LD      $@")
+	$(if $(V),,@)$(LD) --gc-sections -T $(USER_LD) -o $@ $(USER_LIBOBJS) $(LVGL_PORT_OBJS) $(UOBJ)/$*.o $(LVGL_A)
 
 AP_TRAMPOLINE_BIN := $(BUILD)/ap_trampoline.bin
 
@@ -440,7 +468,7 @@ TEST_BUILD  := $(BUILD)/tests
 TEST_CFLAGS := -std=c11 -g -O1 -Wall -Wextra -Werror -DLEANOS_HOST_TEST \
                -fno-omit-frame-pointer \
                -Itests -Itests/fakes -Ikernel -Isystem_api/include \
-               -Iuser_space/library
+               -Iuser_space/library $(LVGL_INCLUDES)
 
 ifneq ($(TEST_SAN),0)
 TEST_CFLAGS += -fsanitize=address,undefined -fno-sanitize-recover=all

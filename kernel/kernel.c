@@ -136,7 +136,8 @@
     X(netrecv)                  \
     X(unixtest)                 \
     X(epolltest)                \
-    X(memfdtest)
+    X(memfdtest)                \
+    X(lvgl_demo)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -203,6 +204,11 @@ static void kernel_log_perf(const char *name, uint64_t value, const char *unit) 
     kernel_log_puts(unit);
     kernel_log_putc('\n');
 }
+
+#define LVGL_DISTINCT_BUCKETS 512
+#define LVGL_DISTINCT_EMPTY 0xFFFFFFFFu
+#define LVGL_MINIMUM_DRAWN_PIXELS 20000
+#define LVGL_MINIMUM_DISTINCT_COLORS 64
 
 #define LATENCY_SAMPLES 16
 
@@ -2200,7 +2206,7 @@ static void boot_selftests_system(void) {
         kernel_log_puts(" round-tripped).\n\n");
     } else {
         kernel_log_puts("[net] no NIC - the ICMP round-trip self-test was skipped "
-                   "(expected on real hardware; see docs/real-hardware.md).\n\n");
+                   "(expected on real hardware).\n\n");
     }
 
     {
@@ -5751,7 +5757,7 @@ static void boot_selftests_system(void) {
         os_stat_t tb;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/toybox", (uint64_t)&tb, 0) != 0) {
             kernel_log_puts("[m89] /bin/toybox is not on this image - skipped. "
-                       "`make toybox` installs it; see milestones.md M89.\n\n");
+                       "`make toybox` installs it.\n\n");
         } else {
             int all_ok = 1;
             const char *script = PATH_TEMPORARY_DIRECTORY "m89.sh";
@@ -8010,6 +8016,89 @@ static void boot_selftests_system(void) {
 
     {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        size_t comp_bytes = 0;
+        uint8_t *comp_image = read_program(PATH_BIN_DIRECTORY "compositor", &comp_bytes);
+        size_t demo_bytes = 0;
+        uint8_t *demo_image = read_program(PATH_BIN_DIRECTORY "lvgl_demo", &demo_bytes);
+        if (!comp_image || !demo_image) {
+            panic("M125 self-test: /bin/lvgl_demo is not on this disk");
+        }
+
+        task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
+        kfree(comp_image);
+        selftest_wait_for_compositor();
+
+        task_t *demo_task = process_spawn("lvgl_demo", demo_image, demo_bytes, "");
+        kfree(demo_image);
+        pit_sleep_ms(3000);
+
+        uint32_t width = framebuffer_width();
+        uint32_t height = framebuffer_height();
+        uint32_t distinct_table[LVGL_DISTINCT_BUCKETS];
+        for (uint32_t i = 0; i < LVGL_DISTINCT_BUCKETS; i++) {
+            distinct_table[i] = LVGL_DISTINCT_EMPTY;
+        }
+        uint32_t distinct = 0;
+        uint32_t drawn = 0;
+        for (uint32_t y = 0; y < height; y += 2) {
+            for (uint32_t x = 0; x < width; x += 2) {
+                uint32_t pixel = framebuffer_get_pixel(x, y) & 0x00FFFFFFu;
+                if (pixel == 0x001A1A2Eu) {
+                    continue;
+                }
+                drawn++;
+                uint32_t slot = (pixel * 2654435761u) % LVGL_DISTINCT_BUCKETS;
+                for (uint32_t probe = 0; probe < LVGL_DISTINCT_BUCKETS; probe++) {
+                    uint32_t at = (slot + probe) % LVGL_DISTINCT_BUCKETS;
+                    if (distinct_table[at] == pixel) {
+                        break;
+                    }
+                    if (distinct_table[at] == LVGL_DISTINCT_EMPTY) {
+                        distinct_table[at] = pixel;
+                        distinct++;
+                        break;
+                    }
+                }
+            }
+        }
+
+        selftest_reap(demo_task);
+        selftest_reap(comp_task);
+        console_init();
+        kernel_log_use_console();
+
+        if (drawn < LVGL_MINIMUM_DRAWN_PIXELS) {
+            kernel_log_puts("[m125] the LVGL window drew ");
+            kernel_log_put_dec(drawn);
+            kernel_log_puts(" pixels, wanted at least ");
+            kernel_log_put_dec(LVGL_MINIMUM_DRAWN_PIXELS);
+            kernel_log_putc('\n');
+            panic("M125 self-test: the LVGL toolkit painted nothing the "
+                  "compositor showed");
+        }
+        if (distinct < LVGL_MINIMUM_DISTINCT_COLORS) {
+            kernel_log_puts("[m125] the LVGL window used ");
+            kernel_log_put_dec(distinct);
+            kernel_log_puts(" distinct colors, wanted at least ");
+            kernel_log_put_dec(LVGL_MINIMUM_DISTINCT_COLORS);
+            kernel_log_puts(" - a flat fill is not an anti-aliased widget\n");
+            panic("M125 self-test: the LVGL toolkit rendered without "
+                  "anti-aliasing");
+        }
+        kernel_log_puts("[m125] a third-party toolkit on this compositor: LVGL "
+                  "rendering a flex-laid-out card of widgets straight into "
+                  "the window's shared memory with no copy, ");
+        kernel_log_put_dec(drawn);
+        kernel_log_puts(" pixels in ");
+        kernel_log_put_dec(distinct);
+        kernel_log_puts(" distinct colors - which a bitmap-font toolkit "
+                  "cannot produce - self-test passed (");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
+    }
+
+    {
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
         int un_before = unix_socket_in_use();
         size_t ut_bytes = 0;
         uint8_t *ut_img = read_program(PATH_BIN_DIRECTORY "unixtest", &ut_bytes);
@@ -8306,8 +8395,7 @@ static void boot_selftests_system(void) {
         if (do_syscall(SYS_stat, (uint64_t)(PATH_BIN_DIRECTORY "netsurf"),
                         (uint64_t)&nst, 0) != 0) {
             kernel_log_puts("[m113] /bin/netsurf is not on this image - skipped. "
-                       "`make browser` builds and installs it; see "
-                       "docs/browser.md.\n\n");
+                       "`make browser` builds and installs it.\n\n");
         } else {
             int all_ok = 1;
 
@@ -11127,7 +11215,7 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
 
     if (!net_init()) {
         kernel_log_puts("[net] no RTL8139 NIC found - networking unavailable this boot "
-                   "(expected on real hardware; see docs/real-hardware.md).\n\n");
+                   "(expected on real hardware).\n\n");
     }
 
     if (boot_selftests_enabled()) {

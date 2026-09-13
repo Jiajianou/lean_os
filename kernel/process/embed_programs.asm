@@ -419,3 +419,9 @@ global memfdtest_elf_end
 memfdtest_elf_start:
     incbin "build/memfdtest.elf"
 memfdtest_elf_end:
+
+global lvgl_demo_elf_start
+global lvgl_demo_elf_end
+lvgl_demo_elf_start:
+    incbin "build/lvgl_demo.elf"
+lvgl_demo_elf_end:
