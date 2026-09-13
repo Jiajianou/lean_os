@@ -192,18 +192,6 @@ file_manager_elf_start:
     incbin "build/file_manager.elf"
 file_manager_elf_end:
 
-global settings_elf_start
-global settings_elf_end
-settings_elf_start:
-    incbin "build/settings.elf"
-settings_elf_end:
-
-global task_manager_elf_start
-global task_manager_elf_end
-task_manager_elf_start:
-    incbin "build/task_manager.elf"
-task_manager_elf_end:
-
 global wm_stubborn_elf_start
 global wm_stubborn_elf_end
 wm_stubborn_elf_start:
@@ -420,8 +408,8 @@ memfdtest_elf_start:
     incbin "build/memfdtest.elf"
 memfdtest_elf_end:
 
-global lvgl_demo_elf_start
-global lvgl_demo_elf_end
-lvgl_demo_elf_start:
-    incbin "build/lvgl_demo.elf"
-lvgl_demo_elf_end:
+global desktop_applications_elf_start
+global desktop_applications_elf_end
+desktop_applications_elf_start:
+    incbin "build/desktop_applications.elf"
+desktop_applications_elf_end:

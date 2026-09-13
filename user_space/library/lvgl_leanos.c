@@ -32,9 +32,15 @@ static void lvgl_read_pointer(lv_indev_t *indev, lv_indev_data_t *data) {
     if (!window) {
         return;
     }
-    data->point.x = window->pointer_x;
-    data->point.y = window->pointer_y;
-    data->state = window->pointer_pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    int32_t x = window->pointer_x;
+    int32_t y = window->pointer_y;
+    int32_t width = (int32_t)window->window.width;
+    int32_t height = (int32_t)window->window.height;
+    int outside = (x < 0 || y < 0 || x >= width || y >= height);
+    data->point.x = x < 0 ? 0 : (x >= width ? width - 1 : x);
+    data->point.y = y < 0 ? 0 : (y >= height ? height - 1 : y);
+    data->state = (window->pointer_pressed && !outside) ? LV_INDEV_STATE_PRESSED
+                                                        : LV_INDEV_STATE_RELEASED;
 }
 
 static void lvgl_read_keypad(lv_indev_t *indev, lv_indev_data_t *data) {
@@ -92,6 +98,7 @@ static int lvgl_window_attach(lvgl_window_t *window) {
         return -1;
     }
     lv_display_set_color_format(window->display, LV_COLOR_FORMAT_XRGB8888);
+    window->bound_pixels = window->window.graphics.pixels;
     lv_display_set_buffers(window->display, window->window.graphics.pixels, NULL,
                            (uint32_t)(window->window.width * window->window.height * sizeof(uint32_t)),
                            LV_DISPLAY_RENDER_MODE_DIRECT);
@@ -153,6 +160,35 @@ int lvgl_window_open_confirm_close(uint32_t width, uint32_t height, const char *
     return lvgl_window_attach(out);
 }
 
+static void lvgl_rebind_buffer(lvgl_window_t *window) {
+    uint32_t *pixels = window->window.graphics.pixels;
+    if (!window->display || !pixels || pixels == window->bound_pixels) {
+        return;
+    }
+    window->bound_pixels = pixels;
+    lv_display_set_buffers(window->display, pixels, NULL,
+                           (uint32_t)(window->window.width * window->window.height * sizeof(uint32_t)),
+                           LV_DISPLAY_RENDER_MODE_DIRECT);
+    lv_obj_invalidate(lv_screen_active());
+}
+
+void lvgl_window_set_key_handler(lvgl_window_t *window, lvgl_key_handler_t handler) {
+    if (window) {
+        window->key_handler = handler;
+    }
+}
+
+void lvgl_window_report_geometry(const char *name, lv_obj_t *object) {
+    if (!name || !object) {
+        return;
+    }
+    lv_obj_update_layout(lv_obj_get_screen(object));
+    lv_area_t area;
+    lv_obj_get_coords(object, &area);
+    printf("[geometry] %s %d %d %d %d\n", name, (int)area.x1, (int)area.y1,
+           (int)(area.x2 - area.x1 + 1), (int)(area.y2 - area.y1 + 1));
+}
+
 int lvgl_window_pump(lvgl_window_t *window, int timeout_ms) {
     if (!window) {
         return -1;
@@ -172,6 +208,10 @@ int lvgl_window_pump(lvgl_window_t *window, int timeout_ms) {
             window->pointer_pressed = (uint8_t)(event.buttons & 1u);
             break;
         case WINDOW_MANAGER_EVENT_KEY:
+            if (window->key_handler &&
+                window->key_handler(window, (uint32_t)(unsigned char)event.ch, (uint32_t)event.mods)) {
+                break;
+            }
             lvgl_push_key(window, lvgl_translate_key(event.ch, event.mods));
             break;
         case WINDOW_MANAGER_EVENT_EXPOSE:
@@ -184,6 +224,7 @@ int lvgl_window_pump(lvgl_window_t *window, int timeout_ms) {
             break;
         }
     }
+    lvgl_rebind_buffer(window);
     return 0;
 }
 

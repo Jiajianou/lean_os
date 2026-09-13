@@ -83,10 +83,10 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
 
 THIRD_PARTY_PROGRAMS := whetstone
 
-USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager settings task_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest os pkgtest dirtest browsertest netrecv unixtest epolltest memfdtest
+USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest os pkgtest dirtest browsertest netrecv unixtest epolltest memfdtest
 USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
 
-LVGL_PROGRAMS := lvgl_demo
+LVGL_PROGRAMS := desktop_applications
 USER_PROGRAMS += $(LVGL_PROGRAMS)
 
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
@@ -163,11 +163,16 @@ $(BUILD)/%.elf: $(UOBJ)/%.o $(USER_LIBOBJS) $(USER_LD)
 	$(if $(V),,@echo "  LD      $@")
 	$(if $(V),,@)$(LD) --gc-sections -T $(USER_LD) -o $@ $(USER_LIBOBJS) $(UOBJ)/$*.o
 
-LVGL_PORT_OBJS := $(UOBJ)/lvgl_leanos.o $(UOBJ)/lvgl_keys.o
+LVGL_PORT_OBJS := $(UOBJ)/lvgl_leanos.o $(UOBJ)/lvgl_keys.o $(UOBJ)/lvgl_theme.o \
+                  $(UOBJ)/desktop_palette.o $(UOBJ)/application_dispatch.o
 
-$(LVGL_PROGRAM_ELFS): $(BUILD)/%.elf: $(UOBJ)/%.o $(USER_LIBOBJS) $(LVGL_PORT_OBJS) $(LVGL_A) $(USER_LD)
+DESKTOP_APPLICATION_OBJS := $(UOBJ)/desktop_application_settings.o \
+                            $(UOBJ)/desktop_application_task_manager.o \
+                            $(UOBJ)/desktop_application_widgets.o
+
+$(LVGL_PROGRAM_ELFS): $(BUILD)/%.elf: $(UOBJ)/%.o $(USER_LIBOBJS) $(LVGL_PORT_OBJS) $(DESKTOP_APPLICATION_OBJS) $(LVGL_A) $(USER_LD)
 	$(if $(V),,@echo "  LD      $@")
-	$(if $(V),,@)$(LD) --gc-sections -T $(USER_LD) -o $@ $(USER_LIBOBJS) $(LVGL_PORT_OBJS) $(UOBJ)/$*.o $(LVGL_A)
+	$(if $(V),,@)$(LD) --gc-sections -T $(USER_LD) -o $@ $(USER_LIBOBJS) $(LVGL_PORT_OBJS) $(DESKTOP_APPLICATION_OBJS) $(UOBJ)/$*.o $(LVGL_A)
 
 AP_TRAMPOLINE_BIN := $(BUILD)/ap_trampoline.bin
 
@@ -535,7 +540,8 @@ LLVM_CC    := $(shell for c in /opt/homebrew/opt/llvm/bin/clang \
 COV_CC     := $(LLVM_CC)
 COV_CFLAGS := -std=c11 -g -O0 -Wall -Wextra -DLEANOS_HOST_TEST \
               -fprofile-instr-generate -fcoverage-mapping \
-              -Itests -Itests/fakes -Ikernel -Isystem_api/include -Iuser_space/library
+              -Itests -Itests/fakes -Ikernel -Isystem_api/include -Iuser_space/library \
+              $(LVGL_INCLUDES)
 
 $(COV_BUILD):
 	mkdir -p $@
@@ -572,7 +578,7 @@ FUZZ_FAKES  := tests/fakes/fake_panic_abort.c tests/fakes/fake_klog.c \
                tests/fakes/fake_vmm.c tests/fakes/fake_blk.c \
                tests/fakes/fake_rtc.c tests/fakes/fake_net.c \
                tests/fakes/fake_pit.c tests/fakes/fake_socket.c \
-              tests/fakes/fake_fwcfg.c \
+              tests/fakes/fake_fwcfg.c tests/fakes/fake_pci.c \
               tests/fakes/fake_arch.c tests/fakes/fake_kernel_objects.c
 FUZZ_TARGETS := $(FUZZ_BUILD)/fuzz_net $(FUZZ_BUILD)/fuzz_leanfs
 

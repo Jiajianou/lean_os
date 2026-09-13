@@ -99,8 +99,6 @@
     X(gui_terminal)                  \
     X(text_editor)                   \
     X(file_manager)                  \
-    X(settings)                    \
-    X(task_manager)                \
     X(wm_stubborn)                 \
     X(wm_zorder)                   \
     X(wm_faulter)                  \
@@ -137,7 +135,7 @@
     X(unixtest)                 \
     X(epolltest)                \
     X(memfdtest)                \
-    X(lvgl_demo)
+    X(desktop_applications)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
     extern const uint8_t name##_elf_start[]; \
@@ -8104,6 +8102,129 @@ static void boot_selftests_system(void) {
 
     {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        leanfs_stat_t binary_stat;
+        leanfs_stat_t settings_link;
+        leanfs_stat_t settings_target;
+        leanfs_stat_t tasks_link;
+        leanfs_stat_t tasks_target;
+        if (virtual_file_system_stat(PATH_BIN_DIRECTORY "desktop_applications", &binary_stat) != 0 ||
+            virtual_file_system_lstat(PATH_BIN_DIRECTORY "settings", &settings_link) != 0 ||
+            virtual_file_system_stat(PATH_BIN_DIRECTORY "settings", &settings_target) != 0 ||
+            virtual_file_system_lstat(PATH_BIN_DIRECTORY "task_manager", &tasks_link) != 0 ||
+            virtual_file_system_stat(PATH_BIN_DIRECTORY "task_manager", &tasks_target) != 0) {
+            panic("M127 self-test: the desktop applications are not on this disk");
+        }
+        if (!settings_link.is_link || !tasks_link.is_link) {
+            kernel_log_puts("[m127] /bin/settings and /bin/task_manager are not links - "
+                      "every application is paying for its own copy of the toolkit\n");
+            panic("M127 self-test: the desktop applications were seeded as copies");
+        }
+        if (settings_target.inode != binary_stat.inode ||
+            tasks_target.inode != binary_stat.inode) {
+            kernel_log_puts("[m127] the application links do not resolve to "
+                      PATH_BIN_DIRECTORY "desktop_applications\n");
+            panic("M127 self-test: an application link points somewhere else");
+        }
+
+        size_t comp_bytes = 0;
+        uint8_t *comp_image = read_program(PATH_BIN_DIRECTORY "compositor", &comp_bytes);
+        size_t settings_bytes = 0;
+        uint8_t *settings_image = read_program(PATH_BIN_DIRECTORY "settings", &settings_bytes);
+        size_t tasks_bytes = 0;
+        uint8_t *tasks_image = read_program(PATH_BIN_DIRECTORY "task_manager", &tasks_bytes);
+        if (!comp_image || !settings_image || !tasks_image) {
+            panic("M127 self-test: a desktop application could not be read through its link");
+        }
+
+        task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
+        kfree(comp_image);
+        selftest_wait_for_compositor();
+
+        task_t *settings_task = process_spawn("settings", settings_image, settings_bytes, "");
+        kfree(settings_image);
+        task_t *tasks_task = process_spawn("task_manager", tasks_image, tasks_bytes, "");
+        kfree(tasks_image);
+        uint32_t settings_caps = settings_task ? settings_task->caps : 0;
+        uint32_t tasks_caps = tasks_task ? tasks_task->caps : 0;
+        pit_sleep_ms(4000);
+
+        uint32_t width = framebuffer_width();
+        uint32_t height = framebuffer_height();
+        uint32_t distinct_table[LVGL_DISTINCT_BUCKETS];
+        for (uint32_t i = 0; i < LVGL_DISTINCT_BUCKETS; i++) {
+            distinct_table[i] = LVGL_DISTINCT_EMPTY;
+        }
+        uint32_t distinct = 0;
+        uint32_t drawn = 0;
+        for (uint32_t y = 0; y < height; y += 2) {
+            for (uint32_t x = 0; x < width; x += 2) {
+                uint32_t pixel = framebuffer_get_pixel(x, y) & 0x00FFFFFFu;
+                if (pixel == 0x001A1A2Eu) {
+                    continue;
+                }
+                drawn++;
+                uint32_t slot = (pixel * 2654435761u) % LVGL_DISTINCT_BUCKETS;
+                for (uint32_t probe = 0; probe < LVGL_DISTINCT_BUCKETS; probe++) {
+                    uint32_t at = (slot + probe) % LVGL_DISTINCT_BUCKETS;
+                    if (distinct_table[at] == pixel) {
+                        break;
+                    }
+                    if (distinct_table[at] == LVGL_DISTINCT_EMPTY) {
+                        distinct_table[at] = pixel;
+                        distinct++;
+                        break;
+                    }
+                }
+            }
+        }
+
+        selftest_reap(tasks_task);
+        selftest_reap(settings_task);
+        selftest_reap(comp_task);
+        console_init();
+        kernel_log_use_console();
+
+        if (drawn < LVGL_MINIMUM_DRAWN_PIXELS || distinct < LVGL_MINIMUM_DISTINCT_COLORS) {
+            kernel_log_puts("[m127] the two desktop applications drew ");
+            kernel_log_put_dec(drawn);
+            kernel_log_puts(" pixels in ");
+            kernel_log_put_dec(distinct);
+            kernel_log_puts(" distinct colors\n");
+            panic("M127 self-test: the converted desktop applications did not "
+                  "reach the screen");
+        }
+        if ((settings_caps & CAP_DISPLAY_MODE) == 0 ||
+            (tasks_caps & CAP_PROCESS_LIST) == 0 ||
+            (settings_caps & CAP_PROCESS_LIST) != 0 ||
+            (tasks_caps & CAP_DISPLAY_MODE) != 0) {
+            kernel_log_puts("[m127] settings holds 0x");
+            kernel_log_put_hex64(settings_caps);
+            kernel_log_puts(" and task_manager holds 0x");
+            kernel_log_put_hex64(tasks_caps);
+            kernel_log_puts(" - one binary under two names got one capability set\n");
+            panic("M127 self-test: a multicall binary defeated the capability model");
+        }
+
+        kernel_log_puts("[m127] the desktop's own applications on LVGL: Settings and "
+                  "Tasks are ");
+        kernel_log_put_dec((uint32_t)binary_stat.size);
+        kernel_log_puts(" bytes of ONE binary reached through two links, "
+                  "drawing ");
+        kernel_log_put_dec(drawn);
+        kernel_log_puts(" pixels in ");
+        kernel_log_put_dec(distinct);
+        kernel_log_puts(" distinct colors, and the kernel still gave each name its "
+                  "own capabilities (settings 0x");
+        kernel_log_put_hex64(settings_caps);
+        kernel_log_puts(", task_manager 0x");
+        kernel_log_put_hex64(tasks_caps);
+        kernel_log_puts(") - self-test passed (");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
+        kernel_log_puts(" ms).\n\n");
+    }
+
+    {
+        uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
         int un_before = unix_socket_in_use();
         size_t ut_bytes = 0;
         uint8_t *ut_img = read_program(PATH_BIN_DIRECTORY "unixtest", &ut_bytes);
@@ -11079,6 +11200,33 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
             size_t size = (size_t)(p->end - p->start);
             if (virtual_file_system_write(path, p->start, size) != 0) {
                 panic("vfs_write: failed to seed a program onto disk");
+            }
+        }
+    }
+    {
+        static const struct {
+            const char *name;
+            const char *target;
+        } PROGRAM_ALIASES[] = {
+            {"settings", PATH_BIN_DIRECTORY "desktop_applications"},
+            {"task_manager", PATH_BIN_DIRECTORY "desktop_applications"},
+            {"lvgl_demo", PATH_BIN_DIRECTORY "desktop_applications"},
+        };
+        for (size_t i = 0; i < sizeof(PROGRAM_ALIASES) / sizeof(PROGRAM_ALIASES[0]); i++) {
+            char path[PATH_MAX_LENGTH];
+            if (path_join(path, PATH_BIN_DIRECTORY, PROGRAM_ALIASES[i].name) != 0) {
+                panic("a program alias is too long to live in /bin");
+            }
+            if (virtual_file_system_exists(path)) {
+                continue;
+            }
+            kernel_log_puts("[fs] linking '");
+            kernel_log_puts(path);
+            kernel_log_puts("' -> '");
+            kernel_log_puts(PROGRAM_ALIASES[i].target);
+            kernel_log_puts("' (first boot only)...\n");
+            if (virtual_file_system_symlink(path, PROGRAM_ALIASES[i].target) != 0) {
+                panic("vfs_symlink: failed to seed a program alias onto disk");
             }
         }
     }

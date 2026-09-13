@@ -1,7 +1,7 @@
 #include <stdio.h>
-#include <string.h>
 
-#include "lvgl_leanos.h"
+#include "desktop_applications.h"
+#include "lvgl_theme.h"
 
 #define DEMO_WIDTH 640
 #define DEMO_HEIGHT 480
@@ -26,8 +26,8 @@ static void on_slider_changed(lv_event_t *event) {
 }
 
 static void build_user_interface(void) {
+    const desktop_palette_t *palette = lvgl_theme_palette();
     lv_obj_t *screen = lv_screen_active();
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0x141414), LV_PART_MAIN);
     lv_obj_set_flex_flow(screen, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(screen, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(screen, 16, LV_PART_MAIN);
@@ -35,13 +35,13 @@ static void build_user_interface(void) {
     lv_obj_t *title = lv_label_create(screen);
     lv_label_set_text(title, "lean_os widgets");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_24, LV_PART_MAIN);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xF0F0F0), LV_PART_MAIN);
+    lv_obj_set_style_text_color(title, lvgl_theme_color(palette->text), LV_PART_MAIN);
 
     lv_obj_t *card = lv_obj_create(screen);
     lv_obj_set_size(card, 420, 260);
-    lv_obj_set_style_bg_color(card, lv_color_hex(0x1F1F1F), LV_PART_MAIN);
-    lv_obj_set_style_border_color(card, lv_color_hex(0x3A3A3A), LV_PART_MAIN);
-    lv_obj_set_style_radius(card, 12, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(card, lvgl_theme_color(palette->surface), LV_PART_MAIN);
+    lv_obj_set_style_border_color(card, lvgl_theme_color(palette->outline), LV_PART_MAIN);
+    lv_obj_set_style_radius(card, LVGL_THEME_RADIUS, LV_PART_MAIN);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(card, 18, LV_PART_MAIN);
@@ -60,35 +60,32 @@ static void build_user_interface(void) {
     lv_obj_t *toggle = lv_switch_create(card);
     lv_obj_add_state(toggle, LV_STATE_CHECKED);
 
-    lv_obj_t *button = lv_button_create(card);
-    lv_obj_set_style_radius(button, 8, LV_PART_MAIN);
+    lv_obj_t *button = lvgl_theme_button(card, "Clicked 0", 1);
     lv_obj_add_event_cb(button, on_button_clicked, LV_EVENT_CLICKED, NULL);
-    counter_label = lv_label_create(button);
-    lv_label_set_text(counter_label, "Clicked 0");
-    lv_obj_center(counter_label);
+    counter_label = lv_obj_get_child(button, 0);
 }
 
 static unsigned long count_rendered_pixels(void) {
+    const desktop_palette_t *palette = lvgl_theme_palette();
     const uint32_t *pixels = demo_window.window.graphics.pixels;
     unsigned long total = (unsigned long)demo_window.window.width * demo_window.window.height;
     unsigned long drawn = 0;
     for (unsigned long i = 0; i < total; i++) {
-        if ((pixels[i] & 0x00FFFFFFu) != 0x00141414u) {
+        if ((pixels[i] & 0x00FFFFFFu) != palette->window) {
             drawn++;
         }
     }
     return drawn;
 }
 
-int main(int argc, char **argv) {
-    int selftest = (argc > 1 && strcmp(argv[1], "--selftest") == 0);
-
+int desktop_application_widgets(int selftest) {
     if (lvgl_window_open(DEMO_WIDTH, DEMO_HEIGHT, "Widgets", &demo_window) != 0) {
         printf("[m125] lvgl_demo: window open failed\n");
         return 1;
     }
     printf("[m125] lvgl display %ux%u xrgb8888\n", demo_window.window.width, demo_window.window.height);
 
+    lvgl_theme_apply(&demo_window);
     build_user_interface();
 
     for (int frame = 0; frame < 8; frame++) {

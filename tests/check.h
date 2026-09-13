@@ -37,6 +37,13 @@ void test_abandon(void);
         }                                                                      \
     } while (0)
 
+#define CHECK_MSG(cond, ...)                                                   \
+    do {                                                                       \
+        if (!(cond)) {                                                         \
+            test_fail(__FILE__, __LINE__, __VA_ARGS__);                        \
+        }                                                                      \
+    } while (0)
+
 #define REQUIRE(cond)                                                          \
     do {                                                                       \
         if (!(cond)) {                                                         \

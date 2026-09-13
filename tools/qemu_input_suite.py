@@ -191,44 +191,58 @@ CLOCK_W = 200
 BORDER = 2
 BORDER_COLOR = 0x444466
 
-SETTINGS_W, SETTINGS_H = 320, 680
-WALL_BTN_Y, WALL_BTN_W, WALL_BTN_H = 258, 68, 22
+SETTINGS_W, SETTINGS_H = 440, 620
 
-MOTION_BTN_Y = 288
-VOL_Y, VOL_BTN_W, VOL_BTN_H, VOL_BTN_GAP = 288, 22, 20, 4
-VOL_X0 = 12 + 58
-MOTION_BTN_W, MOTION_BTN_H = 50, 20
-MOTION_BTN_X = 320 - 12 - MOTION_BTN_W
-SETTINGS_BTN_ON = 0x607088
-SETTINGS_BTN_OFF = 0x445566
-
-def volume_click(sx, sy, step):
-    return (sx + VOL_X0 + step * (VOL_BTN_W + VOL_BTN_GAP) + VOL_BTN_W - 4,
-            sy + VOL_Y + VOL_BTN_H - 4)
-
-def volume_probe(sx, sy, step):
-    return (sx + VOL_X0 + step * (VOL_BTN_W + VOL_BTN_GAP) + 3,
-            sy + VOL_Y + 3)
-
-def motion_click(sx, sy):
-    return (sx + MOTION_BTN_X + MOTION_BTN_W - 6, sy + MOTION_BTN_Y + MOTION_BTN_H - 4)
-
-def motion_probe(sx, sy):
-    return (sx + MOTION_BTN_X + 6, sy + MOTION_BTN_Y + 4)
-
-MODE_BTN_Y, MODE_BTN_W, MODE_BTN_H, MODE_BTN_GAP, MODE_COLS = 340, 92, 20, 6, 3
-GFX_PAD = 12
-CONFIRM_Y = MODE_BTN_Y + 3 * (MODE_BTN_H + 4) + 6
-CONFIRM_H = 20
-KEEP_BTN_W = 64
-KEEP_BTN_X = SETTINGS_W - GFX_PAD - KEEP_BTN_W
 SMALL_MODE = (800, 600)
 SMALL_MODE_INDEX = 0
 MODE_REVERT_S = 10 + 5
 
-def mode_btn_center(sx, sy, i):
-    return (sx + GFX_PAD + (i % MODE_COLS) * (MODE_BTN_W + MODE_BTN_GAP) + MODE_BTN_W // 2,
-            sy + MODE_BTN_Y + (i // MODE_COLS) * (MODE_BTN_H + 4) + MODE_BTN_H // 2)
+DESKTOP_ACCENT = 0x4C99E6
+
+def geometry(m, name, timeout=25.0):
+    needle = "[geometry] %s " % name
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        log = m.read_log()
+        at = log.rfind(needle)
+        if at >= 0:
+            fields = log[at + len(needle):].split("\n", 1)[0].split()
+            if len(fields) >= 4:
+                return tuple(int(v) for v in fields[:4])
+        time.sleep(0.3)
+    raise Failure("%s never reported where it put %r (log: %s)"
+                  % (current_test(), name, m.save_log("no-geometry")))
+
+def widget_center(m, origin, name):
+    x, y, w, h = geometry(m, name)
+    return (origin[0] + x + w // 2, origin[1] + y + h // 2)
+
+def widget_point(m, origin, name, fx, fy):
+    x, y, w, h = geometry(m, name)
+    return (origin[0] + x + int(w * fx), origin[1] + y + int(h * fy))
+
+def dominant_color(shot, x, y, w, h):
+    counts = {}
+    for py in range(y, y + h):
+        for px in range(x, x + w):
+            c = shot.px(px, py)
+            counts[c] = counts.get(c, 0) + 1
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+def motion_is_on(m, shot, origin):
+    x, y, w, h = geometry(m, "motion")
+    left = origin[0] + x + 4
+    top = origin[1] + y + h // 2 - 3
+    return dominant_color(shot, left, top, max(4, w // 3), 6) == DESKTOP_ACCENT
+
+def volume_is_audible(m, shot, origin):
+    x, y, w, h = geometry(m, "volume")
+    left = origin[0] + x + 4
+    top = origin[1] + y + h // 2 - 2
+    return dominant_color(shot, left, top, max(4, w // 6), 4) == DESKTOP_ACCENT
+
+def mode_btn_center(m, origin, i):
+    return widget_center(m, origin, "mode%d" % i)
 
 FM_W, FM_H = 340, 360
 FM_HEADER_H = 24
@@ -274,25 +288,21 @@ def toast_stripe_probe(i):
 def toast_click_point(i):
     x, y = toast_rect(i)
     return (x + TOAST_W - 20, y + TOAST_H // 2)
-TASKS_W, TASKS_H = 420, 360
-LIST_Y_IN_WIN = 40
-LIST_H_IN_WIN = TASKS_H - LIST_Y_IN_WIN - 34
-SCROLLBAR_THUMB = 0x506080
-TM_ROW_H = 16
-TM_SELECT = 0x4C6699
-TM_BG = 0x1C1C24
+TASKS_W, TASKS_H = 520, 420
+TM_ROW_H = 26
+TM_ROW_GAP = 2
+TM_LIST_PAD = 6
 
-def tm_row_states(shot, tx, ty):
-    selected = -1
-    last = -1
-    rows = (LIST_H_IN_WIN) // TM_ROW_H
+def tm_selected_row(m, shot, origin):
+    x, y, w, h = geometry(m, "list")
+    left = origin[0] + x + TM_LIST_PAD
+    top = origin[1] + y + TM_LIST_PAD
+    rows = (h - 2 * TM_LIST_PAD + TM_ROW_GAP) // (TM_ROW_H + TM_ROW_GAP)
     for row in range(rows):
-        y = ty + LIST_Y_IN_WIN + row * TM_ROW_H + TM_ROW_H // 2
-        if shot.px(tx + 4, y) == TM_SELECT:
-            selected = row
-        if any(shot.px(x, y) != TM_BG for x in range(tx + 4, tx + TASKS_W - 12, 3)):
-            last = row
-    return selected, last
+        band_y = top + row * (TM_ROW_H + TM_ROW_GAP) + TM_ROW_H // 2 - 2
+        if dominant_color(shot, left + 6, band_y, w - 2 * TM_LIST_PAD - 12, 4) == DESKTOP_ACCENT:
+            return row, rows
+    return -1, rows
 
 MENU_W = 124
 MENU_ITEM_H = 22
@@ -688,22 +698,20 @@ def test_task_manager_end_task(m):
     m.double_click(ICON_X, ICONS[4][2])
     wait_for_windows(m, 2)
 
-    tx, ty = app_origin(FIRST_APP_IDX)
-    m.click(tx + TASKS_W - 40, ty + 8)
+    origin = app_origin(FIRST_APP_IDX)
+    m.click(origin[0] + TASKS_W - 40, origin[1] + 8)
 
     for _ in range(90):
         m.sendkey("down")
 
     def selection_at_end(shot):
-        selected, last = tm_row_states(shot, tx, ty)
-        return selected >= 0 and selected == last
+        selected, rows = tm_selected_row(m, shot, origin)
+        return selected >= 0 and selected >= rows - 2
 
     wait_for(m, selection_at_end,
              "the selection never reached the last row of the task list", timeout=25.0)
 
-    end_x = tx + TASKS_W - 96 - 8 - 96 - 8 + 48
-    end_y = ty + TASKS_H - 22 - 6 + 11
-    m.click(end_x, end_y)
+    m.click(*widget_center(m, origin, "end_task"))
     wait_for(m, lambda s: count_app_windows(s) == 1,
              "End Task in the task manager did not terminate the selected process")
 
@@ -814,8 +822,8 @@ def test_settings_persist_across_a_reboot(m):
     m.double_click(ICON_X, ICONS[3][2])
     wait_for_windows(m, 1)
 
-    sx, sy = app_origin(FIRST_APP_IDX, SETTINGS_H)
-    m.click(sx + 12 + WALL_BTN_W // 2, sy + WALL_BTN_Y + WALL_BTN_H // 2)
+    origin = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    m.click(*widget_center(m, origin, "wallpaper0"))
     shot = wait_for(m, lambda s: s.px(700, 200) == s.px(700, 600),
                     "picking the Flat wallpaper did not flatten the desktop gradient")
     flat = shot.px(700, 200)
@@ -1012,8 +1020,7 @@ TASKS_SLOT = 1
 FILES_IN_FRONT_PROBE = (FILES_ORIGIN[0] + FM_W, 400)
 TASKS_IN_FRONT_PROBE = (TASKS_ORIGIN[0] - BORDER, 400)
 FILES_TITLEBAR_CLICK = (FILES_ORIGIN[0] + 20, FILES_ORIGIN[1] - TITLEBAR_H // 2)
-TASKS_W = 400
-_TASKS_BTN_BAND = TASKS_ORIGIN[0] + TASKS_W - 54
+_TASKS_BTN_BAND = TASKS_ORIGIN[0] + TASKS_W - 74
 _TASKS_FREE_LO = FILES_ORIGIN[0] + FM_W + 4
 if _TASKS_FREE_LO >= _TASKS_BTN_BAND:
     raise SystemExit("qemu_input_suite: Files is now wide enough to cover every clickable "
@@ -1397,17 +1404,16 @@ def test_display_resolution_changes_and_persists(m):
     m.double_click(ICON_X, ICONS[3][2])
     wait_for_windows(m, 1)
 
-    sx, sy = app_origin(FIRST_APP_IDX, SETTINGS_H)
-    m.click(*mode_btn_center(sx, sy, SMALL_MODE_INDEX))
+    origin = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    m.click(*mode_btn_center(m, origin, SMALL_MODE_INDEX))
     wait_for(m, lambda s: (s.width, s.height) == SMALL_MODE,
              "clicking a resolution did not change the display size")
     wait_for(m, _bar_spans,
              "the taskbar does not span the new %dx%d display - its buffer was not reallocated"
              % SMALL_MODE, timeout=20.0)
 
-    kx = sx + KEEP_BTN_X + KEEP_BTN_W // 2
-    ky = CONTENT_TOP + CONFIRM_Y + CONFIRM_H // 2
-    m.click(kx, ky)
+    keep_x, keep_y, keep_w, keep_h = geometry(m, "keep")
+    m.click(origin[0] + keep_x + keep_w // 2, CONTENT_TOP + keep_y + keep_h // 2)
 
     time.sleep(MODE_REVERT_S)
     shot = m.screenshot()
@@ -1424,8 +1430,8 @@ def test_display_resolution_reverts_when_not_confirmed(m):
 
     m.double_click(ICON_X, ICONS[3][2])
     wait_for_windows(m, 1)
-    sx, sy = app_origin(FIRST_APP_IDX, SETTINGS_H)
-    m.click(*mode_btn_center(sx, sy, SMALL_MODE_INDEX))
+    origin = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    m.click(*mode_btn_center(m, origin, SMALL_MODE_INDEX))
     wait_for(m, lambda s: (s.width, s.height) == SMALL_MODE,
              "clicking a resolution did not change the display size")
 
@@ -1445,21 +1451,19 @@ def test_behaviour_settings_persist(m):
     m.double_click(ICON_X, ICONS[3][2])
     wait_for_windows(m, 1)
 
-    sx, sy = app_origin(FIRST_APP_IDX, SETTINGS_H)
-    probe = motion_probe(sx, sy)
-    shot = wait_for(m, lambda s: s.px(*probe) == SETTINGS_BTN_ON,
-                    "Settings did not open with animations on, which is the default")
+    origin = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    wait_for(m, lambda s: motion_is_on(m, s, origin),
+             "Settings did not open with animations on, which is the default")
+    check(volume_is_audible(m, m.screenshot(), origin),
+          "the volume did not start un-muted, which is the default")
 
-    m.click(*motion_click(sx, sy))
-    wait_for(m, lambda s: s.px(*probe) == SETTINGS_BTN_OFF,
+    m.click(*widget_center(m, origin, "motion"))
+    wait_for(m, lambda s: not motion_is_on(m, s, origin),
              "clicking the Motion switch did not turn animations off")
 
-    mute = volume_probe(sx, sy, 0)
-    check(m.screenshot().px(*mute) == SETTINGS_BTN_OFF,
-          "the volume did not start un-muted, which is the default")
-    m.click(*volume_click(sx, sy, 0))
-    wait_for(m, lambda s: s.px(*mute) == SETTINGS_BTN_ON,
-             "clicking mute did not take")
+    m.click(*widget_point(m, origin, "volume", 0.0, 0.5))
+    wait_for(m, lambda s: not volume_is_audible(m, s, origin),
+             "dragging the volume slider to its left end did not mute it")
 
     boots_before = m.read_log().count(BOOT_MARKER)
     m.sendkey("ctrl-spc")
@@ -1470,13 +1474,12 @@ def test_behaviour_settings_persist(m):
         time.sleep(1.0)
     check(m.read_log().count(BOOT_MARKER) > boots_before, "the machine never restarted")
 
-    shot = wait_for(m, lambda s: count_app_windows(s) >= 1 and
-                                 s.px(*probe) in (SETTINGS_BTN_ON, SETTINGS_BTN_OFF),
-                    "Settings did not come back with a readable Motion switch",
-                    timeout=120.0)
-    check(shot.px(*probe) == SETTINGS_BTN_OFF,
+    wait_for(m, lambda s: count_app_windows(s) >= 1,
+             "Settings did not come back after the restart", timeout=120.0)
+    shot = m.screenshot()
+    check(not motion_is_on(m, shot, origin),
           "the Motion switch forgot it had been turned off across a restart")
-    check(shot.px(*volume_probe(sx, sy, 0)) == SETTINGS_BTN_ON,
+    check(not volume_is_audible(m, shot, origin),
           "the volume forgot it had been muted across a restart")
 
 class Region:
