@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "os_net.h"
+#include "os_network.h"
 #include "scheduler/scheduler.h"
 
 #define UNIX_SOCKET_STREAM    1

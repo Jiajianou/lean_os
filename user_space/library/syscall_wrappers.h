@@ -4,14 +4,14 @@
 
 #include "display.h"
 #include "os_time.h"
-#include "os_net.h"
+#include "os_network.h"
 #include "os_poll.h"
-#include "caps.h"
+#include "capabilities.h"
 #include "syscall.h"
 #include "input.h"
 #include "power_mode.h"
-#include "proc.h"
-#include "wm.h"
+#include "process.h"
+#include "window_manager.h"
 
 long sys_raw(long num, long a1, long a2, long a3);
 

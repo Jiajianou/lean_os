@@ -8,7 +8,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "os_net.h"
+#include "os_network.h"
 #include "syscall_wrappers.h"
 
 static int failures;

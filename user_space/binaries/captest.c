@@ -1,13 +1,13 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "caps.h"
-#include "os_net.h"
+#include "capabilities.h"
+#include "os_network.h"
 #include "power_mode.h"
 #include "signal.h"
-#include "proc.h"
+#include "process.h"
 #include "syscall_wrappers.h"
-#include "wm.h"
+#include "window_manager.h"
 
 static int failures;
 

@@ -4,7 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "proc.h"
+#include "process.h"
 #include "syscall_wrappers.h"
 
 static long tick_hz(void) {

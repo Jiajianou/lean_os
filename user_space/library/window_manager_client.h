@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 #include "graphics.h"
-#include "wm.h"
+#include "window_manager.h"
 
 typedef struct {
     int32_t window_id;

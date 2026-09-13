@@ -1,7 +1,7 @@
 #include <stdio.h>
 
 #include "dns.h"
-#include "os_net.h"
+#include "os_network.h"
 #include "paths.h"
 #include "syscall_wrappers.h"
 

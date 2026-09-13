@@ -52,7 +52,7 @@
 #include "network/tcp.h"
 #include "panic.h"
 #include "paths.h"
-#include "proc.h"
+#include "process.h"
 #include "power/power.h"
 #include "profile/sampler.h"
 #include "profile.h"
@@ -64,7 +64,7 @@
 #include "signal.h"
 #include "spawn_error.h"
 #include "syscall.h"
-#include "wm.h"
+#include "window_manager.h"
 
 #define FOR_EACH_EMBEDDED_PROGRAM(X) \
     X(hello)                         \
@@ -91,7 +91,7 @@
     X(memtest)                       \
     X(fonttest)                      \
     X(compositor)                    \
-    X(window_manager_demo)                       \
+    X(wm_demo)                       \
     X(gui_clock)                     \
     X(gui_paint)                     \
     X(desktop_shell)                 \
@@ -101,10 +101,10 @@
     X(file_manager)                  \
     X(settings)                    \
     X(task_manager)                \
-    X(window_manager_stubborn)                 \
-    X(window_manager_zorder)                   \
-    X(window_manager_faulter)                  \
-    X(window_manager_crash)                    \
+    X(wm_stubborn)                 \
+    X(wm_zorder)                   \
+    X(wm_faulter)                  \
+    X(wm_crash)                    \
     X(badptr)                      \
     X(shutdown)                    \
     X(reboot)                      \

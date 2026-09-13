@@ -144,11 +144,11 @@ compositor_elf_start:
     incbin "build/compositor.elf"
 compositor_elf_end:
 
-global window_manager_demo_elf_start
-global window_manager_demo_elf_end
-window_manager_demo_elf_start:
+global wm_demo_elf_start
+global wm_demo_elf_end
+wm_demo_elf_start:
     incbin "build/wm_demo.elf"
-window_manager_demo_elf_end:
+wm_demo_elf_end:
 
 global gui_clock_elf_start
 global gui_clock_elf_end
@@ -204,29 +204,29 @@ task_manager_elf_start:
     incbin "build/task_manager.elf"
 task_manager_elf_end:
 
-global window_manager_stubborn_elf_start
-global window_manager_stubborn_elf_end
-window_manager_stubborn_elf_start:
+global wm_stubborn_elf_start
+global wm_stubborn_elf_end
+wm_stubborn_elf_start:
     incbin "build/wm_stubborn.elf"
-window_manager_stubborn_elf_end:
+wm_stubborn_elf_end:
 
-global window_manager_zorder_elf_start
-global window_manager_zorder_elf_end
-window_manager_zorder_elf_start:
+global wm_zorder_elf_start
+global wm_zorder_elf_end
+wm_zorder_elf_start:
     incbin "build/wm_zorder.elf"
-window_manager_zorder_elf_end:
+wm_zorder_elf_end:
 
-global window_manager_faulter_elf_start
-global window_manager_faulter_elf_end
-window_manager_faulter_elf_start:
+global wm_faulter_elf_start
+global wm_faulter_elf_end
+wm_faulter_elf_start:
     incbin "build/wm_faulter.elf"
-window_manager_faulter_elf_end:
+wm_faulter_elf_end:
 
-global window_manager_crash_elf_start
-global window_manager_crash_elf_end
-window_manager_crash_elf_start:
+global wm_crash_elf_start
+global wm_crash_elf_end
+wm_crash_elf_start:
     incbin "build/wm_crash.elf"
-window_manager_crash_elf_end:
+wm_crash_elf_end:
 
 global badptr_elf_start
 global badptr_elf_end

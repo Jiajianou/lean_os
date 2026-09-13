@@ -2,7 +2,7 @@
 #include <string.h>
 
 #include "syscall_wrappers.h"
-#include "proc.h"
+#include "process.h"
 
 extern char __lean_tls_init_start[] __attribute__((weak));
 extern char __lean_tls_init_end[] __attribute__((weak));

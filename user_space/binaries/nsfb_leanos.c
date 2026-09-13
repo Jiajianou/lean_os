@@ -11,7 +11,7 @@
 #include "surface.h"
 
 #include "input.h"
-#include "wm.h"
+#include "window_manager.h"
 #include "window_manager_client.h"
 #include "syscall_wrappers.h"
 

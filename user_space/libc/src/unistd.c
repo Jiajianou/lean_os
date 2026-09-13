@@ -8,10 +8,10 @@
 #include "paths.h"
 #include <errno.h>
 #include <stdint.h>
-#include "os_fs.h"
+#include "os_file_system.h"
 #include <sys/random.h>
 #include <limits.h>
-#include "proc.h"
+#include "process.h"
 #include <dirent.h>
 #include <string.h>
 #include <sys/resource.h>

@@ -2,7 +2,7 @@
 
 #include "os_package.h"
 #include "sha256.h"
-#include "caps.h"
+#include "capabilities.h"
 
 #include <stdlib.h>
 #include <string.h>

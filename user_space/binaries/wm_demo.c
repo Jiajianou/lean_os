@@ -1,6 +1,6 @@
 #include "string_utilities.h"
 #include "syscall_wrappers.h"
-#include "wm.h"
+#include "window_manager.h"
 
 #define WIN_W 200
 #define WIN_H 120

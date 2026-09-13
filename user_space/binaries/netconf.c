@@ -1,6 +1,6 @@
 #include <stdio.h>
 
-#include "os_net.h"
+#include "os_network.h"
 #include "syscall_wrappers.h"
 
 int main(void) {

@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <unistd.h>
 
-#include "proc.h"
+#include "process.h"
 #include "syscall_wrappers.h"
 
 time_t time(time_t *out) {

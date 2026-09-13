@@ -34,8 +34,8 @@
 #include "memory_management/physical_memory.h"
 #include "memory_management/virtual_memory.h"
 #include "power/power.h"
-#include "os_fs.h"
-#include "proc.h"
+#include "os_file_system.h"
+#include "process.h"
 #include "process/process.h"
 #include "process/package_capabilities.h"
 #include "process/elf.h"
@@ -47,14 +47,14 @@
 #include "syscall.h"
 #include "display.h"
 #include "os_time.h"
-#include "os_net.h"
+#include "os_network.h"
 #include "device/tty.h"
 #include "mman.h"
-#include "caps.h"
+#include "capabilities.h"
 #include "network/network.h"
 #include "network/socket.h"
 #include "network/tcp.h"
-#include "wm.h"
+#include "window_manager.h"
 
 typedef long (*syscall_function_t)(uint64_t a1, uint64_t a2, uint64_t a3,
                               uint64_t a4, uint64_t a5, uint64_t a6);
@@ -233,7 +233,7 @@ static int has_cap(uint32_t cap) {
                 break;
             }
         }
-        kernel_log_puts("' - see system_api/include/caps.h\n");
+        kernel_log_puts("' - see system_api/include/capabilities.h\n");
     }
     return 0;
 }

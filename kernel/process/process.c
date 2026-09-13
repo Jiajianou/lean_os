@@ -1,6 +1,6 @@
 #include "process.h"
 
-#include "caps.h"
+#include "capabilities.h"
 
 #include "architecture/x86_64/global_descriptor_table.h"
 #include "drivers/kernel_log.h"

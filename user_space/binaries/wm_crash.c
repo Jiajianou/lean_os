@@ -1,4 +1,4 @@
-#include "proc.h"
+#include "process.h"
 #include "signal.h"
 #include "string_utilities.h"
 #include "syscall_wrappers.h"

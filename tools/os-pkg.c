@@ -7,7 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "caps.h"
+#include "capabilities.h"
 #include "../user_space/library/os_package.h"
 #include "../user_space/library/sha256.h"
 
@@ -183,13 +183,13 @@ static int command_build(const char *manifest_path, const char *stage, const cha
     uint32_t caps = os_package_caps_from_names(man.caps, &unknown);
     if (unknown) {
         die("%s: 'caps:' names a capability this OS does not have - see "
-            "system_api/include/caps.h for the list", manifest_path);
+            "system_api/include/capabilities.h for the list", manifest_path);
     }
     if (caps & ~(uint32_t)CAP_PKG_MAX) {
         char names[OSP_MAX_TEXT];
         os_package_caps_to_names(caps & ~(uint32_t)CAP_PKG_MAX, names, sizeof(names));
         die("%s: a package may not ask for '%s' - see CAP_PKG_MAX in "
-            "system_api/include/caps.h for why", manifest_path, names);
+            "system_api/include/capabilities.h for why", manifest_path, names);
     }
 
     entry_count = 0;

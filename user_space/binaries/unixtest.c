@@ -8,7 +8,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "caps.h"
+#include "capabilities.h"
 #include "syscall_wrappers.h"
 
 #define FAIL(code) do { return (code); } while (0)

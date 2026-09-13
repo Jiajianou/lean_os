@@ -6,7 +6,7 @@ typedef unsigned char u8;
 
 #include "syscall.h"
 #include "mman.h"
-#include "proc.h"
+#include "process.h"
 
 static i64 sys(long n, long a, long b, long c) {
     i64 r;

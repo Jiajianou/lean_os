@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <string.h>
 
-#include "os_fs.h"
+#include "os_file_system.h"
 #include "syscall_wrappers.h"
 
 int statvfs(const char *path, struct statvfs *buffer) {

@@ -146,9 +146,9 @@ AP_TRAMPOLINE_BIN := $(BUILD)/ap_trampoline.bin
 $(AP_TRAMPOLINE_BIN): kernel/architecture/x86_64/ap_trampoline.asm | $(BUILD)
 	$(AS) -f bin $< -o $@
 
-$(KOBJ)/proc/embed_ap_trampoline.o: $(AP_TRAMPOLINE_BIN)
+$(KOBJ)/process/embed_ap_trampoline.o: $(AP_TRAMPOLINE_BIN)
 
-$(KOBJ)/proc/embed_programs.o: $(USER_PROGRAM_ELFS) | check-embedded-programs
+$(KOBJ)/process/embed_programs.o: $(USER_PROGRAM_ELFS) | check-embedded-programs
 
 .PHONY: check-embedded-programs
 check-embedded-programs:
@@ -229,7 +229,7 @@ OS_PKG      := $(BUILD)/os-pkg
 OS_PKG_SRCS := tools/os-pkg.c user_space/library/os_package.c user_space/library/sha256.c
 
 $(OS_PKG): $(OS_PKG_SRCS) user_space/library/os_package.h user_space/library/sha256.h \
-           system_api/include/caps.h | $(BUILD)
+           system_api/include/capabilities.h | $(BUILD)
 	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -Iuser_space/library \
 	          -Isystem_api/include -o $@ $(OS_PKG_SRCS)
 

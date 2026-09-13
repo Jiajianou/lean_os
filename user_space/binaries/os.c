@@ -7,7 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "caps.h"
+#include "capabilities.h"
 #include "os_package.h"
 #include "sha256.h"
 #include "syscall_wrappers.h"
@@ -333,7 +333,7 @@ static int rewrite_registry(void) {
         "# Written by /bin/os; read by the kernel at spawn (kernel/process/package_capabilities.c).\n"
         "# <hex capability mask> <absolute path>. Masks are intersected with\n"
         "# CAP_PKG_MAX in the kernel, so a line here cannot grant more than a\n"
-        "# package is ever allowed - see system_api/include/caps.h.\n";
+        "# package is ever allowed - see system_api/include/capabilities.h.\n";
     length = strlen(head);
     memcpy(buffer, head, length);
 
@@ -522,7 +522,7 @@ static int install_one(const char *name, int depth) {
         os_package_caps_to_names(caps & ~(uint32_t)CAP_PKG_MAX, names, sizeof(names));
         fprintf(stderr, "os: %s asks for '%s', which no package on this "
                         "machine may hold. See CAP_PKG_MAX in "
-                        "system_api/include/caps.h.\n", name, names);
+                        "system_api/include/capabilities.h.\n", name, names);
         free(bytes);
         return 1;
     }

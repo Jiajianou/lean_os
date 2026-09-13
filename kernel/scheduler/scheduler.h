@@ -2,14 +2,14 @@
 
 #include <stdint.h>
 
-#include "caps.h"
+#include "capabilities.h"
 #include "signal.h"
 #include "paths.h"
 #include "library/spinlock.h"
 #include "architecture/x86_64/floating_point_unit.h"
 
 #include "architecture/x86_64/interrupt_service_routines.h"
-#include "proc.h"
+#include "process.h"
 
 struct pipe;
 struct memfd;

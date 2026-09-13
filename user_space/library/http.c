@@ -3,7 +3,7 @@
 #include <string.h>
 
 #include "dns.h"
-#include "os_net.h"
+#include "os_network.h"
 #include "syscall_wrappers.h"
 
 #define HTTP_CONNECT_MS 5000

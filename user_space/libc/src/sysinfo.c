@@ -7,7 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "proc.h"
+#include "process.h"
 #include "syscall_wrappers.h"
 
 static void field(char *destination, const char *source) {

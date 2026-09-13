@@ -1,6 +1,6 @@
 #include "os_package.h"
 
-#include "caps.h"
+#include "capabilities.h"
 
 static size_t osp_strlen(const char *s) {
     size_t n = 0;

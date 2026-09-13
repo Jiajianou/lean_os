@@ -1,6 +1,6 @@
 #include "package_capabilities.h"
 
-#include "caps.h"
+#include "capabilities.h"
 #include "../drivers/kernel_log.h"
 #include "../file_system/virtual_file_system.h"
 

@@ -3,7 +3,7 @@
 #define LIST_FONT_H UI_FONT_SMALL_HEIGHT
 #include "string_utilities.h"
 #include "file_system_utilities.h"
-#include "os_fs.h"
+#include "os_file_system.h"
 #include "spawn_error.h"
 #include "recent.h"
 #include "syscall_wrappers.h"

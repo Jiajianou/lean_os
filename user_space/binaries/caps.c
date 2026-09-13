@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "caps.h"
+#include "capabilities.h"
 #include "syscall_wrappers.h"
 
 int main(int argc, char **argv) {

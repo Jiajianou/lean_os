@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "os_net.h"
+#include "os_network.h"
 #include "os_time.h"
 #include "sntp.h"
 #include "syscall_wrappers.h"

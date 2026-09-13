@@ -4,7 +4,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "caps.h"
+#include "capabilities.h"
 #include "syscall_wrappers.h"
 
 #define E_OK              0
@@ -84,7 +84,7 @@ int main(void) {
 
     if ((sys_getcaps() & CAP_PKG_ADMIN) == 0) {
         printf("[m111] pkgtest holds no pkg-admin - it cannot run `os` at all. "
-               "See CAP_GRANTS in system_api/include/caps.h.\n");
+               "See CAP_GRANTS in system_api/include/capabilities.h.\n");
         return E_NO_ADMIN;
     }
     if (!exists("/pkg/repo/index")) {

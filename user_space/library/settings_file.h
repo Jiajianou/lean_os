@@ -1,7 +1,7 @@
 #pragma once
 
 #include "paths.h"
-#include "wm.h"
+#include "window_manager.h"
 
 #define SETTINGS_FILE_NAME PATH_SETTINGS
 

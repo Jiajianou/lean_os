@@ -15,7 +15,7 @@
 #include "recent.h"
 #include "string_utilities.h"
 #include "syscall_wrappers.h"
-#include "wm.h"
+#include "window_manager.h"
 
 #define MAX_WINDOWS          WINDOW_MANAGER_MAX_ROUTABLE_WINDOWS
 #define TITLEBAR_H           20

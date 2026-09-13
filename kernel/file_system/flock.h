@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "os_fs.h"
+#include "os_file_system.h"
 
 #define FLOCK_MAX 128
 
