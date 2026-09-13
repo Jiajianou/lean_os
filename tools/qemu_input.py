@@ -101,6 +101,17 @@ class Ppm:
                     n += 1
         return n
 
+    def count_brighter(self, minimum_sum, x0, y0, w, h, ignore=None):
+        n = 0
+        for y in range(y0, y0 + h):
+            for x in range(x0, x0 + w):
+                c = self.px(x, y)
+                if c == ignore:
+                    continue
+                if ((c >> 16) & 0xFF) + ((c >> 8) & 0xFF) + (c & 0xFF) >= minimum_sum:
+                    n += 1
+        return n
+
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "build", "snapshot")
 SNAPSHOT_TAG = "desktop"

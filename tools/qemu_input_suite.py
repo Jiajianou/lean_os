@@ -263,11 +263,14 @@ FM_ROOT_FIRST_ROW = 0
 def fm_row_point(x, y, row):
     return (x + 60, y + FM_LIST_Y + row * FM_ROW_H + FM_ROW_H // 2)
 
+FM_INK_SUM = 0x90 * 3
+
 def fm_rows_with_text(shot, x, y):
     n = 0
     for row in range(FM_ROWS_VISIBLE):
         top = y + FM_LIST_Y + row * FM_ROW_H
-        if shot.count_color(FM_TEXT_COLOR, x + 6, top, FM_LIST_W - 12, FM_ROW_H) > 0:
+        if shot.count_brighter(FM_INK_SUM, x + 6, top, FM_LIST_W - 12, FM_ROW_H,
+                               ignore=qemu_input.CURSOR_COLOR) > 0:
             n += 1
     return n
 

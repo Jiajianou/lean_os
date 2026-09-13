@@ -113,7 +113,7 @@ static void check_face(const ui_font_t *f, const char *face) {
     };
     for (unsigned i = 0; i < sizeof(SAMPLES) / sizeof(SAMPLES[0]); i++) {
         check_width(f, SAMPLES[i], face, 0);
-        if (f->rows_bold) {
+        if (f->coverage_bold) {
             check_width(f, SAMPLES[i], face, 1);
         }
     }
@@ -173,7 +173,7 @@ int main(void) {
           ui_font_ui.height < ui_font_large.height)) {
         fail("the three sizes are not ordered by height", 0);
     }
-    if (ui_font_ui.rows_bold == 0) {
+    if (ui_font_ui.coverage_bold == 0) {
         fail("the chrome face has no bold weight", 0);
     }
 

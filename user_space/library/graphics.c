@@ -10,6 +10,27 @@ void graphics_put_pixel(graphics_context_t *context, int32_t x, int32_t y, uint3
     context->pixels[y * context->width + x] = color;
 }
 
+void graphics_blend_pixel(graphics_context_t *context, int32_t x, int32_t y, uint32_t color,
+                          uint32_t alpha) {
+    if (x < 0 || y < 0 || x >= context->width || y >= context->height) {
+        return;
+    }
+    if (alpha >= 255) {
+        context->pixels[y * context->width + x] = color;
+        return;
+    }
+    if (alpha == 0) {
+        return;
+    }
+    uint32_t *at = &context->pixels[y * context->width + x];
+    uint32_t behind = *at;
+    uint32_t inverse = 255u - alpha;
+    uint32_t r = GRAPHICS_OVER_255((color >> 16 & 0xFFu) * alpha + (behind >> 16 & 0xFFu) * inverse);
+    uint32_t g = GRAPHICS_OVER_255((color >> 8 & 0xFFu) * alpha + (behind >> 8 & 0xFFu) * inverse);
+    uint32_t b = GRAPHICS_OVER_255((color & 0xFFu) * alpha + (behind & 0xFFu) * inverse);
+    *at = (behind & 0xFF000000u) | (r << 16) | (g << 8) | b;
+}
+
 void graphics_fill_rect(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
     int32_t x0 = x < 0 ? 0 : x;
     int32_t y0 = y < 0 ? 0 : y;
@@ -201,20 +222,20 @@ void graphics_draw_glyph_font(graphics_context_t *context, int32_t x, int32_t y,
         return;
     }
     uint8_t code = (uint8_t)cp;
-    const uint16_t *rows = (bold && font->rows_bold) ? font->rows_bold : font->rows;
-    const uint16_t *glyph = rows + (int32_t)code * font->height;
-    int32_t w = font->width[code] + ((bold && font->rows_bold) ? 1 : 0);
-    if (w > UI_FONT_MAX_COLS) {
-        w = UI_FONT_MAX_COLS;
+    int use_bold = (bold && font->coverage_bold) ? 1 : 0;
+    const uint8_t *coverage = use_bold ? font->coverage_bold : font->coverage;
+    const uint16_t *offset = use_bold ? font->offset_bold : font->offset;
+    int32_t w = font->width[code] + use_bold;
+    if (font->width[code] == 0) {
+        return;
     }
+    const uint8_t *glyph = coverage + offset[code];
     for (int32_t row = 0; row < font->height; row++) {
-        uint16_t bits = glyph[row];
-        if (!bits) {
-            continue;
-        }
+        const uint8_t *line = glyph + (int32_t)row * w;
         for (int32_t col = 0; col < w; col++) {
-            if (bits & (uint16_t)(0x8000u >> col)) {
-                graphics_put_pixel(context, x + col, y + row, color);
+            uint8_t alpha = line[col];
+            if (alpha) {
+                graphics_blend_pixel(context, x + col, y + row, color, alpha);
             }
         }
     }

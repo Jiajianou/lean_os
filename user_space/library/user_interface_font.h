@@ -12,8 +12,10 @@ typedef struct {
     uint8_t baseline;
     uint8_t descriptor_last;
     uint8_t max_advance;
-    const uint16_t *rows;
-    const uint16_t *rows_bold;
+    const uint8_t  *coverage;
+    const uint8_t  *coverage_bold;
+    const uint16_t *offset;
+    const uint16_t *offset_bold;
     const uint8_t  *advance;
     const uint8_t  *width;
 } ui_font_t;

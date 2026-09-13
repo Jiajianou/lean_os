@@ -509,6 +509,20 @@ static inline void put_pixel(int32_t x, int32_t y, uint32_t color) {
     back_buffer[(uint32_t)y * back_pitch_pixels + (uint32_t)x] = color;
 }
 
+static inline void blend_pixel(int32_t x, int32_t y, uint32_t color, uint32_t alpha) {
+    if (alpha >= 255) {
+        put_pixel(x, y, color);
+        return;
+    }
+    uint32_t *at = &back_buffer[(uint32_t)y * back_pitch_pixels + (uint32_t)x];
+    uint32_t behind = *at;
+    uint32_t inverse = 255u - alpha;
+    uint32_t r = GRAPHICS_OVER_255((color >> 16 & 0xFFu) * alpha + (behind >> 16 & 0xFFu) * inverse);
+    uint32_t g = GRAPHICS_OVER_255((color >> 8 & 0xFFu) * alpha + (behind >> 8 & 0xFFu) * inverse);
+    uint32_t b = GRAPHICS_OVER_255((color & 0xFFu) * alpha + (behind & 0xFFu) * inverse);
+    *at = (behind & 0xFF000000u) | (r << 16) | (g << 8) | b;
+}
+
 static inline void put_pixel_clipped(int32_t x, int32_t y, uint32_t color) {
     if (x >= clip_x0 && x < clip_x1 && y >= clip_y0 && y < clip_y1) {
         put_pixel(x, y, color);
@@ -763,25 +777,27 @@ static void draw_char_clipped(int32_t x, int32_t y, char c, uint32_t color, int 
         return;
     }
     const ui_font_t *f = &UI_FONT;
-    const uint16_t *rows = (bold && f->rows_bold) ? f->rows_bold : f->rows;
-    const uint16_t *glyph = rows + (int32_t)code * f->height;
-    int32_t w = f->width[code] + ((bold && f->rows_bold) ? 1 : 0);
-    if (w > UI_FONT_MAX_COLS) {
-        w = UI_FONT_MAX_COLS;
+    if (f->width[code] == 0) {
+        return;
     }
+    int use_bold = (bold && f->coverage_bold) ? 1 : 0;
+    const uint8_t *coverage = use_bold ? f->coverage_bold : f->coverage;
+    const uint16_t *offset = use_bold ? f->offset_bold : f->offset;
+    int32_t w = f->width[code] + use_bold;
+    const uint8_t *glyph = coverage + offset[code];
     for (int32_t row = 0; row < f->height; row++) {
-        uint16_t bits = glyph[row];
         int32_t py = y + row;
-        if (!bits || py < clip_y0 || py >= clip_y1) {
+        if (py < clip_y0 || py >= clip_y1) {
             continue;
         }
+        const uint8_t *line = glyph + (int32_t)row * w;
         for (int32_t col = 0; col < w; col++) {
             int32_t px = x + col;
             if (px < clip_x0 || px >= clip_x1) {
                 continue;
             }
-            if (bits & (uint16_t)(0x8000u >> col)) {
-                put_pixel(px, py, color);
+            if (line[col]) {
+                blend_pixel(px, py, color, line[col]);
             }
         }
     }

@@ -11,6 +11,9 @@ typedef struct {
 } graphics_context_t;
 
 void graphics_put_pixel(graphics_context_t *context, int32_t x, int32_t y, uint32_t color);
+#define GRAPHICS_OVER_255(v) (((v) + 128u + (((v) + 128u) >> 8)) >> 8)
+
+void graphics_blend_pixel(graphics_context_t *context, int32_t x, int32_t y, uint32_t color, uint32_t alpha);
 void graphics_fill_rect(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color);
 void graphics_draw_rect(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color);
 void graphics_draw_line(graphics_context_t *context, int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint32_t color);

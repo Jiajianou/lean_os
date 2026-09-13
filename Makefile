@@ -503,6 +503,8 @@ TEST_KERNEL_SRCS := kernel/library/kernel_library.c kernel/memory_management/hea
 TEST_USER_SRCS := user_space/library/symbol_table.c \
                   user_space/library/sha256.c user_space/library/os_package.c \
                   user_space/library/file_system_utilities.c user_space/library/dns.c \
+                  user_space/library/graphics.c user_space/library/font8x16.c \
+                  user_space/library/user_interface_font.c \
                   user_space/libc/src/wchar.c user_space/libc/src/errno.c \
                   user_space/libc/src/fnmatch.c user_space/libc/src/libgen.c \
                   user_space/libc/src/getopt.c user_space/libc/src/wallclock.c

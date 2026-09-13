@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <math.h>
 
 #define FONT_WIDTH  8
 #define FONT_HEIGHT 16
@@ -255,7 +256,7 @@ static void check_metric(void) {
     }
 }
 
-static char out[1 << 20];
+static char out[1 << 22];
 static size_t out_length;
 
 static void emit(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -699,6 +700,495 @@ static void ui_check(const user_interface_font_t *f) {
     }
 }
 
+#define UI_COVERAGE_MAX_POINTS 4096
+#define UI_COVERAGE_SUBSAMPLES 4
+#define UI_INSET_LARGE 0.30
+#define UI_COVERAGE_MAX_BYTES  (1 << 18)
+
+typedef struct {
+    double x, y;
+    int    sharp;
+} outline_point_t;
+
+typedef struct {
+    outline_point_t point[UI_COVERAGE_MAX_POINTS];
+    int             count;
+    int             start[64];
+    int             length[64];
+    int             contours;
+} outline_t;
+
+typedef struct {
+    const char    *ident;
+    int            height;
+    int            width[128];
+    int            bold_width[128];
+    unsigned int   offset[128];
+    unsigned int   offset_bold[128];
+    unsigned char  data[UI_COVERAGE_MAX_BYTES];
+    unsigned int   length;
+    unsigned char  bold[UI_COVERAGE_MAX_BYTES];
+    unsigned int   bold_length;
+    int            has_bold;
+} coverage_font_t;
+
+static coverage_font_t cov_small, cov_ui, cov_large;
+
+static int ui_cell(const user_interface_font_t *f, int code, int row, int col) {
+    if (row < 0 || row >= f->height || col < 0 || col >= f->width[code]) {
+        return 0;
+    }
+    return (f->rows[code][row] & (unsigned short)(0x8000u >> col)) ? 1 : 0;
+}
+
+typedef struct {
+    int x0, y0, x1, y1;
+    int used;
+} crack_edge_t;
+
+static crack_edge_t cracks[UI_COVERAGE_MAX_POINTS];
+static int crack_count;
+
+static void crack_add(int x0, int y0, int x1, int y1) {
+    if (crack_count >= UI_COVERAGE_MAX_POINTS) {
+        return;
+    }
+    cracks[crack_count].x0 = x0;
+    cracks[crack_count].y0 = y0;
+    cracks[crack_count].x1 = x1;
+    cracks[crack_count].y1 = y1;
+    cracks[crack_count].used = 0;
+    crack_count++;
+}
+
+static user_interface_font_t ui_eroded;
+
+static void ui_erode(const user_interface_font_t *source, user_interface_font_t *out) {
+    *out = *source;
+    for (int code = 0; code < 128; code++) {
+        for (int row = 0; row < source->height; row++) {
+            unsigned short v = source->rows[code][row];
+            unsigned short thinned = 0;
+            int col = 0;
+            while (col < UI_MAX_COLS) {
+                if (!(v & (unsigned short)(0x8000u >> col))) {
+                    col++;
+                    continue;
+                }
+                int run = 0;
+                while (col + run < UI_MAX_COLS &&
+                       (v & (unsigned short)(0x8000u >> (col + run)))) {
+                    run++;
+                }
+                int keep = run > 1 ? run - 1 : run;
+                for (int i = 0; i < keep; i++) {
+                    thinned |= (unsigned short)(0x8000u >> (col + i));
+                }
+                col += run;
+            }
+            out->rows[code][row] = thinned;
+        }
+    }
+}
+
+static void ui_trace(const user_interface_font_t *f, int code, outline_t *out) {
+    crack_count = 0;
+    out->count = 0;
+    out->contours = 0;
+
+    for (int row = 0; row < f->height; row++) {
+        for (int col = 0; col < f->width[code]; col++) {
+            if (!ui_cell(f, code, row, col)) {
+                continue;
+            }
+            if (!ui_cell(f, code, row - 1, col)) crack_add(col, row, col + 1, row);
+            if (!ui_cell(f, code, row, col + 1)) crack_add(col + 1, row, col + 1, row + 1);
+            if (!ui_cell(f, code, row + 1, col)) crack_add(col + 1, row + 1, col, row + 1);
+            if (!ui_cell(f, code, row, col - 1)) crack_add(col, row + 1, col, row);
+        }
+    }
+
+    for (int seed = 0; seed < crack_count; seed++) {
+        if (cracks[seed].used) {
+            continue;
+        }
+        int first = out->count;
+        int at = seed;
+        int guard = 0;
+        while (at >= 0 && guard++ < UI_COVERAGE_MAX_POINTS) {
+            cracks[at].used = 1;
+            if (out->count < UI_COVERAGE_MAX_POINTS) {
+                out->point[out->count].x = cracks[at].x0;
+                out->point[out->count].y = cracks[at].y0;
+                out->point[out->count].sharp = 1;
+                out->count++;
+            }
+            int ex = cracks[at].x1, ey = cracks[at].y1;
+            int dx = cracks[at].x1 - cracks[at].x0, dy = cracks[at].y1 - cracks[at].y0;
+            int best = -1, best_rank = 9;
+            for (int i = 0; i < crack_count; i++) {
+                if (cracks[i].used || cracks[i].x0 != ex || cracks[i].y0 != ey) {
+                    continue;
+                }
+                int nx = cracks[i].x1 - cracks[i].x0, ny = cracks[i].y1 - cracks[i].y0;
+                int cross = dx * ny - dy * nx;
+                int rank = cross < 0 ? 0 : (cross == 0 ? 1 : 2);
+                if (rank < best_rank) {
+                    best_rank = rank;
+                    best = i;
+                }
+            }
+            at = best;
+        }
+        if (out->contours < 64 && out->count > first) {
+            out->start[out->contours] = first;
+            out->length[out->contours] = out->count - first;
+            out->contours++;
+        }
+    }
+}
+
+static double point_distance(const outline_point_t *a, const outline_point_t *b) {
+    double dx = a->x - b->x, dy = a->y - b->y;
+    return dx * dx + dy * dy;
+}
+
+static void ui_mark_staircase(outline_t *o) {
+    for (int c = 0; c < o->contours; c++) {
+        int s = o->start[c], n = o->length[c];
+        for (int i = 0; i < n; i++) {
+            const outline_point_t *previous = &o->point[s + (i + n - 1) % n];
+            const outline_point_t *here     = &o->point[s + i];
+            const outline_point_t *next     = &o->point[s + (i + 1) % n];
+            double before = point_distance(previous, here);
+            double after  = point_distance(here, next);
+            double shorter = before < after ? before : after;
+            o->point[s + i].sharp = shorter > 1.5 ? 1 : 0;
+        }
+    }
+}
+
+static void ui_cut_corners(outline_t *in, outline_t *out) {
+    out->count = 0;
+    out->contours = 0;
+    for (int c = 0; c < in->contours; c++) {
+        int s = in->start[c], n = in->length[c];
+        int first = out->count;
+        for (int i = 0; i < n; i++) {
+            outline_point_t *previous = &in->point[s + (i + n - 1) % n];
+            outline_point_t *here     = &in->point[s + i];
+            outline_point_t *next     = &in->point[s + (i + 1) % n];
+            if (here->sharp) {
+                if (out->count < UI_COVERAGE_MAX_POINTS) {
+                    out->point[out->count++] = *here;
+                }
+                continue;
+            }
+            if (out->count + 2 > UI_COVERAGE_MAX_POINTS) {
+                break;
+            }
+            out->point[out->count].x = here->x + (previous->x - here->x) * 0.25;
+            out->point[out->count].y = here->y + (previous->y - here->y) * 0.25;
+            out->point[out->count].sharp = 0;
+            out->count++;
+            out->point[out->count].x = here->x + (next->x - here->x) * 0.25;
+            out->point[out->count].y = here->y + (next->y - here->y) * 0.25;
+            out->point[out->count].sharp = 0;
+            out->count++;
+        }
+        if (out->contours < 64 && out->count > first) {
+            out->start[out->contours] = first;
+            out->length[out->contours] = out->count - first;
+            out->contours++;
+        }
+    }
+}
+
+static double contour_area(const outline_t *o, int c) {
+    int s = o->start[c], n = o->length[c];
+    double sum = 0.0;
+    for (int i = 0; i < n; i++) {
+        const outline_point_t *a = &o->point[s + i];
+        const outline_point_t *b = &o->point[s + (i + 1) % n];
+        sum += a->x * b->y - b->x * a->y;
+    }
+    return sum * 0.5;
+}
+
+static void ui_inset(outline_t *o, double distance) {
+    static outline_point_t moved[UI_COVERAGE_MAX_POINTS];
+    if (distance <= 0.0) {
+        return;
+    }
+    for (int c = 0; c < o->contours; c++) {
+        int s = o->start[c], n = o->length[c];
+        double sign = contour_area(o, c) > 0.0 ? 1.0 : -1.0;
+        for (int i = 0; i < n; i++) {
+            const outline_point_t *previous = &o->point[s + (i + n - 1) % n];
+            const outline_point_t *here     = &o->point[s + i];
+            const outline_point_t *next     = &o->point[s + (i + 1) % n];
+
+            double ax = here->x - previous->x, ay = here->y - previous->y;
+            double bx = next->x - here->x,     by = next->y - here->y;
+            double al = sqrt(ax * ax + ay * ay), bl = sqrt(bx * bx + by * by);
+            if (al < 1e-9 || bl < 1e-9) {
+                moved[s + i] = *here;
+                continue;
+            }
+            double nx = (ay / al + by / bl) * sign;
+            double ny = (-ax / al - bx / bl) * sign;
+            double nl = sqrt(nx * nx + ny * ny);
+            if (nl < 1e-9) {
+                moved[s + i] = *here;
+                continue;
+            }
+            moved[s + i] = *here;
+            moved[s + i].x = here->x + nx / nl * distance;
+        }
+    }
+    for (int c = 0; c < o->contours; c++) {
+        for (int i = 0; i < o->length[c]; i++) {
+            o->point[o->start[c] + i] = moved[o->start[c] + i];
+        }
+    }
+}
+
+typedef struct {
+    double x;
+    int    winding;
+} crossing_t;
+
+static int crossing_order(const void *a, const void *b) {
+    double da = ((const crossing_t *)a)->x, db = ((const crossing_t *)b)->x;
+    return da < db ? -1 : (da > db ? 1 : 0);
+}
+
+static void ui_snap_y(outline_t *o, const user_interface_font_t *source,
+                      const user_interface_font_t *destination) {
+    double from[6], to[6];
+    int n = 0;
+    from[n] = 0.0;                                  to[n++] = 0.0;
+    from[n] = source->cap_top;                      to[n++] = destination->cap_top;
+    from[n] = source->x_top;                        to[n++] = destination->x_top;
+    from[n] = source->baseline;                     to[n++] = destination->baseline;
+    from[n] = source->descriptor_last + 1;          to[n++] = destination->descriptor_last + 1;
+    from[n] = source->height;                       to[n++] = destination->height;
+
+    for (int c = 0; c < o->contours; c++) {
+        for (int i = 0; i < o->length[c]; i++) {
+            double y = o->point[o->start[c] + i].y;
+            double mapped = y * destination->height / source->height;
+            for (int k = 0; k + 1 < n; k++) {
+                if (y >= from[k] && y <= from[k + 1] && from[k + 1] > from[k]) {
+                    double t = (y - from[k]) / (from[k + 1] - from[k]);
+                    mapped = to[k] + (to[k + 1] - to[k]) * t;
+                    break;
+                }
+            }
+            o->point[o->start[c] + i].y = mapped;
+        }
+    }
+}
+
+static void ui_rasterise(const outline_t *o, double scale, int out_w, int out_h,
+                         unsigned char *dst) {
+    static double acc[UI_MAX_COLS * 4];
+    static crossing_t hits[UI_COVERAGE_MAX_POINTS];
+
+    for (int row = 0; row < out_h; row++) {
+        for (int col = 0; col < out_w; col++) {
+            acc[col] = 0.0;
+        }
+        for (int sub = 0; sub < UI_COVERAGE_SUBSAMPLES; sub++) {
+            double sample_y = row + (sub + 0.5) / UI_COVERAGE_SUBSAMPLES;
+            int count = 0;
+            for (int c = 0; c < o->contours; c++) {
+                int s = o->start[c], n = o->length[c];
+                for (int i = 0; i < n; i++) {
+                    const outline_point_t *a = &o->point[s + i];
+                    const outline_point_t *b = &o->point[s + (i + 1) % n];
+                    double ay = a->y, by = b->y;
+                    if (ay == by) {
+                        continue;
+                    }
+                    double lo = ay < by ? ay : by;
+                    double hi = ay < by ? by : ay;
+                    if (sample_y < lo || sample_y >= hi) {
+                        continue;
+                    }
+                    double ax = a->x * scale, bx = b->x * scale;
+                    double t = (sample_y - ay) / (by - ay);
+                    if (count < UI_COVERAGE_MAX_POINTS) {
+                        hits[count].x = ax + (bx - ax) * t;
+                        hits[count].winding = by > ay ? 1 : -1;
+                        count++;
+                    }
+                }
+            }
+            if (count < 2) {
+                continue;
+            }
+            qsort(hits, (size_t)count, sizeof(hits[0]), crossing_order);
+            int winding = 0;
+            for (int i = 0; i + 1 < count; i++) {
+                winding += hits[i].winding;
+                if (winding == 0) {
+                    continue;
+                }
+                double x0 = hits[i].x, x1 = hits[i + 1].x;
+                if (x1 <= 0.0 || x0 >= out_w) {
+                    continue;
+                }
+                if (x0 < 0.0) x0 = 0.0;
+                if (x1 > out_w) x1 = out_w;
+                int first = (int)x0, last = (int)(x1 - 1e-9);
+                if (last >= out_w) last = out_w - 1;
+                for (int col = first; col <= last; col++) {
+                    double left = x0 > col ? x0 : col;
+                    double right = x1 < col + 1 ? x1 : col + 1;
+                    if (right > left) {
+                        acc[col] += (right - left) / UI_COVERAGE_SUBSAMPLES;
+                    }
+                }
+            }
+        }
+        for (int col = 0; col < out_w; col++) {
+            double v = acc[col];
+            if (v < 0.0) v = 0.0;
+            if (v > 1.0) v = 1.0;
+            dst[row * out_w + col] = (unsigned char)(v * 255.0 + 0.5);
+        }
+    }
+}
+
+static int coverage_ink_top(const coverage_font_t *c, int code) {
+    int w = c->width[code];
+    for (int row = 0; row < c->height; row++) {
+        for (int col = 0; col < w; col++) {
+            if (c->data[c->offset[code] + row * w + col]) {
+                return row;
+            }
+        }
+    }
+    return -1;
+}
+
+static int coverage_ink_bottom(const coverage_font_t *c, int code) {
+    int w = c->width[code];
+    for (int row = c->height - 1; row >= 0; row--) {
+        for (int col = 0; col < w; col++) {
+            if (c->data[c->offset[code] + row * w + col]) {
+                return row;
+            }
+        }
+    }
+    return -1;
+}
+
+static void ui_check_coverage(const coverage_font_t *c, const user_interface_font_t *f) {
+    static const char *UPPER  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    static const char *DIGITS = "0123456789";
+    static const char *XBAND  = "acemnorsuvwxz";
+    static const char *DESCRIPTOR = "gpqyj";
+    static const char *ASC    = "bdfhikl";
+    int has_partial = 0;
+
+    for (int code = 0x21; code <= 0x7E; code++) {
+        if (f->width[code] == 0) {
+            continue;
+        }
+        int top = coverage_ink_top(c, code);
+        int bottom = coverage_ink_bottom(c, code);
+        if (top < 0) {
+            ui_error("rendered coverage is blank", c->ident, code);
+            continue;
+        }
+        if (bottom > f->descriptor_last) {
+            ui_error("rendered coverage runs below the descender row", c->ident, code);
+        }
+        if (in(UPPER, code) || in(DIGITS, code) || in(ASC, code)) {
+            if (top != f->cap_top) {
+                ui_error("rendered coverage does not start on the cap line", c->ident, code);
+            }
+            if (bottom != f->baseline - 1) {
+                ui_error("rendered coverage does not sit on the baseline", c->ident, code);
+            }
+        } else if (in(XBAND, code)) {
+            if (top != f->x_top) {
+                ui_error("rendered coverage does not start on the x-height line", c->ident, code);
+            }
+            if (bottom != f->baseline - 1) {
+                ui_error("rendered coverage does not sit on the baseline", c->ident, code);
+            }
+        } else if (in(DESCRIPTOR, code)) {
+            if (bottom != f->descriptor_last) {
+                ui_error("rendered descender does not reach the descender row", c->ident, code);
+            }
+        }
+        for (int i = 0; i < f->width[code] * c->height; i++) {
+            unsigned char v = c->data[c->offset[code] + i];
+            if (v != 0 && v != 255) {
+                has_partial = 1;
+            }
+        }
+    }
+    if (!has_partial) {
+        ui_error("no glyph has a partly-covered pixel - this face is not anti-aliased",
+                 c->ident, 0x41);
+    }
+}
+
+static void ui_build_coverage(const user_interface_font_t *source,
+                              const user_interface_font_t *metrics,
+                              coverage_font_t *out, int scale_numerator, int scale_denominator,
+                              double inset) {
+    static outline_t traced, cut_once, cut_twice;
+    double scale = (double)scale_numerator / scale_denominator;
+
+    out->ident = metrics->ident;
+    out->height = metrics->height;
+    out->length = 0;
+    out->bold_length = 0;
+    out->has_bold = metrics->has_bold;
+
+    for (int code = 0; code < 128; code++) {
+        int w = metrics->width[code];
+        out->width[code] = w;
+        out->offset[code] = out->length;
+        out->offset_bold[code] = out->bold_length;
+        out->bold_width[code] = w ? w + 1 : 0;
+        if (w == 0) {
+            continue;
+        }
+        if (out->length + (unsigned)(w * out->height) > UI_COVERAGE_MAX_BYTES) {
+            ui_error("coverage table overflowed", out->ident, code);
+            return;
+        }
+        ui_trace(source, code, &traced);
+        ui_mark_staircase(&traced);
+        ui_cut_corners(&traced, &cut_once);
+        ui_cut_corners(&cut_once, &cut_twice);
+        ui_inset(&cut_twice, inset);
+        ui_snap_y(&cut_twice, source, metrics);
+        ui_rasterise(&cut_twice, scale, w, out->height, out->data + out->length);
+        out->length += (unsigned)(w * out->height);
+
+        if (out->has_bold) {
+            int bw = w + 1;
+            const unsigned char *src = out->data + out->offset[code];
+            unsigned char *dst = out->bold + out->bold_length;
+            for (int row = 0; row < out->height; row++) {
+                for (int col = 0; col < bw; col++) {
+                    int a = (col < w) ? src[row * w + col] : 0;
+                    int b = (col > 0) ? src[row * w + col - 1] : 0;
+                    dst[row * bw + col] = (unsigned char)(a > b ? a : b);
+                }
+            }
+            out->bold_length += (unsigned)(bw * out->height);
+        }
+    }
+}
+
 static void ui_build_all(void) {
     ui_ui.ident    = "ui";
     ui_ui.height   = FONT_HEIGHT;
@@ -740,19 +1230,35 @@ static void ui_build_all(void) {
     ui_check(&ui_small);
     ui_check(&ui_ui);
     ui_check(&ui_large);
+
+    ui_erode(&ui_ui, &ui_eroded);
+    ui_eroded.ident = "ui-light";
+    for (int code = 0x21; code <= 0x7E; code++) {
+        if (ui_ink_top(&ui_ui, code) < 0) {
+            continue;
+        }
+        if (ui_ink_top(&ui_eroded, code) < 0) {
+            ui_error("thinning erased the glyph", ui_eroded.ident, code);
+        } else if (ui_ink_top(&ui_eroded, code) != ui_ink_top(&ui_ui, code) ||
+                   ui_ink_bottom(&ui_eroded, code) != ui_ink_bottom(&ui_ui, code)) {
+            ui_error("thinning moved the glyph off its shared metric line",
+                     ui_eroded.ident, code);
+        }
+    }
+    for (int code = UI_SPECIAL_FIRST; code <= UI_SPECIAL_LAST; code++) {
+        if (ui_ink_top(&ui_eroded, code) < 0) {
+            ui_error("thinning erased a special glyph", ui_eroded.ident, code);
+        }
+    }
+    ui_build_coverage(&ui_small, &ui_small, &cov_small, 1, 1, 0.0);
+    ui_build_coverage(&ui_eroded, &ui_ui, &cov_ui, 1, 1, 0.0);
+    ui_build_coverage(&ui_ui, &ui_large, &cov_large, 3, 2, UI_INSET_LARGE);
+
+    ui_check_coverage(&cov_small, &ui_small);
+    ui_check_coverage(&cov_ui, &ui_ui);
+    ui_check_coverage(&cov_large, &ui_large);
 }
 
-static void emit_ui_rows(const char *name, const user_interface_font_t *f, const unsigned short t[128][UI_MAX_ROWS]) {
-    emit("static const uint16_t %s[128 * %d] = {\n", name, f->height);
-    for (int code = 0; code < 128; code++) {
-        emit("   ");
-        for (int r = 0; r < f->height; r++) {
-            emit(" 0x%04X,", t[code][r]);
-        }
-        emit("\n");
-    }
-    emit("};\n\n");
-}
 
 static void emit_ui_bytes(const char *name, const unsigned char t[128]) {
     emit("static const uint8_t %s[128] = {\n", name);
@@ -766,14 +1272,42 @@ static void emit_ui_bytes(const char *name, const unsigned char t[128]) {
     emit("};\n\n");
 }
 
-static void emit_user_interface_font(const user_interface_font_t *f) {
+static void emit_ui_coverage(const char *name, const unsigned char *data, unsigned int length) {
+    emit("static const uint8_t %s[%u] = {\n", name, length);
+    for (unsigned int i = 0; i < length; i += 24) {
+        emit("   ");
+        for (unsigned int j = i; j < i + 24 && j < length; j++) {
+            emit("%4u,", data[j]);
+        }
+        emit("\n");
+    }
+    emit("};\n\n");
+}
+
+static void emit_ui_offsets(const char *name, const unsigned int *t) {
+    emit("static const uint16_t %s[128] = {\n", name);
+    for (int code = 0; code < 128; code += 8) {
+        emit("   ");
+        for (int i = 0; i < 8; i++) {
+            emit("%7u,", t[code + i]);
+        }
+        emit("\n");
+    }
+    emit("};\n\n");
+}
+
+static void emit_user_interface_font(const user_interface_font_t *f, const coverage_font_t *c) {
     char buffer[64];
 
-    snprintf(buffer, sizeof(buffer), "ui_rows_%s", f->ident);
-    emit_ui_rows(buffer, f, f->rows);
+    snprintf(buffer, sizeof(buffer), "ui_coverage_%s", f->ident);
+    emit_ui_coverage(buffer, c->data, c->length);
+    snprintf(buffer, sizeof(buffer), "ui_offset_%s", f->ident);
+    emit_ui_offsets(buffer, c->offset);
     if (f->has_bold) {
-        snprintf(buffer, sizeof(buffer), "ui_bold_%s", f->ident);
-        emit_ui_rows(buffer, f, f->bold);
+        snprintf(buffer, sizeof(buffer), "ui_coverage_bold_%s", f->ident);
+        emit_ui_coverage(buffer, c->bold, c->bold_length);
+        snprintf(buffer, sizeof(buffer), "ui_offset_bold_%s", f->ident);
+        emit_ui_offsets(buffer, c->offset_bold);
     }
     snprintf(buffer, sizeof(buffer), "ui_adv_%s", f->ident);
     emit_ui_bytes(buffer, f->advance);
@@ -789,11 +1323,14 @@ static void emit_user_interface_font(const user_interface_font_t *f) {
     emit("    .height = %d, .cap_top = %d, .x_top = %d, .baseline = %d,\n",
          f->height, f->cap_top, f->x_top, f->baseline);
     emit("    .descriptor_last = %d, .max_advance = %d,\n", f->descriptor_last, max_adv);
-    emit("    .rows = ui_rows_%s,\n", f->ident);
+    emit("    .coverage = ui_coverage_%s,\n", f->ident);
+    emit("    .offset = ui_offset_%s,\n", f->ident);
     if (f->has_bold) {
-        emit("    .rows_bold = ui_bold_%s,\n", f->ident);
+        emit("    .coverage_bold = ui_coverage_bold_%s,\n", f->ident);
+        emit("    .offset_bold = ui_offset_bold_%s,\n", f->ident);
     } else {
-        emit("    .rows_bold = 0,\n");
+        emit("    .coverage_bold = 0,\n");
+        emit("    .offset_bold = 0,\n");
     }
     emit("    .advance = ui_adv_%s,\n", f->ident);
     emit("    .width = ui_wid_%s,\n", f->ident);
@@ -814,8 +1351,10 @@ static void build_user_interface_font_header(void) {
          "    uint8_t baseline;\n"
          "    uint8_t descriptor_last;\n"
          "    uint8_t max_advance;\n"
-         "    const uint16_t *rows;\n"
-         "    const uint16_t *rows_bold;\n"
+         "    const uint8_t  *coverage;\n"
+         "    const uint8_t  *coverage_bold;\n"
+         "    const uint16_t *offset;\n"
+         "    const uint16_t *offset_bold;\n"
          "    const uint8_t  *advance;\n"
          "    const uint8_t  *width;\n"
          "} ui_font_t;\n\n");
@@ -849,9 +1388,9 @@ static void build_user_interface_font_header(void) {
 static void build_user_interface_font_source(void) {
     out_length = 0;
     emit("#include \"user_interface_font.h\"\n\n");
-    emit_user_interface_font(&ui_small);
-    emit_user_interface_font(&ui_ui);
-    emit_user_interface_font(&ui_large);
+    emit_user_interface_font(&ui_small, &cov_small);
+    emit_user_interface_font(&ui_ui, &cov_ui);
+    emit_user_interface_font(&ui_large, &cov_large);
 }
 
 static int write_if(const char *path, int check_only) {
@@ -867,7 +1406,7 @@ static int write_if(const char *path, int check_only) {
         return 0;
     }
 
-    static char have[1 << 20];
+    static char have[1 << 22];
     size_t have_length = fread(have, 1, sizeof(have), f);
     fclose(f);
 
@@ -886,6 +1425,67 @@ static int write_if(const char *path, int check_only) {
     return 0;
 }
 
+static void write_preview(const char *path) {
+    static const char *SAMPLE = "Handgloves 0123 Settings Tasks Files";
+    const coverage_font_t *faces[3] = { &cov_small, &cov_ui, &cov_large };
+    const user_interface_font_t *metrics[3] = { &ui_small, &ui_ui, &ui_large };
+    int pad = 8;
+    int width = 960;
+    int height = pad;
+    for (int f = 0; f < 3; f++) {
+        height += metrics[f]->height + pad;
+    }
+    height += metrics[1]->height + pad;
+
+    static unsigned char image[960 * 400 * 3];
+    for (int i = 0; i < width * height * 3; i++) {
+        image[i] = 0x14;
+    }
+
+    int y = pad;
+    for (int f = 0; f < 4; f++) {
+        int face = f < 3 ? f : 1;
+        int bold = f == 3;
+        const coverage_font_t *c = faces[face];
+        const user_interface_font_t *m = metrics[face];
+        int x = pad;
+        for (const char *p = SAMPLE; *p; p++) {
+            int code = (unsigned char)*p;
+            int w = bold ? c->bold_width[code] : c->width[code];
+            const unsigned char *g = (bold ? c->bold : c->data) +
+                                     (bold ? c->offset_bold[code] : c->offset[code]);
+            if (bold && !c->has_bold) {
+                break;
+            }
+            for (int row = 0; row < c->height; row++) {
+                for (int col = 0; col < w; col++) {
+                    int a = g[row * w + col];
+                    int px = x + col, py = y + row;
+                    if (px < 0 || px >= width || py < 0 || py >= height) {
+                        continue;
+                    }
+                    for (int ch = 0; ch < 3; ch++) {
+                        unsigned char *d = &image[(py * width + px) * 3 + ch];
+                        *d = (unsigned char)((*d * (255 - a) + 0xF0 * a) / 255);
+                    }
+                }
+            }
+            x += m->advance[code];
+        }
+        y += c->height + pad;
+    }
+
+    FILE *out_file = fopen(path, "wb");
+    if (!out_file) {
+        fprintf(stderr, "gen-font: cannot write %s\n", path);
+        return;
+    }
+    fprintf(out_file, "P6\n%d %d\n255\n", width, height);
+    fwrite(image, 1, (size_t)(width * height * 3), out_file);
+    fclose(out_file);
+    printf("gen-font: preview written to %s (%dx%d)\n", path, width, height);
+}
+
 int main(int argc, char **argv) {
     int check_only;
 
@@ -893,8 +1493,13 @@ int main(int argc, char **argv) {
         check_only = 1;
     } else if (argc == 2 && strcmp(argv[1], "--write") == 0) {
         check_only = 0;
+    } else if (argc == 3 && strcmp(argv[1], "--preview") == 0) {
+        build();
+        ui_build_all();
+        write_preview(argv[2]);
+        return errors ? 1 : 0;
     } else {
-        fprintf(stderr, "usage: %s --write | --check\n", argv[0]);
+        fprintf(stderr, "usage: %s --write | --check | --preview <file.ppm>\n", argv[0]);
         return 2;
     }
 
