@@ -18,36 +18,44 @@
 #include "window_manager.h"
 
 #define MAX_WINDOWS          WINDOW_MANAGER_MAX_ROUTABLE_WINDOWS
-#define TITLEBAR_H           20
-#define BORDER               2
+#define TITLEBAR_H           28
+#define BORDER               1
+#define FRAME_RADIUS         8
 #define DEFAULT_BG_COLOR     0x001A1A2Eu
-#define BORDER_COLOR         0x00444466u
-#define TITLEBAR_COLOR       0x00335577u
+#define BORDER_COLOR         0x00000000u
+#define BORDER_ALPHA         150u
+#define FRAME_HAIRLINE       0x00FFFFFFu
+#define FRAME_HAIRLINE_ALPHA 26u
+#define TITLEBAR_TOP_COLOR       0x002A3140u
+#define TITLEBAR_BOTTOM_COLOR    0x001E2430u
+#define TITLEBAR_DIM_TOP_COLOR   0x00212733u
+#define TITLEBAR_DIM_BOTTOM_COLOR 0x001A1F29u
 #define TITLEBAR_FOCUS_COLOR 0x004C99E6u
+#define TITLEBAR_ACCENT_ALPHA 255u
 #define CURSOR_COLOR         0x00FFFFFFu
 #define CURSOR_SIZE          8
 #define REDRAW_INTERVAL_MS   1000
 
-#define BTN_SIZE   GRAPHICS_CIRCLE_D
-#define BTN_GAP    4
-#define BTN_MARGIN 4
+#define BTN_SIZE   12
+#define BTN_GAP    8
+#define BTN_MARGIN 10
 #define BTN_CLOSE_COLOR    0x00FF5F57u
-#define BTN_MAXIMIZE_COLOR 0x00FEBC2Eu
-#define BTN_MINIMIZE_COLOR 0x008FA88Fu
-#define BTN_GLYPH_COLOR 0x00303030u
-#define BTN_GLYPH_INSET 4
-#define BTN_HOVER_LIGHTEN 2
+#define BTN_MAXIMIZE_COLOR 0x0028C840u
+#define BTN_MINIMIZE_COLOR 0x00FEBC2Eu
+#define BTN_IDLE_COLOR     0x005A6270u
+#define BTN_GLYPH_COLOR 0x00202020u
+#define BTN_GLYPH_INSET 3
+#define BTN_HOVER_LIGHTEN 5
 
-#define TITLE_COLOR 0x00F0F0F0u
-#define TITLE_DIM_COLOR 0x009AA4B0u
-#define TITLE_MARGIN 6
-#define TITLE_BTN_GAP 6
+#define TITLE_COLOR 0x00EDF1F7u
+#define TITLE_DIM_COLOR 0x008B95A5u
+#define TITLE_MARGIN 10
+#define TITLE_BTN_GAP 10
 
-#define SHADOW_OFFSET 6
-#define SHADOW_NUMBER 1
-#define SHADOW_DEN 3
-#define SHADOW_FOCUS_NUMBER 1
-#define SHADOW_FOCUS_DEN 2
+#define SHADOW_RINGS   8
+#define SHADOW_DROP    5
+#define SHADOW_PEAK        52u
+#define SHADOW_FOCUS_PEAK  84u
 
 #define SNAP_PREVIEW_NUMBER 1
 #define SNAP_PREVIEW_DEN 4
@@ -73,8 +81,8 @@
 #define LAUNCHER_LIST_BUFFER 2048
 
 #define LAUNCHER_BG      0x001C2233u
-#define LAUNCHER_BORDER  0x004C99E6u
-#define LAUNCHER_INPUT_BG 0x00101820u
+#define LAUNCHER_BORDER  0x005B6B85u
+#define LAUNCHER_INPUT_BG 0x00131A27u
 #define LAUNCHER_TEXT    0x00FFFFFFu
 #define LAUNCHER_HINT    0x006C8098u
 #define LAUNCHER_SEL_BG  0x00335577u
@@ -86,7 +94,7 @@
 #define POWER_BTN_Y   (LAUNCHER_H - LAUNCHER_PAD - POWER_BTN_H)
 #define POWER_OFF_X   (LAUNCHER_W - LAUNCHER_PAD - 2 * POWER_BTN_W - POWER_BTN_GAP)
 #define POWER_REBOOT_X (LAUNCHER_W - LAUNCHER_PAD - POWER_BTN_W)
-#define POWER_BTN_BG      0x00303C52u
+#define POWER_BTN_BG      0x002B3548u
 #define POWER_BTN_HOVER   0x004C6699u
 #define POWER_CONFIRM_W   300
 #define POWER_CONFIRM_H   96
@@ -97,9 +105,9 @@
 #define WMENU_W        124
 #define WMENU_ITEM_H   22
 #define WMENU_COUNT    3
-#define WMENU_BG       0x00243040u
+#define WMENU_BG       0x001E2430u
 #define WMENU_HOVER_BG 0x003A5A80u
-#define WMENU_BORDER   0x00506070u
+#define WMENU_BORDER   0x00495568u
 #define WMENU_TEXT     0x00FFFFFFu
 
 #define TOAST_MAX      4
@@ -109,8 +117,8 @@
 #define TOAST_MARGIN   12
 #define TOAST_STRIPE_W 4
 #define TOAST_TTL_MS   4000
-#define TOAST_BG       0x00222A38u
-#define TOAST_BORDER   0x00465266u
+#define TOAST_BG       0x001E2430u
+#define TOAST_BORDER   0x00495568u
 #define TOAST_TITLE_FG 0x00FFFFFFu
 #define TOAST_BODY_FG  0x00B4C0D0u
 #define TOAST_INFO_C   0x004C99E6u
@@ -572,17 +580,129 @@ static void fill_rect_blend(int32_t x, int32_t y, int32_t w, int32_t h,
 
 static int32_t content_bottom_limit(void);
 
-static void fill_rect_shadow(int32_t x, int32_t y, int32_t w, int32_t h, int focused) {
-    int32_t limit = content_bottom_limit();
-    if (y + h > limit) {
-        h = limit - y;
-    }
-    if (h <= 0) {
+static void blend_pixel_clipped(int32_t x, int32_t y, uint32_t color, uint32_t alpha) {
+    if (x < clip_x0 || x >= clip_x1 || y < clip_y0 || y >= clip_y1 || alpha == 0) {
         return;
     }
-    fill_rect_blend(x, y, w, h, 0x00000000u,
-                     focused ? SHADOW_FOCUS_NUMBER : SHADOW_NUMBER,
-                     focused ? SHADOW_FOCUS_DEN : SHADOW_DEN);
+    blend_pixel(x, y, color, alpha);
+}
+
+static void fill_rounded(int32_t x, int32_t y, int32_t w, int32_t h, int32_t radius,
+                         uint32_t color, uint32_t alpha) {
+    if (w <= 0 || h <= 0 || alpha == 0) {
+        return;
+    }
+    radius = graphics_clamp_radius(w, h, radius);
+    for (int32_t row = 0; row < h; row++) {
+        if (y + row < clip_y0 || y + row >= clip_y1) {
+            continue;
+        }
+        int32_t left = graphics_rounded_edge_subpixels(row, h, radius);
+        if (left == 0) {
+            if (alpha >= 255) {
+                fill_rect(x, y + row, w, 1, color);
+            } else {
+                for (int32_t column = 0; column < w; column++) {
+                    blend_pixel_clipped(x + column, y + row, color, alpha);
+                }
+            }
+            continue;
+        }
+        int32_t right = w * GRAPHICS_SUBPIXEL - left;
+        for (int32_t column = left / GRAPHICS_SUBPIXEL;
+             column < (right + GRAPHICS_SUBPIXEL - 1) / GRAPHICS_SUBPIXEL && column < w; column++) {
+            uint32_t coverage = graphics_span_coverage(column, left, right);
+            blend_pixel_clipped(x + column, y + row, color, coverage * alpha / 255);
+        }
+    }
+}
+
+static void stroke_rounded(int32_t x, int32_t y, int32_t w, int32_t h, int32_t radius,
+                           uint32_t color, uint32_t alpha) {
+    if (w <= 2 || h <= 2 || alpha == 0) {
+        return;
+    }
+    radius = graphics_clamp_radius(w, h, radius);
+    int32_t inner_radius = radius > 0 ? radius - 1 : 0;
+    for (int32_t row = 0; row < h; row++) {
+        if (y + row < clip_y0 || y + row >= clip_y1) {
+            continue;
+        }
+        int32_t outer_left = graphics_rounded_edge_subpixels(row, h, radius);
+        if (outer_left == 0) {
+            if (row == 0 || row == h - 1) {
+                for (int32_t column = 0; column < w; column++) {
+                    blend_pixel_clipped(x + column, y + row, color, alpha);
+                }
+            } else {
+                blend_pixel_clipped(x, y + row, color, alpha);
+                blend_pixel_clipped(x + w - 1, y + row, color, alpha);
+            }
+            continue;
+        }
+        int32_t outer_right = w * GRAPHICS_SUBPIXEL - outer_left;
+        int32_t inner_left;
+        int32_t inner_right;
+        if (row == 0 || row == h - 1) {
+            inner_left = outer_right;
+            inner_right = outer_right;
+        } else {
+            inner_left = GRAPHICS_SUBPIXEL + graphics_rounded_edge_subpixels(row - 1, h - 2, inner_radius);
+            inner_right = (w - 1) * GRAPHICS_SUBPIXEL - (inner_left - GRAPHICS_SUBPIXEL);
+        }
+        int32_t bands[2][2];
+        int band_count;
+        if (inner_left >= inner_right) {
+            bands[0][0] = outer_left / GRAPHICS_SUBPIXEL;
+            bands[0][1] = (outer_right + GRAPHICS_SUBPIXEL - 1) / GRAPHICS_SUBPIXEL;
+            band_count = 1;
+        } else {
+            bands[0][0] = outer_left / GRAPHICS_SUBPIXEL;
+            bands[0][1] = (inner_left + GRAPHICS_SUBPIXEL - 1) / GRAPHICS_SUBPIXEL;
+            bands[1][0] = inner_right / GRAPHICS_SUBPIXEL;
+            bands[1][1] = (outer_right + GRAPHICS_SUBPIXEL - 1) / GRAPHICS_SUBPIXEL;
+            band_count = 2;
+        }
+        for (int band = 0; band < band_count; band++) {
+            int32_t from = bands[band][0] < 0 ? 0 : bands[band][0];
+            int32_t to = bands[band][1] > w ? w : bands[band][1];
+            for (int32_t column = from; column < to; column++) {
+                int32_t outer = (int32_t)graphics_span_coverage(column, outer_left, outer_right);
+                int32_t inner = (int32_t)graphics_span_coverage(column, inner_left, inner_right);
+                int32_t coverage = outer - inner;
+                if (coverage > 0) {
+                    blend_pixel_clipped(x + column, y + row, color, (uint32_t)coverage * alpha / 255);
+                }
+            }
+        }
+    }
+}
+
+static int32_t content_bottom_limit(void);
+
+static void draw_window_shadow(const window_t *win, int focused) {
+    int32_t x = win->x - BORDER;
+    int32_t y = win->y - TITLEBAR_H - BORDER;
+    int32_t w = win->w + 2 * BORDER;
+    int32_t h = win->h + TITLEBAR_H + 2 * BORDER;
+    uint32_t peak = focused ? SHADOW_FOCUS_PEAK : SHADOW_PEAK;
+    int32_t limit = content_bottom_limit();
+    for (int32_t ring = SHADOW_RINGS - 1; ring >= 0; ring--) {
+        int32_t grow = ring + 1;
+        int32_t remaining = SHADOW_RINGS - ring;
+        uint32_t alpha = peak * (uint32_t)(remaining * remaining) /
+                         (uint32_t)(SHADOW_RINGS * SHADOW_RINGS);
+        int32_t ry = y + SHADOW_DROP;
+        int32_t rh = h + 2 * grow;
+        if (ry - grow + rh > limit) {
+            rh = limit - (ry - grow);
+        }
+        if (rh <= 2) {
+            continue;
+        }
+        stroke_rounded(x - grow, ry - grow, w + 2 * grow, rh,
+                       FRAME_RADIUS + grow, 0x00000000u, alpha);
+    }
 }
 
 static void blit_window(const window_t *win) {
@@ -609,8 +729,25 @@ static void blit_window(const window_t *win) {
         return;
     }
     size_t row_bytes = (size_t)(x1 - x0) * sizeof(uint32_t);
+    int32_t radius = (win->is_panel || win->is_desktop)
+                         ? 0
+                         : graphics_clamp_radius(win->w, 2 * FRAME_RADIUS, FRAME_RADIUS);
     for (int32_t row = y0; row < y1; row++) {
         const uint32_t *source_row = win->pixels + (uint32_t)(row - win->y + win->buffer_y0) * (uint32_t)win->buffer_w;
+        int32_t from_bottom = win->y + win->h - 1 - row;
+        if (radius > 0 && from_bottom < radius) {
+            int32_t left = graphics_rounded_edge_subpixels(2 * radius - 1 - from_bottom,
+                                                           2 * radius, radius);
+            int32_t right = win->w * GRAPHICS_SUBPIXEL - left;
+            for (int32_t col = x0; col < x1; col++) {
+                uint32_t coverage = graphics_span_coverage(col - win->x, left, right);
+                if (coverage == 0) {
+                    continue;
+                }
+                blend_pixel(col, row, source_row[col - win->x], coverage);
+            }
+            continue;
+        }
         memcpy(back_buffer + (uint32_t)row * back_pitch_pixels + (uint32_t)x0,
                source_row + (x0 - win->x), row_bytes);
     }
@@ -618,9 +755,16 @@ static void blit_window(const window_t *win) {
 
 typedef enum { BTN_MINIMIZE = 0, BTN_MAXIMIZE = 1, BTN_CLOSE = 2, BTN_COUNT } titlebar_button_t;
 
+static const int BTN_SLOT_FROM_RIGHT[BTN_COUNT] = {
+    [BTN_MINIMIZE] = 1,
+    [BTN_MAXIMIZE] = 0,
+    [BTN_CLOSE]    = 2,
+};
+
 static void titlebar_button_rect(const window_t *win, titlebar_button_t btn, int32_t *out_x, int32_t *out_y) {
     int32_t by = win->y - TITLEBAR_H + (TITLEBAR_H - BTN_SIZE) / 2;
-    int32_t bx = win->x + win->w - BTN_MARGIN - BTN_SIZE - (int32_t)btn * (BTN_SIZE + BTN_GAP);
+    int32_t slot = BTN_SLOT_FROM_RIGHT[btn];
+    int32_t bx = win->x + win->w - BTN_MARGIN - BTN_SIZE - slot * (BTN_SIZE + BTN_GAP);
     *out_x = bx;
     *out_y = by;
 }
@@ -730,11 +874,8 @@ static uint32_t lighten(uint32_t color, uint32_t num, uint32_t den) {
     return out;
 }
 
-static void fill_circle(int32_t x, int32_t y, uint32_t color) {
-    for (int32_t row = 0; row < GRAPHICS_CIRCLE_D; row++) {
-        int32_t inset = graphics_circle_inset(row);
-        fill_rect(x + inset, y + row, GRAPHICS_CIRCLE_D - 2 * inset, 1, color);
-    }
+static void fill_circle(int32_t x, int32_t y, int32_t diameter, uint32_t color) {
+    fill_rounded(x, y, diameter, diameter, diameter / 2, color, 255);
 }
 
 static void draw_button_glyph(int32_t bx, int32_t by, titlebar_button_t btn) {
@@ -748,10 +889,14 @@ static void draw_button_glyph(int32_t bx, int32_t by, titlebar_button_t btn) {
         }
         return;
     }
-    fill_rect(bx + g0, by + mid - 1, g1 - g0 + 1, 1, BTN_GLYPH_COLOR);
-    if (btn == BTN_MAXIMIZE) {
-        fill_rect(bx + mid - 1, by + g0, 1, g1 - g0 + 1, BTN_GLYPH_COLOR);
+    if (btn == BTN_MINIMIZE) {
+        fill_rect(bx + g0, by + mid - 1, g1 - g0 + 1, 2, BTN_GLYPH_COLOR);
+        return;
     }
+    fill_rect(bx + g0, by + g0, g1 - g0 + 1, 2, BTN_GLYPH_COLOR);
+    fill_rect(bx + g0, by + g1 - 1, g1 - g0 + 1, 2, BTN_GLYPH_COLOR);
+    fill_rect(bx + g0, by + g0, 2, g1 - g0 + 1, BTN_GLYPH_COLOR);
+    fill_rect(bx + g1 - 1, by + g0, 2, g1 - g0 + 1, BTN_GLYPH_COLOR);
 }
 
 static void draw_titlebar_buttons(const window_t *win, int idx, int focused) {
@@ -760,12 +905,12 @@ static void draw_titlebar_buttons(const window_t *win, int idx, int focused) {
     for (int b = 0; b < BTN_COUNT; b++) {
         int32_t bx, by;
         titlebar_button_rect(win, (titlebar_button_t)b, &bx, &by);
-        uint32_t color = colors[b];
+        uint32_t color = (focused || hovered_here) ? colors[b] : BTN_IDLE_COLOR;
         if (hovered_here && hover_btn == (titlebar_button_t)b) {
             color = lighten(color, 1, BTN_HOVER_LIGHTEN);
         }
-        fill_circle(bx, by, color);
-        if (focused || hovered_here) {
+        fill_circle(bx, by, BTN_SIZE, color);
+        if (hovered_here) {
             draw_button_glyph(bx, by, (titlebar_button_t)b);
         }
     }
@@ -815,11 +960,16 @@ static void draw_text_clipped(int32_t x, int32_t y, const char *s, uint32_t colo
     }
 }
 
-static void fit_title(const window_t *win, char *out) {
+static int32_t title_available_width(const window_t *win) {
     int32_t leftmost_btn_x;
     int32_t unused_y;
     titlebar_button_rect(win, (titlebar_button_t)(BTN_COUNT - 1), &leftmost_btn_x, &unused_y);
     int32_t avail = leftmost_btn_x - TITLE_BTN_GAP - (win->x + TITLE_MARGIN);
+    return avail < 0 ? 0 : avail;
+}
+
+static void fit_title(const window_t *win, char *out) {
+    int32_t avail = title_available_width(win);
     if (avail < 0) {
         avail = 0;
     }
@@ -864,74 +1014,61 @@ static void stroke_rect(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t col
     fill_rect(x + w - 1, y, 1, h, color);
 }
 
-static int32_t rounded_row_inset(int32_t row, int32_t h) {
-    if (row < GRAPHICS_CORNER_R) {
-        return graphics_corner_inset(row);
-    }
-    if (row >= h - GRAPHICS_CORNER_R) {
-        return graphics_corner_inset(h - 1 - row);
-    }
-    return 0;
-}
+#define OVERLAY_RADIUS 9
 
 static void fill_rect_rounded(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
-    if (w < 2 * GRAPHICS_CORNER_R || h < 2 * GRAPHICS_CORNER_R) {
-        fill_rect(x, y, w, h, color);
-        return;
-    }
-    for (int32_t row = 0; row < h; row++) {
-        int32_t inset = rounded_row_inset(row, h);
-        fill_rect(x + inset, y + row, w - 2 * inset, 1, color);
-    }
+    fill_rounded(x, y, w, h, OVERLAY_RADIUS, color, 255);
 }
 
 static void fill_rect_rounded_blend(int32_t x, int32_t y, int32_t w, int32_t h,
                                      uint32_t color, uint32_t num, uint32_t den) {
-    if (w < 2 * GRAPHICS_CORNER_R || h < 2 * GRAPHICS_CORNER_R) {
-        fill_rect_blend(x, y, w, h, color, num, den);
-        return;
-    }
-    for (int32_t row = 0; row < h; row++) {
-        int32_t inset = rounded_row_inset(row, h);
-        fill_rect_blend(x + inset, y + row, w - 2 * inset, 1, color, num, den);
-    }
+    fill_rounded(x, y, w, h, OVERLAY_RADIUS, color, num * 255u / den);
 }
 
-static void draw_frame_top_rounded(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
-    if (w < 2 * GRAPHICS_CORNER_R || h < GRAPHICS_CORNER_R) {
-        fill_rect(x, y, w, h, color);
-        return;
+static void draw_titlebar(const window_t *win, int focused) {
+    int32_t x = win->x;
+    int32_t y = win->y - TITLEBAR_H;
+    int32_t w = win->w;
+    uint32_t top = focused ? TITLEBAR_TOP_COLOR : TITLEBAR_DIM_TOP_COLOR;
+    uint32_t bottom = focused ? TITLEBAR_BOTTOM_COLOR : TITLEBAR_DIM_BOTTOM_COLOR;
+    int32_t radius = graphics_clamp_radius(w, 2 * FRAME_RADIUS, FRAME_RADIUS);
+    for (int32_t row = 0; row < TITLEBAR_H; row++) {
+        if (y + row < clip_y0 || y + row >= clip_y1) {
+            continue;
+        }
+        uint32_t color = 0;
+        for (int shift = 16; shift >= 0; shift -= 8) {
+            int32_t a = (int32_t)((top >> shift) & 0xFFu);
+            int32_t b = (int32_t)((bottom >> shift) & 0xFFu);
+            color |= (uint32_t)(a + (b - a) * row / (TITLEBAR_H - 1)) << shift;
+        }
+        if (row >= radius) {
+            fill_rect(x, y + row, w, 1, color);
+            continue;
+        }
+        int32_t left = graphics_rounded_edge_subpixels(row, 2 * radius, radius);
+        int32_t right = w * GRAPHICS_SUBPIXEL - left;
+        for (int32_t column = 0; column < w; column++) {
+            uint32_t coverage = graphics_span_coverage(column, left, right);
+            blend_pixel_clipped(x + column, y + row, color, coverage);
+        }
     }
-    for (int32_t row = 0; row < GRAPHICS_CORNER_R; row++) {
-        int32_t inset = graphics_corner_inset(row);
-        fill_rect(x + inset, y + row, w - 2 * inset, 1, color);
+    if (focused) {
+        int32_t left = graphics_rounded_edge_subpixels(0, 2 * radius, radius);
+        int32_t right = w * GRAPHICS_SUBPIXEL - left;
+        for (int32_t column = 0; column < w; column++) {
+            uint32_t coverage = graphics_span_coverage(column, left, right);
+            blend_pixel_clipped(x + column, y, accent_color,
+                                coverage * TITLEBAR_ACCENT_ALPHA / 255);
+        }
     }
-    fill_rect(x, y + GRAPHICS_CORNER_R, w, h - GRAPHICS_CORNER_R, color);
-}
-
-static int32_t rounded_outline_run(int32_t row, int32_t w, int32_t h) {
-    int32_t inset = rounded_row_inset(row, h);
-    int32_t above = (row == 0) ? w : rounded_row_inset(row - 1, h);
-    int32_t below = (row == h - 1) ? w : rounded_row_inset(row + 1, h);
-    int32_t reach = above > below ? above : below;
-    if (reach > w - inset) {
-        reach = w - inset;
+    for (int32_t column = 0; column < w; column++) {
+        blend_pixel_clipped(x + column, y + TITLEBAR_H - 1, 0x00000000u, 90u);
     }
-    int32_t run = reach - inset;
-    return run < 1 ? 1 : run;
 }
 
 static void stroke_rect_rounded(int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
-    if (w < 2 * GRAPHICS_CORNER_R || h < 2 * GRAPHICS_CORNER_R) {
-        stroke_rect(x, y, w, h, color);
-        return;
-    }
-    for (int32_t row = 0; row < h; row++) {
-        int32_t inset = rounded_row_inset(row, h);
-        int32_t run = rounded_outline_run(row, w, h);
-        fill_rect(x + inset, y + row, run, 1, color);
-        fill_rect(x + w - inset - run, y + row, run, 1, color);
-    }
+    stroke_rounded(x, y, w, h, OVERLAY_RADIUS, color, 255);
 }
 
 static void launcher_rect(int32_t *out_x, int32_t *out_y) {
@@ -1154,15 +1291,23 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
             continue;
         }
         int focused = (i == focused_window);
-        uint32_t titlebar_color = focused ? accent_color : TITLEBAR_COLOR;
-        fill_rect_shadow(win->x - BORDER + SHADOW_OFFSET, win->y - TITLEBAR_H - BORDER + SHADOW_OFFSET,
-                          win->w + 2 * BORDER, win->h + TITLEBAR_H + 2 * BORDER, focused);
-        draw_frame_top_rounded(win->x - BORDER, win->y - TITLEBAR_H - BORDER,
-                                win->w + 2 * BORDER, win->h + TITLEBAR_H + 2 * BORDER, BORDER_COLOR);
-        draw_frame_top_rounded(win->x, win->y - TITLEBAR_H, win->w, TITLEBAR_H, titlebar_color);
+        draw_window_shadow(win, focused);
+        stroke_rounded(win->x - BORDER, win->y - TITLEBAR_H - BORDER,
+                        win->w + 2 * BORDER, win->h + TITLEBAR_H + 2 * BORDER,
+                        FRAME_RADIUS + BORDER, BORDER_COLOR, BORDER_ALPHA);
+        draw_titlebar(win, focused);
         char fitted_title[WINDOW_MANAGER_TITLE_MAX];
         fit_title(win, fitted_title);
-        draw_text_clipped(win->x + TITLE_MARGIN, win->y - TITLEBAR_H + (TITLEBAR_H - UI_FONT_HEIGHT) / 2,
+        int32_t title_w = text_width(fitted_title);
+        int32_t title_x = win->x + (win->w - title_w) / 2;
+        int32_t title_left = win->x + TITLE_MARGIN;
+        if (title_x < title_left) {
+            title_x = title_left;
+        }
+        if (title_x + title_w > title_left + title_available_width(win)) {
+            title_x = title_left;
+        }
+        draw_text_clipped(title_x, win->y - TITLEBAR_H + (TITLEBAR_H - UI_FONT_HEIGHT) / 2,
                            fitted_title, focused ? TITLE_COLOR : TITLE_DIM_COLOR, 1  );
         draw_titlebar_buttons(win, i, focused);
         blit_window(win);

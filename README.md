@@ -19,6 +19,19 @@ UEFI firmware
   traffic-light buttons, drag and resize, snapping, minimize/restore with
   motion, a taskbar, a Spotlight-style launcher, context menus, toasts,
   drag and drop, four virtual desktops, and keyboard chords.
+- **Window chrome that is not from 2005.** A 28px titlebar with its own
+  vertical gradient rather than a flat fill, the title centred and bold,
+  and an accent hairline along the top of the focused window - so focus
+  is shown the way a modern desktop shows it rather than by painting the
+  whole bar blue. The traffic lights are anti-aliased 12px circles in
+  macOS order, coloured on the focused window and grey on every other
+  one, with their glyphs appearing on hover. Windows are rounded on all
+  four corners - the bottom two are cut out of the client's own blit,
+  which the compositor can do because it already has what is behind the
+  window in its back buffer - and they sit on a real drop shadow: eight
+  concentric rounded strokes whose alpha falls off with distance, rather
+  than one offset rectangle at a flat ratio. The launcher, the toasts
+  and the window menu are on the same rounded primitives.
 - **Artwork with an alpha channel.** The desktop icons are RGBA, drawn by
   a first-party vector rasteriser in `tools/gen-icons.c` rather than typed
   as hex: closed contours filled with a scanline rasteriser at four

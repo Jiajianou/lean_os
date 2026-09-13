@@ -340,12 +340,12 @@ static void selftest_title_counts(int until_bright, int *out_bright, int *out_di
     uint64_t deadline = pit_get_ticks() + (SELFTEST_PAINT_MS + 9) / 10;
     for (;;) {
         int bright = 0, dim = 0;
-        for (int32_t ty = 82; ty < 98; ty++) {
-            for (int32_t tx = 106; tx < 150; tx++) {
+        for (int32_t ty = 76; ty < 96; ty++) {
+            for (int32_t tx = 170; tx < 235; tx++) {
                 uint32_t c = framebuffer_get_pixel(tx, ty);
-                if (c == 0x00F0F0F0u) {
+                if (c == 0x00EDF1F7u) {
                     bright++;
-                } else if (c == 0x009AA4B0u) {
+                } else if (c == 0x008B95A5u) {
                     dim++;
                 }
             }
@@ -697,8 +697,8 @@ static void boot_selftests_desktop(void) {
         struct { uint32_t x, y; uint32_t expected; const char *what; } checks[] = {
             {200, 180, 0x00336699u, "window content color"},
             {140, 140, 0x00CC8822u, "window accent square color"},
-            {150, 85,  0x004C99E6u, "window titlebar color (focused)"},
-            {99,  150, 0x00444466u, "window border color"},
+            {150, 85,  0x00252B39u, "window titlebar gradient at row 13 of 28 (focused)"},
+            {99,  150, 0x000B0B13u, "window border - black at 150/255 over the desktop background"},
             {500, 500, 0x001A1A2Eu, "desktop background color"},
         };
         uint32_t got[sizeof(checks) / sizeof(checks[0])];
@@ -753,12 +753,12 @@ static void boot_selftests_desktop(void) {
         pit_sleep_ms(1000);
 
         static const struct { uint32_t x, y; uint32_t expected; const char *what; } checks[] = {
-            {150, 90,  0x00335577u, "clock titlebar color (unfocused)"},
-            {98,  150, 0x00444466u, "clock compositor border color"},
+            {150, 90,  0x001D222Du, "clock titlebar gradient at row 18 of 28 (unfocused)"},
+            {99,  150, 0x000B0B13u, "clock compositor border - black at 150/255 over the desktop background"},
             {105, 105, 0x00122438u, "clock content background color"},
             {110, 115, 0x00FFFFFFu, "clock caption 'C' glyph - on pixel (left stem)"},
             {113, 115, 0x00122438u, "clock caption 'C' glyph - off pixel (bowl interior)"},
-            {200, 130, 0x004C99E6u, "paint titlebar color (focused)"},
+            {200, 130, 0x00222936u, "paint titlebar gradient at row 18 of 28 (focused)"},
             {140, 190, 0x0088AA55u, "paint's own border frame color"},
             {150, 240, 0x00202020u, "paint canvas background color"},
             {150, 151, 0x00FFFFFFu, "paint caption 'P' glyph - on pixel (left stem)"},
@@ -1165,9 +1165,28 @@ static void boot_selftests_desktop(void) {
         kfree(clock_image);
         pit_sleep_ms(500);
 
-        uint32_t expected_shadow = 0x000D0D17u;
-        uint32_t shadow_pixel = selftest_pixel_settled(304, 150, expected_shadow,
-                                                        "the window's drop shadow to be drawn");
+        uint32_t accent_line = selftest_pixel_settled(200, 72, 0x004C99E6u,
+                                                      "the focused window's accent hairline to be drawn");
+
+        uint32_t shadow_near = framebuffer_get_pixel(302, 150);
+        uint32_t shadow_mid = framebuffer_get_pixel(306, 150);
+        uint32_t shadow_far = framebuffer_get_pixel(310, 150);
+        uint32_t shadow_ground = framebuffer_get_pixel(500, 150);
+        int shadow_darkens = 1;
+        int shadow_falls_off = 1;
+        for (int shift = 16; shift >= 0; shift -= 8) {
+            uint32_t near_channel = (shadow_near >> shift) & 0xFFu;
+            uint32_t mid_channel = (shadow_mid >> shift) & 0xFFu;
+            uint32_t far_channel = (shadow_far >> shift) & 0xFFu;
+            uint32_t ground_channel = (shadow_ground >> shift) & 0xFFu;
+            if (near_channel >= ground_channel) {
+                shadow_darkens = 0;
+            }
+            if (!(near_channel < mid_channel && mid_channel < far_channel &&
+                  far_channel <= ground_channel)) {
+                shadow_falls_off = 0;
+            }
+        }
 
         int settings_file_descriptors[2];
         if (do_syscall(SYS_pipe_open, (uint64_t)WINDOW_MANAGER_SETTINGS_PIPE, (uint64_t)settings_file_descriptors, 0) != 0) {
@@ -1181,7 +1200,7 @@ static void boot_selftests_desktop(void) {
         request.accent_color = 0x00AA5500u;
         do_syscall(SYS_write, (uint64_t)settings_file_descriptors[1], (uint64_t)&request, sizeof(request));
         pit_sleep_ms(300);
-        uint32_t titlebar_pixel = framebuffer_get_pixel(200, 88);
+        uint32_t titlebar_pixel = framebuffer_get_pixel(200, 72);
 
         selftest_reap(clock_task);
         selftest_reap(comp_task);
@@ -1189,11 +1208,25 @@ static void boot_selftests_desktop(void) {
         kernel_log_use_console();
 
         int all_ok = 1;
-        if (shadow_pixel != expected_shadow) {
-            kernel_log_puts("[wm38] pixel check failed: drop-shadow blend did not match - expected 0x");
-            kernel_log_put_hex32(expected_shadow);
-            kernel_log_puts(" got 0x");
-            kernel_log_put_hex32(shadow_pixel);
+        if (accent_line != 0x004C99E6u) {
+            kernel_log_puts("[wm38] pixel check failed: the focused accent hairline - expected 0x004C99E6 got 0x");
+            kernel_log_put_hex32(accent_line);
+            kernel_log_putc('\n');
+            all_ok = 0;
+        }
+        if (!shadow_darkens) {
+            kernel_log_puts("[wm38] the pixel beside the window is not darker than the desktop - there is no drop shadow\n");
+            all_ok = 0;
+        }
+        if (!shadow_falls_off) {
+            kernel_log_puts("[wm38] the drop shadow does not fade with distance - a flat offset rectangle, not a falloff: 0x");
+            kernel_log_put_hex32(shadow_near);
+            kernel_log_puts(" 0x");
+            kernel_log_put_hex32(shadow_mid);
+            kernel_log_puts(" 0x");
+            kernel_log_put_hex32(shadow_far);
+            kernel_log_puts(" against ground 0x");
+            kernel_log_put_hex32(shadow_ground);
             kernel_log_putc('\n');
             all_ok = 0;
         }
@@ -2244,8 +2277,8 @@ static void boot_selftests_system(void) {
         request.window_id = 1;
         request.action = WINDOW_MANAGER_ACTION_MAXIMIZE;
         do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
-        uint32_t maximized_titlebar = selftest_pixel_settled(100, 12, 0x004C99E6u,
-                                                              "the maximized window's titlebar");
+        uint32_t maximized_titlebar = selftest_pixel_settled(100, 1, 0x004C99E6u,
+                                                              "the maximized window's accent hairline");
         uint32_t panel_over_maximized = selftest_pixel_settled(512, 726, 0x00202634u,
                                                                 "the taskbar to stay on top of the maximized window");
 
@@ -2253,7 +2286,7 @@ static void boot_selftests_system(void) {
         request.window_id = -1;
         request.action = WINDOW_MANAGER_ACTION_TOGGLE_LAUNCHER;
         do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
-        uint32_t launcher_open_px = selftest_pixel_settled(512, 309, 0x001B2032u,
+        uint32_t launcher_open_px = selftest_pixel_settled(512, 309, 0x001C2032u,
                                                             "the launcher overlay to finish fading in");
         do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t launcher_closed_px = selftest_pixel_settled(512, 309, 0x001A1A2Eu,
@@ -2271,9 +2304,9 @@ static void boot_selftests_system(void) {
             {"the launcher button's accent glyph at the taskbar's left edge (desktop_shell.c ACCENT_COLOR, translucent)", 0x003F79B8u},
             {"running-app button 0's icon - a flat pixel of the Clock tile, which proves the shell mapped the window title to an icon", 0x00BEBFC6u},
             {"the current workspace's pill in the tray, right-aligned (desktop_shell.c ACCENT_COLOR, translucent)", 0x003F79B8u},
-            {"a maximized window's titlebar starting at the top of the screen (compositor.c TITLEBAR_FOCUS_COLOR)", 0x004C99E6u},
+            {"a maximized window's accent hairline at y=1, directly under the one-pixel frame border (compositor.c accent_color)", 0x004C99E6u},
             {"the taskbar staying on top of a maximized window (desktop_shell.c PANEL_TOP_COLOR, translucent)", 0x00202634u},
-            {"the launcher overlay, opened by WM_ACTION_TOGGLE_LAUNCHER (compositor.c LAUNCHER_BG, translucent)", 0x001B2032u},
+            {"the launcher overlay, opened by WM_ACTION_TOGGLE_LAUNCHER (compositor.c LAUNCHER_BG, translucent)", 0x001C2032u},
             {"the launcher overlay gone again after a second toggle (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
         };
         const uint32_t got[] = {
@@ -2362,11 +2395,11 @@ static void boot_selftests_system(void) {
         kernel_log_use_console();
 
         static const struct { const char *what; uint32_t expected; } names[] = {
-            {"a right-snapped window's titlebar filling the screen's right half (compositor.c TITLEBAR_FOCUS_COLOR)", 0x004C99E6u},
+            {"a right-snapped window's titlebar filling the screen's right half (compositor.c titlebar gradient at row 11 of 28, focused)", 0x00262C3Au},
             {"the left half staying empty while a window is snapped right (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
-            {"a left-snapped window's titlebar filling the screen's left half (compositor.c TITLEBAR_FOCUS_COLOR)", 0x004C99E6u},
+            {"a left-snapped window's titlebar filling the screen's left half (compositor.c titlebar gradient at row 11 of 28, focused)", 0x00262C3Au},
             {"the right half staying empty while a window is snapped left (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
-            {"the launcher overlay, opened by WM_ACTION_TOGGLE_LAUNCHER (compositor.c LAUNCHER_BG, translucent)", 0x001B2032u},
+            {"the launcher overlay, opened by WM_ACTION_TOGGLE_LAUNCHER (compositor.c LAUNCHER_BG, translucent)", 0x001C2032u},
             {"the launcher's first result drawn selected (compositor.c LAUNCHER_SEL_BG, drawn opaquely over the blended overlay)", 0x00335577u},
             {"the launcher overlay gone again after a second toggle (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
         };
@@ -2640,27 +2673,23 @@ static void boot_selftests_system(void) {
         selftest_wait_for_compositor();
         task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
         kfree(clock_image);
-        uint32_t focused_corner = selftest_pixel_settled(246, 83, 0x004C99E6u,
+        uint32_t focused_corner = selftest_pixel_settled(238, 80, 0x00272E3Cu,
                                                           "the focused window's titlebar to be drawn");
-        uint32_t focused_disc = selftest_pixel_settled(250, 90, 0x00FF5F57u,
+        uint32_t focused_disc = selftest_pixel_settled(244, 86, 0x00FF5F57u,
                                                         "the close button's own colour");
-        uint32_t focused_glyph = selftest_pixel_settled(253, 90, 0x00303030u,
-                                                         "the x drawn on the close button");
-        uint32_t focused_shadow = selftest_pixel_settled(304, 100, 0x000D0D17u,
-                                                          "the focused window's deeper drop shadow");
+        uint32_t focused_glyph = framebuffer_get_pixel(241, 83);
+        uint32_t focused_shadow = framebuffer_get_pixel(304, 100);
         int focused_bright = 0, focused_dim = 0;
         selftest_title_counts(1, &focused_bright, &focused_dim);
 
         task_t *stub_task = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
         kfree(stub_image);
-        uint32_t unfocused_corner = selftest_pixel_settled(246, 83, 0x00335577u,
+        uint32_t unfocused_corner = selftest_pixel_settled(238, 80, 0x001F2531u,
                                                             "the clock's window to be repainted unfocused");
-        uint32_t unfocused_disc = selftest_pixel_settled(250, 90, 0x00FF5F57u,
-                                                          "the close button keeping its own colour unfocused");
-        uint32_t unfocused_glyph = selftest_pixel_settled(253, 90, 0x00FF5F57u,
-                                                           "the x to be gone from an unfocused button");
-        uint32_t unfocused_shadow = selftest_pixel_settled(304, 100, 0x0011111Eu,
-                                                            "the unfocused window's shallower drop shadow");
+        uint32_t unfocused_disc = selftest_pixel_settled(244, 86, 0x005A6270u,
+                                                          "the close button to go grey on an unfocused window");
+        uint32_t unfocused_glyph = framebuffer_get_pixel(241, 83);
+        uint32_t unfocused_shadow = framebuffer_get_pixel(304, 100);
         int unfocused_bright = 0, unfocused_dim = 0;
         selftest_title_counts(0, &unfocused_bright, &unfocused_dim);
 
@@ -2671,18 +2700,15 @@ static void boot_selftests_system(void) {
         kernel_log_use_console();
 
         static const struct { const char *what; uint32_t expected; } names[] = {
-            {"the close button's bounding-box corner on a focused window - titlebar color, which is what says a circle got drawn and not a square", 0x004C99E6u},
-            {"the middle of that same button, clear of both strokes of its x", 0x00FF5F57u},
-            {"a pixel on that x itself", 0x00303030u},
-            {"the corner again once the window is unfocused - the unfocused titlebar color", 0x00335577u},
-            {"the middle of the button on an unfocused window - still the button's own color", 0x00FF5F57u},
-            {"the x's own pixel once unfocused - the glyph is gone, so this is button color too", 0x00FF5F57u},
-            {"the focused window's drop shadow - blend(0x1A1A2E, black, 1/2), the deeper of the two ratios", 0x000D0D17u},
-            {"that same shadow pixel once the window is unfocused - blend(0x1A1A2E, black, 1/3), the shallower one", 0x0011111Eu},
+            {"the close button's bounding-box corner on a focused window - the titlebar gradient at row 8, which is what says a circle got drawn and not a square", 0x00272E3Cu},
+            {"the middle of that same button - its own colour, because a focused window's lights are coloured", 0x00FF5F57u},
+            {"a pixel on the diagonal of the x - still button colour, because the glyph appears on hover rather than on focus", 0x00FF5F57u},
+            {"the corner again once the window is unfocused - the dim titlebar gradient at row 8", 0x001F2531u},
+            {"the middle of the button on an unfocused window - grey, because an unfocused window's lights lose their colour", 0x005A6270u},
+            {"the x's own pixel once unfocused - grey too, the glyph still being a hover state", 0x005A6270u},
         };
         const uint32_t got[] = {focused_corner, focused_disc, focused_glyph,
-                                 unfocused_corner, unfocused_disc, unfocused_glyph,
-                                 focused_shadow, unfocused_shadow};
+                                 unfocused_corner, unfocused_disc, unfocused_glyph};
         int all_ok = 1;
         for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
             if (got[i] != names[i].expected) {
@@ -2695,6 +2721,20 @@ static void boot_selftests_system(void) {
                 kernel_log_putc('\n');
                 all_ok = 0;
             }
+        }
+        int shadow_deeper_when_focused = 1;
+        for (int shift = 16; shift >= 0; shift -= 8) {
+            if (((focused_shadow >> shift) & 0xFFu) >= ((unfocused_shadow >> shift) & 0xFFu)) {
+                shadow_deeper_when_focused = 0;
+            }
+        }
+        if (!shadow_deeper_when_focused) {
+            kernel_log_puts("[m46] the drop shadow is not deeper on the focused window - focused 0x");
+            kernel_log_put_hex32(focused_shadow);
+            kernel_log_puts(" against unfocused 0x");
+            kernel_log_put_hex32(unfocused_shadow);
+            kernel_log_putc('\n');
+            all_ok = 0;
         }
         if (focused_bright == 0 || focused_dim != 0 || unfocused_dim == 0 || unfocused_bright != 0) {
             kernel_log_puts("[m46] the title text did not dim when the window lost focus (focused: 0x");
@@ -2852,7 +2892,7 @@ static void boot_selftests_system(void) {
 
         static const struct { const char *what; uint32_t expected; } names[] = {
             {"the error toast's accent stripe", 0x00E05C55u},
-            {"the toast's own background, right of its text", 0x00222A38u},
+            {"the toast's own background, right of its text", 0x001E2430u},
             {"that same stripe two seconds in - still well inside the toast's own deadline", 0x00E05C55u},
             {"the stripe once the deadline has passed - bare desktop again", 0x001A1A2Eu},
             {"the toast's background once the deadline has passed", 0x001A1A2Eu},
@@ -3453,8 +3493,8 @@ static void boot_selftests_system(void) {
         uint64_t worst_us = 0;
         int missed = 0;
         for (int t = 0; t < 3 && !missed; t++) {
-            int32_t tick_x = 393 - 14 * t + 4;
-            int32_t tick_y = 293 + 4;
+            int32_t tick_x = 388 - 14 * t + 4;
+            int32_t tick_y = 288 + 4;
             mouse_inject(-4096, -4096, 0, 0);
             mouse_inject(120, 250, 0, 0);
             pit_sleep_ms(120);

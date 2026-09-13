@@ -273,3 +273,137 @@ TEST(rounded, a_box_too_small_to_have_two_edges_is_refused_rather_than_drawn_ins
     graphics_fill_rounded(&context, 10, 10, 40, 0, 4, INK, 255);
     CHECK_EQ(painted_count(), 0);
 }
+
+TEST(rounded, the_radius_is_clamped_to_what_the_box_can_hold) {
+    CHECK_EQ(graphics_clamp_radius(40, 40, 12), 12);
+    CHECK_EQ(graphics_clamp_radius(10, 40, 12), 5);
+    CHECK_EQ(graphics_clamp_radius(40, 6, 12), 3);
+    CHECK_EQ(graphics_clamp_radius(40, 40, 0), 0);
+    CHECK_EQ(graphics_clamp_radius(40, 40, -3), 0);
+}
+
+TEST(rounded, only_the_rows_within_the_radius_are_inset) {
+    for (int radius = 0; radius <= 20; radius++) {
+        int h = 2 * radius + 6;
+        for (int row = radius; row < h - radius; row++) {
+            CHECK_MSG(graphics_rounded_edge_subpixels(row, h, radius) == 0,
+                      "row %d of %d at radius %d is inset, so the straight-row fast path "
+                      "would skip pixels it should paint", row, h, radius);
+        }
+        for (int row = 0; row < radius; row++) {
+            CHECK_MSG(graphics_rounded_edge_subpixels(row, h, radius) > 0,
+                      "row %d of %d at radius %d has no inset, so the corner is square there",
+                      row, h, radius);
+        }
+    }
+}
+
+TEST(rounded, span_coverage_is_the_overlap_of_a_pixel_with_the_span) {
+    CHECK_EQ(graphics_span_coverage(0, 0, GRAPHICS_SUBPIXEL), 255);
+    CHECK_EQ(graphics_span_coverage(1, 0, GRAPHICS_SUBPIXEL), 0);
+    CHECK_EQ(graphics_span_coverage(0, GRAPHICS_SUBPIXEL, 2 * GRAPHICS_SUBPIXEL), 0);
+    CHECK_EQ(graphics_span_coverage(0, GRAPHICS_SUBPIXEL / 2, GRAPHICS_SUBPIXEL),
+             (GRAPHICS_SUBPIXEL / 2) * 255 / GRAPHICS_SUBPIXEL);
+    CHECK_EQ(graphics_span_coverage(5, 0, 100 * GRAPHICS_SUBPIXEL), 255);
+}
+
+static uint32_t reference[CANVAS * CANVAS];
+
+static void reference_stroke(int32_t x, int32_t y, int32_t w, int32_t h, int32_t radius,
+                             uint32_t color, uint32_t alpha) {
+    graphics_context_t target = { reference, CANVAS, CANVAS };
+    for (int i = 0; i < CANVAS * CANVAS; i++) {
+        reference[i] = GROUND;
+    }
+    if (w <= 2 || h <= 2 || alpha == 0) {
+        return;
+    }
+    radius = graphics_clamp_radius(w, h, radius);
+    int32_t inner_radius = radius > 0 ? radius - 1 : 0;
+    for (int32_t row = 0; row < h; row++) {
+        int32_t outer_left = graphics_rounded_edge_subpixels(row, h, radius);
+        int32_t outer_right = w * GRAPHICS_SUBPIXEL - outer_left;
+        int32_t inner_left;
+        int32_t inner_right;
+        if (row == 0 || row == h - 1) {
+            inner_left = outer_right;
+            inner_right = outer_right;
+        } else {
+            inner_left = GRAPHICS_SUBPIXEL +
+                         graphics_rounded_edge_subpixels(row - 1, h - 2, inner_radius);
+            inner_right = (w - 1) * GRAPHICS_SUBPIXEL - (inner_left - GRAPHICS_SUBPIXEL);
+        }
+        for (int32_t column = 0; column < w; column++) {
+            int32_t outer = (int32_t)graphics_span_coverage(column, outer_left, outer_right);
+            int32_t inner = (int32_t)graphics_span_coverage(column, inner_left, inner_right);
+            int32_t coverage = outer - inner;
+            if (coverage > 0) {
+                graphics_blend_pixel(&target, x + column, y + row, color,
+                                     (uint32_t)coverage * alpha / 255);
+            }
+        }
+    }
+}
+
+TEST(rounded, the_banded_stroke_paints_exactly_what_a_full_scan_would) {
+    static const int32_t SIZES[] = {3, 4, 12, 30, 64};
+    static const int32_t RADII[] = {0, 1, 4, 9, 30};
+    for (unsigned si = 0; si < sizeof(SIZES) / sizeof(SIZES[0]); si++) {
+        for (unsigned sj = 0; sj < sizeof(SIZES) / sizeof(SIZES[0]); sj++) {
+            for (unsigned ri = 0; ri < sizeof(RADII) / sizeof(RADII[0]); ri++) {
+                int32_t w = SIZES[si];
+                int32_t h = SIZES[sj];
+                int32_t radius = RADII[ri];
+                clear();
+                graphics_stroke_rounded(&context, 8, 8, w, h, radius, INK, 200);
+                reference_stroke(8, 8, w, h, radius, INK, 200);
+                for (int i = 0; i < CANVAS * CANVAS; i++) {
+                    CHECK_MSG(canvas[i] == reference[i],
+                              "the banded stroke and a full scan disagree at pixel %d "
+                              "for a %dx%d box at radius %d", i, w, h, radius);
+                }
+            }
+        }
+    }
+}
+
+static uint32_t outer_fill[CANVAS * CANVAS];
+static uint32_t inner_fill[CANVAS * CANVAS];
+
+TEST(rounded, a_stroke_is_exactly_the_outer_fill_minus_the_one_pixel_inset_fill) {
+    static const int32_t SIZES[] = {6, 20, 41, 64};
+    static const int32_t RADII[] = {0, 1, 5, 12};
+    graphics_context_t outer_context = { outer_fill, CANVAS, CANVAS };
+    graphics_context_t inner_context = { inner_fill, CANVAS, CANVAS };
+    for (unsigned si = 0; si < sizeof(SIZES) / sizeof(SIZES[0]); si++) {
+        for (unsigned ri = 0; ri < sizeof(RADII) / sizeof(RADII[0]); ri++) {
+            int32_t w = SIZES[si];
+            int32_t h = SIZES[(si + 1) % (sizeof(SIZES) / sizeof(SIZES[0]))];
+            int32_t radius = RADII[ri];
+            int32_t clamped = graphics_clamp_radius(w, h, radius);
+
+            for (int i = 0; i < CANVAS * CANVAS; i++) {
+                canvas[i] = 0;
+                outer_fill[i] = 0;
+                inner_fill[i] = 0;
+            }
+            graphics_stroke_rounded(&context, 8, 8, w, h, radius, 0x00FFFFFFu, 255);
+            graphics_fill_rounded(&outer_context, 8, 8, w, h, clamped, 0x00FFFFFFu, 255);
+            graphics_fill_rounded(&inner_context, 9, 9, w - 2, h - 2,
+                                  clamped > 0 ? clamped - 1 : 0, 0x00FFFFFFu, 255);
+
+            for (int i = 0; i < CANVAS * CANVAS; i++) {
+                int32_t outer = (int32_t)(outer_fill[i] & 0xFFu);
+                int32_t inner = (int32_t)(inner_fill[i] & 0xFFu);
+                int32_t want = outer - inner;
+                if (want < 0) {
+                    want = 0;
+                }
+                CHECK_MSG((int32_t)(canvas[i] & 0xFFu) == want,
+                          "a %dx%d stroke at radius %d is not its outer fill minus the "
+                          "one-pixel-inset fill at pixel %d: stroke %d, outer %d, inner %d",
+                          w, h, radius, i, (int)(canvas[i] & 0xFFu), outer, inner);
+            }
+        }
+    }
+}

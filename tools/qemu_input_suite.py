@@ -74,6 +74,19 @@ def blend(under, over, num, den):
         out |= ((u * (den - num) + o * num) // den) << shift
     return out
 
+def over_255(v):
+    return (v + 128 + ((v + 128) >> 8)) >> 8
+
+def blend_alpha(under, over, alpha):
+    out = 0
+    for shift in (16, 8, 0):
+        u = (under >> shift) & 0xFF
+        o = (over >> shift) & 0xFF
+        out |= over_255(o * alpha + u * (255 - alpha)) << shift
+    return out
+
+LAUNCHER_ALPHA = LAUNCHER_OPACITY_NUM * 255 // LAUNCHER_OPACITY_DEN
+
 def panel_px(raw, y):
     return blend(desktop_px(y), raw, TRANSLUCENT_NUM, TRANSLUCENT_DEN)
 
@@ -148,15 +161,14 @@ def power_button_center(which):
     return (LAUNCHER_X + bx + POWER_BTN_W // 2, LAUNCHER_Y + POWER_BTN_Y + POWER_BTN_H // 2)
 
 LAUNCHER_LOWER_PROBE = (LAUNCHER_X + 20, LAUNCHER_Y + POWER_BTN_Y + POWER_BTN_H // 2)
-LAUNCHER_LOWER_BG = blend(desktop_px(LAUNCHER_LOWER_PROBE[1]), LAUNCHER_BG_RAW,
-                          LAUNCHER_OPACITY_NUM, LAUNCHER_OPACITY_DEN)
+LAUNCHER_LOWER_BG = blend_alpha(desktop_px(LAUNCHER_LOWER_PROBE[1]), LAUNCHER_BG_RAW,
+                                LAUNCHER_ALPHA)
 
 def power_confirm_probe():
     return (LAUNCHER_X + (LAUNCHER_W - POWER_CONFIRM_W) // 2 + POWER_CONFIRM_W - 12,
             LAUNCHER_Y + (LAUNCHER_H - POWER_CONFIRM_H) // 2 + POWER_CONFIRM_H - 8)
 LAUNCHER_PROBE = (LAUNCHER_X + 428, LAUNCHER_Y + LAUNCHER_LIST_Y + 5 * LAUNCHER_ROW_H + 10)
-LAUNCHER_BG = blend(desktop_px(LAUNCHER_PROBE[1]), LAUNCHER_BG_RAW,
-                    LAUNCHER_OPACITY_NUM, LAUNCHER_OPACITY_DEN)
+LAUNCHER_BG = blend_alpha(desktop_px(LAUNCHER_PROBE[1]), LAUNCHER_BG_RAW, LAUNCHER_ALPHA)
 
 ACCENT = 0x4C99E6
 SNAP_PREVIEW_NUM, SNAP_PREVIEW_DEN = 1, 4
@@ -202,16 +214,18 @@ def slot_is_minimized(shot, i):
     ground = channel_sum(panel_ground(shot, INDICATOR_Y))
     return channel_sum(slot_indicator(shot, i)) < ground + SLOT_MINIMIZED_CEILING
 
-TITLEBAR_H = 20
-BTN_SIZE = 14
-BTN_GAP = 4
-BTN_MARGIN = 4
+TITLEBAR_H = 28
+BTN_SIZE = 12
+BTN_GAP = 8
+BTN_MARGIN = 10
 BTN_MINIMIZE, BTN_MAXIMIZE, BTN_CLOSE = 0, 1, 2
+BTN_SLOT_FROM_RIGHT = {BTN_MINIMIZE: 1, BTN_MAXIMIZE: 0, BTN_CLOSE: 2}
 
 BTN_CLOSE_COLOR = 0xFF5F57
-BTN_MAXIMIZE_COLOR = 0xFEBC2E
-BTN_MINIMIZE_COLOR = 0x8FA88F
-BTN_HOVER_LIGHTEN = 2
+BTN_MAXIMIZE_COLOR = 0x28C840
+BTN_MINIMIZE_COLOR = 0xFEBC2E
+BTN_IDLE_COLOR = 0x5A6270
+BTN_HOVER_LIGHTEN = 5
 
 def lighten(color, num, den):
     out = 0
@@ -222,17 +236,23 @@ def lighten(color, num, den):
 
 def titlebar_button_disc(win_x, win_y, win_w, button):
     cx, cy = titlebar_button_center(win_x, win_y, win_w, button)
-    return (cx - 4, cy)
+    return (cx - 4, cy - 3)
 
 def titlebar_button_center(win_x, win_y, win_w, button):
-    x = win_x + win_w - BTN_MARGIN - BTN_SIZE - button * (BTN_SIZE + BTN_GAP)
+    x = win_x + win_w - BTN_MARGIN - BTN_SIZE - BTN_SLOT_FROM_RIGHT[button] * (BTN_SIZE + BTN_GAP)
     y = win_y - TITLEBAR_H + (TITLEBAR_H - BTN_SIZE) // 2
     return (x + BTN_SIZE // 2, y + BTN_SIZE // 2)
 
 CLOCK_W = 200
 
-BORDER = 2
-BORDER_COLOR = 0x444466
+BORDER = 1
+HAIRLINE_Y = BORDER
+WINDOW_EDGE_MARGIN = 20
+
+def window_edge_at(shot, x, y):
+    here = channel_sum(shot.px(x, y))
+    inside = channel_sum(shot.px(x + 3, y))
+    return here + WINDOW_EDGE_MARGIN < inside
 
 SETTINGS_W, SETTINGS_H = 440, 620
 
@@ -353,7 +373,7 @@ def tm_selected_row(m, shot, origin):
 MENU_W = 124
 MENU_ITEM_H = 22
 MENU_MINIMIZE, MENU_CLOSE, MENU_FORCE_QUIT = 0, 1, 2
-MENU_BG_RAW = 0x243040
+MENU_BG_RAW = 0x1E2430
 
 TASKBAR_MENU_W = 132
 TASKBAR_MENU_ITEM_H = 26
@@ -367,7 +387,7 @@ def taskbar_menu_row_center(slot, row):
 
 FIRST_APP_IDX = 2
 
-CONTENT_TOP = 22
+CONTENT_TOP = TITLEBAR_H + 2
 CONTENT_BOTTOM = SCREEN_H - PANEL_H
 
 def app_origin(slot, height=None):
@@ -705,7 +725,7 @@ def test_snap_drag_to_edge(m):
           "expected 0x%06X)" % (shot.px(600, 60), expected))
 
     m.release()
-    shot = wait_for(m, lambda s: s.px(600, 12) == ACCENT,
+    shot = wait_for(m, lambda s: s.px(600, HAIRLINE_Y) == ACCENT,
                     "releasing at the right edge did not snap the window to the right half")
     check(shot.px(200, 12) == desktop_px(12),
           "the snapped window is not confined to the right half")
@@ -803,7 +823,7 @@ def test_titlebar_double_click_maximizes(m):
 
     x, y = app_origin(FIRST_APP_IDX)
     m.double_click(x + 100, y - TITLEBAR_H // 2)
-    wait_for(m, lambda s: s.px(60, 12) == ACCENT,
+    wait_for(m, lambda s: s.px(60, HAIRLINE_Y) == ACCENT,
              "double-clicking the titlebar did not maximize the window")
 
     m.double_click(2 + 100, 12)
@@ -1043,11 +1063,11 @@ def test_ctrl_alt_arrows_snap_and_maximize(m):
     wait_for_windows(m, 1)
 
     m.sendkey("ctrl-alt-right")
-    wait_for(m, lambda s: s.px(600, 12) == ACCENT,
+    wait_for(m, lambda s: s.px(600, HAIRLINE_Y) == ACCENT,
              "Ctrl+Alt+Right did not snap the window to the right half")
 
     m.sendkey("ctrl-alt-left")
-    wait_for(m, lambda s: s.px(60, 12) == ACCENT and s.px(600, 12) == desktop_px(12),
+    wait_for(m, lambda s: s.px(60, HAIRLINE_Y) == ACCENT and s.px(600, HAIRLINE_Y) == desktop_px(HAIRLINE_Y),
              "Ctrl+Alt+Left did not snap the window back to the left half")
 
     m.sendkey("ctrl-alt-down")
@@ -1093,30 +1113,30 @@ def open_overlapping_pair(m):
     wait_for_windows(m, 1)
     m.double_click(ICON_X, ICONS[6][2])
     wait_for_windows(m, 2)
-    wait_for(m, lambda s: s.px(*TASKS_IN_FRONT_PROBE) == BORDER_COLOR,
+    wait_for(m, lambda s: window_edge_at(s, *TASKS_IN_FRONT_PROBE),
              "the second window launched did not start in front of the first")
 
 def test_clicking_a_window_raises_it(m):
     open_overlapping_pair(m)
 
     m.click(*FILES_TITLEBAR_CLICK)
-    shot = wait_for(m, lambda s: (s.px(*FILES_IN_FRONT_PROBE) == BORDER_COLOR and
+    shot = wait_for(m, lambda s: (window_edge_at(s, *FILES_IN_FRONT_PROBE) and
                                   focused_slot(s) == FILES_SLOT),
                     "clicking the covered window's titlebar did not raise and focus it")
-    check(shot.px(*TASKS_IN_FRONT_PROBE) != BORDER_COLOR,
+    check(not window_edge_at(shot, *TASKS_IN_FRONT_PROBE),
           "the window that was raised did not cover the one that had been in front")
 
     m.click(*TASKS_TITLEBAR_CLICK)
-    shot = wait_for(m, lambda s: (s.px(*TASKS_IN_FRONT_PROBE) == BORDER_COLOR and
+    shot = wait_for(m, lambda s: (window_edge_at(s, *TASKS_IN_FRONT_PROBE) and
                                   focused_slot(s) == TASKS_SLOT),
                     "clicking the other window's titlebar did not raise and focus it back")
-    check(shot.px(*FILES_IN_FRONT_PROBE) != BORDER_COLOR,
+    check(not window_edge_at(shot, *FILES_IN_FRONT_PROBE),
           "both windows claim to be in front after the second raise")
 
 def test_overlap_click_reaches_the_front_window(m):
     open_overlapping_pair(m)
     m.click(*FILES_TITLEBAR_CLICK)
-    wait_for(m, lambda s: s.px(*FILES_IN_FRONT_PROBE) == BORDER_COLOR,
+    wait_for(m, lambda s: window_edge_at(s, *FILES_IN_FRONT_PROBE),
              "the covered window did not raise, so there is no occlusion to test")
 
     m.click(*OVERLAP_CLICK)
@@ -1125,7 +1145,7 @@ def test_overlap_click_reaches_the_front_window(m):
     check(focused_slot(shot) == FILES_SLOT,
           "a click in the overlap region focused slot %d - the window behind, "
           "which is not visible at that pixel" % focused_slot(shot))
-    check(shot.px(*FILES_IN_FRONT_PROBE) == BORDER_COLOR,
+    check(window_edge_at(shot, *FILES_IN_FRONT_PROBE),
           "the front window stopped being in front after being clicked")
 
 def test_alt_tab_visits_windows_in_use_order(m):

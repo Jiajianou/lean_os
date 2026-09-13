@@ -478,9 +478,15 @@ static uint32_t integer_square_root(uint64_t value) {
     return (uint32_t)guess;
 }
 
-#define GRAPHICS_SUBPIXEL 256
+int32_t graphics_clamp_radius(int32_t w, int32_t h, int32_t radius) {
+    int32_t maximum = (w < h ? w : h) / 2;
+    if (radius > maximum) {
+        radius = maximum;
+    }
+    return radius < 0 ? 0 : radius;
+}
 
-static int32_t rounded_edge_subpixels(int32_t row, int32_t h, int32_t radius) {
+int32_t graphics_rounded_edge_subpixels(int32_t row, int32_t h, int32_t radius) {
     if (radius <= 0) {
         return 0;
     }
@@ -505,7 +511,7 @@ static int32_t rounded_edge_subpixels(int32_t row, int32_t h, int32_t radius) {
     return (int32_t)(r - horizontal);
 }
 
-static uint32_t span_coverage(int32_t column, int32_t left_subpixels, int32_t right_subpixels) {
+uint32_t graphics_span_coverage(int32_t column, int32_t left_subpixels, int32_t right_subpixels) {
     int32_t pixel_left = column * GRAPHICS_SUBPIXEL;
     int32_t pixel_right = pixel_left + GRAPHICS_SUBPIXEL;
     int32_t covered_left = left_subpixels > pixel_left ? left_subpixels : pixel_left;
@@ -521,12 +527,9 @@ void graphics_fill_rounded(graphics_context_t *context, int32_t x, int32_t y, in
     if (w <= 0 || h <= 0 || alpha == 0) {
         return;
     }
-    int32_t maximum = (w < h ? w : h) / 2;
-    if (radius > maximum) {
-        radius = maximum;
-    }
+    radius = graphics_clamp_radius(w, h, radius);
     for (int32_t row = 0; row < h; row++) {
-        int32_t left = rounded_edge_subpixels(row, h, radius);
+        int32_t left = graphics_rounded_edge_subpixels(row, h, radius);
         if (left == 0) {
             if (alpha >= 255) {
                 graphics_fill_rect(context, x, y + row, w, 1, color);
@@ -541,7 +544,7 @@ void graphics_fill_rounded(graphics_context_t *context, int32_t x, int32_t y, in
         int32_t first = left / GRAPHICS_SUBPIXEL;
         int32_t last = (right + GRAPHICS_SUBPIXEL - 1) / GRAPHICS_SUBPIXEL;
         for (int32_t column = first; column < last && column < w; column++) {
-            uint32_t coverage = span_coverage(column, left, right);
+            uint32_t coverage = graphics_span_coverage(column, left, right);
             if (coverage == 0) {
                 continue;
             }
@@ -555,13 +558,21 @@ void graphics_stroke_rounded(graphics_context_t *context, int32_t x, int32_t y, 
     if (w <= 2 || h <= 2 || alpha == 0) {
         return;
     }
-    int32_t maximum = (w < h ? w : h) / 2;
-    if (radius > maximum) {
-        radius = maximum;
-    }
+    radius = graphics_clamp_radius(w, h, radius);
     int32_t inner_radius = radius > 0 ? radius - 1 : 0;
     for (int32_t row = 0; row < h; row++) {
-        int32_t outer_left = rounded_edge_subpixels(row, h, radius);
+        int32_t outer_left = graphics_rounded_edge_subpixels(row, h, radius);
+        if (outer_left == 0) {
+            if (row == 0 || row == h - 1) {
+                for (int32_t column = 0; column < w; column++) {
+                    graphics_blend_pixel(context, x + column, y + row, color, alpha);
+                }
+            } else {
+                graphics_blend_pixel(context, x, y + row, color, alpha);
+                graphics_blend_pixel(context, x + w - 1, y + row, color, alpha);
+            }
+            continue;
+        }
         int32_t outer_right = w * GRAPHICS_SUBPIXEL - outer_left;
         int32_t inner_left;
         int32_t inner_right;
@@ -569,17 +580,33 @@ void graphics_stroke_rounded(graphics_context_t *context, int32_t x, int32_t y, 
             inner_left = outer_right;
             inner_right = outer_right;
         } else {
-            inner_left = GRAPHICS_SUBPIXEL + rounded_edge_subpixels(row - 1, h - 2, inner_radius);
+            inner_left = GRAPHICS_SUBPIXEL + graphics_rounded_edge_subpixels(row - 1, h - 2, inner_radius);
             inner_right = (w - 1) * GRAPHICS_SUBPIXEL - (inner_left - GRAPHICS_SUBPIXEL);
         }
-        for (int32_t column = 0; column < w; column++) {
-            int32_t outer = (int32_t)span_coverage(column, outer_left, outer_right);
-            int32_t inner = (int32_t)span_coverage(column, inner_left, inner_right);
-            int32_t coverage = outer - inner;
-            if (coverage <= 0) {
-                continue;
+        int32_t bands[2][2];
+        int band_count;
+        if (inner_left >= inner_right) {
+            bands[0][0] = outer_left / GRAPHICS_SUBPIXEL;
+            bands[0][1] = (outer_right + GRAPHICS_SUBPIXEL - 1) / GRAPHICS_SUBPIXEL;
+            band_count = 1;
+        } else {
+            bands[0][0] = outer_left / GRAPHICS_SUBPIXEL;
+            bands[0][1] = (inner_left + GRAPHICS_SUBPIXEL - 1) / GRAPHICS_SUBPIXEL;
+            bands[1][0] = inner_right / GRAPHICS_SUBPIXEL;
+            bands[1][1] = (outer_right + GRAPHICS_SUBPIXEL - 1) / GRAPHICS_SUBPIXEL;
+            band_count = 2;
+        }
+        for (int band = 0; band < band_count; band++) {
+            int32_t from = bands[band][0] < 0 ? 0 : bands[band][0];
+            int32_t to = bands[band][1] > w ? w : bands[band][1];
+            for (int32_t column = from; column < to; column++) {
+                int32_t outer = (int32_t)graphics_span_coverage(column, outer_left, outer_right);
+                int32_t inner = (int32_t)graphics_span_coverage(column, inner_left, inner_right);
+                int32_t coverage = outer - inner;
+                if (coverage > 0) {
+                    graphics_blend_pixel(context, x + column, y + row, color, (uint32_t)coverage * alpha / 255);
+                }
             }
-            graphics_blend_pixel(context, x + column, y + row, color, (uint32_t)coverage * alpha / 255);
         }
     }
 }

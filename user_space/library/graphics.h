@@ -84,6 +84,14 @@ void graphics_draw_text_alpha(graphics_context_t *context, int32_t x, int32_t y,
 void graphics_draw_text_shadowed(graphics_context_t *context, int32_t x, int32_t y, const char *s,
                                  uint32_t color, uint32_t shadow_color, uint32_t shadow_alpha);
 
+#define GRAPHICS_SUBPIXEL 256
+
+int32_t graphics_rounded_edge_subpixels(int32_t row, int32_t h, int32_t radius);
+
+uint32_t graphics_span_coverage(int32_t column, int32_t left_subpixels, int32_t right_subpixels);
+
+int32_t graphics_clamp_radius(int32_t w, int32_t h, int32_t radius);
+
 void graphics_fill_rounded(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h,
                            int32_t radius, uint32_t color, uint32_t alpha);
 
