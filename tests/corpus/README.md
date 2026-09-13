@@ -42,8 +42,7 @@ What has changed is the decision, not the reasoning.
 What is unchanged is that `make fuzz-run` replays every file in this
 directory before it generates anything, so a reproducer still works as a
 regression test **on the machine that found it** - which is the same
-machine every tier of this project is run on (see "Testing is local" in
-`milestones.md`). What is lost is a finding surviving a fresh clone. If
+machine every tier of this project is run on. What is lost is a finding surviving a fresh clone. If
 that matters for a particular input, the way to keep it is to turn it
 into a test: a byte array in `tests/test_leanfs_format.c` is tracked,
 readable, and says what it is for, which a hash-named blob never did.

@@ -4,12 +4,10 @@ A desktop operating system for x86-64, written from scratch: bootloader,
 kernel, drivers, filesystem, window system and applications. No GRUB, no
 libc, no third-party code anywhere in the OS itself.
 
-![100 milestones](https://img.shields.io/badge/milestones-100-informational)
-
 ```
 UEFI firmware
   -> BOOTX64.EFI            hand-written PE32+ EFI app (kernel/boot/uefi)
-  -> kernel.bin             long mode, paging, PMM/VMM/heap, SMP
+  -> kernel.bin             long mode, paging, physical/virtual memory, heap, SMP
   -> init (PID 1)
   -> compositor             owns the framebuffer, the cursor and the speaker
   -> desktop_icons, desktop_shell, and whatever you open
@@ -38,31 +36,25 @@ UEFI firmware
   a stack that grows when it is touched. A virtio block driver with the
   ATA one kept as the fallback, and a cache in front of both: the same
   megabyte costs 95 ms through PIO, 5.6 ms through DMA and 2.5 ms warm.
-  See M90-M93 in [milestones.md](milestones.md).
 - **A terminal that is a device.** A line discipline with canonical
   and raw modes, sessions, process groups and job control - and
   **pseudo-terminals**: `/dev/ptmx`, `/dev/pts/<n>`, `openpty` and
   `forkpty`, so a program can run another program on a terminal it
   cannot tell from the console. `^C` interrupts the foreground job and
-  `^Z` suspends it, with `waitpid(WUNTRACED)` reporting the stop. See
-  M85 in [milestones.md](milestones.md).
+  `^Z` suspends it, with `waitpid(WUNTRACED)` reporting the stop.
 - **Unix-shaped enough to build against.** An environment inherited
   across a spawn and a real working directory, so a relative path means
   something; signals a program can *catch*, delivered through a frame on
   its own stack; `mmap`/`munmap` that hands pages back and reuses the
   holes; POSIX threads sharing one address space; and `<dirent.h>`,
   `<sys/stat.h>`, `<unistd.h>`, `<signal.h>`, `<pthread.h>`,
-  `<sys/mman.h>` and `<setjmp.h>` over the top of it. See M75-M79 in
-  [milestones.md](milestones.md).
-- **A desktop that sleeps** (M117). Every window used to be a process
-  that never left the run queue - its event loop polled and yielded -
-  so an idle desktop cost 22% of a host core under QEMU and 44% with
-  eight windows open, and a window's own drawing reached the screen on
-  a 100 ms poll. Clients block in `SYS_waitfds` now and tell the
-  compositor when they have drawn; 11% and 23%, and a click's result
-  is composited the moment the client presents it. And a window
-  animation that used to be three to five pictures 60-100 ms apart is
-  four to seven, 40-50 ms apart.
+  `<sys/mman.h>` and `<setjmp.h>` over the top of it.
+- **A desktop that sleeps.** Every window used to be a process that never
+  left the run queue - its event loop polled and yielded - so an idle
+  desktop cost 22% of a host core under QEMU and 44% with eight windows
+  open. Clients block in `SYS_waitfds` now and tell the compositor when
+  they have drawn; 11% and 23%, and a click's result is composited the
+  moment the client presents it.
 - **A desktop that remembers.** Whatever was open when the machine
   stopped is open again where it was when it starts; an editor with
   unsaved changes can veto a shutdown; recently-opened files are in the
@@ -70,43 +62,26 @@ UEFI firmware
 - **A network.** An RTL8139 driver, Ethernet, ARP, IPv4, ICMP, UDP and
   **TCP** - the eleven-state machine, retransmission with a measured
   timeout and Reno congestion control - plus a DHCP client, and sockets
-  programs open as ordinary file descriptors. `netconf` and an SNTP
-  client (`nettime`) use them. See
-  [docs/networking.md](docs/networking.md).
+  programs open as ordinary file descriptors.
 
   **And a resolver that does not trust one server.** `/etc/resolv.conf`
   is read, every nameserver in it is asked at once alongside the one
-  DHCP handed over, and the first correct answer wins — because a
+  DHCP handed over, and the first correct answer wins - because a
   nameserver that accepts queries and answers none is a common failure,
   and a resolver with one server cannot tell that apart from a network
-  that is down. It could not, here: a dead router made every name on
-  this machine unresolvable while UDP to the public internet was working
-  in the next window. See M114 in [milestones.md](milestones.md) for the
-  packet capture that settled it.
-- **The devices a real machine has** (M107). AHCI, **NVMe** and
-  **xHCI with USB HID** — three controllers found by PCI *class* rather
-  than by vendor, which is what lets one driver drive everybody's
-  silicon. The block layer probes NVMe, AHCI, virtio and ATA in that
-  order and nothing above `blk_read` can tell which answered;
-  `QEMU_DISK=nvme|ahci|virtio|ide` are four supported configurations of
-  one byte-identical image, and the boot battery is green on all four
-  with the disk numbers recorded separately, because the point is that
-  they differ.
+  that is down.
+- **The devices a real machine has.** AHCI, **NVMe** and **xHCI with USB
+  HID** - three controllers found by PCI *class* rather than by vendor,
+  which is what lets one driver drive everybody's silicon. The block
+  layer probes NVMe, AHCI, virtio and ATA in that order and nothing above
+  `block_device_read` can tell which answered; `QEMU_DISK=nvme|ahci|virtio|ide`
+  are four supported configurations of one byte-identical image.
 
   **And the keyboard is the same keyboard.** The USB driver delivers
-  through the ring buffers the PS/2 IRQ handlers have fed since M51, so
-  there is no second input path — which means the entire existing input
+  through the ring buffers the PS/2 IRQ handlers have always fed, so
+  there is no second input path - which means the entire existing input
   suite grades it unchanged, on a machine booted with **no PS/2
-  controller at all**. That is the only way to prove the USB path is
-  carrying the keys rather than sitting beside one that still works.
-
-  Finding it cost a bug in something else: QEMU puts a 64-bit PCI BAR at
-  768 GiB, every address space shares only `PML4[0]`, and an
-  identity-mapped BAR above 512 GiB is therefore visible throughout
-  device probing and invisible the moment a user process runs. AHCI never
-  found it — its BAR is below 4 GiB and was correct by luck of address.
-  See [docs/devices.md](docs/devices.md).
-
+  controller at all**.
 - **Settings that stick.** Wallpaper, colours, **screen resolution**
   (changed live, with a countdown that puts it back if you do not
   confirm), motion, and volume.
@@ -115,241 +90,102 @@ UEFI firmware
   set the kernel assigns from a manifest at spawn time, and that set can
   only ever shrink. An ordinary application cannot paint on the screen,
   read the clipboard, list processes, open a socket or switch the machine
-  off. See [docs/capabilities.md](docs/capabilities.md).
-- **Somebody else's program.** The 1972 Whetstone benchmark, ported
-  unmodified, running on an SSE-enabled kernel against a libc written
-  here. See [docs/third-party-programs.md](docs/third-party-programs.md).
+  off.
 - **A compiler that knows this OS by name.** `x86_64-lean_os` is a real
-  target triple in binutils and GCC, built by
-  `tools/build-toolchain.sh` from a nine-edit port. `x86_64-lean_os-gcc
-  hello.c -o hello` produces a program this machine runs with **no flag
-  supplied by hand** — the load address, code model, red zone and startup
-  files all come from the target description, because every flag invented
-  by hand is a flag someone else's build system will not pass. `bzip2`
-  and `GNU hello` are built with it, the second through
-  `./configure --host=x86_64-lean_os && make`, and both run here. See M94
-  in [milestones.md](milestones.md).
+  target triple in binutils and GCC. `x86_64-lean_os-gcc hello.c -o hello`
+  produces a program this machine runs with **no flag supplied by hand** -
+  the load address, code model, red zone and startup files all come from
+  the target description, because every flag invented by hand is a flag
+  someone else's build system will not pass.
 - **Somebody else's *userland*.** Toybox, built for this machine from
   the published tarball with no edit to its source, installed as one
   static binary and 143 command names in `/bin`: `find`, `grep`, `sed`,
-  `sort`, `xargs`, `tar`, `ps`, `du`, `wc` and the rest. `find . -type f
-  | xargs grep -l something | sort | uniq -c | sort -rn` is a boot
-  self-test — five programs nobody here wrote, four pipes, five forked
-  and exec'd processes. See M89 in [milestones.md](milestones.md) for
-  the eight bugs running it found.
+  `sort`, `xargs`, `tar`, `ps`, `du`, `wc` and the rest.
+  `find . -type f | xargs grep -l something | sort | uniq -c | sort -rn`
+  is a boot self-test - five programs nobody here wrote, four pipes, five
+  forked and exec'd processes.
 - **Somebody else's language.** CPython 3.12.7, cross-built with this
-  project's own compiler from a three-edit port, with its standard
-  library on the disk as `.py` source rather than frozen into the
-  binary — so `import json` is a file this filesystem opens. A boot
-  self-test runs a real script; `python3 -m test` runs **CPython's own
-  regression suite** here and reports its own pass and fail counts,
-  which is the only instrument in this project that neither wrote its
-  own assertions nor chose what to assert. It found nineteen bugs in
-  this OS, including a thread stack that had been entered misaligned
-  since M79 and an `fstat` that refused every descriptor which was not
-  a file — which is why `print()` on this machine used to write nothing
-  and return successfully. See M99 in [milestones.md](milestones.md).
-- **Somebody else's *libraries*.** zlib 1.3.1, libpng 1.6.44 and
-  libjpeg 9f, built for this machine by this project's own compiler
-  with **no edit to any of their source**, installed into the sysroot
-  by their own `make install` so the next one links the last — libpng's
-  `./configure` will not proceed until it finds `-lz` here. Each is
-  graded by its own test suite on the machine, and libjpeg's is the
-  sharpest instrument in this tree: it ships the PPM, GIF, BMP and JPEG
-  files the IJG's own encoder and decoder produced in **1995**, and its
-  `make test` requires byte equality with them. All seven comparisons
-  pass here — baseline and progressive, decode and encode, and a
-  `jpegtran` transcode that turns the progressive file back into the
-  original file byte for byte. See M100 in
-  [milestones.md](milestones.md).
-
+  project's own compiler, with its standard library on the disk as `.py`
+  source rather than frozen into the binary - so `import json` is a file
+  this filesystem opens. `python3 -m test` runs **CPython's own
+  regression suite** here and reports its own pass and fail counts, which
+  is the only instrument in this project that neither wrote its own
+  assertions nor chose what to assert. It found nineteen bugs in this OS.
+- **Somebody else's *libraries*.** zlib, libpng and libjpeg, built for
+  this machine by this project's own compiler with **no edit to any of
+  their source**, installed into the sysroot by their own `make install`
+  so the next one links the last. Each is graded by its own test suite on
+  the machine, and libjpeg's is the sharpest instrument in this tree: it
+  ships the files the IJG's own encoder and decoder produced in **1995**,
+  and its `make test` requires byte equality with them.
 - **A web browser.** **NetSurf 3.11**, built for this machine by this
-  project's own compiler, on the desktop as **Browser** — libhubbub
+  project's own compiler, on the desktop as **Browser** - libhubbub
   parsing HTML5, libdom, **libcss** doing the cascade, **Duktape**
   running JavaScript, freetype rasterising the text, and **libcurl over
   mbedtls over this project's own TCP** for `http` and `https`. Fifteen
   third-party projects and **no edit to any of their source**: the
   display port is *one file*, because libnsfb registers its surfaces at
-  runtime and NetSurf picks one by name, and the pixels are zero copy —
-  libnsfb's XRGB8888 is byte-for-byte this compositor's own word
-  layout, so the layout engine renders straight into the window's
-  shared segment.
+  runtime and NetSurf picks one by name, and the pixels are zero copy -
+  libnsfb's XRGB8888 is byte-for-byte this compositor's own word layout.
 
   **It reaches the real web.** `https://www.google.com/` loads and
-  renders in about six seconds, verified against certificate
-  authorities that arrive as a *package* — installed by `os` on the
-  first boot of an image that has the browser, removable with
-  `os remove ca-certificates`, and replaceable without rebuilding the
-  OS; an image without the browser still trusts nobody. Getting there
-  found a bug in this project's `malloc` that had been present since
-  M19: it returned 8-byte-aligned memory where x86-64 requires 16, and
-  no program had ever noticed because none had been built by a
-  compiler that vectorised a store into the heap. NetSurf was, and it
-  died on a `movaps` to an address ending in 8. See M114-M115 in
-  [milestones.md](milestones.md).
-
-  **And it is fast because three bugs below it are gone** (M116): the
-  network driver corrupted one full-sized frame in five and TCP's
-  checksum discarded each one silently, TCP ignored a FIN that arrived
-  with data, and `gettimeofday` ran backwards by up to a second, which
-  put NetSurf's 10 ms fetch poller to sleep for most of one. A 60 KB
-  download went from never finishing to 35 ms. Google *search* still
-  shows a blank page: its results are served only to a browser that
-  runs modern JavaScript, and Duktape is ES5.
-
-  **And it survives the pages it used to die on** (M117): apple.com
-  and Wikipedia's *Unix* article both killed it on NetSurf's own
-  assertion, and the same NetSurf built for the host rendered both. A
-  bisection of apple.com down to three empty `div`s found the cause
-  under the browser: this libc's `malloc(0)` returned NULL - legal C,
-  and what every program written against glibc, macOS or musl reads as
-  out of memory. NetSurf's flex layout asks for a zero-item list for
-  every empty `display: flex` box. It returns a real block now, the
-  port is built with frame pointers so an assertion prints its
-  backtrace, and `tools/build-netsurf-host.sh` builds the twin that
-  decides whose bug the next one is. See
-  [docs/browser.md](docs/browser.md).
+  renders in about six seconds, verified against certificate authorities
+  that arrive as a *package*. Getting there found a bug in this project's
+  `malloc` that had been present for ninety-five milestones: it returned
+  8-byte-aligned memory where x86-64 requires 16, and no program had ever
+  noticed because none had been built by a compiler that vectorised a
+  store into the heap.
 
   It holds `CAP_FS_WRITE | CAP_NETWORK` and nothing else. **Not**
   `CAP_FRAMEBUFFER`: twenty megabytes of somebody else's C and C++,
   running a JavaScript engine on bytes from a machine nobody here
   controls, with no more authority over the screen than the clock has.
-
-  Porting it named five gaps in this system — `pread`/`pwrite`, the
-  `lround` family, `scandir`, `STDIN_FILENO`, and **`<iconv.h>`, which
-  did not exist at all** — and each one is now built and graded. See
-  [docs/browser.md](docs/browser.md).
-
-- **And the browser that will not come, measured rather than guessed.**
-  The same milestone asked what Chromium's build actually demands, and
-  answered with numbers instead of an estimate: 8 GB of RAM, 32 GB of
-  swap and 100 GB of disk in its own documentation, against this
-  machine's 128 MiB, no swap and a 2 GiB image; **535 sub-repositories**
-  in its `DEPS`; clang and libc++ as its only supported toolchain; and a
-  seccomp sandbox naming **427 syscalls of which this kernel has 79**.
-  The number that decides it is none of those — it is `AF_UNIX` with
-  `SCM_RIGHTS`, without which there is no Mojo and therefore no Chromium
-  at all. Google Chrome is a different question again: it is
-  proprietary, so there is no source to build. See
-  [docs/browser.md](docs/browser.md).
-
-- **And the first of those conditions is now built** (M118).
-  **`AF_UNIX` with `SCM_RIGHTS`**: `socketpair`, names and abstract
-  names, `sendmsg`/`recvmsg`, and a descriptor — a pipe end, an open
-  file, a socket — crossing to another process as a reference to *the
+- **`AF_UNIX` with `SCM_RIGHTS`.** `socketpair`, names and abstract
+  names, `sendmsg`/`recvmsg`, and a descriptor - a pipe end, an open
+  file, a socket - crossing to another process as a reference to *the
   same kernel object*, sharing its file position. It needs **no
-  capability**, and that is the point rather than an omission: a
-  renderer process is the one program on this machine that must hold no
+  capability**, and that is the point rather than an omission: a renderer
+  process is the one program on this machine that must hold no
   `CAP_NETWORK` and the one that cannot work without this call.
-
-  Reading the question again is what made it a milestone rather than a
-  chore: this was never Chromium's condition. WebKit's
-  `IPC::Connection`, Gecko's IPDL and Ladybird's LibIPC all pass
-  descriptors over a Unix-domain socket, and **none of those four
-  engines still has a supported single-process mode** — so one kernel
-  feature stood in front of every multi-process browser engine that
-  exists, which is why it was built before the engine was chosen. See
-  [docs/unix-sockets.md](docs/unix-sockets.md).
-
-- **And the second** (M119): **`epoll`, `eventfd` and `timerfd`** — a set
-  of descriptors the kernel remembers, a counter another thread can poke
-  to be heard, and a deadline that is a descriptor like any other. That
-  is `base::MessagePumpEpoll`'s whole vocabulary, and libevent's and
-  glib's. It is not here for speed, and the file says so: with 128
-  descriptors per process, epoll's O(1) against `poll`'s O(n) is worth
-  nothing, and what it actually buys is a set the kernel remembers, a
-  cookie that comes back with each event, and edge-triggered and one-shot
-  modes that a stateless call cannot express.
-
-  It also gave this kernel something it had never had: **write-readiness**.
+- **A message pump.** `epoll`, `eventfd` and `timerfd` - a set of
+  descriptors the kernel remembers, a counter another thread can poke to
+  be heard, and a deadline that is a descriptor like any other. It also
+  gave this kernel something it had never had: **write-readiness**.
   `EPOLLOUT` means a pipe with room, a socket with send-buffer space, a
-  counter below saturation — where `poll` has reported POLLOUT for
-  anything open since M88 and said why. And the self-test measures
-  `SYS_idle_ticks` across a 200 ms `epoll_wait`, because the failure this
-  work was most likely to ship is an event loop that works perfectly and
-  burns a core — which is invisible to every other instrument here. See
-  [docs/readiness.md](docs/readiness.md).
-
-- **And the third** (M120): **`memfd_create`** — anonymous shared memory
-  that a *descriptor* names, sized with `ftruncate`, mapped `MAP_SHARED`,
-  and passed to another process over a Unix-domain socket. This machine
-  has had shared memory since M19, and it is named by a global id any
-  process can guess at; this is the same memory with the authority the
-  other way round — **nobody can name it and anybody holding the
-  descriptor can map it**. Sealable, so a sender can hand over memory the
-  receiver can *verify* is read-only rather than trust.
-
-  With it, the three pieces a multi-process program is built out of are
-  all here, and the boot self-test runs the whole shape: a socketpair, a
-  forked child that drops **every** capability, a buffer created and sized
-  by the parent, the descriptor sent over the channel, and the parent
-  reading what the child painted — through a mapping it made before the
-  child existed and kept after both descriptors were closed. Which is, in
-  one sentence, what a browser's renderer and its parent do all day.
-
-- **And the fourth** (M121): **a second compiler.**
-  `x86_64-lean_os-clang`, `clang++`, and **libc++** — LLVM 19.1.7 ported
-  to this OS from **thirteen anchored edits and three files** — eight of
-  the edits are the compiler, against the nine M94's GCC port needed, and
-  five are libc++, which is a second port rather than a postscript. `x86_64-lean_os-clang hello.c -o hello`
-  produces a program this machine runs with **no flag supplied by hand**,
-  which is the same standard M94 set and for the same reason.
-
-  It links against **GCC's** libgcc and libgcc_eh rather than LLVM's own
+  counter below saturation - where `poll` reported POLLOUT for anything
+  open.
+- **`memfd_create`.** Anonymous shared memory that a *descriptor* names,
+  sized with `ftruncate`, mapped `MAP_SHARED`, and passed to another
+  process over a Unix-domain socket. **Nobody can name it and anybody
+  holding the descriptor can map it.** Sealable, so a sender can hand
+  over memory the receiver can *verify* is read-only rather than trust.
+- **A second compiler.** `x86_64-lean_os-clang`, `clang++`, and
+  **libc++**. It links against **GCC's** libgcc rather than LLVM's own
   compiler-rt and libunwind, and that is a decision rather than a
   default: libgcc's exception machinery keeps a static registry of the
   `.eh_frame` tables it has been told about, so two unwinders in one
   program means a throw that crosses between them finds no handler and
-  aborts with no message. There is one unwinder on this machine and it is
-  GCC's.
+  aborts with no message.
 
-  The sharpest thing it proves is **one program built by two
-  compilers**: one translation unit from clang and one from GCC, linked
-  together and calling each other in both directions across twelve
-  shapes the x86-64 ABI argues about — a struct of two floats in one SSE
-  register, a mixed integer/SSE pair, a struct returned through a hidden
-  pointer, mixed varargs, an x87 `long double`. Every archive in this
-  sysroot was built by GCC, so two front ends that disagreed there would
-  produce programs that run and are wrong, and no single-compiler test
-  can see it.
-
-  **And porting libc++ found 27 missing functions in this project's own
-  C library** — `wcsstr`, `wcspbrk`, the five wide numeric conversions,
-  the whole wide *input* family (M94 built only the output half),
-  `asprintf`, `strerror_r` and thirteen more — plus six C99 `lconv`
-  fields and a `struct tm` declaration missing from one header, which
-  presented as an error inside `<chrono>` three files away. Every one is
-  a function C99 or POSIX requires. The same lesson CPython and
-  NetSurf taught: somebody else's code asks for what the standard says,
-  not for what this project remembered to build. See
-  [docs/toolchain.md](docs/toolchain.md).
-
-- **A package manager.** `os install grep` puts **GNU grep 3.11** on
-  this machine — built here by this project's own compiler from the
-  published tarball with no edit to its source — and the machine runs
-  it. A package is a manifest, a file table and a payload with **no
-  install hooks at all**: installing is verify and copy, so what
-  installing can do to your machine is a sentence rather than an audit.
-  Three SHA-256s, written here, answer three different questions; every
-  path is refused before anything is created; commands land in
-  `/pkg/bin` and never in `/bin`, so a package cannot take over the name
-  of a program this OS ships.
-
-  And the kernel decides what an installed package may do. A program
-  under `/pkg` never matches the shipped capability table whatever it is
-  *called* — a package shipping a binary named `compositor` gets `0x0`,
-  not `CAP_ALL` — and every write under `/pkg` needs a capability only
-  `/bin/os` holds, so the registry that records those grants is not a
-  file anything else can edit. See M111 in
-  [milestones.md](milestones.md) and [docs/packages.md](docs/packages.md),
-  which is also where the four C library bugs GNU grep's build found are
-  written down.
+  The sharpest thing it proves is **one program built by two compilers**:
+  one translation unit from clang and one from GCC, linked together and
+  calling each other in both directions across twelve shapes the x86-64
+  ABI argues about. Every archive in this sysroot was built by GCC, so
+  two front ends that disagreed there would produce programs that run and
+  are wrong, and no single-compiler test can see it.
+- **A package manager.** `os install grep` puts **GNU grep 3.11** on this
+  machine - built here by this project's own compiler from the published
+  tarball with no edit to its source. A package is a manifest, a file
+  table and a payload with **no install hooks at all**: installing is
+  verify and copy, so what installing can do to your machine is a
+  sentence rather than an audit. Commands land in `/pkg/bin` and never in
+  `/bin`, so a package cannot take over the name of a program this OS
+  ships.
 
 ## Build and run
 
 Needs an `x86_64-elf` cross-toolchain, `nasm`, `clang`+`lld` (for the
-EFI app), `mtools` and `qemu-system-x86_64`. See
-[docs/toolchain.md](docs/toolchain.md).
+EFI app), `mtools` and `qemu-system-x86_64`.
 
 ```sh
 ./tools/run-qemu.sh          # builds everything, fetches OVMF the first time, boots
@@ -357,42 +193,30 @@ EFI app), `mtools` and `qemu-system-x86_64`. See
 ```
 
 Three optional steps put ported software into the image, each once per
-image and none of them part of `all` — see the Makefile for why writing
+image and none of them part of `all` - see the Makefile for why writing
 into a fresh image is ordered rather than automatic:
 
 ```sh
 make toybox                  # /bin/toybox and 143 command names
 tools/build-packages.sh      # cross-build grep and bzip2 into .osp archives
 make packages                # ...and write them into the image as /pkg/repo
-make browser                 # cross-build NetSurf 3.11, libcurl and 14
+make browser                 # cross-build NetSurf, libcurl and 14
                              #   libraries, and write the browser in
 ```
 
 The two compilers for this target are separate again, and neither is part
-of `make` — both take most of an hour, once:
+of `make` - both take most of an hour, once:
 
 ```sh
-tools/build-toolchain.sh     # x86_64-lean_os-gcc and binutils (M94)
-tools/build-clang.sh         # x86_64-lean_os-clang, into the same prefix (M121)
+tools/build-toolchain.sh     # x86_64-lean_os-gcc and binutils
+tools/build-clang.sh         # x86_64-lean_os-clang, into the same prefix
 tools/build-libcxx.sh        # ...and libc++/libc++abi for the target
 ```
-
-`make browser` builds the port only if it has never been built, and
-installs it either way. It is a step of its own for the same reason the
-two above it are — but unlike them, `tools/run-qemu.sh` reinstalls it on
-every boot (`make browser-if-built`, about a tenth of a second), because
-rebuilding the kernel recreates the disk image from scratch and a
-browser you have to reinstall by hand after every kernel edit is not
-installed. See M113 in [milestones.md](milestones.md).
-
-`tools/build-netsurf.sh` needs `bison` 3.x and the host's `libpng` on
-top of the toolchain above — macOS ships bison 2.3, which cannot parse
-one of NetSurf's grammars. Both are dev-time only.
 
 `QEMU_RES=1440x900 ./tools/run-qemu.sh` boots with a bigger screen. The
 size lives in `/etc/settings.conf`, which a kernel rebuild deletes along
 with the rest of the filesystem, so it is re-applied from outside the
-image on every run — the compiled-in default stays 1024x768 because
+image on every run - the compiled-in default stays 1024x768 because
 every coordinate in the interactive suite is measured against it.
 
 The disk image is 2 GiB and sparse - a few megabytes on disk until
@@ -407,30 +231,28 @@ One command, three tiers. Each is a superset of the one above it.
 
 ```sh
 ./tools/run-tests.sh --fast    # host unit tests. No QEMU. Under a second.
-./tools/run-tests.sh           # ...plus a graded boot and the quick input subset. Minutes.
+./tools/run-tests.sh           # ...plus a graded boot and the quick input subset.
 ./tools/run-tests.sh --full    # ...plus the whole input suite and the slow host tests.
 ```
 
 `make test` and `make test-fast` are the same thing for people who type
 that instead.
 
-Four instruments, and none of them subsumes another:
+Several instruments, and none of them subsumes another:
 
-- **Host unit tests** (`tests/`) compile kernel units - `libk`, the heap,
-  leanfs, every network parser - for the machine you are sitting at and
-  run them under ASan and UBSan in under a second. They exist to reach
-  the error paths a booted machine cannot: a full disk, a failed
-  allocation, a corrupt superblock, a malformed packet. It also
-  compiles the **scheduler** (Q13) - 2,157 lines whose bugs have
-  historically presented as "about one boot in ten hangs" - against a
-  fake timer and a fake CPU, so a tick is a function call and a
-  fairness property can be checked at every task count, and it learns
-  the order locks are taken in so an inversion is an error rather than
-  a comment (Q9). It also compiles the three pieces of M107's device
-  drivers whose failure mode is a *plausible wrong answer* rather than a
-  loud one - the USB boot-report decoder, the xHCI ring's cycle bit, and
-  the NVMe request splitter, **which is the one path QEMU cannot reach at
-  all**: its namespace has 512-byte blocks, so a 4Kn drive's
+- **Host unit tests** (`tests/`) compile kernel units - the kernel
+  library, the heap, leanfs, every network parser - for the machine you
+  are sitting at and run them under ASan and UBSan in under a second.
+  They exist to reach the error paths a booted machine cannot: a full
+  disk, a failed allocation, a corrupt superblock, a malformed packet. It
+  also compiles the **scheduler** - whose bugs have historically
+  presented as "about one boot in ten hangs" - against a fake timer and a
+  fake CPU, so a tick is a function call and a fairness property can be
+  checked at every task count. It also compiles the three pieces of the
+  device drivers whose failure mode is a *plausible wrong answer* rather
+  than a loud one - the USB boot-report decoder, the xHCI ring's cycle
+  bit, and the NVMe request splitter, **which is the one path QEMU cannot
+  reach at all**: its namespace has 512-byte blocks, so a 4Kn drive's
   read-modify-write path is dead code here and would first execute on
   somebody's real filesystem. 564 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
@@ -438,57 +260,42 @@ Four instruments, and none of them subsumes another:
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It
-  proves the path a person's hands take - a distinction learned the hard
-  way (M40). Most of its tests check that something *did* change; two of
-  them check the opposite, that nothing else did, which is the only way to
-  catch a flicker (Q7). Since Q19 it boots **once per image** and
-  restores a snapshot of the painted desktop per test - 440 s to 337 s
-  for fifty tests - with the snapshot keyed on a hash of the image, so a
-  stale one is refused rather than quietly used.
+  proves the path a person's hands take. Most of its tests check that
+  something *did* change; two of them check the opposite, that nothing
+  else did, which is the only way to catch a flicker.
 - **Fuzzers** (`make fuzz-run`) feed the network parsers and the
-  filesystem mount path arbitrary bytes. The network target manages about
-  150,000 inputs a second.
+  filesystem mount path arbitrary bytes, about 150,000 inputs a second.
 - **A mutation harness** (`make mutate`) breaks the kernel on purpose,
   one small change at a time, and reports whether the tests noticed. It
   is the only instrument here that grades the *tests* rather than the
   machine, and the first thing it found was a file at 100% line coverage
   whose mutation score was zero.
-- **Seven differential tests** (`tools/sh-test.sh`,
-  `tools/regex-test.sh`, `tools/scanf-test.sh`, `tools/printf-test.sh`,
-  `tools/math-test.sh`, `tools/pkg-test.sh` and
-  `tools/iconv-test.sh`) compile this project's
+- **Differential tests** (`tools/sh-test.sh`, `tools/regex-test.sh`,
+  `tools/scanf-test.sh`, `tools/printf-test.sh`, `tools/math-test.sh`,
+  `tools/pkg-test.sh` and `tools/iconv-test.sh`) compile this project's
   own shell, regular-expression engine, `sscanf`, `printf`, libm and
   SHA-256 from the same source the machine runs, for the machine you are
-  sitting at, and require every fixture to agree with the host's own —
-  the last of them over 250 real files from this tree, with a package
-  round trip decided by `cmp` and `diff -r`. Nothing in those
-  fixtures says what the right answer is - a program nobody here wrote
-  decides, which is the only useful standard for code whose whole job is
-  to agree with every other implementation of itself. Every one of them
-  found real bugs on its first run; the iconv one (M100) found a
-  sentinel that shared a value with real data, in thirteen charsets at
+  sitting at, and require every fixture to agree with the host's own.
+  Nothing in those fixtures says what the right answer is - a program
+  nobody here wrote decides, which is the only useful standard for code
+  whose whole job is to agree with every other implementation of itself.
+  Every one of them found real bugs on its first run; the iconv one found
+  a sentinel that shared a value with real data, in thirteen charsets at
   once - and, before that, taught this project that **the host is not
   always one oracle**: macOS's iconv transliterates by default, which
-  made 144,589 of its first run's "disagreements" nothing of the kind; the libm one (M99) found `fmod`
-  returning the wrong sign and a result larger than its own modulus, and
-  then, once it learned to ask about infinity, a `log` that did not
-  return at all.
+  made 144,589 of its first run's "disagreements" nothing of the kind.
 - **An image-tree test** (`tools/image-tree-test.sh`) has a host tool
   write a directory tree into a leanfs image, compares the image with an
   independent reader against the tree it came from, then boots it and has
   the machine walk that tree and hash every byte of it against what the
-  host wrote down. It is how a source tree reaches this disk at all, and
-  both halves are needed: the host half alone is a well-formed image
-  nothing has opened.
-- **Exhaustion** (`/bin/exhausttest`, graded by the `[q9]` boot marker)
-  takes descriptors, pipes, shared-memory segments and sockets to their
-  ceilings and requires each to refuse, recover, and work again - twice
-  over, with a leak audit across 2,200 rounds either side of it.
+  host wrote down.
+- **Exhaustion** (`/bin/exhausttest`) takes descriptors, pipes,
+  shared-memory segments and sockets to their ceilings and requires each
+  to refuse, recover, and work again - twice over, with a leak audit
+  across 2,200 rounds either side of it.
 - **A fault-injected disk** (`tools/disk-fault-test.sh`) boots the
-  machine with QEMU's `blkdebug` refusing **every** write, through
-  virtio and through ATA, and requires it to reach PID 1 anyway. Every
-  device error in the block and network drivers used to be a `panic`;
-  Q16 made them errors that propagate, and this is what says so.
+  machine with QEMU's `blkdebug` refusing **every** write, through virtio
+  and through ATA, and requires it to reach PID 1 anyway.
 - **A crash test** (`tools/crash-test.sh`) cuts the power mid-write with
   `SIGKILL`, reboots, and checks the filesystem with an independent
   reader. Sixteen cuts across the heaviest metadata window; the
@@ -498,27 +305,33 @@ Booting the machine is no longer the same thing as testing it. `make run`
 boots to the desktop in about eight seconds; the ~190-second self-test
 battery runs only when something asks for it, which
 `tools/qemu-serial-test.sh` does and `tools/run-qemu.sh` does not. The
-image is identical either way - see `kernel/dev/fwcfg.h` for why the
-switch comes from outside the image rather than from a `#ifdef`.
+image is identical either way - the switch comes from outside the image
+via fw_cfg rather than from a `#ifdef`.
+
+## Source conventions
+
+The source carries **no comments**, in any language, and **no abbreviated
+names**: `file_system` rather than `fs`, `virtual_memory_map_page` rather
+than `vmm_map_page`. Two things keep their spelling, because both are
+contracts rather than style - the C and POSIX names in
+`user_space/libc/include` that ported software links against, and the
+names of standards, hardware and protocols (PCI, NVMe, xHCI, ELF, TCP and
+the rest). `third_party/` is exempt from all of it, being nobody here's
+to edit. See [CLAUDE.md](CLAUDE.md).
 
 ## Where things are
 
 ```
-kernel/          boot, arch/x86_64, mm, sched, drivers, fs, ipc, net, kernel.c
+kernel/          boot, architecture/x86_64, memory_management, scheduler,
+                 drivers, file_system, inter_process_communication, network,
+                 process, device, library, acpi, power, profile, kernel.c
 system_api/      the syscall ABI: numbers, structs, the kernel/user contract
-user_space/library   the runtime every program links: crt0, syscalls, gfx, wmclient
-user_space/libc  a C library subset, for programs written against standard headers
-user_space/binaries   the applications
+user_space/library   the runtime every program links
+user_space/libc      a C library subset, for programs written against std headers
+user_space/binaries  the applications
+user_space/shell     the shell
+user_space/loader    the dynamic loader
 third_party/     source nobody here wrote, kept clearly separate
 tools/           build scripts, the QEMU harnesses, the font generator
-docs/            per-subsystem design notes
-milestones.md    the live record: where this is, what is open, what is next
-milestones-archive.md   every milestone entry M0-M110 and Q1-Q20, frozen
+tests/           host unit tests, fakes, fixtures, budgets and coverage floors
 ```
-
-**`milestones.md` is the real documentation.** It carries the current
-state, every open box with the condition attached, and the order the work
-goes in. Start there. Behind it,
-[milestones-archive.md](milestones-archive.md) holds every milestone
-entry ever written - what was added, what it cost, and, most usefully,
-what went wrong and what that taught.
