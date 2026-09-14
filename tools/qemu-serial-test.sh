@@ -228,6 +228,8 @@ REQUIRED_MARKERS=(
   "[m121] a second compiler that knows this OS by name:"
   "ONE PROGRAM FROM TWO COMPILERS"
   "[m137] a third language for this target:"
+  "[m138] the Rust standard library on this machine:"
+  "[m138] ruststd: "
   "[q16] devices that fail, and a machine that keeps running:"
   "[m85] a terminal that is a device:"
   "ptytest: all eight checks passed"

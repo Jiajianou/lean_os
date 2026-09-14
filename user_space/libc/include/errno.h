@@ -32,6 +32,7 @@ int *__errno_location(void);
 #define ENFILE  23
 #define EMFILE  24
 #define ENOTTY  25
+#define ETXTBSY 26
 #define EFBIG   27
 #define ENOSPC  28
 #define ESPIPE  29
@@ -85,6 +86,7 @@ int *__errno_location(void);
 #define EISCONN      106
 #define ETOOMANYREFS 109
 #define ESTALE       116
+#define EDQUOT       122
 #define ECANCELED    125
 #define EOWNERDEAD   130
 #define ENOTRECOVERABLE 131

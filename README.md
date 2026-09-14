@@ -223,6 +223,30 @@ UEFI firmware
   ABI argues about. Every archive in this sysroot was built by GCC, so
   two front ends that disagreed there would produce programs that run and
   are wrong, and no single-compiler test can see it.
+
+- **A third language, with its standard library.** `x86_64-lean_os` is a
+  Rust target, and **`std`** is built for it: `std::fs` on leanfs,
+  `std::thread` on this libc's pthreads, a `Mutex` and a `Condvar` that
+  block on this kernel's futex, both clocks, the environment, and a
+  `HashMap` seeded from `getrandom`. The fork is a set of *anchored
+  edits* to rust-src rather than a patch series - twenty-three of them,
+  plus one new module in the `libc` crate and one in `std::os`. Most are
+  a line adding `lean_os` to a list of operating systems.
+
+  **It is lean_os, not Linux wearing a hat.** This `struct stat` carries
+  three `timespec`s and puts `st_mode` first; `O_RDONLY` is 1; `sigset_t`
+  is 32 bits. A target that claimed `target_os = "linux"` would compile
+  and produce plausible wrong answers, so `/bin/ruststd` carries **two
+  tables of the same 301 facts** - every struct size, alignment and field
+  offset - one computed by `x86_64-lean_os-gcc` from the C headers and
+  one by `rustc` from the Rust module, in one program, compared on the
+  machine. Reordering two fields in the Rust `struct stat` makes the boot
+  battery print which offsets disagree and panic.
+
+  Building it found two things missing from this libc and added them:
+  `fcntl(F_DUPFD_CLOEXEC)`, which `File::try_clone` needs, and
+  `posix_memalign`, which an over-aligned `Box` needs.
+
 - **A package manager.** `os install grep` puts **GNU grep 3.11** on this
   machine - built here by this project's own compiler from the published
   tarball with no edit to its source. A package is a manifest, a file

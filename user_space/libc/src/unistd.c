@@ -242,6 +242,35 @@ int fcntl(int fd, int command, ...) {
         return -1;
     }
     switch (command) {
+    case F_DUPFD:
+    case F_DUPFD_CLOEXEC: {
+        __builtin_va_list ap;
+        __builtin_va_start(ap, command);
+        int lowest = __builtin_va_arg(ap, int);
+        __builtin_va_end(ap);
+        if (lowest < 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        for (int i = lowest; i < OPEN_MAX; i++) {
+            if (i == fd) {
+                continue;
+            }
+            if (sys_fcntl(i, F_GETFD_COMMAND, 0) >= 0) {
+                continue;
+            }
+            int copy = dup2(fd, i);
+            if (copy < 0) {
+                return -1;
+            }
+            if (command == F_DUPFD_CLOEXEC) {
+                sys_fcntl(copy, F_SETFD_COMMAND, FD_CLOEXEC);
+            }
+            return copy;
+        }
+        errno = EMFILE;
+        return -1;
+    }
     case F_GETFD:
         return (int)sys_fcntl(fd, F_GETFD_COMMAND, 0);
     case F_SETFD: {

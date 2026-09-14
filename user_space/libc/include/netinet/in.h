@@ -62,6 +62,29 @@ extern const struct in6_addr in6addr_loopback;
 #define IPPROTO_IPV6 41
 #define IPV6_V6ONLY  26
 
+#define IP_TTL             2
+#define IP_MULTICAST_IF    32
+#define IP_MULTICAST_TTL   33
+#define IP_MULTICAST_LOOP  34
+#define IP_ADD_MEMBERSHIP  35
+#define IP_DROP_MEMBERSHIP 36
+
+#define IPV6_MULTICAST_LOOP 19
+#define IPV6_ADD_MEMBERSHIP 20
+#define IPV6_DROP_MEMBERSHIP 21
+#define IPV6_JOIN_GROUP     IPV6_ADD_MEMBERSHIP
+#define IPV6_LEAVE_GROUP    IPV6_DROP_MEMBERSHIP
+
+struct ip_mreq {
+    struct in_addr imr_multiaddr;
+    struct in_addr imr_interface;
+};
+
+struct ipv6_mreq {
+    struct in6_addr ipv6mr_multiaddr;
+    unsigned int    ipv6mr_interface;
+};
+
 #ifdef __cplusplus
 }
 #endif

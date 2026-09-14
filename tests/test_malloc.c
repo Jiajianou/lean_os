@@ -8,12 +8,16 @@
 #define calloc lean_calloc
 #define realloc lean_realloc
 #define malloc_usable_size lean_malloc_usable_size
+#define posix_memalign lean_posix_memalign
+#define aligned_alloc lean_aligned_alloc
 #include "../user_space/library/malloc.c"
 #undef malloc
 #undef free
 #undef calloc
 #undef realloc
 #undef malloc_usable_size
+#undef posix_memalign
+#undef aligned_alloc
 
 static void malloc_reset(void) {
     fake_user_heap_reset();
@@ -258,5 +262,131 @@ TEST(malloc, zero_byte_blocks_are_freed_and_reused_like_any_other) {
         REQUIRE(p != NULL);
         lean_free(p);
     }
+    check_lists();
+}
+
+TEST(malloc, posix_memalign_returns_the_alignment_it_was_asked_for) {
+    malloc_reset();
+    static const size_t ALIGNMENTS[] = {32, 64, 128, 256, 512, 1024, 4096, 65536};
+    void *held[sizeof(ALIGNMENTS) / sizeof(ALIGNMENTS[0])];
+    for (unsigned i = 0; i < sizeof(ALIGNMENTS) / sizeof(ALIGNMENTS[0]); i++) {
+        void *p = (void *)0;
+        CHECK_EQ(lean_posix_memalign(&p, ALIGNMENTS[i], 100), 0);
+        REQUIRE(p != NULL);
+        CHECK_EQ(((unsigned long)p) % ALIGNMENTS[i], 0u);
+        CHECK(lean_malloc_usable_size(p) >= 100);
+        memset(p, 0xC3, 100);
+        held[i] = p;
+        check_lists();
+    }
+    for (unsigned i = 0; i < sizeof(ALIGNMENTS) / sizeof(ALIGNMENTS[0]); i++) {
+        CHECK_EQ(((unsigned char *)held[i])[99], 0xC3);
+        lean_free(held[i]);
+        check_lists();
+    }
+}
+
+TEST(malloc, the_front_an_aligned_block_leaves_behind_is_handed_out_again) {
+    malloc_reset();
+    void *p = (void *)0;
+    REQUIRE(lean_posix_memalign(&p, 4096, 64) == 0);
+    check_lists();
+    void *front = lean_malloc(16);
+    REQUIRE(front != NULL);
+    CHECK((unsigned char *)front < (unsigned char *)p);
+    lean_free(front);
+    lean_free(p);
+    check_lists();
+}
+
+TEST(malloc, an_aligned_block_survives_being_freed_and_asked_for_again) {
+    malloc_reset();
+    for (int round = 0; round < 500; round++) {
+        void *p = (void *)0;
+        REQUIRE(lean_posix_memalign(&p, 256, 300) == 0);
+        CHECK_EQ(((unsigned long)p) % 256u, 0u);
+        memset(p, round & 0xFF, 300);
+        lean_free(p);
+    }
+    check_lists();
+}
+
+TEST(malloc, posix_memalign_refuses_an_alignment_that_is_not_a_power_of_two) {
+    malloc_reset();
+    void *p = (void *)0xDEAD;
+    CHECK_EQ(lean_posix_memalign(&p, 24, 16), EINVAL);
+    CHECK_EQ(lean_posix_memalign(&p, 1, 16), EINVAL);
+    CHECK_EQ(lean_posix_memalign(&p, 0, 16), EINVAL);
+    CHECK_EQ(lean_posix_memalign((void **)0, 64, 16), EINVAL);
+    check_lists();
+}
+
+TEST(malloc, a_small_alignment_is_the_ordinary_allocator) {
+    malloc_reset();
+    void *p = (void *)0;
+    CHECK_EQ(lean_posix_memalign(&p, 8, 40), 0);
+    REQUIRE(p != NULL);
+    CHECK_EQ(((unsigned long)p) % 16u, 0u);
+    lean_free(p);
+    void *q = lean_aligned_alloc(16, 40);
+    REQUIRE(q != NULL);
+    CHECK_EQ(((unsigned long)q) % 16u, 0u);
+    lean_free(q);
+    check_lists();
+}
+
+TEST(malloc, posix_memalign_reports_a_refused_heap_rather_than_returning_null) {
+    malloc_reset();
+    fake_user_sbrk_refuse(1);
+    void *p = (void *)0;
+    CHECK_EQ(lean_posix_memalign(&p, 4096, 64), ENOMEM);
+    CHECK_EQ(lean_aligned_alloc(4096, 64), NULL);
+    CHECK_EQ(lean_posix_memalign(&p, 16, 64), ENOMEM);
+    CHECK_EQ(lean_aligned_alloc(8, 64), NULL);
+    fake_user_sbrk_refuse(0);
+    check_lists();
+}
+
+TEST(malloc, a_zero_byte_aligned_request_is_nothing_rather_than_a_block) {
+    malloc_reset();
+    void *p = (void *)0xDEAD;
+    CHECK_EQ(lean_posix_memalign(&p, 4096, 0), 0);
+    CHECK_EQ(p, NULL);
+    p = (void *)0xDEAD;
+    CHECK_EQ(lean_posix_memalign(&p, 16, 0), 0);
+    CHECK_EQ(p, NULL);
+    CHECK_EQ(lean_aligned_alloc(4096, 0), NULL);
+    CHECK_EQ(lean_aligned_alloc(16, 0), NULL);
+    CHECK_EQ(lean_posix_memalign(&p, 4096, 1), 0);
+    REQUIRE(p != NULL);
+    CHECK_EQ(((unsigned long)p) % 4096u, 0u);
+    lean_free(p);
+    void *q = lean_aligned_alloc(64, 1);
+    REQUIRE(q != NULL);
+    CHECK_EQ(((unsigned long)q) % 64u, 0u);
+    lean_free(q);
+    check_lists();
+}
+
+TEST(malloc, carving_a_block_that_is_not_the_tail_leaves_the_tail_alone) {
+    malloc_reset();
+    void *big = lean_malloc(60000);
+    void *tail = lean_malloc(64);
+    REQUIRE(big != NULL);
+    REQUIRE(tail != NULL);
+    lean_free(big);
+    check_lists();
+    block_header_t *was_tail = heap_tail;
+
+    void *p = (void *)0;
+    REQUIRE(lean_posix_memalign(&p, 4096, 64) == 0);
+    CHECK_EQ(((unsigned long)p) % 4096u, 0u);
+    CHECK((unsigned char *)p < (unsigned char *)tail);
+    CHECK_EQ(heap_tail, was_tail);
+    check_lists();
+
+    memset(p, 0x5A, 64);
+    lean_free(p);
+    lean_free(tail);
     check_lists();
 }

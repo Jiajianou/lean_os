@@ -19,7 +19,7 @@
   "metadata": {
     "description": "64-bit lean_os",
     "host_tools": false,
-    "std": false,
+    "std": true,
     "tier": 3
   },
   "os": "lean_os",

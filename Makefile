@@ -452,6 +452,18 @@ sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crt
 	@# reachable", not "no such library".
 	@rm -f $(SYSROOT)/usr/lib/libdl.a
 	@$(AR) rcs $(SYSROOT)/usr/lib/libdl.a 2>/dev/null || true
+	@# M138: librt.a and libpthread.a, empty, and for the third time the
+	@# argument libm.a makes above. Rust's standard library writes
+	@# #[link(name = "rt")] and #[link(name = "pthread")] for every unix,
+	@# because that is where glibc kept clock_gettime and the pthread
+	@# functions until it folded them into libc. This libc never split
+	@# them out - sys_clock_gettime and user_space/libc/src/pthread.c are
+	@# in libc.a - so the truthful shape is again an empty archive rather
+	@# than a second copy of every symbol or a fork of std's link
+	@# attributes.
+	@rm -f $(SYSROOT)/usr/lib/librt.a $(SYSROOT)/usr/lib/libpthread.a
+	@$(AR) rcs $(SYSROOT)/usr/lib/librt.a 2>/dev/null || true
+	@$(AR) rcs $(SYSROOT)/usr/lib/libpthread.a 2>/dev/null || true
 	@# M100: and the library stack, if it has been built.
 	@#
 	@# The `rm -rf` at the top of this rule is right and stays: a

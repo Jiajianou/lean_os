@@ -8644,6 +8644,108 @@ static void boot_selftests_system(void) {
     }
 
     {
+        os_stat_t rs;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/ruststd", (uint64_t)&rs, 0) != 0) {
+            kernel_log_puts("[m138] /bin/ruststd is not on this image - skipped. "
+                       "tools/rust-test.sh builds std for x86_64-lean_os and "
+                       "installs what it produces.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TEMPORARY_DIRECTORY "m138.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m138.out";
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "/bin/ruststd > " PATH_TEMPORARY_DIRECTORY "m138.out\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M138 self-test: could not write the script fixture");
+            }
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                kernel_log_puts("[m138] the Rust program could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+
+            static char std_produced[4096];
+            k_memset(std_produced, 0, sizeof(std_produced));
+            int64_t n = virtual_file_system_read(result, std_produced,
+                                                 sizeof(std_produced) - 1);
+            if (n <= 0) {
+                kernel_log_puts("[m138] the Rust program produced no output\n");
+                all_ok = 0;
+            } else {
+                std_produced[n] = '\0';
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"ABI facts agree between this libc's headers and the Rust libc crate",
+                     "every struct offset and size this libc's headers and the "
+                     "Rust libc crate both claim"},
+                    {"ruststd: std::fs wrote, read, walked and stat'd a file on leanfs",
+                     "std::fs over this filesystem, with a modification time that "
+                     "agrees with the clock"},
+                    {"ruststd: try_clone gave a descriptor sharing one file position",
+                     "fcntl(F_DUPFD_CLOEXEC), which this libc did not have before"},
+                    {"ruststd: four std::thread threads ran and joined with their values",
+                     "std::thread over this libc's pthread_create"},
+                    {"ruststd: a Mutex and a Condvar over this libc's pthreads",
+                     "std's pthread Mutex and Condvar, waking on this OS's futex"},
+                    {"ruststd: a 512-entry HashMap seeded from getrandom, and an "
+                     "over-aligned Box",
+                     "a HashMap seeded from getrandom and posix_memalign, which "
+                     "this libc did not have before either"},
+                    {"ruststd: Instant and SystemTime over clock_gettime",
+                     "both of std's clocks"},
+                    {"ruststd: argv[0] is ",
+                     "argv, the environment and the working directory, through "
+                     "std::env"},
+                    {"ruststd: done", "and the program reached its own last line"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(std_produced, EXPECT[i].needle)) {
+                        kernel_log_puts("[m138] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+            }
+
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+            if (all_ok) {
+                for (char *line = std_produced; *line;) {
+                    char *end = line;
+                    while (*end && *end != '\n') {
+                        end++;
+                    }
+                    char saved = *end;
+                    *end = '\0';
+                    kernel_log_puts("[m138] ");
+                    kernel_log_puts(line);
+                    kernel_log_putc('\n');
+                    *end = saved;
+                    line = saved ? end + 1 : end;
+                }
+            }
+            if (!all_ok) {
+                kernel_log_puts("[m138] what the Rust program wrote:\n");
+                kernel_log_puts(std_produced);
+                kernel_log_puts("[m138] ---- end\n");
+                panic("M138 self-test: the Rust standard library does not work here");
+            }
+            kernel_log_puts("[m138] the Rust standard library on this machine: a "
+                      "program with std in it, built from a fork of rust-src that "
+                      "knows x86_64-lean_os by name, doing files, directories, "
+                      "threads, a Mutex, a Condvar, both clocks, the environment "
+                      "and a HashMap - and comparing every struct offset it "
+                      "believes against what this libc's own headers say, in one "
+                      "program built by rustc and x86_64-lean_os-gcc together "
+                      "- self-test passed.\n\n");
+        }
+    }
+
+    {
         os_stat_t nst;
         if (do_syscall(SYS_stat, (uint64_t)(PATH_BIN_DIRECTORY "netsurf"),
                         (uint64_t)&nst, 0) != 0) {

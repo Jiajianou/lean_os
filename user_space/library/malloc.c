@@ -1,5 +1,7 @@
 #include "malloc.h"
 
+#include <errno.h>
+
 #include "mman.h"
 #include "syscall_wrappers.h"
 
@@ -109,6 +111,8 @@ static void *grow_heap(size_t min_bytes) {
     return (void *)(unsigned long)previous_brk;
 }
 
+static void *heap_alloc(size_t size);
+
 void *malloc(size_t size) {
     if (size == 0) {
         size = 1;
@@ -132,6 +136,10 @@ void *malloc(size_t size) {
         }
     }
 
+    return heap_alloc(size);
+}
+
+static void *heap_alloc(size_t size) {
     heap_acquire();
     for (int i = bin_of(size); i < NBINS; i++) {
         for (block_header_t *b = bins[i]; b; b = LINKS(b)->fnext) {
@@ -208,6 +216,71 @@ void free(void *ptr) {
     }
     bin_insert(b);
     heap_release();
+}
+
+int posix_memalign(void **out, size_t alignment, size_t size) {
+    if (!out) {
+        return EINVAL;
+    }
+    if (alignment < sizeof(void *) || (alignment & (alignment - 1)) != 0) {
+        return EINVAL;
+    }
+    if (size == 0) {
+        *out = (void *)0;
+        return 0;
+    }
+    if (alignment <= HEAP_ALIGN) {
+        void *p = malloc(size);
+        if (!p) {
+            return ENOMEM;
+        }
+        *out = p;
+        return 0;
+    }
+
+    size = align_up(size, HEAP_ALIGN);
+    if (size < MIN_PAYLOAD) {
+        size = MIN_PAYLOAD;
+    }
+
+    size_t slack = alignment + sizeof(block_header_t) + MIN_PAYLOAD;
+    void *raw = heap_alloc(align_up(size + slack, HEAP_ALIGN));
+    if (!raw) {
+        return ENOMEM;
+    }
+
+    heap_acquire();
+    block_header_t *b = (block_header_t *)raw - 1;
+    unsigned char *payload = (unsigned char *)raw;
+    unsigned char *aligned = (unsigned char *)align_up(
+        (size_t)(payload + sizeof(block_header_t) + MIN_PAYLOAD), alignment);
+    block_header_t *nb = (block_header_t *)(aligned - sizeof(block_header_t));
+    size_t front = (size_t)((unsigned char *)nb - payload);
+
+    nb->size = b->size - front - sizeof(block_header_t);
+    nb->is_free = 0;
+    nb->mmapped = 0;
+    nb->next = b->next;
+
+    b->next = nb;
+    if (heap_tail == b) {
+        heap_tail = nb;
+    }
+    b->size = front;
+    b->is_free = 1;
+    bin_insert(b);
+    heap_release();
+
+    *out = aligned;
+    return 0;
+}
+
+void *aligned_alloc(size_t alignment, size_t size) {
+    void *p = (void *)0;
+    if (posix_memalign(&p, alignment, size) != 0) {
+        return (void *)0;
+    }
+    return p;
 }
 
 size_t malloc_usable_size(void *ptr) {

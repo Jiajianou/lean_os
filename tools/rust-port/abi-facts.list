@@ -1,0 +1,107 @@
+# What the Rust libc module claims about this libc's ABI, named once and
+# answered twice: by x86_64-lean_os-gcc reading the C headers, and by rustc
+# reading tools/rust-port/libc/lean_os/mod.rs. tools/rust-port/gen-abi-facts.py
+# turns this into tests/rust/abi_facts.c and the Rust table beside it, and
+# /bin/ruststd compares the two ON THE MACHINE - which is the only place the
+# two answers ever meet.
+#
+# Lines are:
+#   struct <C spelling> | <rust path> | <field> <field> ...
+#   scalar <C spelling> | <rust path>
+#   const  <name> | <rust integer type>
+# A field written a=b is spelled a in C and b in Rust.
+
+struct struct stat | stat | st_mode st_size st_mtim st_atim st_ctim st_nlink st_ino st_dev st_rdev st_uid st_gid st_blksize st_blocks
+struct struct dirent | dirent | d_ino d_type d_name
+struct struct sockaddr | sockaddr | sa_family sa_data
+struct struct in_addr | in_addr | s_addr
+struct struct in6_addr | in6_addr | s6_addr
+struct struct sockaddr_in | sockaddr_in | sin_family sin_port sin_addr sin_zero
+struct struct sockaddr_in6 | sockaddr_in6 | sin6_family sin6_port sin6_flowinfo sin6_addr sin6_scope_id
+struct struct sockaddr_un | sockaddr_un | sun_family sun_path
+struct struct sockaddr_storage | sockaddr_storage | ss_family
+struct struct msghdr | msghdr | msg_name msg_namelen msg_iov msg_iovlen msg_control msg_controllen msg_flags
+struct struct cmsghdr | cmsghdr | cmsg_len cmsg_level cmsg_type
+struct struct addrinfo | addrinfo | ai_flags ai_family ai_socktype ai_protocol ai_addrlen ai_addr ai_canonname ai_next
+struct struct ip_mreq | ip_mreq | imr_multiaddr imr_interface
+struct struct passwd | passwd | pw_name pw_passwd pw_uid pw_gid pw_gecos pw_dir pw_shell
+struct struct termios | termios | c_iflag c_oflag c_cflag c_lflag c_cc
+struct struct flock | flock | l_type l_whence l_start l_len l_pid
+struct struct statvfs | statvfs | f_bsize f_frsize f_blocks f_bfree f_bavail f_files f_ffree f_favail f_fsid f_flag f_namemax
+struct struct utsname | utsname | sysname nodename release version machine
+struct struct epoll_event | epoll_event | events
+struct struct itimerspec | itimerspec | it_interval it_value
+struct struct timespec | timespec | tv_sec tv_nsec
+struct struct timeval | timeval | tv_sec tv_usec
+struct struct iovec | iovec | iov_base iov_len
+struct struct pollfd | pollfd | fd events revents
+struct struct linger | linger | l_onoff l_linger
+struct struct winsize | winsize | ws_row ws_col ws_xpixel ws_ypixel
+struct struct rlimit | rlimit | rlim_cur rlim_max
+struct struct rusage | rusage | ru_utime ru_stime ru_maxrss ru_minflt ru_majflt ru_nvcsw ru_nivcsw
+struct struct sigaction | sigaction | sa_mask sa_flags
+struct siginfo_t | siginfo_t | si_signo si_code si_errno si_pid si_uid si_address=si_addr si_status si_band
+struct struct tm | tm | tm_sec tm_min tm_hour tm_mday tm_mon tm_year tm_wday tm_yday tm_isdst tm_gmtoff tm_zone
+struct struct lconv | lconv | decimal_point thousands_sep grouping int_frac_digits frac_digits n_sign_posn
+struct struct sched_param | sched_param | sched_priority
+
+scalar pthread_mutex_t | pthread_mutex_t
+scalar pthread_cond_t | pthread_cond_t
+scalar pthread_rwlock_t | pthread_rwlock_t
+scalar pthread_attr_t | pthread_attr_t
+scalar pthread_mutexattr_t | pthread_mutexattr_t
+scalar pthread_condattr_t | pthread_condattr_t
+scalar pthread_t | pthread_t
+scalar pthread_key_t | pthread_key_t
+scalar fd_set | fd_set
+scalar off_t | off_t
+scalar mode_t | mode_t
+scalar ino_t | ino_t
+scalar dev_t | dev_t
+scalar nlink_t | nlink_t
+scalar blksize_t | blksize_t
+scalar blkcnt_t | blkcnt_t
+scalar fsblkcnt_t | fsblkcnt_t
+scalar fsfilcnt_t | fsfilcnt_t
+scalar time_t | time_t
+scalar suseconds_t | suseconds_t
+scalar clock_t | clock_t
+scalar clockid_t | clockid_t
+scalar socklen_t | socklen_t
+scalar sa_family_t | sa_family_t
+scalar sigset_t | sigset_t
+scalar nfds_t | nfds_t
+scalar rlim_t | rlim_t
+scalar tcflag_t | tcflag_t
+scalar cc_t | cc_t
+scalar pid_t | pid_t
+scalar uid_t | uid_t
+scalar gid_t | gid_t
+scalar ssize_t | ssize_t
+scalar in_addr_t | in_addr_t
+scalar in_port_t | in_port_t
+scalar eventfd_t | eventfd_t
+
+const O_RDONLY | c_int
+const O_ACCMODE | c_int
+const O_CLOEXEC | c_int
+const F_DUPFD_CLOEXEC | c_int
+const AT_FDCWD | c_int
+const S_IFMT | mode_t
+const S_IFSOCK | mode_t
+const S_IRWXU | mode_t
+const EPOLLET | u32
+const EPOLLIN | u32
+const RLIM_INFINITY | rlim_t
+const INADDR_LOOPBACK | in_addr_t
+const INADDR_NONE | in_addr_t
+const UTIME_OMIT | c_long
+const NCCS | usize
+const EAI_SYSTEM | c_int
+const SEEK_END | c_int
+const MAP_ANONYMOUS | c_int
+const EWOULDBLOCK | c_int
+const ETXTBSY | c_int
+const SOMAXCONN | c_int
+const PATH_MAX | c_int
+const _SC_PAGESIZE | c_int

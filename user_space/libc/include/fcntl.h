@@ -37,6 +37,8 @@ int creat(const char *path, mode_t mode);
 #define F_SETFL  4
 #define FD_CLOEXEC 1
 
+#define F_DUPFD_CLOEXEC 8
+
 #define F_GETLK  5
 #define F_SETLK  6
 #define F_SETLKW 7
