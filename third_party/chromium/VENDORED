@@ -1,0 +1,7 @@
+VERSION 155.0.8057.0 (chromium.googlesource.com/chromium/src)
+REVISION d676c5e85f483ee97c275db8bcd30961808f53b6
+
+The checkout is 31 GB across 455 sub-repositories and 1,089,439 files,
+which is why it is fetched by tools/fetch-chromium.sh into build/chromium
+rather than committed here. This directory holds the pin, the files this
+project authors in full under lean_os/, and nothing of upstream's.
