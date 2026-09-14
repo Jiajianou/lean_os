@@ -4,7 +4,8 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
-SPEC="$ROOT/tools/rust-port/x86_64-lean_os.json"
+TARGET=x86_64-unknown-lean_os
+SYSROOT="$ROOT/build/rust-sysroot-lean_os"
 WORK="$ROOT/build/rust-lean_os"
 CRATE="$WORK/probe"
 STD_CRATE="$WORK/std_probe"
@@ -36,10 +37,18 @@ echo "rust-test: the generated tables still agree with what generates them"
 python3 "$ROOT/tools/rust-port/gen-libc-constants.py" --check || exit 1
 python3 "$ROOT/tools/rust-port/gen-abi-facts.py" --check || exit 1
 
-echo "rust-test: the target specification loads"
-"$RUSTC" -Z unstable-options --print target-spec-json --target "$SPEC" \
+# Everything below goes through the sysroot's own rustc, which is what makes
+# x86_64-unknown-lean_os a NAME rather than a path to a file: it exports
+# RUST_TARGET_PATH and passes -Zunstable-options. Chromium's build reaches the
+# same target the same way, through the environment rather than through a
+# wrapper, so the name is the one interface both use.
+echo "rust-test: building the standard library and the sysroot for $TARGET"
+"$ROOT/tools/build-rust-sysroot.sh" || exit 1
+
+echo "rust-test: rustc resolves $TARGET by name"
+"$SYSROOT/bin/rustc" --print target-spec-json --target "$TARGET" \
     > /dev/null 2>&1 || {
-  echo "rust-test: $SPEC is not a target rustc accepts" >&2
+  echo "rust-test: $TARGET is not a target this rustc resolves" >&2
   exit 1
 }
 
@@ -58,13 +67,15 @@ crate-type = ["staticlib"]
 panic = "abort"
 TOML
 
-echo "rust-test: building core for x86_64-lean_os"
-(cd "$CRATE" && PATH="$ROOT/build/toolchain/bin:$PATH" RUSTC="$RUSTC" \
-    "$CARGO" build -Z json-target-spec -Z build-std=core \
-    --target "$SPEC" --release) > "$ROOT/build/rust-build.log" 2>&1 || {
+echo "rust-test: building core for $TARGET"
+(cd "$CRATE" && PATH="$ROOT/build/toolchain/bin:$PATH" \
+    RUSTC="$SYSROOT/bin/rustc" \
+    __CARGO_TESTS_ONLY_SRC_ROOT="$SOURCE/library" \
+    "$CARGO" build -Z build-std=core \
+    --target "$TARGET" --release) > "$ROOT/build/rust-build.log" 2>&1 || {
   tail -20 "$ROOT/build/rust-build.log" >&2; exit 1; }
 
-LIB="$CRATE/target/x86_64-lean_os/release/libprobe.a"
+LIB="$CRATE/target/$TARGET/release/libprobe.a"
 if [ ! -f "$LIB" ]; then
   echo "rust-test: $LIB was not produced" >&2
   exit 1
@@ -87,38 +98,6 @@ if [ -f "$IMAGE" ] && [ -x "$ROOT/build/leanfs-put" ]; then
   "$ROOT/build/leanfs-put" "$IMAGE" "$ROOT/build/rusttest" /bin/rusttest \
       >/dev/null || exit 1
   echo "rust-test: installed as /bin/rusttest - the [m137] boot self-test runs it"
-fi
-
-# M138: the standard library. Everything below needs rust-src, which the
-# Chromium toolchain carries and a bare host rustc may not.
-UPSTREAM="$TOOLCHAIN/lib/rustlib/src/rust/library"
-if [ ! -d "$UPSTREAM/std" ]; then
-  UPSTREAM=$("$RUSTC" --print sysroot 2>/dev/null)/lib/rustlib/src/rust/library
-fi
-if [ ! -d "$UPSTREAM/std" ]; then
-  echo "rust-test: no rust-src beside this rustc - std half skipped"
-  exit 0
-fi
-
-# The fork is a copy of rust-src with tools/rust-port/apply.py's edits on it.
-# The stamp is the rustc that produced the source plus every file the port is
-# made of, because a stale copy is the failure mode that costs an afternoon:
-# cargo fingerprints the tree it was given, so an edit that does not reach
-# this directory is an edit the build silently does not have.
-STAMP="$SOURCE/.lean_os-port-stamp"
-FINGERPRINT=$("$RUSTC" --version; cat "$ROOT/tools/rust-port/apply.py" \
-    "$ROOT/tools/rust-port/libc/lean_os/mod.rs" \
-    "$ROOT/tools/rust-port/libc/lean_os/constants.rs" \
-    "$ROOT"/tools/rust-port/std/os/lean_os/*.rs | shasum -a 256 | cut -d' ' -f1)
-if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP")" != "$FINGERPRINT" ]; then
-  echo "rust-test: unpacking rust-src and applying the lean_os port"
-  rm -rf "$SOURCE" "$STD_CRATE/target"
-  mkdir -p "$SOURCE"
-  cp -a "$UPSTREAM" "$SOURCE/library"
-  python3 "$ROOT/tools/rust-port/apply.py" "$SOURCE/library" || exit 1
-  echo "$FINGERPRINT" > "$STAMP"
-else
-  python3 "$ROOT/tools/rust-port/apply.py" "$SOURCE/library" > /dev/null || exit 1
 fi
 
 echo "rust-test: compiling the C half of the ABI table with x86_64-lean_os-gcc"
@@ -148,18 +127,19 @@ path = "src/main.rs"
 panic = "abort"
 TOML
 cat > "$STD_CRATE/.cargo/config.toml" <<TOML
-[target.x86_64-lean_os]
+[target.$TARGET]
 rustflags = ["-Clink-arg=$WORK/abi_facts.o"]
 TOML
 
-echo "rust-test: building std for x86_64-lean_os"
-(cd "$STD_CRATE" && PATH="$ROOT/build/toolchain/bin:$PATH" RUSTC="$RUSTC" \
+echo "rust-test: building std for $TARGET"
+(cd "$STD_CRATE" && PATH="$ROOT/build/toolchain/bin:$PATH" \
+    RUSTC="$SYSROOT/bin/rustc" \
     __CARGO_TESTS_ONLY_SRC_ROOT="$SOURCE/library" \
-    "$CARGO" build -Z json-target-spec -Z build-std=std,panic_abort \
-    --target "$SPEC" --release) > "$ROOT/build/rust-std-build.log" 2>&1 || {
+    "$CARGO" build -Z build-std=std,panic_abort \
+    --target "$TARGET" --release) > "$ROOT/build/rust-std-build.log" 2>&1 || {
   tail -40 "$ROOT/build/rust-std-build.log" >&2; exit 1; }
 
-BIN="$STD_CRATE/target/x86_64-lean_os/release/ruststd"
+BIN="$STD_CRATE/target/$TARGET/release/ruststd"
 if [ ! -f "$BIN" ]; then
   echo "rust-test: $BIN was not produced" >&2
   exit 1
@@ -169,8 +149,11 @@ if [ "$TYPE" != "EXEC" ]; then
   echo "rust-test: the std program is $TYPE, expected EXEC" >&2
   exit 1
 fi
-if ! "${PREFIX}nm" "$BIN" | grep -q ' T main$'; then
+SYMBOLS=$("${PREFIX}nm" "$BIN" 2>&1)
+if ! printf '%s\n' "$SYMBOLS" | grep -q ' T main$'; then
   echo "rust-test: the std program has no main for this crt0 to call" >&2
+  echo "rust-test: nm exited $? and said:" >&2
+  printf '%s\n' "$SYMBOLS" | grep -iE 'main|_start|error' | head -10 >&2
   exit 1
 fi
 cp "$BIN" "$ROOT/build/ruststd"

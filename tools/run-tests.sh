@@ -154,6 +154,8 @@ else
       ./tools/bootstrap-test.sh
     run_stage "what CPython's own build would cost here" \
       ./tools/python-build-test.sh
+    run_stage "the Chromium fork still fits the revision it is pinned to" \
+      ./tools/chromium-test.sh
   else
     run_stage "interactive suite (--quick subset)" ./tools/qemu-input-test.sh --quick
   fi

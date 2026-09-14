@@ -1,0 +1,20 @@
+diff --git a/build/build_config.h b/build/build_config.h
+index 0e3bcb4558..c77ef11155 100644
+--- a/build/build_config.h
++++ b/build/build_config.h
+@@ -100,6 +100,15 @@
+ // We really are using glibc, not uClibc pretending to be glibc.
+ #define LIBC_GLIBC 1
+ #endif
++#elif defined(__lean_os__)
++// lean_os. GN is told this platform is Linux, because that is what makes the
++// thousands of is_linux conditions gate the right things, so the buildflags
++// the preprocessor derives have to say the same thing - otherwise GN and the
++// compiler would disagree about one target. What stays lean_os is the target
++// triple, which is what the C library and libc++ branch on, and it is
++// deliberately not __linux__: this platform's struct stat, O_RDONLY and
++// sigset_t are its own.
++#define OS_LINUX 1
+ #elif defined(_WIN32)
+ #define OS_WIN 1
+ #elif defined(__Fuchsia__)

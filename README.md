@@ -247,6 +247,15 @@ UEFI firmware
   `fcntl(F_DUPFD_CLOEXEC)`, which `File::try_clone` needs, and
   `posix_memalign`, which an over-aligned `Box` needs.
 
+  **And Chromium's own build system builds it.** `x86_64-unknown-lean_os`
+  is a target rustc resolves by *name* rather than by a path to a JSON
+  file, which needs no fork of rustc, so `//build/rust/std` compiles the
+  forked standard library for this machine - 9.3 MB of `libstd_std.rlib`,
+  x86-64 ELF, out of ninja. Three patches to Chromium make that work and
+  the first mentions this OS nowhere: it adds a declare_arg for the case
+  Chromium has no name for, an out-of-tree platform that poses as Linux
+  for GN's sake while having a Rust target of its own.
+
 - **A package manager.** `os install grep` puts **GNU grep 3.11** on this
   machine - built here by this project's own compiler from the published
   tarball with no edit to its source. A package is a manifest, a file

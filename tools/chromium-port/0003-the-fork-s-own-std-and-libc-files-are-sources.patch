@@ -1,0 +1,27 @@
+diff --git a/build/rust/std/rules/BUILD.gn b/build/rust/std/rules/BUILD.gn
+index 5bf1298596..5d5889036a 100644
+--- a/build/rust/std/rules/BUILD.gn
++++ b/build/rust/std/rules/BUILD.gn
+@@ -1805,7 +1805,9 @@ cargo_crate("libc") {
+     "//third_party/rust-toolchain/lib/rustlib/src/rust/library/vendor/libc-0.2.189/src/windows/mod.rs",
+     "//third_party/rust-toolchain/lib/rustlib/src/rust/library/vendor/libc-0.2.189/src/windows/msvc/mod.rs",
+     "//third_party/rust-toolchain/lib/rustlib/src/rust/library/vendor/libc-0.2.189/src/xous.rs",
+-  ]
++      "//third_party/rust-toolchain/lib/rustlib/src/rust/library/vendor/libc-0.2.189/src/unix/lean_os/mod.rs",
++    "//third_party/rust-toolchain/lib/rustlib/src/rust/library/vendor/libc-0.2.189/src/unix/lean_os/constants.rs",
++]
+   inputs = []
+   no_std = true
+ 
+@@ -3208,7 +3210,10 @@ cargo_crate("std") {
+     "//third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/thread/thread.rs",
+     "//third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/time.rs",
+     "//third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/view.rs",
+-  ]
++      "//third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/os/lean_os/mod.rs",
++    "//third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/os/lean_os/raw.rs",
++    "//third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/os/lean_os/fs.rs",
++]
+   inputs = [
+     "//third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/../../backtrace/src/backtrace/libunwind.rs",
+     "//third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/../../backtrace/src/backtrace/miri.rs",

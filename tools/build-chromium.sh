@@ -27,9 +27,14 @@ else
   AR="${PREFIX}ar"
   NM="${PREFIX}nm"
   READELF="${PREFIX}readelf"
-  CLANG_BASE="$ROOT/build/toolchain"
-  CLANG_VER="24"
   LEANOS_TARGET_FLAG="--target=x86_64-lean_os"
+  CLANG_VER="24"
+  # clang_base_path is one path for the whole build, and the HOST half of a
+  # Rust build uses it too - build scripts and proc macros are native
+  # binaries, and they want macOS's compiler-rt. So it points at Chromium's
+  # own clang even when this OS's clang is the one compiling the target: cc
+  # and cxx below are what decide that, and they stay ours.
+  CLANG_BASE="$SRC/third_party/llvm-build/Release+Asserts"
 fi
 SYSROOT="$ROOT/build/sysroot"
 TARGET="${1:-base}"
@@ -45,6 +50,41 @@ fi
 
 rm -f "$LINK"
 ln -s "$FORK" "$LINK"
+
+# The fork's patch series. Every one of these is meant to be a seam somebody
+# else could use rather than a mention of this OS, which is why Chromium's
+# tree still contains the word lean_os nowhere. Applying is idempotent: a
+# patch already on the tree is left alone.
+for patch in "$ROOT"/tools/chromium-port/*.patch; do
+  [ -e "$patch" ] || continue
+  name=$(basename "$patch")
+  if (cd "$SRC" && git apply --check --reverse -p1 < "$patch") 2>/dev/null; then
+    echo "build-chromium: $name already applied"
+  elif (cd "$SRC" && git apply -p1 < "$patch") 2>/dev/null; then
+    echo "build-chromium: $name applied"
+  else
+    echo "build-chromium: $name does not apply to this checkout" >&2
+    exit 1
+  fi
+done
+
+# Rust. Chromium builds the standard library from the rust-src beside its own
+# rustc, and that is the configuration it supports: an external sysroot turns
+# use_chromium_rust_toolchain off, which turns enable_cpp_api_from_rust off,
+# and //components/cbor then depends on a bindings target nobody defined. So
+# the fork goes on the checkout's own rust-src instead, and the only thing
+# this OS has to inject is a rustc that knows where x86_64-unknown-lean_os
+# is described - which gcc_toolchain already has a hook for.
+RUST_TARGET=x86_64-unknown-lean_os
+RUST_SRC="$SRC/third_party/rust-toolchain/lib/rustlib/src/rust/library"
+ENABLE_RUST=false
+if [ -d "$RUST_SRC/std" ]; then
+  echo "build-chromium: applying the lean_os Rust port to the checkout's rust-src"
+  python3 "$ROOT/tools/rust-port/apply.py" "$RUST_SRC" > /dev/null || exit 1
+  ENABLE_RUST=true
+else
+  echo "build-chromium: no rust-src in the checkout - building without Rust"
+fi
 
 BUILTINS_DIR="$CLANG_BASE/lib/clang/$CLANG_VER/lib/x86_64-unknown-linux-gnu"
 LIBGCC="$ROOT/build/toolchain/lib/gcc/x86_64-lean_os/14.2.0/libgcc.a"
@@ -65,7 +105,8 @@ lean_os_cxx = "$CXX"
 lean_os_ar = "$AR"
 lean_os_nm = "$NM"
 lean_os_readelf = "$READELF"
-enable_rust = false
+enable_rust = $ENABLE_RUST
+rust_abi_target_override = "$RUST_TARGET"
 clang_base_path = "$CLANG_BASE"
 clang_version = "$CLANG_VER"
 ozone_extra_path = "//lean_os/ozone_extra.gni"
@@ -79,8 +120,7 @@ dcheck_always_on = false
 clang_use_chrome_plugins = false
 treat_warnings_as_errors = false
 
-use_sysroot = true
-sysroot = "$SYSROOT"
+use_sysroot = false
 lean_os_sysroot = "$SYSROOT"
 lean_os_target = "$LEANOS_TARGET_FLAG"
 use_custom_libcxx = false
@@ -113,6 +153,13 @@ ARGS
 
 PATH="$DEPOT:$DEPOT/.cipd_bin:$PATH"
 export PATH
+
+# rustc finds x86_64-unknown-lean_os's description here and nowhere else, and
+# it is read by gn, by ninja and by every rustc the build starts - so it is an
+# environment variable rather than a flag. Anyone driving ninja by hand in
+# this output directory needs it set the same way.
+RUST_TARGET_PATH="$ROOT/tools/rust-port${RUST_TARGET_PATH:+:$RUST_TARGET_PATH}"
+export RUST_TARGET_PATH
 
 echo "build-chromium: gn gen $OUT"
 (cd "$SRC" && buildtools/mac/gn gen "out/$OUT_NAME" --root-target="//$TARGET") || exit 1

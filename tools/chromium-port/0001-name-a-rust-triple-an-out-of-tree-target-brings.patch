@@ -1,0 +1,115 @@
+diff --git a/build/config/compiler/BUILD.gn b/build/config/compiler/BUILD.gn
+index ccfe9692ba..e2df23ad3e 100644
+--- a/build/config/compiler/BUILD.gn
++++ b/build/config/compiler/BUILD.gn
+@@ -1006,6 +1006,9 @@ config("compiler") {
+   }
+   if (rust_abi_target != "") {
+     rustflags += [ "--target=$rust_abi_target" ]
++    if (rust_abi_target_is_from_override) {
++      rustflags += [ "-Zunstable-options" ]
++    }
+   }
+   if (!use_thin_lto || !toolchain_supports_rust_thin_lto) {
+     # Don't include bitcode if it won't be used.
+diff --git a/build/config/rust.gni b/build/config/rust.gni
+index 3b5db82dd1..153c75e559 100644
+--- a/build/config/rust.gni
++++ b/build/config/rust.gni
+@@ -198,8 +198,34 @@ if (enable_rust) {
+ # targets to Rust targets comprehensively despite not having official support
+ # (see '*_toolchain_supports_platform above') to enable experimentation with
+ # other toolchains.
++declare_args() {
++  # The Rust target triple to build for, when it is not one this file knows
++  # how to derive from the GN platform. An out-of-tree platform that poses as
++  # another for GN's sake - so that the thousands of is_linux conditions gate
++  # the right things - still has a Rust target of its own, and the triple is
++  # what decides which std and which libc a crate is compiled against.
++  #
++  # Such a triple is described by a target specification file that rustc finds
++  # through RUST_TARGET_PATH, which is why setting this also passes
++  # -Zunstable-options: rustc will not load a target it did not ship with
++  # otherwise. Setting this takes responsibility for the triple being one
++  # rustc accepts, so the known-triples assert below is skipped.
++  rust_abi_target_override = ""
++}
++
+ rust_abi_target = ""
+-if (is_linux || is_chromeos) {
++
++# Whether rust_abi_target came from the override above. The override names the
++# triple of the target platform, so it applies in the toolchains that build
++# FOR that platform and not in the ones that build host tools - a proc macro
++# and a build script are native binaries, and their triple is the host's.
++rust_abi_target_is_from_override =
++    rust_abi_target_override != "" && !toolchain_for_rust_host_build_tools &&
++    current_os == target_os && current_cpu == target_cpu
++
++if (rust_abi_target_is_from_override) {
++  rust_abi_target = rust_abi_target_override
++} else if (is_linux || is_chromeos) {
+   if (current_cpu == "arm64") {
+     rust_abi_target = "aarch64-unknown-linux-gnu"
+   } else if (current_cpu == "x86") {
+@@ -343,7 +369,7 @@ if (is_linux || is_chromeos) {
+   }
+ }
+ 
+-if (toolchain_has_rust) {
++if (toolchain_has_rust && !rust_abi_target_is_from_override) {
+   assert(rust_abi_target != "")
+ 
+   _known_rust_target_triples_filepath = "//build/rust/known-target-triples.txt"
+diff --git a/build/rust/gni_impl/BUILD.gn b/build/rust/gni_impl/BUILD.gn
+index b1ae5352db..84e5de837d 100644
+--- a/build/rust/gni_impl/BUILD.gn
++++ b/build/rust/gni_impl/BUILD.gn
+@@ -48,6 +48,11 @@ action("rustc_print_cfg") {
+     "--output-path",
+     rebase_path(rustc_print_cfg_path, root_build_dir),
+   ]
++  if (rust_abi_target_is_from_override) {
++    # An out-of-tree triple is a target specification file rather than one
++    # rustc shipped with, and rustc will not load one without this.
++    args += [ "--custom-target" ]
++  }
+   inputs = []
+   if (host_os == "win") {
+     inputs += [ "${rust_sysroot}/bin/rustc.exe" ]
+diff --git a/build/rust/gni_impl/rustc_print_cfg.py b/build/rust/gni_impl/rustc_print_cfg.py
+index 452841105a..cf41ce45e1 100755
+--- a/build/rust/gni_impl/rustc_print_cfg.py
++++ b/build/rust/gni_impl/rustc_print_cfg.py
+@@ -26,7 +26,7 @@ def rustc_name():
+         return "rustc"
+ 
+ 
+-def capture_rustc_cfg(rust_prefix, target, output_path):
++def capture_rustc_cfg(rust_prefix, target, output_path, custom_target=False):
+     """Invokes `rustc --print=cfg --target=<target>` and saves results.
+ 
+     Results are saved to a file at `output_path`."""
+@@ -37,6 +37,8 @@ def capture_rustc_cfg(rust_prefix, target, output_path):
+     # output of `--print-cfg`.  If so, then consider also passing extra `args`
+     # (derived from `rustflags` maybe?).
+     args = [rustc_path, "--print=cfg", f"--target={target}"]
++    if custom_target:
++        args.append("-Zunstable-options")
+ 
+     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+     with open(output_path, 'w') as output_file:
+@@ -47,9 +49,12 @@ def main():
+     parser = argparse.ArgumentParser("rustc_print_cfg.py")
+     parser.add_argument('--rust-prefix', required=True, help='rust path prefix')
+     parser.add_argument('--target', required=True, help='rust target triple')
++    parser.add_argument('--custom-target', action='store_true',
++                        help='the triple is a target specification file')
+     parser.add_argument('--output-path', required=True, help='output file')
+     args = parser.parse_args()
+-    capture_rustc_cfg(args.rust_prefix, args.target, args.output_path)
++    capture_rustc_cfg(args.rust_prefix, args.target, args.output_path,
++                      args.custom_target)
+     return 0
+ 
+ 

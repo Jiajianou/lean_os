@@ -400,6 +400,20 @@ $(LD_SO): user_space/loader/ld-lean.c user_space/loader/ld-start.S
 	$(LD) -shared -soname ld-lean.so -e _start --no-undefined \
 	  -o $@ $(UOBJ)/pic/ld-start.o $(UOBJ)/pic/ld-lean.o
 
+# M139: the headers alone, over an existing sysroot. `sysroot` below begins
+# with `rm -rf`, which is right for a generated directory but takes the
+# fifteen third-party libraries installed into it with it - so a header added
+# to user_space/libc/include had no safe way to reach a cross compile short
+# of rebuilding the whole library stack. This is that way.
+.PHONY: sysroot-headers
+sysroot-headers:
+	@if [ ! -d $(SYSROOT)/usr/include ]; then \
+	  echo "sysroot-headers: no sysroot yet - run 'make sysroot'"; exit 1; fi
+	@cp -R user_space/libc/include/. $(SYSROOT)/usr/local/include/
+	@cp -R system_api/include/. $(SYSROOT)/usr/include/
+	@cp user_space/library/syscall_wrappers.h $(SYSROOT)/usr/include/
+	@echo "sysroot-headers: $(SYSROOT) headers refreshed from the tree"
+
 sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
 	@rm -rf $(SYSROOT)
 	@mkdir -p $(SYSROOT)/usr/local/include $(SYSROOT)/usr/include $(SYSROOT)/usr/lib
