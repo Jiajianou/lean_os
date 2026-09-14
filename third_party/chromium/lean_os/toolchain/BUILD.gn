@@ -1,0 +1,31 @@
+import("//build/toolchain/gcc_toolchain.gni")
+
+declare_args() {
+  lean_os_cc = ""
+  lean_os_cxx = ""
+  lean_os_ar = ""
+  lean_os_nm = ""
+  lean_os_readelf = ""
+  lean_os_sysroot = ""
+  lean_os_cxx_include = ""
+}
+
+gcc_toolchain("x64") {
+  cc = lean_os_cc
+  cxx = lean_os_cxx
+  ar = lean_os_ar
+  nm = lean_os_nm
+  ld = cxx
+  extra_cppflags = "-isystem$lean_os_cxx_include"
+  readelf = lean_os_readelf
+
+  toolchain_args = {
+    current_cpu = "x64"
+    current_os = "linux"
+    is_clang = true
+    clang_use_chrome_plugins = false
+    use_debug_fission = false
+    is_component_build = false
+    sysroot = lean_os_sysroot
+  }
+}

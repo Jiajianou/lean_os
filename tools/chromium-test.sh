@@ -54,5 +54,14 @@ else
   check $? "the baseline parses the fixture and V8 mutates its DOM"
 fi
 
+if [ ! -x "$ROOT/build/toolchain/bin/x86_64-lean_os-clang" ]; then
+  echo "chromium-test: no cross toolchain - skipping the configure check"
+else
+  LEANOS_CHROMIUM_CONFIGURE_ONLY=1 LEANOS_CHROMIUM_CC=chromium \
+      "$ROOT/tools/build-chromium.sh" base/third_party/double_conversion \
+      > "$ROOT/build/chromium-configure.log" 2>&1
+  check $? "the lean_os GN configuration generates with no patch to Chromium"
+fi
+
 echo "chromium-test: $PASS passed, $FAIL failed"
 [ "$FAIL" = "0" ]
