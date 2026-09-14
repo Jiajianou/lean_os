@@ -227,6 +227,7 @@ REQUIRED_MARKERS=(
   "[m127] the desktop's own applications on LVGL:"
   "[m121] a second compiler that knows this OS by name:"
   "ONE PROGRAM FROM TWO COMPILERS"
+  "[m137] a third language for this target:"
   "[q16] devices that fail, and a machine that keeps running:"
   "[m85] a terminal that is a device:"
   "ptytest: all eight checks passed"

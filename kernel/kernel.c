@@ -8570,6 +8570,80 @@ static void boot_selftests_system(void) {
     }
 
     {
+        os_stat_t rt;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/rusttest", (uint64_t)&rt, 0) != 0) {
+            kernel_log_puts("[m137] /bin/rusttest is not on this image - skipped. "
+                       "tools/rust-test.sh builds core for x86_64-lean_os and "
+                       "installs what it produces.\n\n");
+        } else {
+            int all_ok = 1;
+            const char *script = PATH_TEMPORARY_DIRECTORY "m137.sh";
+            const char *result = PATH_TEMPORARY_DIRECTORY "m137.out";
+            static const char SCRIPT[] =
+                "#!/bin/sh\n"
+                "/bin/rusttest > " PATH_TEMPORARY_DIRECTORY "m137.out\n";
+            if (do_syscall(SYS_writefile, (uint64_t)script, (uint64_t)SCRIPT,
+                            sizeof(SCRIPT) - 1) != 0) {
+                panic("M137 self-test: could not write the script fixture");
+            }
+            long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
+            if (pid < 0) {
+                kernel_log_puts("[m137] the Rust program could not be spawned\n");
+                all_ok = 0;
+            } else {
+                do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+            }
+
+            static char produced[1024];
+            k_memset(produced, 0, sizeof(produced));
+            int64_t n = virtual_file_system_read(result, produced, sizeof(produced) - 1);
+            if (n <= 0) {
+                kernel_log_puts("[m137] the Rust program produced no output\n");
+                all_ok = 0;
+            } else {
+                produced[n] = '\0';
+                static const struct { const char *needle; const char *what; } EXPECT[] = {
+                    {"rusttest: a slice crossed the C boundary and core summed it",
+                     "core's slice and iterator code, compiled for this target"},
+                    {"rusttest: 128-bit division through compiler_builtins",
+                     "Rust's compiler_builtins beside GCC's libgcc in one program"},
+                    {"rusttest: a two-word struct returned by value",
+                     "the SysV ABI this kernel's crt0 assumes, from rustc"},
+                    {"rusttest: an atomic read-modify-write in a static",
+                     "a static with interior mutability and a lock-prefixed op"},
+                    {"rusttest: an iterator chain through Option",
+                     "monomorphised generics reaching a C caller"},
+                    {"rusttest: done", "and the program reached its own last line"},
+                };
+                for (unsigned i = 0; i < sizeof(EXPECT) / sizeof(EXPECT[0]); i++) {
+                    if (!selftest_contains(produced, EXPECT[i].needle)) {
+                        kernel_log_puts("[m137] missing: ");
+                        kernel_log_puts(EXPECT[i].what);
+                        kernel_log_putc('\n');
+                        all_ok = 0;
+                    }
+                }
+            }
+
+            do_syscall(SYS_unlink, (uint64_t)script, 0, 0);
+            do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
+            if (!all_ok) {
+                kernel_log_puts("[m137] what the Rust program wrote:\n");
+                kernel_log_puts(produced);
+                kernel_log_puts("[m137] ---- end\n");
+                panic("M137 self-test: Rust does not work here");
+            }
+            kernel_log_puts("[m137] a third language for this target: rustc builds "
+                      "core for x86_64-lean_os from a target specification this "
+                      "project wrote, and the objects link against this libc and "
+                      "GCC's libgcc in one program - a slice, an iterator chain, "
+                      "a by-value struct return, an atomic in a static, and a "
+                      "128-bit division that reaches compiler_builtins "
+                      "- self-test passed.\n\n");
+        }
+    }
+
+    {
         os_stat_t nst;
         if (do_syscall(SYS_stat, (uint64_t)(PATH_BIN_DIRECTORY "netsurf"),
                         (uint64_t)&nst, 0) != 0) {

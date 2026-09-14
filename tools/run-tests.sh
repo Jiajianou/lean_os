@@ -83,6 +83,13 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
     echo "the clang port produced something that will not link or run" >&2
     exit 1
   fi
+  run_stage "core, for x86_64-lean_os, linked against this libc" \
+    ./tools/rust-test.sh
+  if [ "$OVERALL" -ne 0 ]; then
+    echo "the Rust target produced something that will not link" >&2
+    exit 1
+  fi
+
   run_stage "the native binutils, onto the image" ./tools/install-native-toolchain.sh
 
   run_stage "python and its library, onto the image" ./tools/install-python.sh
