@@ -1,8 +1,17 @@
 #include "LeanOS.h"
+#include "llvm/Config/llvm-config.h"
+#if __has_include("clang/Driver/CommonArgs.h")
+#include "clang/Driver/CommonArgs.h"
+#else
 #include "CommonArgs.h"
+#endif
 #include "clang/Config/config.h"
 #include "clang/Driver/Compilation.h"
+#if __has_include("clang/Options/Options.h")
+#include "clang/Options/Options.h"
+#else
 #include "clang/Driver/Options.h"
+#endif
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/VirtualFileSystem.h"
@@ -19,9 +28,15 @@ static bool isPositionIndependentRequest(const ArgList &Args) {
                      options::OPT_fpie, options::OPT_fPIE);
 }
 
+#if LLVM_VERSION_MAJOR >= 24
+void LeanOS::addClangTargetOptions(const ArgList &DriverArgs,
+                                   ArgStringList &CC1Args, BoundArch,
+                                   Action::OffloadKind) const {
+#else
 void LeanOS::addClangTargetOptions(const ArgList &DriverArgs,
                                    ArgStringList &CC1Args,
                                    Action::OffloadKind) const {
+#endif
   const bool PIC = isPositionIndependentRequest(DriverArgs);
 
   if (!DriverArgs.hasArg(options::OPT_mcmodel_EQ) && !PIC)
@@ -173,14 +188,23 @@ void leanos::Linker::ConstructJob(Compilation &C, const JobAction &JA,
   Args.addAllArgs(CmdArgs, {options::OPT_L, options::OPT_u});
   ToolChain.AddFilePathLibArgs(Args, CmdArgs);
 
+#if LLVM_VERSION_MAJOR >= 24
+  if (ToolChain.isUsingLTO(Args)) {
+#else
   if (D.isUsingLTO()) {
+#endif
     assert(!Inputs.empty() && "Must have at least one input.");
     auto Input = llvm::find_if(
         Inputs, [](const InputInfo &II) -> bool { return II.isFilename(); });
     if (Input == Inputs.end())
       Input = Inputs.begin();
+#if LLVM_VERSION_MAJOR >= 24
+    addLTOOptions(ToolChain, Args, CmdArgs, Output, Inputs,
+                  ToolChain.getLTOMode(Args) == LTOK_Thin);
+#else
     addLTOOptions(ToolChain, Args, CmdArgs, Output, *Input,
                   D.getLTOMode() == LTOK_Thin);
+#endif
   }
 
   AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);

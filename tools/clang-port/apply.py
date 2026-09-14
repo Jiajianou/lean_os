@@ -18,6 +18,20 @@ def write_file(path, content, why):
 def edit(path, anchor, replacement, why, count=1):
     with open(path) as f:
         text = f.read()
+    if isinstance(anchor, tuple):
+        pairs = anchor
+    else:
+        pairs = ((anchor, replacement),)
+    for candidate, edited in pairs:
+        if edited in text:
+            return "already applied"
+    for candidate, edited in pairs:
+        if candidate in text:
+            anchor = candidate
+            replacement = edited
+            break
+    else:
+        anchor = pairs[0][0]
     if replacement in text:
         return "already applied"
     if anchor not in text:
@@ -30,13 +44,25 @@ def edit(path, anchor, replacement, why, count=1):
         f.write(text.replace(anchor, replacement, -1 if count == 0 else count))
     return "applied"
 
-TRIPLE_H_ANCHOR = """    Serenity,
+TRIPLE_H_ANCHOR = (
+    ("""    Serenity,
     Vulkan, // Vulkan SPIR-V
-    LastOSType = Vulkan"""
-TRIPLE_H_EDIT = """    Serenity,
+    LastOSType = Vulkan""",
+     """    Serenity,
     Vulkan, // Vulkan SPIR-V
     LeanOS, // lean_os
-    LastOSType = LeanOS"""
+    LastOSType = LeanOS"""),
+    ("""    H2,
+    LastOSType = H2""",
+     """    H2,
+    LeanOS, // lean_os
+    LastOSType = LeanOS"""),
+)
+TRIPLE_H_EDIT = None
+
+TRIPLE_DEF_ANCHOR = 'TRIPLE_OS(H2, "h2", "Generic")'
+TRIPLE_DEF_EDIT = ('TRIPLE_OS(H2, "h2", "Generic")\n'
+                   'TRIPLE_OS(LeanOS, "lean_os", "lean_os")')
 
 TRIPLE_CPP_NAME_ANCHOR = '  case Serenity: return "serenity";'
 TRIPLE_CPP_NAME_EDIT = ('  case Serenity: return "serenity";\n'
@@ -160,6 +186,12 @@ def port_llvm(root):
         os.path.join(root, "llvm/include/llvm/TargetParser/Triple.h"),
         TRIPLE_H_ANCHOR, TRIPLE_H_EDIT,
         "the OSType enum llvm::Triple parses into")))
+    names = os.path.join(root, "llvm/include/llvm/TargetParser/TripleName.def")
+    if os.path.exists(names):
+        out.append(("llvm/.../TripleName.def", edit(
+            names, TRIPLE_DEF_ANCHOR, TRIPLE_DEF_EDIT,
+            "the one table that is both the names and the parse")))
+        return out
     tcpp = os.path.join(root, "llvm/lib/TargetParser/Triple.cpp")
     out.append(("llvm/.../Triple.cpp (name)", edit(
         tcpp, TRIPLE_CPP_NAME_ANCHOR, TRIPLE_CPP_NAME_EDIT,
@@ -205,7 +237,132 @@ CHRONO_ANCHOR = """#if defined(__APPLE__) || defined(__gnu_hurd__) || defined(__
 CHRONO_EDIT = """#if defined(__APPLE__) || defined(__gnu_hurd__) || defined(__OpenBSD__) || \\
     defined(__lean_os__) || (defined(_POSIX_TIMERS) && _POSIX_TIMERS > 0)"""
 
+SUPPORT_HEADER = """// -*- C++ -*-
+//===-----------------------------------------------------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// Written by tools/clang-port/apply.py - M136.
+//
+// lean_os has one locale and it is "C" (user_space/libc/include/locale.h),
+// so this delegates to libc++'s own no_locale implementation rather than
+// reimplementing the _l functions to ignore their locale_t. That is the
+// same claim M121's locale_base_api/lean_os.h made against the older
+// libc++, in the vocabulary libc++ now uses for it.
+
+#ifndef _LIBCPP___LOCALE_DIR_SUPPORT_LEAN_OS_H
+#define _LIBCPP___LOCALE_DIR_SUPPORT_LEAN_OS_H
+
+#include <__config>
+#include <clocale>
+#include <cstdio>
+#include <cstdlib>
+#include <ctype.h>
+#include <locale.h>
+#include <string.h>
+
+#if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
+#  pragma GCC system_header
+#endif
+
+_LIBCPP_BEGIN_NAMESPACE_STD
+namespace __locale {
+
+using __locale_t _LIBCPP_NODEBUG = ::locale_t;
+
+#define _LIBCPP_COLLATE_MASK LC_COLLATE_MASK
+#define _LIBCPP_CTYPE_MASK LC_CTYPE_MASK
+#define _LIBCPP_MONETARY_MASK LC_MONETARY_MASK
+#define _LIBCPP_NUMERIC_MASK LC_NUMERIC_MASK
+#define _LIBCPP_TIME_MASK LC_TIME_MASK
+#define _LIBCPP_MESSAGES_MASK LC_MESSAGES_MASK
+#define _LIBCPP_ALL_MASK LC_ALL_MASK
+#define _LIBCPP_LC_ALL LC_ALL
+
+#if defined(_LIBCPP_BUILDING_LIBRARY)
+using __lconv_t _LIBCPP_NODEBUG = std::lconv;
+
+inline _LIBCPP_HIDE_FROM_ABI __locale_t __newlocale(int __category_mask, const char* __locale, __locale_t __base) {
+  return ::newlocale(__category_mask, __locale, __base);
+}
+
+inline _LIBCPP_HIDE_FROM_ABI void __freelocale(__locale_t __loc) { ::freelocale(__loc); }
+
+inline _LIBCPP_HIDE_FROM_ABI char* __setlocale(int __category, char const* __locale) {
+  return ::setlocale(__category, __locale);
+}
+
+inline _LIBCPP_HIDE_FROM_ABI __lconv_t* __localeconv(__locale_t&) { return std::localeconv(); }
+
+inline _LIBCPP_HIDE_FROM_ABI const char* __get_locale_encoding(__locale_t) { return nullptr; }
+#endif // _LIBCPP_BUILDING_LIBRARY
+
+} // namespace __locale
+_LIBCPP_END_NAMESPACE_STD
+
+#include <__locale_dir/support/no_locale/characters.h>
+#include <__locale_dir/support/no_locale/conversions.h>
+#include <__locale_dir/support/no_locale/formatting.h>
+#include <__locale_dir/support/no_locale/strtonum.h>
+
+#define _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE 1
+
+#endif // _LIBCPP___LOCALE_DIR_SUPPORT_LEAN_OS_H
+"""
+
+SUPPORT_DISPATCH_ANCHOR = """#  elif defined(__linux__)
+#    include <__locale_dir/support/linux.h>"""
+SUPPORT_DISPATCH_EDIT = """#  elif defined(__lean_os__)
+#    include <__locale_dir/support/lean_os.h>
+#  elif defined(__linux__)
+#    include <__locale_dir/support/linux.h>"""
+
+MESSAGES_ANCHOR = """#    if !defined(__BIONIC__) && !_LIBCPP_LIBC_NEWLIB && !defined(__EMSCRIPTEN__)"""
+MESSAGES_EDIT = """#    if !defined(__BIONIC__) && !_LIBCPP_LIBC_NEWLIB && !defined(__EMSCRIPTEN__) && \\
+        !defined(__lean_os__)"""
+
+CHRONO24_ANCHOR = """    defined(__NVPTX__) || (defined(_POSIX_TIMERS) && _POSIX_TIMERS > 0)"""
+CHRONO24_EDIT = """    defined(__NVPTX__) || defined(__lean_os__) || (defined(_POSIX_TIMERS) && _POSIX_TIMERS > 0)"""
+
+def port_libcxx_support(root):
+    out = []
+    support = os.path.join(root, "libcxx/include/__locale_dir/support")
+    out.append(("libcxx/.../support/lean_os.h", write_file(
+        os.path.join(support, "lean_os.h"), SUPPORT_HEADER,
+        "the locale backend for a machine with one locale")))
+    out.append(("libcxx/.../locale_base_api.h", edit(
+        os.path.join(root, "libcxx/include/__locale_dir/locale_base_api.h"),
+        SUPPORT_DISPATCH_ANCHOR, SUPPORT_DISPATCH_EDIT,
+        "the per-platform locale-API switch")))
+    out.append(("libcxx/.../CMakeLists.txt", edit(
+        os.path.join(root, "libcxx/include/CMakeLists.txt"),
+        "  __locale_dir/support/fuchsia.h\n",
+        "  __locale_dir/support/fuchsia.h\n"
+        "  __locale_dir/support/lean_os.h\n",
+        "the list of headers libcxx installs")))
+    out.append(("libcxx/.../messages.h (catopen)", edit(
+        os.path.join(root, "libcxx/include/__locale_dir/messages.h"),
+        MESSAGES_ANCHOR, MESSAGES_EDIT,
+        "the list of unix variants that have no catopen")))
+    out.append(("libcxx/.../chrono.cpp", edit(
+        os.path.join(root, "libcxx/src/chrono.cpp"),
+        CHRONO24_ANCHOR, CHRONO24_EDIT,
+        "the systems with a monotonic clock but not all of POSIX timers")))
+    out.append(("libcxx/.../module.modulemap.in", edit(
+        os.path.join(root, "libcxx/include/module.modulemap.in"),
+        '      textual header "__locale_dir/support/fuchsia.h"',
+        '      textual header "__locale_dir/support/fuchsia.h"\n'
+        '      textual header "__locale_dir/support/lean_os.h"',
+        "the module map libcxx installs")))
+    return out
+
 def port_libcxx(root):
+    if os.path.isdir(os.path.join(root, "libcxx/include/__locale_dir/support")):
+        return port_libcxx_support(root)
     out = []
     base = os.path.join(root, "libcxx/include/__locale_dir/locale_base_api")
     out.append(("libcxx/.../lean_os.h", write_file(

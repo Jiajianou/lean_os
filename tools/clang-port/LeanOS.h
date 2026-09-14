@@ -4,6 +4,7 @@
 #include "Gnu.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Driver/ToolChain.h"
+#include "llvm/Config/llvm-config.h"
 
 namespace clang {
 namespace driver {
@@ -61,10 +62,17 @@ public:
     return ToolChain::CST_Libcxx;
   }
 
+#if LLVM_VERSION_MAJOR >= 24
+  void
+  addClangTargetOptions(const llvm::opt::ArgList &DriverArgs,
+                        llvm::opt::ArgStringList &CC1Args, BoundArch BA,
+                        Action::OffloadKind DeviceOffloadKind) const override;
+#else
   void
   addClangTargetOptions(const llvm::opt::ArgList &DriverArgs,
                         llvm::opt::ArgStringList &CC1Args,
                         Action::OffloadKind DeviceOffloadKind) const override;
+#endif
 
   void AddClangSystemIncludeArgs(
       const llvm::opt::ArgList &DriverArgs,

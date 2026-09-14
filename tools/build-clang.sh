@@ -8,7 +8,7 @@ LLVM_VER=19.1.7
 TARGET=x86_64-lean_os
 
 SRC="$ROOT/build/clang-src"
-TREE="$SRC/llvm-project-$LLVM_VER.src"
+TREE="${LEANOS_LLVM_TREE:-$SRC/llvm-project-$LLVM_VER.src}"
 PREFIX="${LEANOS_TOOLCHAIN_PREFIX:-$ROOT/build/toolchain}"
 SYSROOT="$ROOT/build/sysroot"
 BUILDDIR="$ROOT/build/clang-build"
@@ -47,23 +47,32 @@ mkdir -p "$SRC"
 cd "$SRC"
 
 TARBALL="llvm-project-$LLVM_VER.src.tar.xz"
-if [ ! -f "$TARBALL" ]; then
+if [ -n "${LEANOS_LLVM_TREE:-}" ]; then
+  echo "build-clang: using the tree at $TREE"
+elif [ ! -f "$TARBALL" ]; then
   echo "build-clang: fetching $TARBALL (about 135 MB)"
   curl -sSL -o "$TARBALL.part" \
     "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VER/$TARBALL" \
     && mv "$TARBALL.part" "$TARBALL" || exit 1
 fi
 
-FP=$(shasum -a 256 tools/clang-port/apply.py | cut -c1-16)
+FP=$(shasum -a 256 "$ROOT/tools/clang-port/apply.py" | cut -c1-16)
 FP_FILE="$TREE/.lean_os-port-fingerprint"
-if [ -d "$TREE" ] && [ "$(cat "$FP_FILE" 2>/dev/null)" != "$FP" ]; then
-  echo "build-clang: the port changed since this tree was unpacked - re-unpacking"
-  rm -rf "$TREE" "$BUILDDIR"
-fi
+if [ -n "${LEANOS_LLVM_TREE:-}" ]; then
+  if [ "$(cat "$FP_FILE" 2>/dev/null)" != "$FP" ]; then
+    echo "build-clang: the port changed - reconfiguring against $TREE"
+    rm -rf "$BUILDDIR"
+  fi
+else
+  if [ -d "$TREE" ] && [ "$(cat "$FP_FILE" 2>/dev/null)" != "$FP" ]; then
+    echo "build-clang: the port changed since this tree was unpacked - re-unpacking"
+    rm -rf "$TREE" "$BUILDDIR"
+  fi
 
-if [ ! -d "$TREE" ]; then
-  echo "build-clang: unpacking $TARBALL"
-  tar xf "$TARBALL" || exit 1
+  if [ ! -d "$TREE" ]; then
+    echo "build-clang: unpacking $TARBALL"
+    tar xf "$TARBALL" || exit 1
+  fi
 fi
 
 echo "build-clang: applying tools/clang-port"

@@ -8,7 +8,7 @@ LLVM_VER=19.1.7
 TARGET=x86_64-lean_os
 
 SRC="$ROOT/build/clang-src"
-TREE="$SRC/llvm-project-$LLVM_VER.src"
+TREE="${LEANOS_LLVM_TREE:-$SRC/llvm-project-$LLVM_VER.src}"
 PREFIX="${LEANOS_TOOLCHAIN_PREFIX:-$ROOT/build/toolchain}"
 SYSROOT="$ROOT/build/sysroot"
 BUILDDIR="$ROOT/build/libcxx-build"

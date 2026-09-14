@@ -20,6 +20,7 @@ if [ "${LEANOS_CHROMIUM_CC:-lean_os}" = "chromium" ]; then
   READELF="$CHROMIUM_CLANG/llvm-readelf"
   CLANG_BASE="$SRC/third_party/llvm-build/Release+Asserts"
   CLANG_VER="24"
+  LEANOS_TARGET_FLAG=""
 else
   CC="${PREFIX}clang"
   CXX="${PREFIX}clang++"
@@ -27,7 +28,8 @@ else
   NM="${PREFIX}nm"
   READELF="${PREFIX}readelf"
   CLANG_BASE="$ROOT/build/toolchain"
-  CLANG_VER="19"
+  CLANG_VER="24"
+  LEANOS_TARGET_FLAG="--target=x86_64-lean_os"
 fi
 SYSROOT="$ROOT/build/sysroot"
 TARGET="${1:-base}"
@@ -80,7 +82,7 @@ treat_warnings_as_errors = false
 use_sysroot = true
 sysroot = "$SYSROOT"
 lean_os_sysroot = "$SYSROOT"
-lean_os_cxx_include = "$ROOT/build/toolchain/x86_64-lean_os/include/c++/v1"
+lean_os_target = "$LEANOS_TARGET_FLAG"
 use_custom_libcxx = false
 use_glib = false
 use_dbus = false
