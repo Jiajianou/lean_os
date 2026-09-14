@@ -14,6 +14,7 @@
 #define LINE_BYTES   (BLOCK_DEVICE_PER_LINE * BLOCK_DEVICE_SECTOR_SIZE)
 
 #define CACHE_LINES 2048
+#define SCRATCH_LINES 16
 
 typedef struct {
     uint32_t line_no;
@@ -28,6 +29,8 @@ static cache_tag_t tags[CACHE_LINES];
 static uint8_t *line_pointer[CACHE_LINES];
 static uint32_t cache_lines;
 static uint64_t oldest_dirty_ms;
+static uint8_t *scratch;
+static uint32_t scratch_lines;
 
 typedef enum {
     BACKEND_NVME,
@@ -173,6 +176,13 @@ void block_device_init(void) {
     cache_lines = got;
     statistics.capacity = cache_lines;
 
+    scratch_lines = 0;
+    uint64_t scratch_frame = physical_memory_try_alloc_contiguous(SCRATCH_LINES);
+    if (scratch_frame) {
+        scratch = (uint8_t *)(uintptr_t)scratch_frame;
+        scratch_lines = SCRATCH_LINES;
+    }
+
     kernel_log_puts("[blk] ");
     kernel_log_puts(block_device_backend_name());
     kernel_log_puts(", ");
@@ -243,28 +253,67 @@ int block_device_read(uint32_t lba, uint32_t count, void *buffer) {
         return 0;
     }
 
-    if (device_read(lba, count, destination) != 0) {
-        k_memset(destination, 0, (uint64_t)count * BLOCK_DEVICE_SECTOR_SIZE);
-        spin_unlock_irqrestore(&block_device_lock, irq);
-        return -1;
+    uint32_t span_lines = last_line - first_line + 1;
+    uint32_t span_lba = first_line * BLOCK_DEVICE_PER_LINE;
+    uint32_t span_count = span_lines * BLOCK_DEVICE_PER_LINE;
+    int filled = 0;
+
+    if (scratch && span_lines <= scratch_lines &&
+        (span_lba != lba || span_count != count) &&
+        device_read(span_lba, span_count, scratch) == 0) {
+        for (uint32_t k = 0; k < span_lines; k++) {
+            uint32_t ln = first_line + k;
+            uint32_t s = slot_of(ln);
+            uint8_t *in_scratch = scratch + (uint64_t)k * LINE_BYTES;
+            if (tags[s].valid && tags[s].line_no == ln && tags[s].dirty) {
+                k_memcpy(in_scratch, line_pointer[s], LINE_BYTES);
+                continue;
+            }
+            if (tags[s].valid && tags[s].dirty && tags[s].line_no != ln) {
+                flush_line(s);
+            }
+            if (!tags[s].valid) {
+                statistics.resident++;
+            }
+            k_memcpy(line_pointer[s], in_scratch, LINE_BYTES);
+            tags[s].line_no = ln;
+            tags[s].valid = 1;
+            tags[s].dirty = 0;
+        }
+        k_memcpy(destination, scratch + (uint64_t)(lba - span_lba) * BLOCK_DEVICE_SECTOR_SIZE,
+                 (uint64_t)count * BLOCK_DEVICE_SECTOR_SIZE);
+        filled = 1;
     }
 
-    for (uint32_t ln = first_line; ln <= last_line; ln++) {
-        uint32_t line_lba = ln * BLOCK_DEVICE_PER_LINE;
-        if (line_lba < lba || line_lba + BLOCK_DEVICE_PER_LINE > lba + count) {
-            continue;
+    if (!filled) {
+        if (device_read(lba, count, destination) != 0) {
+            k_memset(destination, 0, (uint64_t)count * BLOCK_DEVICE_SECTOR_SIZE);
+            spin_unlock_irqrestore(&block_device_lock, irq);
+            return -1;
         }
-        uint32_t s = slot_of(ln);
-        if (!tags[s].valid) {
-            statistics.resident++;
+
+        for (uint32_t ln = first_line; ln <= last_line; ln++) {
+            uint32_t line_lba = ln * BLOCK_DEVICE_PER_LINE;
+            if (line_lba < lba || line_lba + BLOCK_DEVICE_PER_LINE > lba + count) {
+                continue;
+            }
+            uint32_t s = slot_of(ln);
+            if (tags[s].valid && tags[s].line_no == ln && tags[s].dirty) {
+                k_memcpy(destination + (uint64_t)(line_lba - lba) * BLOCK_DEVICE_SECTOR_SIZE,
+                         line_pointer[s], LINE_BYTES);
+                continue;
+            }
+            if (!tags[s].valid) {
+                statistics.resident++;
+            }
+            if (tags[s].dirty && tags[s].line_no != ln) {
+                flush_line(s);
+            }
+            k_memcpy(line_pointer[s], destination + (uint64_t)(line_lba - lba) * BLOCK_DEVICE_SECTOR_SIZE, LINE_BYTES);
+            tags[s].line_no = ln;
+            tags[s].valid = 1;
+            tags[s].dirty = 0;
         }
-        if (tags[s].dirty && tags[s].line_no != ln) {
-            flush_line(s);
-        }
-        k_memcpy(line_pointer[s], destination + (uint64_t)(line_lba - lba) * BLOCK_DEVICE_SECTOR_SIZE, LINE_BYTES);
-        tags[s].line_no = ln;
-        tags[s].valid = 1;
-        tags[s].dirty = 0;
     }
 
     if (sequential && readahead_lines > 0) {
@@ -305,14 +354,57 @@ static int flush_line(uint32_t s) {
     return 0;
 }
 
+static int line_is_dirty(uint32_t line_no) {
+    uint32_t s = slot_of(line_no);
+    return tags[s].valid && tags[s].dirty && tags[s].line_no == line_no;
+}
+
+static int flush_run(uint32_t first, uint32_t run) {
+    for (uint32_t k = 0; k < run; k++) {
+        k_memcpy(scratch + (uint64_t)k * LINE_BYTES,
+                 line_pointer[slot_of(first + k)], LINE_BYTES);
+    }
+    if (device_write(first * BLOCK_DEVICE_PER_LINE, run * BLOCK_DEVICE_PER_LINE,
+                     scratch) != 0) {
+        return -1;
+    }
+    for (uint32_t k = 0; k < run; k++) {
+        tags[slot_of(first + k)].dirty = 0;
+    }
+    statistics.writebacks += run;
+    return 0;
+}
+
 static int flush_all_locked(void) {
     if (statistics.dirty == 0) {
         return 0;
     }
     uint32_t still_dirty = 0;
     for (uint32_t i = 0; i < cache_lines; i++) {
-        if (flush_line(i) != 0) {
-            still_dirty++;
+        if (!tags[i].valid || !tags[i].dirty) {
+            continue;
+        }
+        if (!scratch || scratch_lines < 2) {
+            if (flush_line(i) != 0) {
+                still_dirty++;
+            }
+            continue;
+        }
+        uint32_t first = tags[i].line_no;
+        while (first > 0 && line_is_dirty(first - 1) &&
+               (tags[i].line_no - first) + 1 < scratch_lines) {
+            first--;
+        }
+        uint32_t run = 1;
+        while (run < scratch_lines && line_is_dirty(first + run)) {
+            run++;
+        }
+        if (flush_run(first, run) != 0) {
+            for (uint32_t k = 0; k < run; k++) {
+                if (line_is_dirty(first + k)) {
+                    still_dirty++;
+                }
+            }
         }
     }
     statistics.dirty = still_dirty;
@@ -372,15 +464,20 @@ int block_device_write(uint32_t lba, uint32_t count, const void *buffer) {
             continue;
         }
 
-        if (device_write(lba + i, 1, source + (uint64_t)i * BLOCK_DEVICE_SECTOR_SIZE) != 0) {
+        uint32_t run = BLOCK_DEVICE_PER_LINE - within;
+        if (run > remaining) {
+            run = remaining;
+        }
+        if (device_write(lba + i, run, source + (uint64_t)i * BLOCK_DEVICE_SECTOR_SIZE) != 0) {
             failed = 1;
         }
         uint32_t s = slot_of(line_no);
         if (tags[s].valid && tags[s].line_no == line_no) {
             k_memcpy(line_pointer[s] + (uint64_t)within * BLOCK_DEVICE_SECTOR_SIZE,
-                     source + (uint64_t)i * BLOCK_DEVICE_SECTOR_SIZE, BLOCK_DEVICE_SECTOR_SIZE);
+                     source + (uint64_t)i * BLOCK_DEVICE_SECTOR_SIZE,
+                     (uint64_t)run * BLOCK_DEVICE_SECTOR_SIZE);
         }
-        i++;
+        i += run;
     }
     spin_unlock_irqrestore(&block_device_lock, irq);
     return failed ? -1 : 0;

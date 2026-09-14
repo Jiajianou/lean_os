@@ -548,8 +548,20 @@ TEST_USER_DEPS := $(shell find user_space/library user_space/libc -name '*.c' \
 $(TEST_BIN): $(TEST_SRCS) $(TEST_HDRS) $(TEST_USER_DEPS) $(TEST_SAN_STAMP) | $(TEST_BUILD)
 	$(HOSTCC) $(TEST_CFLAGS) -o $@ $(TEST_SRCS)
 
-test-fast: $(TEST_BIN)
+BLOCK_CACHE_SRCS := tests/blockcache/block_cache_test.c tests/runner.c \
+                    tests/fakes/fake_block_backends.c tests/fakes/fake_panic.c \
+                    tests/fakes/fake_klog.c tests/fakes/fake_spinlock.c \
+                    tests/fakes/fake_pmm.c tests/fakes/fake_pit.c \
+                    kernel/drivers/block_device.c kernel/library/kernel_library.c
+
+BLOCK_CACHE_BIN := $(TEST_BUILD)/leanos-block-cache
+
+$(BLOCK_CACHE_BIN): $(BLOCK_CACHE_SRCS) $(TEST_HDRS) $(TEST_SAN_STAMP) | $(TEST_BUILD)
+	$(HOSTCC) $(TEST_CFLAGS) -o $@ $(BLOCK_CACHE_SRCS)
+
+test-fast: $(TEST_BIN) $(BLOCK_CACHE_BIN)
 	@$(TEST_BIN) $(TEST_FILTER)
+	@$(BLOCK_CACHE_BIN)
 
 COV_BUILD  := $(BUILD)/coverage
 LLVM_CC    := $(shell for c in /opt/homebrew/opt/llvm/bin/clang \
