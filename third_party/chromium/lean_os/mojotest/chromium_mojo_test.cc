@@ -18,10 +18,13 @@
 
 #include "base/at_exit.h"
 #include "base/command_line.h"
+#include "base/process/launch.h"
+#include "base/process/process.h"
 #include "base/containers/span.h"
 #include "base/files/scoped_file.h"
 #include "base/functional/bind.h"
 #include "base/memory/read_only_shared_memory_region.h"
+#include "base/memory/shared_memory_mapping.h"
 #include "base/memory/unsafe_shared_memory_region.h"
 #include "base/message_loop/message_pump_type.h"
 #include "base/run_loop.h"
@@ -33,6 +36,7 @@
 
 #include "mojo/core/channel.h"
 #include "mojo/core/connection_params.h"
+#include "mojo/core/embedder/configuration.h"
 #include "mojo/core/embedder/embedder.h"
 #include "mojo/core/embedder/scoped_ipc_support.h"
 #include "mojo/core/ipcz_driver/envelope.h"
@@ -41,9 +45,16 @@
 #include "mojo/public/cpp/system/buffer.h"
 #include "mojo/public/cpp/system/data_pipe.h"
 #include "mojo/public/cpp/system/handle.h"
+#include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "mojo/public/cpp/bindings/pending_remote.h"
+#include "mojo/public/cpp/bindings/receiver.h"
+#include "mojo/public/cpp/bindings/remote.h"
+#include "mojo/public/cpp/system/isolated_connection.h"
 #include "mojo/public/cpp/system/message_pipe.h"
 #include "mojo/public/cpp/system/platform_handle.h"
 #include "mojo/public/cpp/system/wait.h"
+
+#include "lean_os/mojotest/lean_os_echo.mojom.h"
 
 namespace {
 
@@ -381,17 +392,216 @@ bool ChannelsCarryBytesAndADescriptor(
   return ok;
 }
 
+// A SECOND PROCESS, which is the one thing everything above is not. The
+// parent makes a socketpair, hands one end to a child it spawns, and the two
+// mojo nodes meet over it: the child is another copy of this program, found
+// by the path base::CommandLine says this one was started by.
+//
+// The launch happens before any thread in this program is started. A fork in
+// a process with threads leaves the child holding one of them and locks the
+// others were inside, and the only safe thing between that fork and the
+// execve is nothing - so the child is on its way before mojo has an IO
+// thread to lose.
+const char kChildSwitch[] = "mojo-child";
+const char kToChild[] = "a message pipe between two processes";
+const char kToParent[] = "sessecorp owt neewteb epip egassem a";
+const size_t kPatternBytes = 4096;
+
+bool LaunchTheOtherProcess(mojo::PlatformChannel* channel,
+                           base::Process* child) {
+  base::CommandLine child_line(
+      base::CommandLine::ForCurrentProcess()->GetProgram());
+  child_line.AppendSwitch(kChildSwitch);
+  base::LaunchOptions options;
+  channel->PrepareToPassRemoteEndpoint(&options, &child_line);
+  *child = base::LaunchProcess(child_line, options);
+  channel->RemoteProcessLaunchAttempted();
+  return child->IsValid();
+}
+
+// The interface call, in the shape Chromium makes every one of its own: a
+// mojo::Remote on this side, a mojo::Receiver on the other, C++ generated
+// from lean_os_echo.mojom on both, an asynchronous reply delivered to a
+// callback on this thread's run loop - and a handle coming back in it.
+bool CallTheOtherProcess(mojo::PlatformChannel* channel,
+                         base::Process* child) {
+  mojo::IsolatedConnection connection;
+  mojo::ScopedMessagePipeHandle pipe =
+      connection.Connect(channel->TakeLocalEndpoint());
+  if (!pipe.is_valid()) {
+    return false;
+  }
+
+  mojo::Remote<lean_os::mojom::Echo> echo(
+      mojo::PendingRemote<lean_os::mojom::Echo>(std::move(pipe), 0));
+
+  base::RunLoop loop;
+  std::string reversed;
+  int64_t answered_by = 0;
+  mojo::ScopedSharedBufferHandle pattern;
+  uint64_t pattern_size = 0;
+  bool disconnected = false;
+  echo.set_disconnect_handler(
+      base::BindOnce(
+          [](bool* flag, base::RunLoop* loop) {
+            *flag = true;
+            loop->Quit();
+          },
+          &disconnected, &loop));
+  echo->Reverse(
+      kToChild,
+      base::BindOnce(
+          [](std::string* out, int64_t* who,
+             mojo::ScopedSharedBufferHandle* buffer, uint64_t* size,
+             base::RunLoop* loop, const std::string& answer, int64_t pid,
+             mojo::ScopedSharedBufferHandle handle, uint64_t bytes) {
+            *out = answer;
+            *who = pid;
+            *buffer = std::move(handle);
+            *size = bytes;
+            loop->Quit();
+          },
+          &reversed, &answered_by, &pattern, &pattern_size, &loop));
+  loop.Run();
+
+  if (disconnected || reversed != kToParent || pattern_size != kPatternBytes ||
+      !pattern.is_valid()) {
+    return false;
+  }
+  // Somebody else answered. Without this the whole check would pass on a
+  // LaunchProcess that had quietly done the work in this process.
+  if (answered_by == static_cast<int64_t>(getpid()) ||
+      answered_by != static_cast<int64_t>(child->Pid())) {
+    return false;
+  }
+
+  // The buffer the other process made, mapped here. Unwrapping it as a
+  // READ-ONLY region is base's own assertion that the descriptor which
+  // crossed the channel reports O_RDONLY - which on this machine means the
+  // child's memfd, reopened through /proc/self/fd with less access than the
+  // one it kept.
+  base::ReadOnlySharedMemoryRegion region =
+      mojo::UnwrapReadOnlySharedMemoryRegion(std::move(pattern));
+  if (!region.IsValid()) {
+    return false;
+  }
+  base::ReadOnlySharedMemoryMapping mapping = region.Map();
+  if (!mapping.IsValid()) {
+    return false;
+  }
+  base::span<const uint8_t> seen = mapping.GetMemoryAsSpan<uint8_t>();
+  if (seen.size() < kPatternBytes) {
+    return false;
+  }
+  for (size_t i = 0; i < kPatternBytes; ++i) {
+    if (seen[i] != static_cast<uint8_t>(i * 13 + 5)) {
+      return false;
+    }
+  }
+
+  echo.reset();
+  int code = -1;
+  if (!child->WaitForExitWithTimeout(base::Seconds(60), &code)) {
+    return false;
+  }
+  return code == 0;
+}
+
+class EchoImplementation : public lean_os::mojom::Echo {
+ public:
+  EchoImplementation(mojo::PendingReceiver<lean_os::mojom::Echo> receiver,
+                     base::RunLoop* loop)
+      : receiver_(this, std::move(receiver)) {
+    receiver_.set_disconnect_handler(base::BindOnce(
+        [](base::RunLoop* loop) { loop->Quit(); }, loop));
+  }
+
+  void Reverse(const std::string& text, ReverseCallback callback) override {
+    std::string reversed(text.rbegin(), text.rend());
+
+    base::MappedReadOnlyRegion pair =
+        base::ReadOnlySharedMemoryRegion::Create(kPatternBytes);
+    if (!pair.IsValid()) {
+      std::move(callback).Run(std::string(), 0,
+                              mojo::ScopedSharedBufferHandle(), 0);
+      return;
+    }
+    base::span<uint8_t> span = pair.mapping.GetMemoryAsSpan<uint8_t>();
+    for (size_t i = 0; i < span.size(); ++i) {
+      span[i] = static_cast<uint8_t>(i * 13 + 5);
+    }
+    mojo::ScopedSharedBufferHandle wrapped =
+        mojo::WrapReadOnlySharedMemoryRegion(std::move(pair.region));
+    std::move(callback).Run(reversed, static_cast<int64_t>(getpid()),
+                            std::move(wrapped), kPatternBytes);
+  }
+
+ private:
+  mojo::Receiver<lean_os::mojom::Echo> receiver_;
+};
+
+// The other half of the program above, reached by the switch the parent put
+// on the command line.
+int RunAsTheOtherProcess() {
+  // Both ends of an isolated connection have to be brokers - ipcz says so in
+  // as many words, because an isolated invitation has no third node to
+  // allocate shared memory on either side's behalf.
+  mojo::core::Configuration config;
+  config.is_broker_process = true;
+  mojo::core::Init(config);
+
+  base::SingleThreadTaskExecutor main_task_executor;
+  base::Thread io_thread("mojo-child-io");
+  if (!io_thread.StartWithOptions(
+          base::Thread::Options(base::MessagePumpType::IO, 0))) {
+    return 2;
+  }
+  mojo::core::ScopedIPCSupport ipc_support(
+      io_thread.task_runner(),
+      mojo::core::ScopedIPCSupport::ShutdownPolicy::CLEAN);
+
+  mojo::PlatformChannelEndpoint endpoint =
+      mojo::PlatformChannel::RecoverPassedEndpointFromCommandLine(
+          *base::CommandLine::ForCurrentProcess());
+  if (!endpoint.is_valid()) {
+    return 3;
+  }
+  mojo::IsolatedConnection connection;
+  mojo::ScopedMessagePipeHandle pipe = connection.Connect(std::move(endpoint));
+  if (!pipe.is_valid()) {
+    return 4;
+  }
+
+  base::RunLoop loop;
+  EchoImplementation echo(
+      mojo::PendingReceiver<lean_os::mojom::Echo>(std::move(pipe)), &loop);
+  loop.Run();
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   base::AtExitManager at_exit;
   base::CommandLine::Init(argc, argv);
 
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch(kChildSwitch)) {
+    return RunAsTheOtherProcess();
+  }
+
   std::printf(
       "chromiummojo: Chromium's //mojo, built for this machine and running "
       "on it\n");
 
-  mojo::core::Init();
+  // Before any thread exists in this process. See LaunchTheOtherProcess.
+  mojo::PlatformChannel to_the_other_process;
+  base::Process other_process;
+  Check("base::LaunchProcess started a second copy of this program",
+        LaunchTheOtherProcess(&to_the_other_process, &other_process));
+
+  mojo::core::Configuration config;
+  config.is_broker_process = true;
+  mojo::core::Init(config);
   Check("mojo::core::Init brought up the ipcz driver and the node", true);
 
   base::SingleThreadTaskExecutor main_task_executor;
@@ -416,6 +626,8 @@ int main(int argc, char** argv) {
         SharedMemoryTravelsDownAPipe());
   Check("two channels over one socketpair carry bytes and a descriptor",
         ChannelsCarryBytesAndADescriptor(io_thread.task_runner()));
+  Check("a mojom interface call to another process, and its buffer back",
+        CallTheOtherProcess(&to_the_other_process, &other_process));
 
   if (failures != 0) {
     std::printf("chromiummojo: FAILED - %d of %d checks\n", failures, checks);
@@ -426,6 +638,12 @@ int main(int argc, char** argv) {
       "pipes, data pipes, shared buffers and a channel over a socketpair, on "
       "this kernel's epoll, memfd and SCM_RIGHTS.\n",
       checks);
+  std::printf(
+      "[m149] two processes on one mojo connection: base::LaunchProcess "
+      "spawned a second copy of this program, the two nodes met over a "
+      "socketpair, and a mojom interface generated from lean_os_echo.mojom "
+      "carried a call and an asynchronous reply between them - with a "
+      "read-only buffer the CHILD created mapped and read in the parent.\n");
   std::printf("chromiummojo: done\n");
   return 0;
 }

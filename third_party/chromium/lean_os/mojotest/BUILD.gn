@@ -3,11 +3,19 @@
 # it is made from are all here: M118's SCM_RIGHTS, M119's epoll and M120's
 # memfd_create.
 
+import("//mojo/public/tools/bindings/mojom.gni")
+
+mojom("interface") {
+  sources = [ "lean_os_echo.mojom" ]
+}
+
 executable("mojotest") {
   sources = [ "chromium_mojo_test.cc" ]
   deps = [
+    ":interface",
     "//base",
     "//mojo/core/embedder",
+    "//mojo/public/cpp/bindings",
     "//mojo/public/cpp/platform",
     "//mojo/public/cpp/system",
   ]

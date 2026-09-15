@@ -373,13 +373,36 @@ PROBE
     [ "$HAVE_EPOLL_PUMP" -gt 0 ]
     check $? "on base::MessagePumpEpoll ($HAVE_EPOLL_PUMP symbols)"
 
+    # M149. A mojom interface, which is how Chromium describes every one of
+    # its own: the .mojom file goes through Chromium's own generator on the
+    # host and the C++ it produces is compiled for this machine. Both halves
+    # have to be true, and only the second is about this port.
+    MOJOM_OBJECT="$SRC/out/$OUT_NAME/obj/lean_os/mojotest/interface/lean_os_echo.mojom.o"
+    if [ ! -f "$MOJOM_OBJECT" ]; then
+      echo "chromium-test: the mojom interface has not been generated - skipping"
+    else
+      "${PREFIX}readelf" -h "$MOJOM_OBJECT" |
+        grep -q "Advanced Micro Devices X86-64"
+      check $? "C++ generated from lean_os_echo.mojom is x86-64 ELF"
+
+      GENERATED="$SRC/out/$OUT_NAME/gen/lean_os/mojotest/lean_os_echo.mojom.h"
+      grep -q "class .*Echo" "$GENERATED" 2>/dev/null
+      check $? "and the generator wrote the interface this program includes"
+
+      # In the linked program, not merely compiled beside it. A generated
+      # binding that nothing references links to nothing at all.
+      BOUND=$("${PREFIX}nm" -C "$MOJOPROGRAM" | grep -c "lean_os::mojom::Echo")
+      [ "$BOUND" -gt 0 ]
+      check $? "and the program carries the generated bindings ($BOUND symbols)"
+    fi
+
     IMAGE="$ROOT/build/os-image.bin"
     if [ ! -f "$IMAGE" ]; then
       echo "chromium-test: no $IMAGE - run make, then this again"
     else
       make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
       "$ROOT/build/leanfs-put" "$IMAGE" "$MOJOPROGRAM" /bin/chromiummojo > /dev/null
-      check $? "installed as /bin/chromiummojo - the [m148] boot self-test runs it"
+      check $? "installed as /bin/chromiummojo - the [m148] and [m149] boot self-tests run it"
     fi
   fi
 fi

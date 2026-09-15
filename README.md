@@ -387,6 +387,24 @@ Several instruments, and none of them subsumes another:
   truncated, or reopened for writing - which is the same rule the
   capability set follows, and the difference between a boundary and a
   claim.
+- **Two processes, one mojo connection.** `/bin/chromiummojo` spawns a
+  second copy of itself with `base::LaunchProcess`, hands it one end of a
+  socketpair, and the two mojo nodes meet over it - and then they talk
+  through a **mojom interface**, which is how Chromium describes every
+  one of its own: a `.mojom` file, Chromium's own generator, a
+  `mojo::Remote` here and a `mojo::Receiver` there, a call and an
+  asynchronous reply delivered to a callback on a run loop. The reply
+  carries a read-only shared memory region the *child* created, which
+  this side unwraps - and unwrapping it read-only is base's own assertion
+  that the descriptor which crossed the channel reports `O_RDONLY`. The
+  answer also carries the answerer's process id, because every other part
+  of the check would pass just as well if the work had quietly happened
+  here.
+
+  It needed nothing new from this kernel. `fork`, `execve`, `waitpid`,
+  descriptor remapping across the exec, `SCM_RIGHTS` and memfd were all
+  already here, and Chromium's launcher found them where POSIX says they
+  are.
 - **A libm for the format the hardware has.** `long double` on x86-64 is
   the x87's 80-bit extended type, and this libc has the C99 set for it -
   fifty-two functions, graded to the unit in the last place of a 64-bit

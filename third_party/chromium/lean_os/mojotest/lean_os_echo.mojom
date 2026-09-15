@@ -1,0 +1,14 @@
+// An interface between two processes on this machine, in the language
+// Chromium describes its own interfaces in. Everything about the C++ on
+// either side of this file is generated from it.
+
+module lean_os.mojom;
+
+interface Echo {
+  // Returns the text backwards, the process id of whoever answered, and a
+  // shared buffer of |size| bytes the caller can map and read but not write.
+  Reverse(string text) => (string reversed,
+                           int64 answered_by,
+                           handle<shared_buffer> pattern,
+                           uint64 size);
+};

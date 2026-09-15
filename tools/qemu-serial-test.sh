@@ -229,6 +229,7 @@ REQUIRED_MARKERS=(
   "[m147] a thread_local is where the compiler reads it:"
   "chromiumbase: done"
   "[m148] Chromium's //mojo runs on this machine:"
+  "[m149] two processes on one mojo connection:"
   "chromiummojo: done"
   "mathltest: done"
   "[m125] lvgl rendered"
