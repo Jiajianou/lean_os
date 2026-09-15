@@ -1,0 +1,19 @@
+diff --git a/base/files/file_posix.cc b/base/files/file_posix.cc
+index f6205d4f23..20cfc02e1d 100644
+--- a/base/files/file_posix.cc
++++ b/base/files/file_posix.cc
+@@ -614,7 +614,13 @@ void File::DoInitialize(const FilePath& path, uint32_t flags) {
+     open_flags |= O_NOFOLLOW;
+   }
+ 
+-  static_assert(O_RDONLY == 0, "O_RDONLY must equal zero");
++  // O_RDONLY is zero on Linux and the BSDs, so a read-only open needs no
++  // access bit at all there. POSIX does not require that, and this is where
++  // the bit is added on a platform where O_RDONLY has a value - after the
++  // append handling above, so that a write mode already chosen wins.
++  if ((open_flags & (O_WRONLY | O_RDWR)) == 0) {
++    open_flags |= O_RDONLY;
++  }
+ 
+   mode_t mode = S_IRUSR | S_IWUSR;
+ #if BUILDFLAG(IS_CHROMEOS)

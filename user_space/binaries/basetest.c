@@ -1,4 +1,5 @@
 #include <dlfcn.h>
+#include <nl_types.h>
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -6,6 +7,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +20,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/vfs.h>
 #include <sys/ucontext.h>
 #include <time.h>
 #include <ucontext.h>
@@ -1020,6 +1023,129 @@ static int the_remaining_surface_behaves(void) {
     return 0;
 }
 
+
+/* M144. What a fault was, rather than that one happened. The kernel has the
+   trap vector and the page fault's error code, and reported SI_KERNEL for
+   everything until this milestone; a debugger that prints "SEGV_MAPERR" is
+   telling the reader there was no mapping there, which is a different bug
+   from "there was one and you may not write it". */
+static volatile int fault_code_seen;
+static volatile void *fault_address_seen;
+static sigjmp_buf fault_return;
+
+static void fault_reader(int signal_number, siginfo_t *info, void *raw) {
+    (void)signal_number;
+    (void)raw;
+    fault_code_seen = info ? info->si_code : 0;
+    fault_address_seen = info ? info->si_addr : (void *)0;
+    siglongjmp(fault_return, 1);
+}
+
+static int a_fault_says_which_kind_it_was(void) {
+    struct sigaction action, previous;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = fault_reader;
+    action.sa_flags = SA_SIGINFO | SA_NODEFER;
+    if (sigaction(SIGSEGV, &action, &previous) != 0) {
+        return 180;
+    }
+
+    /* A page that was never mapped: there is nothing there to permit. */
+    fault_code_seen = -1;
+    volatile char *nowhere = (volatile char *)0x300000000000ull;
+    if (sigsetjmp(fault_return, 1) == 0) {
+        *nowhere = 1;
+        sigaction(SIGSEGV, &previous, (struct sigaction *)0);
+        return 181;
+    }
+    int unmapped_code = fault_code_seen;
+    void *unmapped_address = (void *)fault_address_seen;
+
+    /* A page that IS mapped, and read-only: the mapping is the difference. */
+    long page = sysconf(_SC_PAGESIZE);
+    char *readonly = mmap((void *)0, (size_t)page, PROT_READ,
+                          MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (readonly == MAP_FAILED) {
+        sigaction(SIGSEGV, &previous, (struct sigaction *)0);
+        return 182;
+    }
+    fault_code_seen = -1;
+    if (sigsetjmp(fault_return, 1) == 0) {
+        readonly[0] = 1;
+        munmap(readonly, (size_t)page);
+        sigaction(SIGSEGV, &previous, (struct sigaction *)0);
+        return 183;
+    }
+    int protected_code = fault_code_seen;
+    void *protected_address = (void *)fault_address_seen;
+    munmap(readonly, (size_t)page);
+    sigaction(SIGSEGV, &previous, (struct sigaction *)0);
+
+    if (unmapped_code != SEGV_MAPERR) {
+        return 184;
+    }
+    if (protected_code != SEGV_ACCERR) {
+        return 185;
+    }
+    /* And si_addr is the address that faulted, at its POSIX spelling. */
+    if (unmapped_address != (void *)nowhere) {
+        return 186;
+    }
+    if (protected_address != (void *)readonly) {
+        return 187;
+    }
+    return 0;
+}
+
+/* M144. The rest of what //base's own sources named after M143. */
+static int the_last_of_the_base_surface_behaves(void) {
+    /* gettid is the kernel's thread id, and a thread here IS a task - so the
+       main thread's is its pid, and another thread's is not. */
+    if (gettid() != getpid()) {
+        return 188;
+    }
+
+    int policy = -1;
+    struct sched_param parameters;
+    memset(&parameters, 0, sizeof(parameters));
+    if (pthread_getschedparam(pthread_self(), &policy, &parameters) != 0) {
+        return 189;
+    }
+    if (policy != SCHED_OTHER || parameters.sched_priority != 0) {
+        return 190;
+    }
+    if (pthread_setschedparam(pthread_self(), SCHED_OTHER, &parameters) != 0) {
+        return 191;
+    }
+    parameters.sched_priority = 7;
+    if (pthread_setschedparam(pthread_self(), SCHED_RR, &parameters) != ENOTSUP) {
+        return 192;
+    }
+
+    /* <sys/vfs.h> is <sys/statfs.h>, and the call behind both works. */
+    struct statfs filesystem;
+    if (statfs("/", &filesystem) != 0) {
+        return 193;
+    }
+    if (filesystem.f_bsize == 0) {
+        return 194;
+    }
+
+    /* A catalogue that is not there, said so rather than crashed on. */
+    nl_catd catalogue = catopen("basetest", 0);
+    if (catalogue != (nl_catd)-1) {
+        return 195;
+    }
+    const char *fallback = "the string the caller passed in";
+    if (catgets(catalogue, 1, 1, fallback) != fallback) {
+        return 196;
+    }
+    if (catclose(catalogue) == 0) {
+        return 197;
+    }
+    return 0;
+}
+
 int main(void) {
     int rc;
     if ((rc = the_monotonic_family_is_one_clock()) != 0) {
@@ -1068,6 +1194,12 @@ int main(void) {
         return rc;
     }
     if ((rc = the_remaining_surface_behaves()) != 0) {
+        return rc;
+    }
+    if ((rc = a_fault_says_which_kind_it_was()) != 0) {
+        return rc;
+    }
+    if ((rc = the_last_of_the_base_surface_behaves()) != 0) {
         return rc;
     }
     return 0;

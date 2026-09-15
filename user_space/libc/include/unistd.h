@@ -50,6 +50,11 @@ char *ttyname(int fd);
 int ttyname_r(int fd, char *buf, size_t len);
 long lseek(int fd, long offset, int whence);
 int dup2(int oldfd, int newfd);
+/* The kernel's own thread identifier. A thread here IS a task, so this is
+   the same number getpid() returns in a single-threaded process and the same
+   one pthread_self() gives - which is why the libc has not needed the name
+   until something portable asked for it. */
+pid_t gettid(void);
 int pipe2(int fd[2], int flags);
 int ftruncate(int fd, off_t length);
 int ftruncate64(int fd, off_t length);

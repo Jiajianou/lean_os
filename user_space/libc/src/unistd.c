@@ -223,6 +223,10 @@ int dup2(int oldfd, int newfd) {
     return (int)sys_dup2(oldfd, newfd);
 }
 
+pid_t gettid(void) {
+    return (pid_t)sys_gettid();
+}
+
 int pipe(int file_descriptors[2]) {
     return (int)sys_pipe(file_descriptors);
 }

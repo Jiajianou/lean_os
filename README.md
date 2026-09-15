@@ -353,6 +353,16 @@ Several instruments, and none of them subsumes another:
   is the only instrument here that grades the *tests* rather than the
   machine, and the first thing it found was a file at 100% line coverage
   whose mutation score was zero.
+- **Chromium's `//base` compiles here.** 428 objects, every one of them
+  x86-64 ELF, out of Chromium's own ninja - the foundation library the
+  rest of the browser is written on top of. Getting there took the same
+  distinction three times over, and the patch that draws it the third
+  time is 804 lines across nineteen files in which the word `lean_os`
+  does not appear: `is_linux` answers "does the build gate the right
+  things", and `has_linux_kernel` answers "is Linux's own system call
+  surface there". They are not the same question, and `getdents64`,
+  `clone`, `tgkill`, `exit_group`, `prctl`, `inotify`, the futex and
+  `<linux/magic.h>` are all on the far side of it.
 - **A libm for the format the hardware has.** `long double` on x86-64 is
   the x87's 80-bit extended type, and this libc has the C99 set for it -
   fifty-two functions, graded to the unit in the last place of a 64-bit

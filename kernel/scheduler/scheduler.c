@@ -1376,6 +1376,32 @@ static int fill_one_page(task_t *self, uint64_t page, int for_write) {
 
 #define STACK_GROW_SLACK 65536ULL
 
+/* Whether this address is inside something this process asked for, which is
+   a different question from whether a page is present at it. Demand paging
+   makes the hardware's present bit useless for telling SEGV_MAPERR from
+   SEGV_ACCERR: a write to a PROT_READ page that has never been touched
+   arrives with the bit clear, and answering MAPERR there would say there was
+   no mapping when there was one and the access was refused. */
+int scheduler_address_is_mapped(uint64_t address) {
+    task_t *self = scheduler_vm_owner(scheduler_current());
+    if (!self || self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
+        return 0;
+    }
+    uint64_t page = address & ~(uint64_t)(PAGE_SIZE - 1);
+    if (virtual_memory_user_range_ok(self->pml4_phys, page, 1, 0)) {
+        return 1;
+    }
+    if (mmap_region_for(self, page) != 0) {
+        return 1;
+    }
+    /* The stack grows into its own area on demand, so an address inside it
+       and above the stack pointer is mapped in every sense that matters. */
+    if (page >= USER_STACK_LIMIT && page < USER_STACK_TOP) {
+        return 1;
+    }
+    return 0;
+}
+
 int scheduler_fault_fill(uint64_t address, uint64_t error_code, uint64_t user_rsp) {
     task_t *self = scheduler_vm_owner(scheduler_current());
     if (!self || self->pml4_phys == virtual_memory_kernel_pml4_phys()) {

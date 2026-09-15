@@ -502,6 +502,22 @@ int pthread_create(pthread_t *out, const pthread_attr_t *attribute,
     return 0;
 }
 
+static int thread_is_known(pthread_t thread) {
+    if (thread == pthread_self()) {
+        return 1;
+    }
+    pthread_mutex_lock(&registry_lock);
+    int found = 0;
+    for (int i = 0; i < MAX_THREADS; i++) {
+        if (registry[i].block && registry[i].tid == thread) {
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&registry_lock);
+    return found;
+}
+
 int pthread_attr_setdetachstate(pthread_attr_t *attribute, int state) {
     if (!attribute || (state != PTHREAD_CREATE_JOINABLE &&
                        state != PTHREAD_CREATE_DETACHED)) {
@@ -568,6 +584,33 @@ int pthread_condattr_getclock(const pthread_condattr_t *attribute, int *out) {
         return EINVAL;
     }
     *out = attribute->clock;
+    return 0;
+}
+
+int pthread_getschedparam(pthread_t thread, int *policy,
+                          struct sched_param *param) {
+    if (!policy || !param) {
+        return EINVAL;
+    }
+    if (!thread_is_known(thread)) {
+        return ESRCH;
+    }
+    *policy = SCHED_OTHER;
+    param->sched_priority = 0;
+    return 0;
+}
+
+int pthread_setschedparam(pthread_t thread, int policy,
+                          const struct sched_param *param) {
+    if (!param) {
+        return EINVAL;
+    }
+    if (!thread_is_known(thread)) {
+        return ESRCH;
+    }
+    if (policy != SCHED_OTHER || param->sched_priority != 0) {
+        return ENOTSUP;
+    }
     return 0;
 }
 

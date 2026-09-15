@@ -178,7 +178,7 @@ pub static FACTS: &[(&str, u64)] = &[
     ("offsetof(siginfo_t,si_errno)", core::mem::offset_of!(libc::siginfo_t, si_errno) as u64),
     ("offsetof(siginfo_t,si_pid)", core::mem::offset_of!(libc::siginfo_t, si_pid) as u64),
     ("offsetof(siginfo_t,si_uid)", core::mem::offset_of!(libc::siginfo_t, si_uid) as u64),
-    ("offsetof(siginfo_t,si_address)", core::mem::offset_of!(libc::siginfo_t, si_addr) as u64),
+    ("offsetof(siginfo_t,si_addr)", core::mem::offset_of!(libc::siginfo_t, si_addr) as u64),
     ("offsetof(siginfo_t,si_status)", core::mem::offset_of!(libc::siginfo_t, si_status) as u64),
     ("offsetof(siginfo_t,si_band)", core::mem::offset_of!(libc::siginfo_t, si_band) as u64),
     ("sizeof(struct tm)", size_of::<libc::tm>() as u64),

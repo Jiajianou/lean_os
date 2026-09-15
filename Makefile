@@ -67,7 +67,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
                 $(UOBJ)/libc_env.o $(UOBJ)/libc_unistd.o \
                 $(UOBJ)/libc_signal.o \
                 $(UOBJ)/libc_dirent.o $(UOBJ)/libc_stat.o $(UOBJ)/libc_mman.o \
-                $(UOBJ)/libc_pthread.o $(UOBJ)/libc_semaphore.o $(UOBJ)/libc_dlfcn.o $(UOBJ)/libc_sendfile.o $(UOBJ)/libc_errno.o $(UOBJ)/libc_wchar.o $(UOBJ)/libc_locale.o \
+                $(UOBJ)/libc_pthread.o $(UOBJ)/libc_semaphore.o $(UOBJ)/libc_dlfcn.o $(UOBJ)/libc_nl_types.o $(UOBJ)/libc_sendfile.o $(UOBJ)/libc_errno.o $(UOBJ)/libc_wchar.o $(UOBJ)/libc_locale.o \
                 $(UOBJ)/libc_poll.o $(UOBJ)/libc_resource.o \
                 $(UOBJ)/libc_statvfs.o $(UOBJ)/libc_utime.o $(UOBJ)/libc_pwd.o \
                 $(UOBJ)/libc_termios.o $(UOBJ)/libc_grp.o $(UOBJ)/libc_libgen.o \

@@ -67,7 +67,7 @@ static volatile int chld_seen;
 static void on_segv_info(int sig, siginfo_t *si, void *uc) {
     (void)uc;
     seen_signo = sig;
-    seen_address = si->si_address;
+    seen_address = si->si_addr;
     seen_code = si->si_code;
     siglongjmp(info_recover, 1);
 }

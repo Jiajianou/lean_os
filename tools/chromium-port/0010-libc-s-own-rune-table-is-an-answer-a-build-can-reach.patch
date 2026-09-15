@@ -1,0 +1,39 @@
+diff --git a/build/config/c++/BUILD.gn b/build/config/c++/BUILD.gn
+index 8975d683f5..3b1b8dfc0b 100644
+--- a/build/config/c++/BUILD.gn
++++ b/build/config/c++/BUILD.gn
+@@ -54,6 +54,10 @@ config("runtime_library") {
+ 
+   defines += [ "CR_LIBCXX_REVISION=$libcxx_revision" ]
+ 
++  if (libcxx_provides_default_rune_table) {
++    defines += [ "_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE" ]
++  }
++
+   if (is_win) {
+     # Intentionally not using libc++abi on Windows because libc++abi only
+     # implements the Itanium C++ ABI, and not the Microsoft ABI which we use on
+diff --git a/build/config/c++/c++.gni b/build/config/c++/c++.gni
+index 9455c44a83..9f0a5b4421 100644
+--- a/build/config/c++/c++.gni
++++ b/build/config/c++/c++.gni
+@@ -65,6 +65,19 @@ if (enable_strict_deps) {
+ use_custom_libcxx =
+     use_custom_libcxx || (use_custom_libcxx_for_host && !is_a_target_toolchain)
+ 
++declare_args() {
++  # Whether libc++ should use its own character-classification table rather
++  # than one taken from the C library.
++  #
++  # libc++ carries a table for each C library it knows, and stops with
++  # "unknown rune table for this platform" for one it does not - which is
++  # every out-of-tree platform whose libc is neither glibc, musl, BSD's nor
++  # Apple's. Its own table is the answer libc++ itself offers for that case;
++  # the define is libc++'s, and this only makes it reachable from a build
++  # that is not editing __config_site by hand.
++  libcxx_provides_default_rune_table = false
++}
++
+ declare_args() {
+   # WARNING: Setting this to a non-default value is highly discouraged.
+   # If true, libc++ will be built as a shared library; otherwise libc++ will be

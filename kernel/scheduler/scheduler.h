@@ -150,6 +150,7 @@ typedef struct task {
     int32_t  si_pid;
     int32_t  si_status;
     uint64_t si_address;
+    int32_t  si_fault_code;
     mmap_region_t mmaps[MAX_MMAP_REGIONS];
     int tgid;
     uint8_t is_thread;
@@ -246,6 +247,7 @@ task_t *scheduler_vm_owner(task_t *t);
 
 #define FILL_NO_MEMORY (-1)
 int scheduler_fault_fill(uint64_t address, uint64_t error_code, uint64_t user_rsp);
+int scheduler_address_is_mapped(uint64_t address);
 
 void scheduler_prefault_range(uint64_t address, uint64_t length, int for_write);
 

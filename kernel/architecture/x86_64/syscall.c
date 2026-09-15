@@ -4878,10 +4878,13 @@ static int signal_deliver(isr_regs_t *regs) {
             info.si_status = self->si_status;
             info.si_code = CLD_EXITED;
         } else if (signo == SIGSEGV || signo == SIGBUS) {
-            info.si_address = (void *)self->si_address;
-            info.si_code = SI_KERNEL;
+            info.si_addr = (void *)self->si_address;
+            /* What the hardware said, where the fault path worked it out;
+               SI_KERNEL only where it did not. */
+            info.si_code = self->si_fault_code ? self->si_fault_code : SI_KERNEL;
         } else if (signo == SIGFPE || signo == SIGILL) {
-            info.si_code = SI_KERNEL;
+            info.si_addr = (void *)self->si_address;
+            info.si_code = self->si_fault_code ? self->si_fault_code : SI_KERNEL;
         } else {
             info.si_code = SI_USER;
         }
@@ -5005,6 +5008,15 @@ static int signal_deliver(isr_regs_t *regs) {
     regs->rdx = ucontext_address;
     regs->rax = 0;
     return 1;
+}
+
+int signal_deliver_fault_with_code(isr_regs_t *regs, int signo,
+                                   uint64_t fault_address, int fault_code) {
+    task_t *self = scheduler_current();
+    if (self) {
+        self->si_fault_code = fault_code;
+    }
+    return signal_deliver_fault(regs, signo, fault_address);
 }
 
 int signal_deliver_fault(isr_regs_t *regs, int signo, uint64_t fault_address) {

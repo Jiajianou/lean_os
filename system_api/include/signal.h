@@ -71,7 +71,7 @@ typedef struct {
     int si_errno;
     int si_pid;
     unsigned int si_uid;
-    void *si_address;
+    void *si_addr;
     int si_status;
     long si_band;
     union {
@@ -81,6 +81,35 @@ typedef struct {
 } siginfo_t;
 
 #define SI_USER    0
+
+/* What kind of fault. The kernel knows - it has the trap vector, the page
+   fault's error code and the two floating point status words - and before
+   M144 it reported SI_KERNEL for all of them, which is "something went
+   wrong" where the hardware had already said which thing. */
+#define SEGV_MAPERR 1
+#define SEGV_ACCERR 2
+
+#define BUS_ADRALN 1
+#define BUS_ADRERR 2
+#define BUS_OBJERR 3
+
+#define FPE_INTDIV 1
+#define FPE_INTOVF 2
+#define FPE_FLTDIV 3
+#define FPE_FLTOVF 4
+#define FPE_FLTUND 5
+#define FPE_FLTRES 6
+#define FPE_FLTINV 7
+#define FPE_FLTSUB 8
+
+#define ILL_ILLOPC 1
+#define ILL_ILLOPN 2
+#define ILL_ILLADR 3
+#define ILL_ILLTRP 4
+#define ILL_PRVOPC 5
+#define ILL_PRVREG 6
+#define ILL_COPROC 7
+#define ILL_BADSTK 8
 #define SI_KERNEL  0x80
 #define CLD_EXITED 1
 #define CLD_KILLED 2

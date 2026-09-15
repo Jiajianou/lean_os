@@ -37,6 +37,44 @@ static uint64_t read_cr2(void) {
     return value;
 }
 
+/* The x87 status word and MXCSR each carry one bit per exception, and the
+   order below is the order the hardware reports them in when more than one is
+   pending - invalid first, because it is the one that makes the others
+   meaningless. */
+static int fp_exception_code(uint32_t status) {
+    if (status & 0x01) {
+        return FPE_FLTINV;
+    }
+    if (status & 0x04) {
+        return FPE_FLTDIV;
+    }
+    if (status & 0x08) {
+        return FPE_FLTOVF;
+    }
+    if (status & 0x10) {
+        return FPE_FLTUND;
+    }
+    if (status & 0x20) {
+        return FPE_FLTRES;
+    }
+    if (status & 0x02) {
+        return FPE_FLTSUB;
+    }
+    return SI_KERNEL;
+}
+
+static int x87_exception_code(void) {
+    uint16_t status = 0;
+    __asm__ volatile("fnstsw %0" : "=m"(status));
+    return fp_exception_code(status);
+}
+
+static int sse_exception_code(void) {
+    uint32_t mxcsr = 0;
+    __asm__ volatile("stmxcsr %0" : "=m"(mxcsr));
+    return fp_exception_code(mxcsr);
+}
+
 static void dump_regs(isr_regs_t *r) {
     {
         task_t *t = scheduler_current();
@@ -134,24 +172,46 @@ void isr_handler(isr_regs_t *r) {
     if ((r->cs & 3) == 3) {
         task_t *t = scheduler_current();
         int fault_signo;
+        int fault_code = SI_KERNEL;
         switch (r->vector) {
         case 0:
+            fault_signo = SIGFPE;
+            fault_code = FPE_INTDIV;
+            break;
         case 16:
+            fault_signo = SIGFPE;
+            fault_code = x87_exception_code();
+            break;
         case 19:
             fault_signo = SIGFPE;
+            fault_code = sse_exception_code();
             break;
         case 6:
             fault_signo = SIGILL;
+            fault_code = ILL_ILLOPC;
             break;
         case 17:
             fault_signo = SIGBUS;
+            fault_code = BUS_ADRALN;
+            break;
+        case PAGE_FAULT_VECTOR:
+            fault_signo = SIGSEGV;
+            /* Not the hardware's present bit. This kernel fills pages on
+               demand, so a write to a read-only page nobody has touched
+               faults with that bit CLEAR - and calling it SEGV_MAPERR would
+               report no mapping where there was one that refused the access.
+               The question the two codes actually name is whether the process
+               asked for this address, and the scheduler is what knows. */
+            fault_code = scheduler_address_is_mapped(read_cr2()) ? SEGV_ACCERR
+                                                                 : SEGV_MAPERR;
             break;
         default:
             fault_signo = SIGSEGV;
             break;
         }
         uint64_t fault_address = (r->vector == PAGE_FAULT_VECTOR) ? read_cr2() : 0;
-        if (signal_deliver_fault(r, fault_signo, fault_address)) {
+        if (signal_deliver_fault_with_code(r, fault_signo, fault_address,
+                                           fault_code)) {
             return;
         }
         uint64_t message = kernel_log_begin();

@@ -134,6 +134,15 @@ int pthread_create(pthread_t *out, const pthread_attr_t *attr,
 
 int pthread_join(pthread_t thread, void **retval);
 
+/* One policy and one priority, reported. pthread_setschedparam accepts them
+   back and refuses anything else, for the reason getpriority in
+   <sys/resource.h> gives: this scheduler has two priority CLASSES and no
+   per-thread priority number, and a call that stored a policy and changed
+   nothing is what M65 refuses. */
+int pthread_getschedparam(pthread_t thread, int *policy,
+                          struct sched_param *param);
+int pthread_setschedparam(pthread_t thread, int policy,
+                          const struct sched_param *param);
 int pthread_detach(pthread_t thread);
 int pthread_attr_setdetachstate(pthread_attr_t *attr, int state);
 int pthread_attr_getdetachstate(const pthread_attr_t *attr, int *out);

@@ -233,6 +233,48 @@ PROBE
       grep -q "Advanced Micro Devices X86-64"
     check $? "std::ifstream reaches this filesystem - libc++ has <fstream>"
   fi
+
+  # M144. //base itself. libbase.a is a thin archive, so what it holds is a
+  # list of object paths; the claim is that every one of them exists and is
+  # for this machine, which is the only way "it builds" means anything.
+  LIBBASE="$SRC/out/$OUT_NAME/obj/base/libbase.a"
+  if [ ! -f "$LIBBASE" ]; then
+    echo "chromium-test: //base has not been built - skipping" \
+         "(tools/build-chromium.sh base)"
+  else
+    COUNT=$("${PREFIX}ar" t "$LIBBASE" | wc -l | tr -d ' ')
+    [ "$COUNT" -gt 300 ]
+    check $? "//base built $COUNT objects"
+
+    # A thin archive names its members by path, so listing it proves nothing
+    # on its own - the objects have to be there and have to be for this
+    # machine. One readelf over all of them answers both at once: a member
+    # that is missing produces no header, and one built for something else
+    # produces the wrong Machine line.
+    MEMBERS=$("${PREFIX}ar" t "$LIBBASE")
+    HEADERS=$(echo "$MEMBERS" | xargs "${PREFIX}readelf" -h 2>/dev/null |
+              grep -c "Advanced Micro Devices X86-64")
+    [ "$HEADERS" = "$COUNT" ]
+    check $? "all $COUNT of them exist and are x86-64 ELF ($HEADERS answered)"
+
+    # The seam M144 added, at the //build level this time, asked of the
+    # preprocessor for the reason M140's probe gives: it is the preprocessor
+    # that acts on it. IS_LINUX gates the build; HAS_LINUX_KERNEL answers
+    # whether getdents64, prctl, inotify and the futex system call are there.
+    WORK=$(mktemp -d)
+    cat > "$WORK/seam.cc" <<'PROBE'
+#include "build/build_config.h"
+static_assert(BUILDFLAG(IS_LINUX), "GN gates this platform as Linux");
+static_assert(BUILDFLAG(IS_POSIX), "and it is POSIX");
+static_assert(!BUILDFLAG(HAS_LINUX_KERNEL),
+              "but it does not have Linux's kernel interfaces");
+PROBE
+    "${PREFIX}clang++" -std=c++20 -fsyntax-only -I"$SRC" \
+      "$WORK/seam.cc" 2>"$WORK/seam.log"
+    check $? "IS_LINUX for the gating, HAS_LINUX_KERNEL=0 for the kernel"
+    [ -s "$WORK/seam.log" ] && cat "$WORK/seam.log" >&2
+    rm -rf "$WORK"
+  fi
 fi
 
 echo "chromium-test: $PASS passed, $FAIL failed"

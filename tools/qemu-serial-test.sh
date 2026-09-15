@@ -223,6 +223,7 @@ REQUIRED_MARKERS=(
   "[m140] the surface a C++ runtime asks a libc for:"
   "[m142] a long double library for the x87's own format:"
   "[m143] the POSIX surface //base's own sources ask for:"
+  "[m144] what a fault was, not that one happened:"
   "mathltest: done"
   "[m125] lvgl rendered"
   "[m125] a third-party toolkit on this compositor:"

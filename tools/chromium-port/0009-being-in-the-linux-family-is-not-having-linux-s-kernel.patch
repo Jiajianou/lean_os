@@ -1,0 +1,804 @@
+--- a/build/build_config.h
++++ b/build/build_config.h
+@@ -226,6 +226,22 @@
+ #define BUILDFLAG_INTERNAL_IS_LINUX() (1)
+ #else
+ #define BUILDFLAG_INTERNAL_IS_LINUX() (0)
++#endif
++
++// Whether this platform offers the Linux KERNEL's own interfaces - the system
++// call numbers in <sys/syscall.h>, prctl(2), inotify(7), futex(2) and the
++// headers under linux/ - rather than only POSIX.
++//
++// IS_LINUX answers a different question. An out-of-tree POSIX platform may
++// set it so that the thousands of is_linux conditions in the build gate the
++// right things, and still have a system call surface of its own; this is the
++// question the code that reaches past libc into the kernel has to ask
++// instead. PartitionAlloc already draws the same line, as
++// PA_BUILDFLAG(HAS_LINUX_KERNEL).
++#if defined(OS_LINUX) && defined(__linux__)
++#define BUILDFLAG_INTERNAL_HAS_LINUX_KERNEL() (1)
++#else
++#define BUILDFLAG_INTERNAL_HAS_LINUX_KERNEL() (0)
+ #endif
+ 
+ #if defined(OS_MAC)
+diff --git a/base/BUILD.gn b/base/BUILD.gn
+index 44ffb6ee33..b4aac131e4 100644
+--- a/base/BUILD.gn
++++ b/base/BUILD.gn
+@@ -1119,11 +1119,16 @@ component("base") {
+     ]
+   }
+ 
+-  if (is_linux || is_chromeos || is_android) {
++  # The inotify watcher is inotify(7) and nothing else, so what decides
++  # between it and the stub Chromium already ships is whether that interface
++  # is there - not which family the platform belongs to.
++  if (has_linux_kernel || is_android) {
+     sources += [
+       "files/file_path_watcher_inotify.cc",
+       "files/file_path_watcher_inotify.h",
+     ]
++  } else if (is_linux || is_chromeos) {
++    sources += [ "files/file_path_watcher_stub.cc" ]
+   }
+ 
+   all_dependent_configs = []
+diff --git a/base/allocator/dispatcher/tls.cc b/base/allocator/dispatcher/tls.cc
+index 5559274fe2..3036533d35 100644
+--- a/base/allocator/dispatcher/tls.cc
++++ b/base/allocator/dispatcher/tls.cc
+@@ -18,7 +18,7 @@
+ #include "base/immediate_crash.h"
+ #include "build/build_config.h"
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <sys/prctl.h>
+ #endif
+ 
+@@ -53,7 +53,7 @@ void Swap(std::atomic_bool& lh_op, std::atomic_bool& rh_op) {
+ void* MMapAllocator::AllocateMemory(size_t size_in_bytes) {
+   void* const mmap_res = mmap(nullptr, size_in_bytes, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(HAS_LINUX_KERNEL)
+ #if defined(PR_SET_VMA) && defined(PR_SET_VMA_ANON_NAME)
+   if (mmap_res != MAP_FAILED) {
+     // Allow the anonymous memory region allocated by mmap(MAP_ANONYMOUS) to
+diff --git a/base/debug/stack_trace_posix.cc b/base/debug/stack_trace_posix.cc
+index d4b6111077..c5b45a790c 100644
+--- a/base/debug/stack_trace_posix.cc
++++ b/base/debug/stack_trace_posix.cc
+@@ -66,12 +66,21 @@
+ #include <AvailabilityMacros.h>
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <sys/prctl.h>
++#endif
+ 
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+ #include "base/debug/proc_maps_linux.h"
+ #endif
+ 
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    defined(ARCH_CPU_X86_FAMILY)
++// The register dump below reads a ucontext_t. POSIX puts it here; glibc also
++// drags it in through <signal.h>, which is what has been supplying it.
++#include <ucontext.h>
++#endif
++
+ #include "base/cfi_buildflags.h"
+ #include "base/debug/debugger.h"
+ #include "base/debug/debugging_buildflags.h"
+@@ -340,8 +349,15 @@ void AlarmSignalHandler(int signal, siginfo_t* info, void* void_context) {
+   PrintToStderr(
+       "Warning: Default signal handler failed to terminate process.\n");
+   PrintToStderr("Calling exit_group() directly to prevent timeout.\n");
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+   // See: https://man7.org/linux/man-pages/man2/exit_group.2.html
+   syscall(SYS_exit_group, EXIT_FAILURE);
++#else
++  // _exit ends every thread of the process, which is what exit_group is
++  // reached for here; it is async-signal-safe, which is the other
++  // requirement.
++  _exit(EXIT_FAILURE);
++#endif
+ }
+ #endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID) ||
+         // BUILDFLAG(IS_CHROMEOS)
+@@ -545,7 +561,7 @@ void StackDumpSignalHandler(int signal, siginfo_t* info, void* void_context) {
+     _exit(EXIT_FAILURE);
+   }
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+   // Set an alarm to trigger in case the default handler does not terminate
+   // the process. See 'AlarmSignalHandler' for more details.
+   struct sigaction action;
+@@ -584,8 +600,8 @@ void StackDumpSignalHandler(int signal, siginfo_t* info, void* void_context) {
+   if (errno != EPERM) {
+     _exit(EXIT_FAILURE);
+   }
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID) ||
+-        // BUILDFLAG(IS_CHROMEOS)
++#endif  // BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
++
+ 
+   // Explicitly re-raise the signal even if it might have re-raised itself on
+   // return. Because signal handlers normally execute with their signal blocked,
+@@ -790,21 +806,28 @@ class SandboxSymbolizeHelper {
+     // original value couldn't be determined, the destructor attempts to
+     // restore the flag to 0 (non-dumpable).
+     explicit ScopedPrSetDumpable() {
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+       int result = prctl(PR_GET_DUMPABLE, 0, 0, 0, 0);
+       was_dumpable_ = result > 0;
+ 
+       if (!was_dumpable_) {
+         std::ignore = prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+       }
++#else
++      // No dumpable flag to raise, so nothing to lower again either.
++      was_dumpable_ = true;
++#endif
+     }
+ 
+     ScopedPrSetDumpable(const ScopedPrSetDumpable&) = delete;
+     ScopedPrSetDumpable& operator=(const ScopedPrSetDumpable&) = delete;
+ 
+     ~ScopedPrSetDumpable() {
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+       if (!was_dumpable_) {
+         std::ignore = prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+       }
++#endif
+     }
+ 
+    private:
+diff --git a/base/files/dir_reader_posix.h b/base/files/dir_reader_posix.h
+index 7fbda52ab4..0a76dcf727 100644
+--- a/base/files/dir_reader_posix.h
++++ b/base/files/dir_reader_posix.h
+@@ -17,7 +17,10 @@
+ // seems worse than falling back to enumerating all file descriptors so we will
+ // probably never implement this on the Mac.
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++// DirReaderLinux is the getdents64 system call and nothing else, so what
++// decides between it and the fallback is whether that call is there - not
++// which family the platform belongs to.
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+ #include "base/files/dir_reader_linux.h"
+ #else
+ #include "base/files/dir_reader_fallback.h"
+@@ -25,7 +28,7 @@
+ 
+ namespace base {
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+ typedef DirReaderLinux DirReaderPosix;
+ #else
+ typedef DirReaderFallback DirReaderPosix;
+diff --git a/base/files/drive_info_posix.cc b/base/files/drive_info_posix.cc
+index 486f8f93b2..cb2087db43 100644
+--- a/base/files/drive_info_posix.cc
++++ b/base/files/drive_info_posix.cc
+@@ -17,7 +17,7 @@
+ #include "base/strings/stringprintf.h"
+ #include "build/build_config.h"
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <linux/kdev_t.h>
+ #include <linux/magic.h>
+ #include <sys/vfs.h>
+@@ -30,7 +30,7 @@ std::optional<DriveInfo> GetFileDriveInfo(const FilePath& file_path) {
+ #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_FUCHSIA)
+   drive_info.has_seek_penalty = false;
+   return drive_info;
+-#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#elif BUILDFLAG(HAS_LINUX_KERNEL)
+   constexpr char kRotationalFormat[] =
+       "/sys/dev/block/%lu:%lu/queue/rotational";
+   constexpr char kRemovableFormat[] = "/sys/dev/block/%lu:%lu/removable";
+diff --git a/base/memory/platform_shared_memory_region_posix.cc b/base/memory/platform_shared_memory_region_posix.cc
+index d878fd30ef..05a23699f7 100644
+--- a/base/memory/platform_shared_memory_region_posix.cc
++++ b/base/memory/platform_shared_memory_region_posix.cc
+@@ -85,6 +85,17 @@ std::optional<FDAccessModeError> CheckFDAccessMode(int fd, int expected_mode) {
+ // Returns an invalid pair when memfd_create() is unavailable (kernels before
+ // 3.17, or a seccomp policy that rejects it) so that the caller falls back to
+ // the file-based implementation.
++// The raw system call is used (as in mojo/core/channel_linux.cc) so that this
++// does not add a glibc 2.27 requirement. A platform whose C library has the
++// function and not the system call number gets the function.
++int MemfdCreate(const char* name, unsigned int flags) {
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
++  return static_cast<int>(syscall(__NR_memfd_create, name, flags));
++#else
++  return memfd_create(name, flags);
++#endif
++}
++
+ ScopedFDPair CreateAnonymousRegion(PlatformSharedMemoryRegion::Mode mode,
+                                    size_t size) {
+   // MFD_NOEXEC_SEAL creates the file non-executable and seals that state.
+@@ -95,16 +106,14 @@ ScopedFDPair CreateAnonymousRegion(PlatformSharedMemoryRegion::Mode mode,
+   static std::atomic<bool> try_noexec_seal{true};
+   ScopedFD fd;
+   if (try_noexec_seal.load(std::memory_order_relaxed)) {
+-    fd.reset(static_cast<int>(
+-        syscall(__NR_memfd_create, kName,
+-                MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL)));
++    fd.reset(MemfdCreate(
++        kName, MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL));
+     if (!fd.is_valid() && errno == EINVAL) {
+       try_noexec_seal.store(false, std::memory_order_relaxed);
+     }
+   }
+   if (!fd.is_valid()) {
+-    fd.reset(static_cast<int>(
+-        syscall(__NR_memfd_create, kName, MFD_CLOEXEC | MFD_ALLOW_SEALING)));
++    fd.reset(MemfdCreate(kName, MFD_CLOEXEC | MFD_ALLOW_SEALING));
+   }
+   if (!fd.is_valid()) {
+     DPLOG_IF(ERROR, errno != ENOSYS) << "memfd_create";
+diff --git a/base/process/launch_posix.cc b/base/process/launch_posix.cc
+index 99427d5301..fed1ec32dc 100644
+--- a/base/process/launch_posix.cc
++++ b/base/process/launch_posix.cc
+@@ -48,7 +48,7 @@
+ #include "base/trace_event/trace_event.h"
+ #include "build/build_config.h"
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_AIX)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_AIX)
+ #include <sys/prctl.h>
+ #endif
+ 
+@@ -99,7 +99,7 @@ sigset_t SetSignalMask(const sigset_t& new_sigmask) {
+   return old_sigmask;
+ }
+ 
+-#if (!BUILDFLAG(IS_LINUX) && !BUILDFLAG(IS_AIX) && !BUILDFLAG(IS_CHROMEOS)) || \
++#if (!BUILDFLAG(HAS_LINUX_KERNEL) && !BUILDFLAG(IS_AIX)) || \
+     (!defined(__i386__) && !defined(__x86_64__) && !defined(__arm__))
+ void ResetChildSignalHandlersToDefaults() {
+   // The previous signal handlers are likely to be meaningless in the child's
+@@ -186,7 +186,7 @@ void ResetChildSignalHandlersToDefaults() {
+ #endif  // !defined(NDEBUG)
+   }
+ }
+-#endif  // !BUILDFLAG(IS_LINUX) ||
++#endif  // !BUILDFLAG(HAS_LINUX_KERNEL) ||
+         // (!defined(__i386__) && !defined(__x86_64__) && !defined(__arm__))
+ }  // anonymous namespace
+ 
+@@ -330,7 +330,7 @@ Process LaunchProcess(const std::vector<std::string>& argv,
+   }
+ 
+   pid_t pid;
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_AIX)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_AIX)
+   if (options.clone_flags) {
+     // Signal handling in this function assumes the creation of a new
+     // process, so we check that a thread is not being created by mistake
+@@ -493,7 +493,7 @@ Process LaunchProcess(const std::vector<std::string>& argv,
+ 
+     CloseSuperfluousFds(fd_shuffle2);
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_AIX)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_AIX)
+ #ifndef PR_SET_NO_NEW_PRIVS
+ #define PR_SET_NO_NEW_PRIVS 38
+ #endif
+@@ -514,6 +514,16 @@ Process LaunchProcess(const std::vector<std::string>& argv,
+         _exit(127);
+       }
+     }
++#else
++    // A parent-death signal is a Linux process attribute and there is no
++    // portable equivalent. A caller that asked for one and silently did not
++    // get it would believe its children are reaped when it dies, so this
++    // fails the launch the same way a failing prctl does above rather than
++    // carrying on.
++    if (options.kill_on_parent_death) {
++      RAW_LOG(ERROR, "kill_on_parent_death needs a parent-death signal");
++      _exit(127);
++    }
+ #endif
+ 
+     if (current_directory != nullptr) {
+@@ -732,7 +742,7 @@ bool GetAppOutputWithExitCode(const std::vector<std::string>& argv,
+   return GetAppOutputInternal(argv, nullptr, false, output, true, exit_code);
+ }
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_AIX)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_AIX)
+ namespace {
+ 
+ // This function runs on the stack specified on the clone call. It uses longjmp
+@@ -810,6 +820,6 @@ pid_t ForkWithFlags(int flags, pid_t* ptid, pid_t* ctid) {
+ 
+   return 0;
+ }
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_AIX)
++#endif  // BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_AIX)
+ 
+ }  // namespace base
+diff --git a/base/process/process_linux.cc b/base/process/process_linux.cc
+index 2618b503db..c31f26bdc1 100644
+--- a/base/process/process_linux.cc
++++ b/base/process/process_linux.cc
+@@ -5,7 +5,10 @@
+ #include "base/process/process.h"
+ 
+ #include <errno.h>
++#include "build/build_config.h"
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <linux/magic.h>
++#endif
+ #include <sys/resource.h>
+ #include <sys/vfs.h>
+ 
+@@ -69,11 +72,18 @@ const char kBackgroundExperiment[] = "/chrome_renderers_background";
+ const char kProcPath[] = "/proc/%d/cgroup";
+ 
+ bool PathIsCGroupFileSystem(const FilePath& path) {
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+   struct statfs statfs_buf;
+   if (statfs(path.value().c_str(), &statfs_buf) < 0) {
+     return false;
+   }
+   return statfs_buf.f_type == CGROUP_SUPER_MAGIC;
++#else
++  // cgroups are a filesystem the Linux kernel provides. Without it there is
++  // no path that is on one.
++  std::ignore = path;
++  return false;
++#endif
+ }
+ 
+ struct CGroups {
+diff --git a/base/process/process_metrics_posix.cc b/base/process/process_metrics_posix.cc
+index 205200021c..ba71d198bb 100644
+--- a/base/process/process_metrics_posix.cc
++++ b/base/process/process_metrics_posix.cc
+@@ -25,7 +25,8 @@
+ #include <malloc.h>
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)) && \
++    defined(__GLIBC__)
+ #include <features.h>
+ 
+ #include "base/numerics/safe_conversions.h"
+@@ -108,7 +109,9 @@ void IncreaseFdLimitTo(unsigned int max_descriptors) {
+ 
+ #endif  // !BUILDFLAG(IS_FUCHSIA)
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || \
++     BUILDFLAG(IS_ANDROID)) && \
++    defined(__GLIBC__)
+ namespace {
+ 
+ size_t GetMallocUsageMallinfo() {
+@@ -126,18 +129,22 @@ size_t GetMallocUsageMallinfo() {
+ }
+ 
+ }  // namespace
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) ||
+-        // BUILDFLAG(IS_ANDROID)
++#endif  // (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) ||
++        //  BUILDFLAG(IS_ANDROID)) && defined(__GLIBC__)
+ 
+ size_t ProcessMetrics::GetMallocUsage() {
+ #if BUILDFLAG(IS_APPLE)
+   malloc_statistics_t stats = {0};
+   malloc_zone_statistics(nullptr, &stats);
+   return stats.size_in_use;
+-#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#elif (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || \
++       BUILDFLAG(IS_ANDROID)) &&                        \
++    defined(__GLIBC__)
+   return GetMallocUsageMallinfo();
+-#elif BUILDFLAG(IS_FUCHSIA)
+-  // TODO(fuchsia): Not currently exposed. https://crbug.com/735087.
++#else
++  // struct mallinfo is glibc's rather than POSIX's, and the allocator shim
++  // that fills it in is compiled only where glibc is - see
++  // PA_BUILDFLAG(PA_LIBC_GLIBC).
+   return 0;
+ #endif
+ }
+diff --git a/base/process/set_process_title.cc b/base/process/set_process_title.cc
+index aacd4a841f..858a851c1c 100644
+--- a/base/process/set_process_title.cc
++++ b/base/process/set_process_title.cc
+@@ -28,7 +28,9 @@
+ 
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+ #include <errno.h>  // Get program_invocation_short_name declaration.
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <sys/prctl.h>
++#endif
+ 
+ #include "base/files/file_path.h"
+ #include "base/files/file_util.h"
+@@ -79,11 +81,13 @@ void SetProcessTitleFromCommandLine(const char** main_argv) {
+ 
+     base::FilePath::StringType base_name =
+         base::FilePath(title).BaseName().value();
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+     // PR_SET_NAME is available in Linux 2.6.9 and newer.
+     // When available at run time, this sets the short process name that shows
+     // when the full command line is not being displayed in most process
+     // listings.
+     prctl(PR_SET_NAME, base_name.c_str());
++#endif
+ 
+     // This prevents program_invocation_short_name from being broken by
+     // setproctitle().
+diff --git a/base/profiler/stack_copier_signal.cc b/base/profiler/stack_copier_signal.cc
+index 62ab1c02f7..d95be5e1eb 100644
+--- a/base/profiler/stack_copier_signal.cc
++++ b/base/profiler/stack_copier_signal.cc
+@@ -5,7 +5,12 @@
+ #include "base/profiler/stack_copier_signal.h"
+ 
+ #include <errno.h>
++#include "build/build_config.h"
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <linux/futex.h>
++#else
++#include <semaphore.h>
++#endif
+ #include <signal.h>
+ #include <stdint.h>
+ #include <sys/ucontext.h>
+@@ -14,6 +19,8 @@
+ #include <atomic>
+ #include <cstring>
+ #include <optional>
++#include <pthread.h>
++#include <type_traits>
+ 
+ #include "base/check.h"
+ #include "base/compiler_specific.h"
+@@ -32,8 +39,38 @@ namespace base {
+ 
+ namespace {
+ 
+-// Waitable event implementation with futex and without DCHECK(s), since signal
+-// handlers cannot allocate memory or use pthread api.
++// Waitable event implementation without DCHECK(s), since signal handlers
++// cannot allocate memory or use pthread api.
++//
++// On a Linux kernel this is a futex. Elsewhere it is a POSIX semaphore, which
++// is the portable primitive with the property the signal handler needs: POSIX
++// requires sem_post to be async-signal-safe. sem_wait is not, and does not
++// have to be - it is called from the sampling thread rather than from the
++// handler.
++#if !BUILDFLAG(HAS_LINUX_KERNEL)
++class AsyncSafeWaitableEvent {
++ public:
++  AsyncSafeWaitableEvent() { sem_init(&semaphore_, /*pshared=*/0, 0); }
++  ~AsyncSafeWaitableEvent() { sem_destroy(&semaphore_); }
++  AsyncSafeWaitableEvent(const AsyncSafeWaitableEvent&) = delete;
++  AsyncSafeWaitableEvent& operator=(const AsyncSafeWaitableEvent&) = delete;
++
++  bool Wait() {
++    while (sem_wait(&semaphore_) != 0) {
++      // EINTR indicates the wait was interrupted by a signal; retry the wait.
++      if (errno != EINTR) {
++        return false;
++      }
++    }
++    return true;
++  }
++
++  void Signal() { sem_post(&semaphore_); }
++
++ private:
++  sem_t semaphore_;
++};
++#else
+ class AsyncSafeWaitableEvent {
+  public:
+   AsyncSafeWaitableEvent() {
+@@ -94,6 +131,7 @@ class AsyncSafeWaitableEvent {
+ 
+   std::atomic_uint32_t futex_{kNotSignaled};
+ };
++#endif  // !BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+ // Scoped signal event that calls Signal on the AsyncSafeWaitableEvent at
+ // destructor.
+@@ -262,10 +300,25 @@ bool StackCopierSignal::CopyStack(StackBuffer* stack_buffer,
+       return false;
+     }
+ 
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+     if (syscall(SYS_tgkill, getpid(), thread_delegate_->GetThreadId(),
+                 SIGURG) != 0) {
+       NOTREACHED();
+     }
++#else
++    // Where base derives PlatformThreadId from pthread_self - which is what
++    // it does on a POSIX platform with no gettid - the way back to a
++    // pthread_t is that conversion in reverse, and pthread_kill is the
++    // portable tgkill.
++    static_assert(std::is_integral_v<pthread_t>,
++                  "recovering a pthread_t from a PlatformThreadId is the "
++                  "identity only where pthread_t is an integer");
++    if (pthread_kill(
++            static_cast<pthread_t>(thread_delegate_->GetThreadId().raw()),
++            SIGURG) != 0) {
++      NOTREACHED();
++    }
++#endif
+     bool finished_waiting = wait_event.Wait();
+     TRACE_EVENT_END(TRACE_DISABLED_BY_DEFAULT("cpu_profiler.debug"));
+     CHECK(finished_waiting);
+diff --git a/base/rand_util_posix.cc b/base/rand_util_posix.cc
+index 6560a29287..adc0b5431f 100644
+--- a/base/rand_util_posix.cc
++++ b/base/rand_util_posix.cc
+@@ -31,9 +31,11 @@
+ #include "base/system/sys_info.h"
+ #endif  // BUILDFLAG(IS_MAC)
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "third_party/lss/linux_syscall_support.h"
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#else
++#include <sys/random.h>
++#endif  // BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+ namespace base {
+ 
+@@ -76,11 +78,17 @@ bool KernelSupportsGetRandom() {
+ }
+ 
+ bool GetRandomSyscall(void* output, size_t output_length) {
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+   // We have to call `getrandom` via Linux Syscall Support, rather than through
+   // the libc wrapper, because we might not have an up-to-date libc (e.g. on
+   // some bots).
+   const ssize_t r =
+       HANDLE_EINTR(syscall(__NR_getrandom, output, output_length, 0));
++#else
++  // A platform whose C library has the function and not the system call
++  // number gets the function.
++  const ssize_t r = HANDLE_EINTR(getrandom(output, output_length, 0));
++#endif
+ 
+   // Return success only on total success. In case errno == ENOSYS (or any other
+   // error), we'll fall through to reading from urandom below.
+diff --git a/base/sampling_heap_profiler/sampling_heap_profiler.cc b/base/sampling_heap_profiler/sampling_heap_profiler.cc
+index c07a801af8..ddbbf40afb 100644
+--- a/base/sampling_heap_profiler/sampling_heap_profiler.cc
++++ b/base/sampling_heap_profiler/sampling_heap_profiler.cc
+@@ -37,7 +37,7 @@
+ #include <pthread.h>
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+ #include <sys/prctl.h>
+ #endif
+ 
+@@ -81,7 +81,7 @@ const char* GetAndLeakThreadName() {
+   // 64 on macOS, see PlatformThread::SetName in platform_thread_apple.mm.
+   constexpr size_t kBufferLen = 64;
+   char name[kBufferLen];
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+   // If the thread name is not set, try to get it from prctl. Thread name might
+   // not be set in cases where the thread started before heap profiling was
+   // enabled.
+@@ -94,8 +94,7 @@ const char* GetAndLeakThreadName() {
+   if (err == 0 && *name != '\0') {
+     return UNSAFE_TODO(strdup(name));
+   }
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) ||
+-        // BUILDFLAG(IS_ANDROID)
++#endif  // BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+ 
+   // Use tid if we don't have a thread name.
+   snprintf(name, sizeof(name), "Thread %lu",
+diff --git a/base/system/sys_info_posix.cc b/base/system/sys_info_posix.cc
+index 5460a7f35e..49ee1946ac 100644
+--- a/base/system/sys_info_posix.cc
++++ b/base/system/sys_info_posix.cc
+@@ -42,7 +42,7 @@
+ #include <sys/statvfs.h>
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <linux/magic.h>
+ #include <sys/vfs.h>
+ #endif
+@@ -64,7 +64,7 @@ base::ByteSize AmountOfVirtualMemory() {
+ using LazyVirtualMemory =
+     base::internal::LazySysInfoValue<base::ByteSize, AmountOfVirtualMemory>;
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+ bool IsStatsZeroIfUnlimited(const base::FilePath& path) {
+   struct statfs stats;
+ 
+@@ -86,7 +86,7 @@ bool IsStatsZeroIfUnlimited(const base::FilePath& path) {
+   }
+   return false;
+ }
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#endif  // BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+ void GetKernelVersionNumbers(int32_t* major_version,
+                              int32_t* minor_version,
+@@ -149,7 +149,7 @@ int SysInfo::NumberOfProcessors() {
+ 
+     int num_cpus = static_cast<int>(res);
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+     // Restrict the CPU count based on the process's CPU affinity mask, if
+     // available.
+     cpu_set_t* cpu_set = CPU_ALLOC(num_cpus);
+@@ -159,7 +159,7 @@ int SysInfo::NumberOfProcessors() {
+       num_cpus = CPU_COUNT_S(cpu_set_size, cpu_set);
+     }
+     CPU_FREE(cpu_set);
+-#endif  // BUILDFLAG(IS_LINUX)
++#endif  // BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+     return num_cpus;
+   }();
+@@ -200,7 +200,7 @@ std::optional<SysInfo::DiskSpaceInfo> SysInfo::AmountOfDiskSpace(
+     return std::nullopt;
+   }
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+   const bool zero_size_means_unlimited =
+       stats.f_blocks == 0 && IsStatsZeroIfUnlimited(path);
+ #else
+diff --git a/base/threading/platform_thread_linux.cc b/base/threading/platform_thread_linux.cc
+index b0dab76f9e..d9e7c4027d 100644
+--- a/base/threading/platform_thread_linux.cc
++++ b/base/threading/platform_thread_linux.cc
+@@ -9,8 +9,12 @@
+ #include <errno.h>
+ #include <pthread.h>
+ #include <sched.h>
++#include <tuple>
+ #include <stddef.h>
++#include "build/build_config.h"
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <sys/prctl.h>
++#endif
+ #include <sys/resource.h>
+ #include <sys/time.h>
+ #include <sys/types.h>
+@@ -223,11 +227,18 @@ void PlatformThreadBase::SetName(const std::string& name) {
+   // Note that glibc also has a 'pthread_setname_np' api, but it may not be
+   // available everywhere and it's only benefit over using prctl directly is
+   // that it can set the name of threads other than the current thread.
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+   int err = prctl(PR_SET_NAME, name.c_str());
+   // We expect EPERM failures in sandboxed processes, just ignore those.
+   if (err < 0 && errno != EPERM) {
+     DPLOG(ERROR) << "prctl(PR_SET_NAME)";
+   }
++#else
++  // Naming the kernel's view of a thread is what prctl is for here; without
++  // it the name this class already keeps in ThreadIdNameManager is the only
++  // one there is, which is what every caller of GetName() reads.
++  std::ignore = name;
++#endif
+ }
+ 
+ // static
+diff --git a/base/threading/platform_thread_posix.cc b/base/threading/platform_thread_posix.cc
+index 2c34251a84..2a64eafb19 100644
+--- a/base/threading/platform_thread_posix.cc
++++ b/base/threading/platform_thread_posix.cc
+@@ -34,7 +34,9 @@
+ #endif
+ 
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <sys/syscall.h>
++#endif
+ 
+ #include <atomic>
+ #endif
+@@ -53,6 +55,20 @@
+ 
+ namespace base {
+ 
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++namespace {
++// The kernel's own thread id. gettid(2) is the C library's name for it and is
++// what a platform that has the call but not the system call NUMBER offers.
++pid_t CurrentThreadIdFromKernel() {
++#if BUILDFLAG(HAS_LINUX_KERNEL)
++  return static_cast<pid_t>(syscall(__NR_gettid));
++#else
++  return gettid();
++#endif
++}
++}  // namespace
++#endif
++
+ void InitThreading();
+ void TerminateOnThread();
+ size_t GetDefaultThreadStackSize(const pthread_attr_t& attributes);
+@@ -234,7 +250,7 @@ PlatformThreadId PlatformThreadBase::CurrentId() {
+       (g_is_main_thread &&
+        !g_main_thread_tid_cache_valid.load(std::memory_order_relaxed))) {
+     // Update the cached tid.
+-    g_thread_id = static_cast<pid_t>(syscall(__NR_gettid));
++    g_thread_id = static_cast<pid_t>(CurrentThreadIdFromKernel());
+     // If this is the main thread, we can mark the tid_cache as valid.
+     // Otherwise, stop the current thread from always entering this slow path.
+     if (g_thread_id == getpid()) {
+@@ -244,7 +260,7 @@ PlatformThreadId PlatformThreadBase::CurrentId() {
+     }
+   } else {
+ #if DCHECK_IS_ON()
+-    if (g_thread_id != syscall(__NR_gettid)) {
++    if (g_thread_id != CurrentThreadIdFromKernel()) {
+       RAW_LOG(
+           FATAL,
+           "Thread id stored in TLS is different from thread id returned by "
+diff --git a/base/trace_event/malloc_dump_provider.cc b/base/trace_event/malloc_dump_provider.cc
+index 37f1fc592a..c87cf862d0 100644
+--- a/base/trace_event/malloc_dump_provider.cc
++++ b/base/trace_event/malloc_dump_provider.cc
+@@ -36,7 +36,8 @@
+ #include <windows.h>
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)) && \
++    defined(__GLIBC__)
+ #include <features.h>
+ #endif
+ 
+diff --git a/build/config/BUILDCONFIG.gn b/build/config/BUILDCONFIG.gn
+index bc4236a4e7..c1c23a02fd 100644
+--- a/build/config/BUILDCONFIG.gn
++++ b/build/config/BUILDCONFIG.gn
+@@ -346,6 +346,21 @@ is_win = current_os == "win" || current_os == "winuwp"
+ is_apple = is_ios || is_mac || is_watchos
+ is_posix = !is_win && !is_fuchsia
+ 
++declare_args() {
++  # Whether this platform offers the Linux KERNEL's own interfaces - the
++  # system call numbers in <sys/syscall.h>, prctl(2), inotify(7), futex(2)
++  # and the headers under linux/ - rather than only POSIX.
++  #
++  # is_linux answers a different question. An out-of-tree POSIX platform may
++  # set it, so that the thousands of is_linux conditions here gate the right
++  # things, and still have a system call surface of its own; code that
++  # reaches past libc into the kernel has to ask this one instead.
++  # PartitionAlloc already draws the same line as
++  # partition_alloc_has_linux_kernel, and build/build_config.h derives
++  # BUILDFLAG(HAS_LINUX_KERNEL) from __linux__ for the preprocessor's half.
++  has_linux_kernel = is_linux || is_chromeos || is_android
++}
++
+ # =============================================================================
+ # TARGET DEFAULTS
+ # =============================================================================

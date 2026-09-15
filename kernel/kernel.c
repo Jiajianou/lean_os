@@ -8484,6 +8484,13 @@ static void boot_selftests_system(void) {
             panic("M141 self-test: the surface Chromium's base and its tracing "
                   "library ask for is not right on this machine");
         }
+        kernel_log_puts("[m144] what a fault was, not that one happened: a write "
+                  "to a page with no mapping reporting SEGV_MAPERR and a write "
+                  "to a read-only one reporting SEGV_ACCERR, each with si_addr "
+                  "at the address that faulted; gettid; one scheduling policy "
+                  "and one priority, reported and defended; <sys/vfs.h>; and a "
+                  "message catalogue that says it is not there - self-test "
+                  "passed.\n\n");
         kernel_log_puts("[m143] the POSIX surface //base's own sources ask for: "
                   "a signal handler given a real ucontext - the registers it "
                   "interrupted, at the offsets both declarations of that "

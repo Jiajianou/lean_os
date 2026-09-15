@@ -1,0 +1,20 @@
+diff --git a/base/linux_util.cc b/base/linux_util.cc
+index a6b4fce5d4..72b0cb563a 100644
+--- a/base/linux_util.cc
++++ b/base/linux_util.cc
+@@ -15,6 +15,7 @@
+ 
+ #include <iomanip>
+ #include <memory>
++#include <sstream>
+ #include <string_view>
+ 
+ #include "base/base_export.h"
+@@ -22,6 +23,7 @@
+ #include "base/files/dir_reader_posix.h"
+ #include "base/files/file_util.h"
+ #include "base/files/scoped_file.h"
++#include "base/logging.h"
+ #include "base/strings/safe_sprintf.h"
+ #include "base/strings/span_printf.h"
+ #include "base/strings/string_number_conversions.h"

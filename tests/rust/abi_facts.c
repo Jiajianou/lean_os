@@ -216,7 +216,7 @@ static const struct leanos_abi_fact FACTS[] = {
     {"offsetof(siginfo_t,si_errno)", (unsigned long)offsetof(siginfo_t, si_errno)},
     {"offsetof(siginfo_t,si_pid)", (unsigned long)offsetof(siginfo_t, si_pid)},
     {"offsetof(siginfo_t,si_uid)", (unsigned long)offsetof(siginfo_t, si_uid)},
-    {"offsetof(siginfo_t,si_address)", (unsigned long)offsetof(siginfo_t, si_address)},
+    {"offsetof(siginfo_t,si_addr)", (unsigned long)offsetof(siginfo_t, si_addr)},
     {"offsetof(siginfo_t,si_status)", (unsigned long)offsetof(siginfo_t, si_status)},
     {"offsetof(siginfo_t,si_band)", (unsigned long)offsetof(siginfo_t, si_band)},
     {"sizeof(struct tm)", (unsigned long)sizeof(struct tm)},

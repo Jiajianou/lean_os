@@ -40,7 +40,7 @@ struct struct winsize | winsize | ws_row ws_col ws_xpixel ws_ypixel
 struct struct rlimit | rlimit | rlim_cur rlim_max
 struct struct rusage | rusage | ru_utime ru_stime ru_maxrss ru_minflt ru_majflt ru_nvcsw ru_nivcsw
 struct struct sigaction | sigaction | sa_mask sa_flags
-struct siginfo_t | siginfo_t | si_signo si_code si_errno si_pid si_uid si_address=si_addr si_status si_band
+struct siginfo_t | siginfo_t | si_signo si_code si_errno si_pid si_uid si_addr si_status si_band
 struct struct tm | tm | tm_sec tm_min tm_hour tm_mday tm_mon tm_year tm_wday tm_yday tm_isdst tm_gmtoff tm_zone
 struct struct lconv | lconv | decimal_point thousands_sep grouping int_frac_digits frac_digits n_sign_posn
 struct struct sched_param | sched_param | sched_priority
