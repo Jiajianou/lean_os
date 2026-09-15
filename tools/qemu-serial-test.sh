@@ -220,6 +220,7 @@ REQUIRED_MARKERS=(
   "[m118] AF_UNIX: a socketpair both ways,"
   "[m119] a message pump:"
   "[m120] a buffer shared across a channel:"
+  "[m140] the surface a C++ runtime asks a libc for:"
   "[m125] lvgl rendered"
   "[m125] a third-party toolkit on this compositor:"
   "[m127] settings rendered"

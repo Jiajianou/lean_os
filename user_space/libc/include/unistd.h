@@ -7,6 +7,8 @@
 
 #define _POSIX_THREADS 200809L
 
+#define _POSIX_MONOTONIC_CLOCK 200809L
+
 #ifdef __cplusplus
 extern "C" {
 #endif

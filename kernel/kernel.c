@@ -135,6 +135,7 @@
     X(unixtest)                 \
     X(epolltest)                \
     X(memfdtest)                \
+    X(posixtest)                \
     X(desktop_applications)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
@@ -8432,6 +8433,36 @@ static void boot_selftests_system(void) {
                   "frame back (");
         kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
         kernel_log_puts(" ms).\n\n");
+    }
+
+    {
+        size_t px_bytes = 0;
+        uint8_t *px_img = read_program(PATH_BIN_DIRECTORY "posixtest", &px_bytes);
+        if (!px_img) {
+            panic("M140 self-test: /bin/posixtest is not on this disk");
+        }
+        const char *px_argv[] = {PATH_BIN_DIRECTORY "posixtest", 0};
+        task_t *px = process_spawnv("posixtest", px_img, px_bytes, px_argv);
+        long rc = px ? do_syscall(SYS_wait, (uint64_t)px->id, 0, 0) : -1;
+        kfree(px_img);
+        if (rc != 0) {
+            kernel_log_puts("[m140] posixtest exited ");
+            kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            kernel_log_puts(" - see user_space/binaries/posixtest.c for what each "
+                      "code means\n");
+            panic("M140 self-test: the POSIX surface PartitionAlloc asks for is "
+                  "not right on this machine");
+        }
+        kernel_log_puts("[m140] the surface a C++ runtime asks a libc for: "
+                  "pthread_atfork handlers running LIFO before a fork and FIFO "
+                  "after it, in the parent and in the child; a thread finding "
+                  "its own stack through pthread_getattr_np and the region "
+                  "containing a local of that thread; malloc_usable_size "
+                  "covering the request; a monotonic clock <unistd.h> now "
+                  "advertises; and this program's own ELF file parsed with "
+                  "this <elf.h> - the linker's e_ehsize and e_phentsize "
+                  "agreeing with these struct sizes, and the entry point "
+                  "landing inside an executable PT_LOAD - self-test passed.\n\n");
     }
 
     {

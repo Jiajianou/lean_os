@@ -1,6 +1,7 @@
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #include "syscall_wrappers.h"
 #include <stdlib.h>
@@ -331,10 +332,17 @@ int fcntl(int fd, int command, ...) {
 }
 
 pid_t fork(void) {
+    __lean_pthread_atfork_prepare();
     long r = sys_fork();
     if (r < 0) {
+        __lean_pthread_atfork_parent();
         errno = EAGAIN;
         return -1;
+    }
+    if (r == 0) {
+        __lean_pthread_atfork_child();
+    } else {
+        __lean_pthread_atfork_parent();
     }
     return (pid_t)r;
 }

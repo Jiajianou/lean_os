@@ -12,6 +12,7 @@ typedef int pthread_t;
 
 typedef struct {
     size_t stack_size;
+    void *stack_base;
 } pthread_attr_t;
 
 #define PTHREAD_STACK_DEFAULT (64u * 1024u)
@@ -80,10 +81,19 @@ int pthread_barrier_wait(pthread_barrier_t *b);
 
 int pthread_cancel(pthread_t thread);
 
+int pthread_atfork(void (*prepare)(void), void (*parent)(void),
+                   void (*child)(void));
+
+void __lean_pthread_atfork_prepare(void);
+void __lean_pthread_atfork_parent(void);
+void __lean_pthread_atfork_child(void);
+
 int pthread_kill(pthread_t thread, int sig);
 
 int pthread_attr_destroy(pthread_attr_t *attr);
 int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *out);
+int pthread_attr_getstack(const pthread_attr_t *attr, void **base, size_t *size);
+int pthread_getattr_np(pthread_t thread, pthread_attr_t *attr);
 
 int pthread_mutexattr_init(pthread_mutexattr_t *attr);
 int pthread_mutexattr_destroy(pthread_mutexattr_t *attr);

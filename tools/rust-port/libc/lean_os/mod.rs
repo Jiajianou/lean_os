@@ -165,6 +165,7 @@ s! {
 
     pub struct pthread_attr_t {
         pub stack_size: size_t,
+        pub stack_base: *mut c_void,
     }
 
     pub struct pthread_mutex_t {

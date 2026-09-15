@@ -385,7 +385,40 @@ int pthread_attr_init(pthread_attr_t *attribute) {
         return 22;
     }
     attribute->stack_size = 0;
+    attribute->stack_base = 0;
     return 0;
+}
+
+int pthread_attr_getstack(const pthread_attr_t *attribute, void **base,
+                          size_t *size) {
+    if (!attribute || !base || !size) {
+        return 22;
+    }
+    if (!attribute->stack_base) {
+        return 22;
+    }
+    *base = attribute->stack_base;
+    *size = attribute->stack_size;
+    return 0;
+}
+
+int pthread_getattr_np(pthread_t thread, pthread_attr_t *attribute) {
+    if (!attribute) {
+        return 22;
+    }
+    pthread_mutex_lock(&registry_lock);
+    for (int i = 0; i < MAX_THREADS; i++) {
+        if (registry[i].block && registry[i].tid == thread) {
+            attribute->stack_base = registry[i].block->stack_base;
+            attribute->stack_size = registry[i].block->stack_bytes;
+            pthread_mutex_unlock(&registry_lock);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&registry_lock);
+    attribute->stack_base = 0;
+    attribute->stack_size = 0;
+    return ENOSYS;
 }
 
 int pthread_attr_setstacksize(pthread_attr_t *attribute, size_t size) {
@@ -690,4 +723,57 @@ int pthread_cancel(pthread_t thread) {
     (void)thread;
     errno = ENOSYS;
     return ENOSYS;
+}
+
+#define ATFORK_MAX 32
+
+static struct {
+    void (*prepare)(void);
+    void (*parent)(void);
+    void (*child)(void);
+} atfork_handlers[ATFORK_MAX];
+
+static int atfork_count;
+static pthread_mutex_t atfork_lock = PTHREAD_MUTEX_INITIALIZER;
+
+int pthread_atfork(void (*prepare)(void), void (*parent)(void),
+                   void (*child)(void)) {
+    pthread_mutex_lock(&atfork_lock);
+    if (atfork_count == ATFORK_MAX) {
+        pthread_mutex_unlock(&atfork_lock);
+        return ENOMEM;
+    }
+    atfork_handlers[atfork_count].prepare = prepare;
+    atfork_handlers[atfork_count].parent = parent;
+    atfork_handlers[atfork_count].child = child;
+    atfork_count++;
+    pthread_mutex_unlock(&atfork_lock);
+    return 0;
+}
+
+void __lean_pthread_atfork_prepare(void) {
+    int count = atfork_count;
+    for (int i = count - 1; i >= 0; i--) {
+        if (atfork_handlers[i].prepare) {
+            atfork_handlers[i].prepare();
+        }
+    }
+}
+
+void __lean_pthread_atfork_parent(void) {
+    int count = atfork_count;
+    for (int i = 0; i < count; i++) {
+        if (atfork_handlers[i].parent) {
+            atfork_handlers[i].parent();
+        }
+    }
+}
+
+void __lean_pthread_atfork_child(void) {
+    int count = atfork_count;
+    for (int i = 0; i < count; i++) {
+        if (atfork_handlers[i].child) {
+            atfork_handlers[i].child();
+        }
+    }
 }

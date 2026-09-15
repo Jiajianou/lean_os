@@ -1,17 +1,18 @@
 #pragma once
 
 #include <stddef.h>
+#include <sys/cdefs.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-void *malloc(size_t size);
-int posix_memalign(void **out, size_t alignment, size_t size);
-void *aligned_alloc(size_t alignment, size_t size);
-void free(void *ptr);
-void *calloc(size_t count, size_t size);
-void *realloc(void *ptr, size_t size);
+void *malloc(size_t size) __THROW;
+int posix_memalign(void **out, size_t alignment, size_t size) __THROW;
+void *aligned_alloc(size_t alignment, size_t size) __THROW;
+void free(void *ptr) __THROW;
+void *calloc(size_t count, size_t size) __THROW;
+void *realloc(void *ptr, size_t size) __THROW;
 
 typedef struct { int quot; int rem; } div_t;
 typedef struct { long quot; long rem; } ldiv_t;

@@ -102,6 +102,64 @@ else
     check $? "Chromium's own build of std for x86_64-unknown-lean_os is x86-64 ELF"
     rm -rf "$WORK"
   fi
+
+  # M140. PartitionAlloc is what every Chromium Rust target depends on, through
+  # //build/rust/allocator, and M139 stopped here. These grade what a build
+  # produced rather than re-running one: the battery is already 400 seconds and
+  # a Chromium compile is minutes, so `tools/build-chromium.sh build/rust/allocator`
+  # is the step a person runs and this is the step that says whether it worked.
+  PA_OBJECT="$SRC/out/$OUT_NAME/obj/base/allocator/partition_allocator/src/partition_alloc/allocator_base/process_handle_posix.o"
+  if [ ! -f "$PA_OBJECT" ]; then
+    echo "chromium-test: PartitionAlloc has not been built - skipping" \
+         "(tools/build-chromium.sh build/rust/allocator)"
+  else
+    "${PREFIX}readelf" -h "$PA_OBJECT" |
+      grep -q "Advanced Micro Devices X86-64"
+    check $? "PartitionAlloc compiles for this target and is x86-64 ELF"
+
+    # The seam M140 added, asked of the preprocessor rather than of args.gn,
+    # because it is the preprocessor that acts on it: this platform is Linux
+    # as far as PartitionAlloc's feature gating goes and does NOT have Linux's
+    # system calls, and those are two different claims. IS_LINUX comes from
+    # build_config.h reading __lean_os__ and HAS_LINUX_KERNEL from the
+    # generated buildflags, so a probe that sees both agrees with what every
+    # PartitionAlloc translation unit sees.
+    WORK=$(mktemp -d)
+    cat > "$WORK/seam.cc" <<'PROBE'
+#include "partition_alloc/build_config.h"
+#include "partition_alloc/buildflags.h"
+static_assert(PA_BUILDFLAG(IS_LINUX), "GN gates this platform as Linux");
+static_assert(PA_BUILDFLAG(IS_POSIX), "and it is POSIX");
+static_assert(!PA_BUILDFLAG(HAS_LINUX_KERNEL),
+              "but it does not have Linux's system calls");
+static_assert(!PA_BUILDFLAG(PA_LIBC_GLIBC), "and its C library is not glibc");
+PROBE
+    "${PREFIX}clang++" -std=c++20 -fsyntax-only \
+      -I"$SRC/base/allocator/partition_allocator/src" \
+      -I"$SRC/out/$OUT_NAME/gen/base/allocator/partition_allocator/src" \
+      "$WORK/seam.cc" 2>"$WORK/seam.log"
+    check $? "IS_LINUX for the gating, HAS_LINUX_KERNEL=0 for the system calls"
+    [ -s "$WORK/seam.log" ] && cat "$WORK/seam.log" >&2
+    rm -rf "$WORK"
+  fi
+
+  # A real rust_static_library, with cxx bindings, is the claim M139 could not
+  # make. Its C++ half is compiled by x86_64-lean_os-clang and its Rust half by
+  # rustc for x86_64-unknown-lean_os, so an rlib here means both agree.
+  B32=$(ls "$SRC/out/$OUT_NAME"/obj/components/base32/libbase32_rust_*.rlib \
+        2>/dev/null | head -1)
+  if [ -z "$B32" ]; then
+    echo "chromium-test: no Chromium Rust library built - skipping" \
+         "(tools/build-chromium.sh components/base32:base32_rust)"
+  else
+    WORK=$(mktemp -d)
+    MEMBER=$("${PREFIX}ar" t "$B32" | grep -F ".o" | head -1)
+    ( cd "$WORK" && "${PREFIX}ar" x "$B32" "$MEMBER" &&
+      "${PREFIX}readelf" -h "$MEMBER" |
+        grep -q "Advanced Micro Devices X86-64" )
+    check $? "a Chromium rust_static_library builds for this target"
+    rm -rf "$WORK"
+  fi
 fi
 
 echo "chromium-test: $PASS passed, $FAIL failed"

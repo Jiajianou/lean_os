@@ -1,0 +1,20 @@
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/build_config.h b/base/allocator/partition_allocator/src/partition_alloc/build_config.h
+index a124902743..c8de0285d9 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/build_config.h
++++ b/base/allocator/partition_allocator/src/partition_alloc/build_config.h
+@@ -86,6 +86,15 @@
+ // We really are using glibc, not uClibc pretending to be glibc.
+ #define PA_LIBC_GLIBC
+ #endif
++#elif defined(__lean_os__)
++// lean_os. PartitionAlloc carries its own copy of the platform detection
++// rather than including //build/build_config.h, so this is the same decision
++// made twice and both have to say the same thing: GN is told this platform is
++// Linux, so PA_BUILDFLAG(IS_LINUX) has to agree or one target would be two
++// platforms. It is deliberately not folded into the __linux__ branch above -
++// that one includes <features.h> to ask which C library it got, and this
++// platform's answer is neither glibc nor uClibc.
++#define PA_IS_LINUX
+ #elif defined(_WIN32)
+ #define PA_IS_WIN
+ #elif defined(__Fuchsia__)

@@ -1,0 +1,192 @@
+diff --git a/base/allocator/partition_allocator/partition_alloc.gni b/base/allocator/partition_allocator/partition_alloc.gni
+index c899756a20..04882c9f9c 100644
+--- a/base/allocator/partition_allocator/partition_alloc.gni
++++ b/base/allocator/partition_allocator/partition_alloc.gni
+@@ -579,6 +579,19 @@ declare_args() {
+   raw_ptr_zero_on_destruct = raw_ptr_zero_on_destruct_default
+ }
+ 
++declare_args() {
++  # Whether this platform offers the Linux kernel's own interfaces - futex(2)
++  # and prctl(2) - rather than only POSIX.
++  #
++  # These are two different questions and is_linux answers only the first: an
++  # out-of-tree POSIX platform may set is_linux so that the thousands of
++  # is_linux conditions in the build gate the right things, and still have a
++  # system call surface of its own. PartitionAlloc has POSIX fallbacks for
++  # everything this gates - a pthread-based lock, and anonymous regions that
++  # simply go unnamed.
++  partition_alloc_has_linux_kernel = is_linux || is_chromeos || is_android
++}
++
+ declare_args() {
+   # Set to true to enable futex priority inheritance.
+   #
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/BUILD.gn b/base/allocator/partition_allocator/src/partition_alloc/BUILD.gn
+index c6a66ad44e..2b43547cb6 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/BUILD.gn
++++ b/base/allocator/partition_allocator/src/partition_alloc/BUILD.gn
+@@ -187,6 +187,7 @@ pa_buildflag_header("buildflags") {
+     "FORCE_ENABLE_RAW_PTR_EXCLUSION=$force_enable_raw_ptr_exclusion",
+     "FORWARD_THROUGH_MALLOC=$forward_through_malloc",
+     "HAS_64_BIT_POINTERS=$has_64_bit_pointers",
++    "HAS_LINUX_KERNEL=$partition_alloc_has_linux_kernel",
+     "HAS_MEMORY_TAGGING=$has_memory_tagging",
+     "IS_ANDROID=$is_android",
+     "IS_CHROMEOS=$is_chromeos",
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/linux_name_region.h b/base/allocator/partition_allocator/src/partition_alloc/linux_name_region.h
+index 7824c66ab7..1d5c51f238 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/linux_name_region.h
++++ b/base/allocator/partition_allocator/src/partition_alloc/linux_name_region.h
+@@ -9,11 +9,10 @@
+ 
+ // Ability to name anonymous VMAs is available on some, but not all Linux-based
+ // systems.
+-#if PA_BUILDFLAG(IS_ANDROID) || PA_BUILDFLAG(IS_LINUX) || \
+-    PA_BUILDFLAG(IS_CHROMEOS)
++#if PA_BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <sys/prctl.h>
+ 
+-#if (PA_BUILDFLAG(IS_LINUX) || PA_BUILDFLAG(IS_CHROMEOS)) && \
++#if PA_BUILDFLAG(HAS_LINUX_KERNEL) && \
+     !(defined(PR_SET_VMA) && defined(PR_SET_VMA_ANON_NAME))
+ 
+ // The PR_SET_VMA* symbols are originally from
+@@ -30,14 +29,13 @@
+ #define PR_SET_VMA_ANON_NAME 0
+ #endif
+ 
+-#endif  // (PA_BUILDFLAG(IS_LINUX) || PA_BUILDFLAG(IS_CHROMEOS)) &&
++#endif  // PA_BUILDFLAG(HAS_LINUX_KERNEL) &&
+         // !(defined(PR_SET_VMA) && defined(PR_SET_VMA_ANON_NAME))
+ 
+ #if defined(PR_SET_VMA) && defined(PR_SET_VMA_ANON_NAME)
+ #define LINUX_NAME_REGION 1
+ #endif
+ 
+-#endif  // PA_BUILDFLAG(IS_ANDROID) || PA_BUILDFLAG(IS_LINUX) ||
+-        // PA_BUILDFLAG(IS_CHROMEOS)
++#endif  // PA_BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+ #endif  // PARTITION_ALLOC_LINUX_NAME_REGION_H_
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_posix.h b/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_posix.h
+index 2c35ada4f8..29a9b6bf3c 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_posix.h
++++ b/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_posix.h
+@@ -24,7 +24,7 @@
+ #include "partition_alloc/partition_alloc_check.h"
+ #include "partition_alloc/thread_isolation/thread_isolation.h"
+ 
+-#if PA_BUILDFLAG(IS_ANDROID) || PA_BUILDFLAG(IS_LINUX)
++#if PA_BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <sys/prctl.h>
+ #endif
+ 
+@@ -339,7 +339,7 @@ void DiscardSystemPagesInternal(uintptr_t address, size_t length) {
+ bool SealSystemPagesInternal(uintptr_t address, size_t length) {
+   // TODO(sroettger): we either need to ensure that __NR_mseal is defined in the
+   // headers used by builders or define it ourselves.
+-#if PA_BUILDFLAG(IS_LINUX) && defined(__NR_mseal)
++#if PA_BUILDFLAG(HAS_LINUX_KERNEL) && defined(__NR_mseal)
+   long ret = syscall(__NR_mseal, address, length, 0);
+   return ret == 0;
+ #else
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/rand_util_posix.cc b/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/rand_util_posix.cc
+index a3874e5b41..dc62a0446b 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/rand_util_posix.cc
++++ b/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/rand_util_posix.cc
+@@ -91,7 +91,7 @@ PA_UNSAFE_BUFFER_USAGE void RandBytes(void* output, size_t output_length) {
+ #elif PA_BUILDFLAG(IS_APPLE)
+   PA_BASE_CHECK(CCRandomGenerateBytes(output, output_length) == kCCSuccess);
+ #else
+-#if PA_BUILDFLAG(IS_LINUX) || PA_BUILDFLAG(IS_CHROMEOS)
++#if PA_BUILDFLAG(HAS_LINUX_KERNEL) && !PA_BUILDFLAG(IS_ANDROID)
+   // Use `syscall(__NR_getrandom...` to avoid a dependency on
+   // `third_party/linux_syscall_support.h`.
+   //
+@@ -108,7 +108,7 @@ PA_UNSAFE_BUFFER_USAGE void RandBytes(void* output, size_t output_length) {
+     PA_MSAN_UNPOISON(output, output_length);
+     return;
+   }
+-#endif  // PA_BUILDFLAG(IS_LINUX) || PA_BUILDFLAG(IS_CHROMEOS)
++#endif  // PA_BUILDFLAG(HAS_LINUX_KERNEL) && !PA_BUILDFLAG(IS_ANDROID)
+   // If getrandom(2) above returned with an error and the /dev/urandom fallback
+   // took place on Linux/ChromeOS bots, they would fail with a CHECK in
+   // nacl_helper. The latter assumes that the number of open file descriptors
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/threading/platform_thread_posix.cc b/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/threading/platform_thread_posix.cc
+index ff4bf714e4..59d803287a 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/threading/platform_thread_posix.cc
++++ b/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/threading/platform_thread_posix.cc
+@@ -12,13 +12,14 @@
+ #include <cerrno>
+ #include <cstddef>
+ #include <cstdint>
++#include <type_traits>
+ 
+ #include "partition_alloc/build_config.h"
+ #include "partition_alloc/buildflags.h"
+ #include "partition_alloc/partition_alloc_base/logging.h"
+ #include "partition_alloc/partition_alloc_base/threading/platform_thread_internal_posix.h"
+ 
+-#if PA_BUILDFLAG(IS_LINUX) || PA_BUILDFLAG(IS_CHROMEOS)
++#if PA_BUILDFLAG(HAS_LINUX_KERNEL) && !PA_BUILDFLAG(IS_ANDROID)
+ #include <sys/syscall.h>
+ #include <atomic>
+ #endif
+@@ -29,13 +30,31 @@
+ 
+ namespace partition_alloc::internal::base {
+ 
++namespace {
++
++// pthread_t is an integer on some POSIX platforms and a pointer on others, so
++// the conversion that reaches a PlatformThreadId is not the same cast in both
++// cases: reinterpret_cast does not accept an integer that is not pointer-sized.
++template <typename T>
++  requires(std::is_integral_v<T>)
++PlatformThreadId ThreadIdFromPthread(T thread) {
++  return static_cast<PlatformThreadId>(thread);
++}
++
++template <typename T>
++PlatformThreadId ThreadIdFromPthread(T* thread) {
++  return static_cast<PlatformThreadId>(reinterpret_cast<uintptr_t>(thread));
++}
++
++}  // namespace
++
+ // static
+ PlatformThreadId PlatformThread::CurrentId() {
+   // Pthreads doesn't have the concept of a thread ID, so we have to reach down
+   // into the kernel.
+ #if PA_BUILDFLAG(IS_APPLE)
+   return pthread_mach_thread_np(pthread_self());
+-#elif PA_BUILDFLAG(IS_LINUX) || PA_BUILDFLAG(IS_CHROMEOS)
++#elif PA_BUILDFLAG(HAS_LINUX_KERNEL) && !PA_BUILDFLAG(IS_ANDROID)
+   // Unlike base/threading/platform_thread_posix.cc, we avoid using thread_local
+   // for thread_id caching. This prevents reentrancy issues within
+   // PartitionAlloc, as reported in crbug.com/476192650. Since
+@@ -61,7 +80,7 @@ PlatformThreadId PlatformThread::CurrentId() {
+ #elif PA_BUILDFLAG(IS_POSIX) && PA_BUILDFLAG(IS_AIX)
+   return pthread_self();
+ #elif PA_BUILDFLAG(IS_POSIX) && !PA_BUILDFLAG(IS_AIX)
+-  return reinterpret_cast<int64_t>(pthread_self());
++  return ThreadIdFromPthread(pthread_self());
+ #endif
+ }
+ 
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_config.h b/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_config.h
+index 58b66e834a..632e992286 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_config.h
++++ b/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_config.h
+@@ -50,9 +50,7 @@ static_assert(sizeof(void*) != 8, "");
+ 
+ // POSIX is not only UNIX, e.g. macOS and other OSes. We do use Linux-specific
+ // features such as futex(2).
+-#define PA_CONFIG_HAS_LINUX_KERNEL()                      \
+-  (PA_BUILDFLAG(IS_LINUX) || PA_BUILDFLAG(IS_CHROMEOS) || \
+-   PA_BUILDFLAG(IS_ANDROID))
++#define PA_CONFIG_HAS_LINUX_KERNEL() PA_BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+ // Need TLS support.
+ #define PA_CONFIG_THREAD_CACHE_SUPPORTED() \

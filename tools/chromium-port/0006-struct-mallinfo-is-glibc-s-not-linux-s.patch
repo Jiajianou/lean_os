@@ -1,0 +1,22 @@
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/shim/allocator_shim_default_dispatch_to_partition_alloc.cc b/base/allocator/partition_allocator/src/partition_alloc/shim/allocator_shim_default_dispatch_to_partition_alloc.cc
+index 8c7b16049d..488e286ea2 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/shim/allocator_shim_default_dispatch_to_partition_alloc.cc
++++ b/base/allocator/partition_allocator/src/partition_alloc/shim/allocator_shim_default_dispatch_to_partition_alloc.cc
+@@ -1253,7 +1253,7 @@ SHIM_ALWAYS_EXPORT int mallopt(int cmd, int value) __THROW {
+ 
+ #endif  // !PA_BUILDFLAG(IS_APPLE) && !PA_BUILDFLAG(IS_ANDROID)
+ 
+-#if PA_BUILDFLAG(IS_LINUX) || PA_BUILDFLAG(IS_CHROMEOS)
++#if PA_BUILDFLAG(PA_LIBC_GLIBC)
+ SHIM_ALWAYS_EXPORT struct mallinfo mallinfo(void) __THROW {
+   partition_alloc::SimplePartitionStatsDumper allocator_dumper;
+   // TODO(crbug.com/477186304): Dump stats for all alloc tokens, by accumulating
+@@ -1280,7 +1280,7 @@ SHIM_ALWAYS_EXPORT struct mallinfo mallinfo(void) __THROW {
+ 
+   return info;
+ }
+-#endif  // PA_BUILDFLAG(IS_LINUX) || PA_BUILDFLAG(IS_CHROMEOS)
++#endif  // PA_BUILDFLAG(PA_LIBC_GLIBC)
+ 
+ }  // extern "C"
+ 

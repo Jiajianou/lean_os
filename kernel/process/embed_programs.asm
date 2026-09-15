@@ -408,6 +408,12 @@ memfdtest_elf_start:
     incbin "build/memfdtest.elf"
 memfdtest_elf_end:
 
+global posixtest_elf_start
+global posixtest_elf_end
+posixtest_elf_start:
+    incbin "build/posixtest.elf"
+posixtest_elf_end:
+
 global desktop_applications_elf_start
 global desktop_applications_elf_end
 desktop_applications_elf_start:

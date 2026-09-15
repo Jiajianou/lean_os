@@ -85,7 +85,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
 
 THIRD_PARTY_PROGRAMS := whetstone
 
-USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest os pkgtest dirtest browsertest netrecv unixtest epolltest memfdtest
+USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest os pkgtest dirtest browsertest netrecv unixtest epolltest memfdtest posixtest
 USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
 
 LVGL_PROGRAMS := desktop_applications
@@ -413,6 +413,26 @@ sysroot-headers:
 	@cp -R system_api/include/. $(SYSROOT)/usr/include/
 	@cp user_space/library/syscall_wrappers.h $(SYSROOT)/usr/include/
 	@echo "sysroot-headers: $(SYSROOT) headers refreshed from the tree"
+
+# M140: and the library half, for the same reason. M139 could add a header
+# without rebuilding the world; adding a libc *function* still could not,
+# because the archive a cross compile links against lives in the same
+# directory `sysroot` deletes. pthread_atfork was the one that made this
+# necessary.
+.PHONY: sysroot-libc
+sysroot-libc: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
+	@if [ ! -d $(SYSROOT)/usr/lib ]; then \
+	  echo "sysroot-libc: no sysroot yet - run 'make sysroot'"; exit 1; fi
+	@cp $(LIBC_A) $(SYSROOT)/usr/lib/libc.a
+	@cp $(LIBC_SO) $(SYSROOT)/usr/lib/libc.so
+	@cp $(LD_SO) $(SYSROOT)/usr/lib/ld-lean.so
+	@cp $(UOBJ)/crt0.o $(SYSROOT)/usr/lib/crt1.o
+	@nasm -f elf64 -o $(UOBJ)/crt0-pie.o user_space/library/crt0-pie.asm
+	@cp $(UOBJ)/crt0-pie.o $(SYSROOT)/usr/lib/Scrt1.o
+	@cp $(UOBJ)/crti.o $(SYSROOT)/usr/lib/crti.o
+	@cp $(UOBJ)/crtn.o $(SYSROOT)/usr/lib/crtn.o
+	@cp user_space/library/user.ld $(SYSROOT)/usr/lib/lean_os.ld
+	@echo "sysroot-libc: $(SYSROOT) libraries refreshed from the tree"
 
 sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
 	@rm -rf $(SYSROOT)
