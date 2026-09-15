@@ -405,6 +405,23 @@ Several instruments, and none of them subsumes another:
   descriptor remapping across the exec, `SCM_RIGHTS` and memfd were all
   already here, and Chromium's launcher found them where POSIX says they
   are.
+- **A network stack.** Chromium's **//url and //net** build for this
+  machine and run on it: GURL's parser and canonicaliser, `net::IPAddress`,
+  `net::HttpUtil`, 594 objects in `libnet.a` and 26 in `liburl.a`. What
+  makes it interesting is not the C++ but what it asked a C library for -
+  and got: `<resolv.h>`'s `res_ninit(3)`, so Chromium reads **this
+  machine's own nameservers**, the ones M114's resolver assembles from
+  `/etc/resolv.conf` and from DHCP; `getifaddrs(3)`, so
+  `net::GetNetworkList` finds `eth0` without netlink; `<uchar.h>`, whose
+  `char16_t` conversions are graded against Python's own encoders over
+  **every code point Unicode has**; and something over a hundred socket
+  option numbers.
+
+  The Linux-only halves are not compiled and that is a decision rather than
+  a gap: `ProxyConfigServiceLinux` is inotify, `AddressTrackerLinux` is
+  rtnetlink, and //net's own fallbacks - a direct proxy configuration and
+  the getifaddrs interface list - are what a POSIX platform without them is
+  supposed to get.
 - **A libm for the format the hardware has.** `long double` on x86-64 is
   the x87's 80-bit extended type, and this libc has the C99 set for it -
   fifty-two functions, graded to the unit in the last place of a 64-bit

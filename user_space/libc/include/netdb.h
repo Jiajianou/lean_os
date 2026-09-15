@@ -45,6 +45,12 @@ struct hostent {
 #define EAI_SERVICE   -8
 #define EAI_MEMORY    -10
 #define EAI_SYSTEM    -11
+#define EAI_OVERFLOW  -12
+/* Not in POSIX, and glibc's own value for it. Programs that tell "no such
+   name" apart from "that name has no address of the family you asked for"
+   test for this one by name. */
+#define EAI_NODATA    -5
+#define EAI_ADDRFAMILY -9
 
 #define NI_NUMERICHOST 1
 #define NI_NUMERICSERV 2

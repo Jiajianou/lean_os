@@ -9,6 +9,19 @@ extern "C" {
 #endif
 
 typedef long          ssize_t;
+
+/* The BSD spellings. They are not POSIX and they are in every C library
+   that has ever been asked for them, because thirty years of network code
+   writes u_char. */
+typedef unsigned char      u_char;
+typedef unsigned short     u_short;
+typedef unsigned int       u_int;
+typedef unsigned long      u_long;
+typedef unsigned char      u_int8_t;
+typedef unsigned short     u_int16_t;
+typedef unsigned int       u_int32_t;
+typedef unsigned long long u_int64_t;
+typedef char              *caddr_t;
 typedef unsigned long ino_t;
 typedef unsigned int  mode_t;
 typedef long          off_t;

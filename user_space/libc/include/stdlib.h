@@ -5,6 +5,11 @@
 
 #include <locale.h>
 
+/* Where glibc puts it, and therefore where every build system that uses
+   alloca(3) expects to find it without saying so - SQLite's
+   SQLITE_USE_ALLOCA is one. */
+#include <alloca.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif

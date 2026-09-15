@@ -231,6 +231,8 @@ REQUIRED_MARKERS=(
   "[m148] Chromium's //mojo runs on this machine:"
   "[m149] two processes on one mojo connection:"
   "chromiummojo: done"
+  "[m150] Chromium's //url and //net run on this machine:"
+  "chromiumnet: done"
   "mathltest: done"
   "[m125] lvgl rendered"
   "[m125] a third-party toolkit on this compositor:"

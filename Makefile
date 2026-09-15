@@ -74,6 +74,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
                 $(UOBJ)/libc_fnmatch.o $(UOBJ)/libc_strings.o $(UOBJ)/libc_sysinfo.o \
                 $(UOBJ)/libc_regex.o $(UOBJ)/libc_syslog.o \
                 $(UOBJ)/libc_socket.o $(UOBJ)/libc_netdb.o \
+                $(UOBJ)/libc_resolv.o $(UOBJ)/libc_ifaddrs.o $(UOBJ)/libc_uchar.o \
                 $(UOBJ)/libc_wctype.o $(UOBJ)/libc_ctype.o \
                 $(UOBJ)/libc_fcntl.o $(UOBJ)/libc_scanf.o $(UOBJ)/libc_mntent.o \
                 $(UOBJ)/libc_xattr.o $(UOBJ)/libc_klog.o $(UOBJ)/libc_getopt.o $(UOBJ)/libc_reboot.o $(UOBJ)/libc_tls.o \
@@ -447,6 +448,13 @@ sysroot-libc: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ
 	@cp $(UOBJ)/crti.o $(SYSROOT)/usr/lib/crti.o
 	@cp $(UOBJ)/crtn.o $(SYSROOT)/usr/lib/crtn.o
 	@cp user_space/library/user.ld $(SYSROOT)/usr/lib/lean_os.ld
+	@# The empty archives `sysroot` makes, in case this rule is the first
+	@# thing run against a sysroot that predates one of them.
+	@for stub in libm libdl librt libpthread libresolv; do \
+	  if [ ! -f $(SYSROOT)/usr/lib/$$stub.a ]; then \
+	    $(AR) rcs $(SYSROOT)/usr/lib/$$stub.a 2>/dev/null || true; \
+	  fi; \
+	done
 	@echo "sysroot-libc: $(SYSROOT) libraries refreshed from the tree"
 
 sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
@@ -513,6 +521,13 @@ sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crt
 	@rm -f $(SYSROOT)/usr/lib/librt.a $(SYSROOT)/usr/lib/libpthread.a
 	@$(AR) rcs $(SYSROOT)/usr/lib/librt.a 2>/dev/null || true
 	@$(AR) rcs $(SYSROOT)/usr/lib/libpthread.a 2>/dev/null || true
+	@# M150: libresolv.a, empty, for the fourth time. Chromium's //net
+	@# writes `-lresolv` because that is where glibc kept res_ninit(3)
+	@# until 2.34 folded it into libc; this libc never split it out
+	@# (user_space/libc/src/resolv.c is in libc.a), and musl and modern
+	@# glibc both answer -lresolv with a stub for the same reason.
+	@rm -f $(SYSROOT)/usr/lib/libresolv.a
+	@$(AR) rcs $(SYSROOT)/usr/lib/libresolv.a 2>/dev/null || true
 	@# M100: and the library stack, if it has been built.
 	@#
 	@# The `rm -rf` at the top of this rule is right and stays: a

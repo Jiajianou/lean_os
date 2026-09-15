@@ -1,0 +1,13 @@
+# A program that uses //url and //net, and that this machine runs. The
+# network stack is the layer a browser is before it is anything else, and
+# the interesting half of it here is what it asks a C library for: the BIND
+# resolver, getifaddrs(3), and a hundred socket option numbers.
+
+executable("nettest") {
+  sources = [ "chromium_net_test.cc" ]
+  deps = [
+    "//base",
+    "//net",
+    "//url",
+  ]
+}

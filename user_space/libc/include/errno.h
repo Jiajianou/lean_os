@@ -92,6 +92,17 @@ int *__errno_location(void);
 #define ENOTRECOVERABLE 131
 #define EWOULDBLOCK EAGAIN
 
+/* The rest of the socket errors, at the numbers Linux gives them - which
+   is what a program that stores an errno in a file or sends it over a
+   wire expects to read back. Nothing here RETURNS these yet; they exist
+   because somebody else's error table names them. */
+#define EUSERS       87
+#define ESHUTDOWN    108
+#define EHOSTDOWN    112
+#define EPFNOSUPPORT 96
+#define EREMOTE      66
+#define ENOPKG       65
+
 #ifdef __cplusplus
 }
 #endif

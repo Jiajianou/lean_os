@@ -1,0 +1,21 @@
+diff --git a/net/cert/cert_verify_proc.cc b/net/cert/cert_verify_proc.cc
+index 042b35bec9..1bae2f17d5 100644
+--- a/net/cert/cert_verify_proc.cc
++++ b/net/cert/cert_verify_proc.cc
+@@ -419,7 +419,15 @@ scoped_refptr<CertVerifyProc> CertVerifyProc::CreateBuiltinWithChromeRootStore(
+   return CreateCertVerifyProcBuiltin(
+       std::move(cert_net_fetcher), std::move(crl_set), std::move(ct_verifier),
+       std::move(ct_policy_enforcer),
+-#if BUILDFLAG(IS_CHROMEOS)
++// CreateSslSystemTrustStoreChromeRoot wraps a system trust store for the
++// user's own roots, and system_trust_store.h declares it only for the
++// platforms that have one. A platform with the Chrome Root Store and no
++// system store of its own gets the Chrome-only trust store that ChromeOS
++// already uses - so the condition here is the same one the declaration is
++// under, rather than a tighter one.
++#if BUILDFLAG(IS_CHROMEOS) ||                                 \
++    !(BUILDFLAG(USE_NSS_SERVER_CERTS) || BUILDFLAG(IS_MAC) || \
++      BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID))
+       CreateChromeOnlySystemTrustStore(std::move(chrome_root)),
+ #else
+       CreateSslSystemTrustStoreChromeRoot(std::move(chrome_root)),

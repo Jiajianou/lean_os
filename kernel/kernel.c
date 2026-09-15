@@ -8816,6 +8816,100 @@ static void boot_selftests_system(void) {
     }
 
     {
+        os_stat_t cn;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/chromiumnet", (uint64_t)&cn, 0) != 0) {
+            kernel_log_puts("[m150] /bin/chromiumnet is not on this image - skipped. "
+                       "tools/build-chromium.sh lean_os links it out of //url's "
+                       "and //net's own objects and tools/chromium-test.sh "
+                       "installs it.\n\n");
+        } else {
+            int cn_pipe[2];
+            if (do_syscall(SYS_pipe, (uint64_t)cn_pipe, 0, 0) != 0) {
+                panic("M150 self-test: could not make a pipe for the report");
+            }
+            do_syscall(SYS_dup2, (uint64_t)cn_pipe[1], 1, 0);
+            do_syscall(SYS_dup2, (uint64_t)cn_pipe[1], 2, 0);
+
+            size_t cn_bytes = 0;
+            uint8_t *cn_image = read_program(PATH_BIN_DIRECTORY "chromiumnet",
+                                             &cn_bytes);
+            if (!cn_image) {
+                panic("M150 self-test: /bin/chromiumnet could not be read");
+            }
+            const char *cn_argv[] = {PATH_BIN_DIRECTORY "chromiumnet", 0};
+            task_t *cnt = process_spawnv("chromiumnet", cn_image, cn_bytes,
+                                         cn_argv);
+            kfree(cn_image);
+
+            static char cn_out[8192];
+            size_t cn_got = 0;
+            long cn_rc = -1;
+            long cn_deadline = (long)pit_get_ticks() + 120 * PIT_HZ;
+            for (;;) {
+                long avail = do_syscall(SYS_pipe_poll, (uint64_t)cn_pipe[0], 0, 0);
+                if (avail > 0 && cn_got < sizeof(cn_out) - 1) {
+                    size_t room = sizeof(cn_out) - 1 - cn_got;
+                    long n = do_syscall(SYS_read, (uint64_t)cn_pipe[0],
+                                        (uint64_t)(cn_out + cn_got),
+                                        (uint64_t)((size_t)avail < room
+                                                   ? (size_t)avail : room));
+                    if (n > 0) {
+                        cn_got += (size_t)n;
+                    }
+                    continue;
+                }
+                long done = cnt ? do_syscall(SYS_wait_nb, (uint64_t)cnt->id, 0, 0)
+                                : -1;
+                if (done != -2) {
+                    cn_rc = done;
+                    long n;
+                    while ((n = do_syscall(SYS_pipe_poll, (uint64_t)cn_pipe[0], 0, 0)) > 0 &&
+                           cn_got < sizeof(cn_out) - 1) {
+                        size_t room = sizeof(cn_out) - 1 - cn_got;
+                        long r = do_syscall(SYS_read, (uint64_t)cn_pipe[0],
+                                            (uint64_t)(cn_out + cn_got),
+                                            (uint64_t)((size_t)n < room ? (size_t)n : room));
+                        if (r <= 0) {
+                            break;
+                        }
+                        cn_got += (size_t)r;
+                    }
+                    break;
+                }
+                if ((long)pit_get_ticks() > cn_deadline) {
+                    break;
+                }
+                do_syscall(SYS_yield, 0, 0, 0);
+            }
+            cn_out[cn_got] = '\0';
+            do_syscall(SYS_close, (uint64_t)cn_pipe[0], 0, 0);
+            do_syscall(SYS_close, (uint64_t)cn_pipe[1], 0, 0);
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[1]);
+            scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[2]);
+            scheduler_current()->descriptor_table->slots[2].type = FILE_DESCRIPTOR_STDOUT;
+
+            for (char *line = cn_out; *line;) {
+                char *end = line;
+                while (*end && *end != '\n') {
+                    end++;
+                }
+                char saved = *end;
+                *end = '\0';
+                kernel_log_puts(line);
+                kernel_log_putc('\n');
+                *end = saved;
+                line = saved ? end + 1 : end;
+            }
+            if (cn_rc != 0) {
+                panic("M150 self-test: Chromium's //url and //net do not work "
+                      "on this machine - see the chromiumnet lines above");
+            }
+            kernel_log_putc('\n');
+        }
+    }
+
+    {
         os_stat_t ct;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/clangtest", (uint64_t)&ct, 0) != 0) {
             kernel_log_puts("[m121] /bin/clangtest is not on this image - skipped. "

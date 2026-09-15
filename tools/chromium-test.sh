@@ -405,6 +405,59 @@ PROBE
       check $? "installed as /bin/chromiummojo - the [m148] and [m149] boot self-tests run it"
     fi
   fi
+
+  # M150. //url and //net.
+  NETPROGRAM="$SRC/out/$OUT_NAME/nettest"
+  if [ ! -x "$NETPROGRAM" ]; then
+    echo "chromium-test: //net has not been linked - skipping" \
+         "(tools/build-chromium.sh lean_os)"
+  else
+    NETCOUNT=$("${PREFIX}ar" t "$SRC/out/$OUT_NAME/obj/net/libnet.a" | wc -l | tr -d ' ')
+    [ "$NETCOUNT" -gt 500 ]
+    check $? "//net built $NETCOUNT objects into libnet.a"
+
+    URLCOUNT=$("${PREFIX}ar" t "$SRC/out/$OUT_NAME/obj/url/liburl.a" | wc -l | tr -d ' ')
+    [ "$URLCOUNT" -gt 20 ]
+    check $? "and //url built $URLCOUNT"
+
+    SHAPE=$("${PREFIX}readelf" -h "$NETPROGRAM" |
+            awk '/^  Type:/{t=$2} /Entry point/{e=$4} END{print t, e}')
+    case "$SHAPE" in
+      "EXEC 0x80"*) true;;
+      *) false;;
+    esac
+    check $? "a program linked from //net is an EXEC in this OS's image region ($SHAPE)"
+
+    # getifaddrs rather than netlink, and res_ninit rather than nothing.
+    # Both are symbol-table questions because the wrong choice links: the
+    # netlink path would compile against headers this machine does not have,
+    # and it is only absent because //net's own condition was moved onto
+    # HAS_LINUX_KERNEL.
+    NETOBJ="$SRC/out/$OUT_NAME/obj/net/net"
+    [ -f "$NETOBJ/network_interfaces_getifaddrs.o" ]
+    check $? "with net's getifaddrs interface list compiled"
+
+    [ ! -f "$NETOBJ/address_tracker_linux.o" ] &&
+      [ ! -f "$NETOBJ/network_interfaces_linux.o" ]
+    check $? "and neither the netlink address tracker nor its interface list"
+
+    RESOLVED=$("${PREFIX}nm" "$NETPROGRAM" | grep -cE " [UT] getifaddrs\$")
+    [ "$RESOLVED" -gt 0 ]
+    check $? "and getifaddrs itself, which is this libc's ($RESOLVED)"
+
+    RESOLV=$("${PREFIX}nm" -C "$NETPROGRAM" | grep -cE " T res_ninit\$")
+    [ "$RESOLV" = "1" ]
+    check $? "and exactly one res_ninit, this libc's ($RESOLV)"
+
+    IMAGE="$ROOT/build/os-image.bin"
+    if [ ! -f "$IMAGE" ]; then
+      echo "chromium-test: no $IMAGE - run make, then this again"
+    else
+      make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
+      "$ROOT/build/leanfs-put" "$IMAGE" "$NETPROGRAM" /bin/chromiumnet > /dev/null
+      check $? "installed as /bin/chromiumnet - the [m150] boot self-test runs it"
+    fi
+  fi
 fi
 
 echo "chromium-test: $PASS passed, $FAIL failed"

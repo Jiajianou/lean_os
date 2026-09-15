@@ -1,0 +1,35 @@
+diff --git a/net/dns/dns_reloader.cc b/net/dns/dns_reloader.cc
+index e95bf654c6..ea4d050f0d 100644
+--- a/net/dns/dns_reloader.cc
++++ b/net/dns/dns_reloader.cc
+@@ -8,7 +8,11 @@
+ 
+ // If we're not on a POSIX system, it's not even safe to try to include resolv.h
+ // - there's not guarantee it exists at all. :(
+-#if BUILDFLAG(IS_POSIX)
++//
++// The same is true of a POSIX system that simply does not ship it: the BIND
++// resolver interface is not in POSIX, so asking the preprocessor whether the
++// header is there says exactly what this comment already says.
++#if BUILDFLAG(IS_POSIX) && __has_include(<resolv.h>)
+ 
+ #include <resolv.h>
+ 
+diff --git a/net/dns/public/resolv_reader.cc b/net/dns/public/resolv_reader.cc
+index b0b63a6c23..7bb94494b8 100644
+--- a/net/dns/public/resolv_reader.cc
++++ b/net/dns/public/resolv_reader.cc
+@@ -79,7 +79,12 @@ std::optional<std::vector<IPEndPoint>> GetNameservers(
+     }
+     nameservers.push_back(ipe);
+   }
+-#elif BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)
++// The _u._ext.nsaddrs half of this is glibc's own extension to res_state
++// rather than anything the BIND interface defines - which is what the
++// static_assert below is really checking for. A C library whose res_state
++// is the classic one keeps every nameserver in nsaddr_list, so it takes
++// the generic branch further down.
++#elif (BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)) && defined(__GLIBC__)
+   static_assert(std::extent<decltype(res.nsaddr_list)>() >= MAXNS &&
+                     std::extent<decltype(res._u._ext.nsaddrs)>() >= MAXNS,
+                 "incompatible libresolv res_state");

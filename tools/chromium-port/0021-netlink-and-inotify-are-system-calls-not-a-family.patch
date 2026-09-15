@@ -1,0 +1,350 @@
+--- a/net/BUILD.gn
++++ b/net/BUILD.gn
+@@ -1423,19 +1423,32 @@
+     ]
+   }
+ 
+-  if (is_linux) {
++  # inotify(7) and netlink, rather than the Linux family. The proxy config
++  # service watches its configuration files with inotify and the network
++  # change notifier reads rtnetlink, so what decides whether these are
++  # compiled is whether those interfaces are there. Both of their callers -
++  # CreateSystemProxyConfigService and NetworkChangeNotifier::Create -
++  # already have a branch for a platform that has neither.
++  if (has_linux_kernel) {
+     sources += [
+       "base/network_change_notifier_linux.cc",
+       "base/network_change_notifier_linux.h",
+       "proxy_resolution/proxy_config_service_linux.cc",
+       "proxy_resolution/proxy_config_service_linux.h",
+     ]
++  }
++
++  if (is_linux) {
+     if (use_glib) {
+       deps += [ "//ui/base/glib" ]
+     }
+   }
+ 
+-  if (is_linux || is_chromeos || is_android) {
++  # rtnetlink, rather than the Linux family: these read interface and address
++  # state through Linux's own socket and its headers under linux/. A POSIX
++  # platform without them enumerates interfaces through getifaddrs(3)
++  # further down this file.
++  if (has_linux_kernel || is_android) {
+     sources += [
+       "base/address_map_linux.cc",
+       "base/address_map_linux.h",
+@@ -1443,11 +1456,16 @@
+       "base/address_tracker_linux.h",
+       "base/network_interfaces_linux.cc",
+       "base/network_interfaces_linux.h",
+-      "base/platform_mime_util_linux.cc",
+     ]
+   }
+ 
+-  if (is_linux) {
++  # A table of file extensions, which is about the desktop rather than the
++  # kernel.
++  if (is_linux || is_chromeos || is_android) {
++    sources += [ "base/platform_mime_util_linux.cc" ]
++  }
++
++  if (has_linux_kernel) {
+     sources += [
+       "base/address_map_cache_linux.cc",
+       "base/address_map_cache_linux.h",
+@@ -1593,7 +1611,10 @@
+     sources += [ "disk_cache/blockfile/mapped_file_posix.cc" ]
+   }
+ 
+-  if (is_android || is_chromeos || is_linux) {
++  # The passive notifier keeps an AddressMapCacheLinux, which is the netlink
++  # address map another process filled in - so it needs the same interface
++  # the tracker does.
++  if (is_android || is_chromeos || (is_linux && has_linux_kernel)) {
+     sources += [
+       "base/network_change_notifier_passive.cc",
+       "base/network_change_notifier_passive.h",
+@@ -1625,8 +1646,10 @@
+     ]
+   }
+ 
+-  # Use getifaddrs() on POSIX platforms, except Linux.
+-  if (is_posix && !is_linux && !is_chromeos) {
++  # Use getifaddrs() on POSIX platforms whose interfaces are not enumerated
++  # through Linux's own netlink socket - which is a question about the
++  # kernel rather than about the family.
++  if (is_posix && !is_chromeos && (!is_linux || !has_linux_kernel)) {
+     sources += [
+       "base/network_interfaces_getifaddrs.cc",
+       "base/network_interfaces_getifaddrs.h",
+diff --git a/net/base/network_change_notifier.cc b/net/base/network_change_notifier.cc
+index 6294bbec43..ec86757608 100644
+--- a/net/base/network_change_notifier.cc
++++ b/net/base/network_change_notifier.cc
+@@ -33,7 +33,7 @@
+ 
+ #if BUILDFLAG(IS_WIN)
+ #include "net/base/network_change_notifier_win.h"
+-#elif BUILDFLAG(IS_LINUX)
++#elif BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "net/base/network_change_notifier_linux.h"
+ #include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
+ #elif BUILDFLAG(IS_APPLE)
+@@ -305,7 +305,7 @@ std::unique_ptr<NetworkChangeNotifier> NetworkChangeNotifier::CreateIfNeeded(
+ #elif BUILDFLAG(IS_CHROMEOS)
+   return std::make_unique<NetworkChangeNotifierPassive>(initial_type,
+                                                         initial_subtype);
+-#elif BUILDFLAG(IS_LINUX)
++#elif BUILDFLAG(HAS_LINUX_KERNEL)
+   return std::make_unique<NetworkChangeNotifierLinux>(
+       absl::flat_hash_set<std::string>());
+ #elif BUILDFLAG(IS_APPLE)
+@@ -525,7 +525,8 @@ base::cstring_view NetworkChangeNotifier::IPAddressChangeTypeToString(
+   return kChangeTypeNames[type];
+ }
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ // static
+ AddressMapOwnerLinux* NetworkChangeNotifier::GetAddressMapOwner() {
+   return g_network_change_notifier
+@@ -906,7 +907,8 @@ NetworkChangeNotifier::NetworkChangeNotifier(
+   }
+ }
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ AddressMapOwnerLinux* NetworkChangeNotifier::GetAddressMapOwnerInternal() {
+   return nullptr;
+ }
+diff --git a/net/base/network_change_notifier.h b/net/base/network_change_notifier.h
+index 60a90a6929..8039f91ef4 100644
+--- a/net/base/network_change_notifier.h
++++ b/net/base/network_change_notifier.h
+@@ -20,7 +20,8 @@
+ #include "net/base/network_handle.h"
+ #include "third_party/perfetto/include/perfetto/tracing/track.h"
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "net/base/address_map_linux.h"
+ #endif
+ 
+@@ -499,7 +500,8 @@ class NET_EXPORT NetworkChangeNotifier {
+   // packets sent lazily.
+   static bool IsDefaultNetworkActive();
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+   // Returns the AddressTrackerLinux if present.
+   static AddressMapOwnerLinux* GetAddressMapOwner();
+ #endif
+@@ -687,7 +689,8 @@ class NET_EXPORT NetworkChangeNotifier {
+       SystemDnsConfigChangeNotifier* system_dns_config_notifier = nullptr,
+       bool omit_observers_in_constructor_for_testing = false);
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+   // Returns the AddressMapOwnerLinux if present.
+   virtual AddressMapOwnerLinux* GetAddressMapOwnerInternal();
+ #endif
+diff --git a/net/dns/address_sorter_posix.cc b/net/dns/address_sorter_posix.cc
+index a7a4faf0a6..424e413b46 100644
+--- a/net/dns/address_sorter_posix.cc
++++ b/net/dns/address_sorter_posix.cc
+@@ -50,7 +50,8 @@
+ #include "net/socket/client_socket_factory.h"
+ #include "net/socket/datagram_client_socket.h"
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "net/base/address_tracker_linux.h"
+ #endif
+ 
+@@ -499,7 +500,8 @@ void AddressSorterPosix::OnIPAddressChanged(
+     NetworkChangeNotifier::IPAddressChangeType change_type) {
+   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+   source_map_.clear();
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+   // TODO(crbug.com/40263501): This always returns nullptr on ChromeOS.
+   const AddressMapOwnerLinux* address_map_owner =
+       NetworkChangeNotifier::GetAddressMapOwner();
+diff --git a/net/dns/loopback_only.cc b/net/dns/loopback_only.cc
+index 3c6e502609..7cf2bc695d 100644
+--- a/net/dns/loopback_only.cc
++++ b/net/dns/loopback_only.cc
+@@ -27,7 +27,7 @@
+ #endif  // BUILDFLAG(IS_ANDROID)
+ #endif  // BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <linux/rtnetlink.h>
+ #include "net/base/address_map_linux.h"
+ #include "net/base/address_tracker_linux.h"
+@@ -98,7 +98,7 @@ bool HaveOnlyLoopbackAddressesSlow() {
+ #endif  // defined(various platforms)
+ }
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ // This implementation can run on the main thread as it will not block.
+ bool HaveOnlyLoopbackAddressesFast(AddressMapOwnerLinux* address_map_owner) {
+   // The AddressMapOwnerLinux has already cached all the information necessary
+@@ -132,7 +132,7 @@ bool HaveOnlyLoopbackAddressesFast(AddressMapOwnerLinux* address_map_owner) {
+ 
+ void RunHaveOnlyLoopbackAddressesJob(
+     base::OnceCallback<void(bool)> finished_cb) {
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+   // On Linux, this check can be fast if it accesses only network information
+   // that's cached by NetworkChangeNotifier, so there's no need to post this
+   // task to a thread pool. If HaveOnlyLoopbackAddressesFast() *is* posted to a
+diff --git a/net/proxy_resolution/proxy_config_service.cc b/net/proxy_resolution/proxy_config_service.cc
+index e32f7dd46b..2bcf312d12 100644
+--- a/net/proxy_resolution/proxy_config_service.cc
++++ b/net/proxy_resolution/proxy_config_service.cc
+@@ -19,20 +19,20 @@
+ #include "net/proxy_resolution/proxy_config_service_ios.h"
+ #elif BUILDFLAG(IS_MAC)
+ #include "net/proxy_resolution/proxy_config_service_mac.h"
+-#elif BUILDFLAG(IS_LINUX)
++#elif BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "net/proxy_resolution/proxy_config_service_linux.h"
+ #elif BUILDFLAG(IS_ANDROID)
+ #include "net/proxy_resolution/proxy_config_service_android.h"
+ #endif
+ 
+-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_APPLE) || BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "net/traffic_annotation/network_traffic_annotation.h"
+ #endif
+ 
+ namespace net {
+ 
+ namespace {
+-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_APPLE) || BUILDFLAG(HAS_LINUX_KERNEL)
+ constexpr net::NetworkTrafficAnnotationTag kSystemProxyConfigTrafficAnnotation =
+     net::DefineNetworkTrafficAnnotation("proxy_config_system", R"(
+       semantics {
+@@ -108,7 +108,7 @@ ProxyConfigService::CreateSystemProxyConfigService(
+              << "profile_io_data.cc::CreateProxyConfigService and this should "
+              << "be used only for examples.";
+   return std::make_unique<UnsetProxyConfigService>();
+-#elif BUILDFLAG(IS_LINUX)
++#elif BUILDFLAG(HAS_LINUX_KERNEL)
+   std::unique_ptr<ProxyConfigServiceLinux> linux_config_service(
+       std::make_unique<ProxyConfigServiceLinux>());
+ 
+diff --git a/net/socket/udp_socket_posix.cc b/net/socket/udp_socket_posix.cc
+index b1f48b0b05..1c2b2670b9 100644
+--- a/net/socket/udp_socket_posix.cc
++++ b/net/socket/udp_socket_posix.cc
+@@ -87,7 +87,7 @@ namespace {
+ constexpr int kBindRetries = 10;
+ constexpr int kPortStart = 1024;
+ constexpr int kPortEnd = 65535;
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+ // Maximum number of UDP packets that can be read at a time from recvmmsg.
+ constexpr size_t kMaxMmsgMessages = 128;
+ #endif
+@@ -277,7 +277,7 @@ int UDPSocketPosix::AdoptOpenedSocket(AddressFamily address_family,
+   return ConfigureOpenedSocket();
+ }
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+ namespace {
+ 
+ SetSocketOptionGroResult GetSetSocketOptionGroResult(int setsockopt_rv,
+@@ -317,7 +317,7 @@ void RecordRecvMmsgPacketsRead(size_t packet_count) {
+ #endif
+ 
+ void UDPSocketPosix::ConfigureGroSocketOption() {
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+   CHECK_NE(socket_, kInvalidSocket);
+   CHECK_EQ(gro_status_, GroStatus::kUnconfigured);
+@@ -530,7 +530,7 @@ base::expected<DatagramsMetadata, Error> UDPSocketPosix::ReadMultiple(
+   // when reading coalesced superpackets (e.g. UDP GRO).
+   CHECK_GE(buf_len, kMinimumReadMultipleBufferSize);
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+   if (gro_status_ == GroStatus::kUnconfigured) {
+     if (base::FeatureList::IsEnabled(features::kEnableUdpGro)) {
+       ConfigureGroSocketOption();
+@@ -834,13 +834,18 @@ int UDPSocketPosix::SetRecvTos() {
+ }
+ 
+ void UDPSocketPosix::SetMsgConfirm(bool confirm) {
+-#if !BUILDFLAG(IS_APPLE)
++// MSG_CONFIRM is a Linux send flag rather than a POSIX one, so the question
++// is whether the C library has it - which is what asking the preprocessor
++// for the name says, on Apple and on everybody else at once.
++#if defined(MSG_CONFIRM)
+   if (confirm) {
+     sendto_flags_ |= MSG_CONFIRM;
+   } else {
+     sendto_flags_ &= ~MSG_CONFIRM;
+   }
+-#endif  // !BUILDFLAG(IS_APPLE)
++#else
++  (void)confirm;
++#endif  // defined(MSG_CONFIRM)
+ }
+ 
+ int UDPSocketPosix::AllowAddressReuse() {
+@@ -1138,7 +1143,7 @@ void UDPSocketPosix::FillResultFromMessageHeader(struct msghdr* msg,
+       base::byte_span_from_ref(tclass_val).copy_from(cmsg_data_as_span);
+       result->tos = static_cast<uint8_t>(tclass_val);
+     }
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+     else if (gro_status_ == GroStatus::kEnabled &&
+              cmsg->cmsg_level == SOL_UDP && cmsg->cmsg_type == UDP_GRO &&
+              cmsg->cmsg_len >= CMSG_LEN(sizeof(int)) &&
+@@ -1171,7 +1176,7 @@ base::expected<DatagramsMetadata, Error> UDPSocketPosix::InternalReadMultiple(
+   if (socket_ == kInvalidSocket) {
+     return base::unexpected(ERR_SOCKET_NOT_CONNECTED);
+   }
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+   if (gro_status_ == GroStatus::kEnabled) {
+     return InternalReadMultipleWithGro(buffer, buf_len, maximum_packet_size);
+   }
+@@ -1182,7 +1187,7 @@ base::expected<DatagramsMetadata, Error> UDPSocketPosix::InternalReadMultiple(
+ #endif
+ }
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+ base::expected<DatagramsMetadata, Error> UDPSocketPosix::InternalRecvMmsg(
+     IOBuffer* buffer,
+     size_t num_messages,
+diff --git a/net/socket/udp_socket_posix.h b/net/socket/udp_socket_posix.h
+index e1e59b1217..986f5d6d78 100644
+--- a/net/socket/udp_socket_posix.h
++++ b/net/socket/udp_socket_posix.h
+@@ -451,7 +451,7 @@ class NET_EXPORT UDPSocketPosix {
+       size_t maximum_packet_size);
+ 
+   // recvmmsg() and GRO are only available on Linux, ChromeOS, and Android.
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+   base::expected<DatagramsMetadata, Error> InternalReadMultipleWithGro(
+       IOBuffer* buffer,
+       size_t buf_len,

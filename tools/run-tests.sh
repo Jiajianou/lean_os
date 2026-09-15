@@ -109,7 +109,8 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
   run_stage "the long double library, onto the image" \
     ./tools/math-long-double-test.sh
 
-  run_stage "Chromium's //base, onto the image" ./tools/chromium-test.sh
+  run_stage "Chromium's //base, //mojo and //net, onto the image" \
+    ./tools/chromium-test.sh
 fi
 
 if [ "$TIER" = "full" ]; then
@@ -128,6 +129,7 @@ run_stage "printf, against the host's" ./tools/printf-test.sh
 run_stage "the FILE layer, off the machine" ./tools/stdio-test.sh
 run_stage "packages, against the host's sha256 and cmp" ./tools/pkg-test.sh
 run_stage "iconv, against the host's" ./tools/iconv-test.sh
+run_stage "uchar, against Python's own encoders" ./tools/uchar-test.sh
 run_stage "realpath, against the host's" ./tools/realpath-test.sh
 run_stage "where a thread_local is, against the linker's own answer" ./tools/tls-layout-test.sh
 run_stage "set-resolution's modes are the driver's" ./tools/set-resolution.sh --check
