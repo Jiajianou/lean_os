@@ -26,6 +26,8 @@ float atanf(float x);
 float roundf(float x);
 float expf(float x);
 float nextafterf(float x, float y);
+float atan2f(float y, float x);
+float ldexpf(float x, int exponent);
 
 double fabs(double x);
 double sqrt(double x);
@@ -63,6 +65,12 @@ double pow(double x, double y);
 #define FP_SUBNORMAL 3
 #define FP_NORMAL    4
 
+#define FP_ILOGB0   (-2147483647 - 1)
+#define FP_ILOGBNAN (-2147483647 - 1)
+
+#define HUGE_VALF (__builtin_huge_valf())
+#define HUGE_VALL (__builtin_huge_vall())
+
 double frexp(double x, int *exp);
 double ldexp(double x, int exp);
 double modf(double x, double *ipart);
@@ -93,6 +101,67 @@ double nextafter(double x, double y);
 double cbrt(double x);
 double exp2(double x);
 double fma(double x, double y, double z);
+
+/* M142. long double on this target is the x87 80-bit extended format, which
+   is a different type from double rather than a spelling of it, and
+   user_space/libc/src/math_long_double.c is x87 instructions for that
+   reason. erfl, erfcl, lgammal, tgammal, fmal and strtold are deliberately
+   absent: each needs an algorithm at 64-bit mantissa that this project has
+   not written, and a (long double) cast of the double one would be a
+   precision claim the compiler would let through. The condition for
+   building them is a program on this machine that calls one. */
+long double fabsl(long double x);
+long double copysignl(long double x, long double y);
+long double sqrtl(long double x);
+long double truncl(long double x);
+long double floorl(long double x);
+long double ceill(long double x);
+long double roundl(long double x);
+long double rintl(long double x);
+long double nearbyintl(long double x);
+long lrintl(long double x);
+long long llrintl(long double x);
+long lroundl(long double x);
+long long llroundl(long double x);
+long double frexpl(long double x, int *exponent);
+long double ldexpl(long double x, int exponent);
+long double scalbnl(long double x, int exponent);
+long double scalblnl(long double x, long exponent);
+int ilogbl(long double x);
+long double logbl(long double x);
+long double modfl(long double x, long double *integer_part);
+long double expl(long double x);
+long double exp2l(long double x);
+long double expm1l(long double x);
+long double logl(long double x);
+long double log2l(long double x);
+long double log10l(long double x);
+long double log1pl(long double x);
+long double sinl(long double x);
+long double cosl(long double x);
+long double tanl(long double x);
+long double asinl(long double x);
+long double acosl(long double x);
+long double atanl(long double x);
+long double atan2l(long double y, long double x);
+long double sinhl(long double x);
+long double coshl(long double x);
+long double tanhl(long double x);
+long double asinhl(long double x);
+long double acoshl(long double x);
+long double atanhl(long double x);
+long double hypotl(long double x, long double y);
+long double cbrtl(long double x);
+long double powl(long double x, long double y);
+long double fmodl(long double x, long double y);
+long double remainderl(long double x, long double y);
+long double remquol(long double x, long double y, int *quotient);
+long double nextafterl(long double x, long double y);
+long double nexttowardl(long double x, long double y);
+long double fdiml(long double x, long double y);
+long double fmaxl(long double x, long double y);
+long double fminl(long double x, long double y);
+long double nanl(const char *tag);
 
 #ifdef __cplusplus
 }

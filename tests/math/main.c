@@ -24,6 +24,8 @@ float lean_hypotf(float, float);
 float lean_sqrtf(float), lean_atanf(float), lean_roundf(float);
 float lean_expf(float);
 float lean_nextafterf(float, float);
+float lean_atan2f(float, float);
+float lean_ldexpf(float, int);
 long lean_lround(double), lean_lroundf(float);
 long long lean_llround(double), lean_llroundf(float);
 
@@ -32,6 +34,7 @@ typedef double (*fn2)(double, double);
 typedef double (*fn3)(double, double, double);
 typedef float (*fn1f)(float);
 typedef float (*fn2f)(float, float);
+typedef float (*fnfi)(float, int);
 typedef long (*fnl)(double);
 typedef long (*fnlf)(float);
 typedef long long (*fnll)(double);
@@ -44,6 +47,7 @@ struct entry {
     fn3 ours3, theirs3;
     fn1f oursf, theirsf;
     fn2f oursF, theirsF;
+    fnfi oursfi, theirsfi;
     fnl oursl, theirsl;
     fnlf ourslf, theirslf;
     fnll oursll, theirsll;
@@ -95,6 +99,8 @@ static const struct entry TABLE[] = {
     {.name = "nextafter", .ours2 = lean_nextafter, .theirs2 = nextafter},
     {.name = "expf", .oursf = lean_expf, .theirsf = expf},
     {.name = "nextafterf", .oursF = lean_nextafterf, .theirsF = nextafterf},
+    {.name = "atan2f", .oursF = lean_atan2f, .theirsF = atan2f},
+    {.name = "ldexpf", .oursfi = lean_ldexpf, .theirsfi = ldexpf},
     {.name = "fmax", .ours2 = lean_fmax, .theirs2 = fmax},
     {.name = "fmin", .ours2 = lean_fmin, .theirs2 = fmin},
     {.name = "cbrt", .ours1 = lean_cbrt, .theirs1 = cbrt},
@@ -277,6 +283,24 @@ int main(int argc, char **argv) {
                     double error = error_of(got, want);
                     if (error > worst) {
                         worst = error; worst_x = (double)x; worst_y = (double)y;
+                        worst_got = got; worst_want = want;
+                    }
+                }
+            }
+        } else if (kind[0] == 's') {
+            /* One float and an integer exponent. ldexpf is the only shape
+               like this here, and lo/hi bound the float while the exponent
+               sweeps the range a float's own exponent field can hold - which
+               is where scaling stops being exact and starts being a
+               subnormal. */
+            for (int i = 0; i < n; i++) {
+                float x = (float)(lo + step * (double)i);
+                for (int k = -160; k <= 160; k++) {
+                    double got = (double)e->oursfi(x, k);
+                    double want = (double)e->theirsfi(x, k);
+                    double error = error_of(got, want);
+                    if (error > worst) {
+                        worst = error; worst_x = (double)x; worst_y = (double)k;
                         worst_got = got; worst_want = want;
                     }
                 }

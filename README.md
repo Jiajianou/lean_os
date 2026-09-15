@@ -353,6 +353,22 @@ Several instruments, and none of them subsumes another:
   is the only instrument here that grades the *tests* rather than the
   machine, and the first thing it found was a file at 100% line coverage
   whose mutation score was zero.
+- **A libm for the format the hardware has.** `long double` on x86-64 is
+  the x87's 80-bit extended type, and this libc has the C99 set for it -
+  fifty-two functions, graded to the unit in the last place of a 64-bit
+  mantissa. The answers come from **MPFR**, through GCC, which folds
+  `__builtin_atan2l(...)` on constant arguments at compile time at the
+  target's own precision; the test requires the object holding those
+  12,840 values to reference no symbol at all, because a call left behind
+  would be the library under test marking its own exam.
+
+  The sharpest thing it found is about the machine rather than the
+  library. `fsin`, `fcos` and `fptan` came back wrong by up to 2,500,000
+  units in the last place while every other x87 instruction was within
+  one - which is exactly what rounding the *argument* to a double costs.
+  So the circular functions are not instructions here: they are a
+  five-piece reduction of pi/2 and an eleven-term polynomial, in this
+  format, and they are right wherever addition is.
 - **Differential tests** (`tools/sh-test.sh`, `tools/regex-test.sh`,
   `tools/scanf-test.sh`, `tools/printf-test.sh`, `tools/math-test.sh`,
   `tools/pkg-test.sh` and `tools/iconv-test.sh`) compile this project's

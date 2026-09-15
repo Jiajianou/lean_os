@@ -63,7 +63,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
                 $(UOBJ)/settings_file.o $(UOBJ)/children.o $(UOBJ)/icons.o $(UOBJ)/icon_draw.o \
                 $(UOBJ)/user_interface_font.o $(UOBJ)/recent.o $(UOBJ)/sntp.o $(UOBJ)/dns.o $(UOBJ)/http.o \
                 $(UOBJ)/libc_string.o $(UOBJ)/libc_stdlib.o $(UOBJ)/libc_stdio.o \
-                $(UOBJ)/libc_math.o $(UOBJ)/libc_time.o \
+                $(UOBJ)/libc_math.o $(UOBJ)/libc_math_long_double.o $(UOBJ)/libc_time.o \
                 $(UOBJ)/libc_env.o $(UOBJ)/libc_unistd.o \
                 $(UOBJ)/libc_signal.o \
                 $(UOBJ)/libc_dirent.o $(UOBJ)/libc_stat.o $(UOBJ)/libc_mman.o \
@@ -171,6 +171,21 @@ LVGL_PORT_OBJS := $(UOBJ)/lvgl_leanos.o $(UOBJ)/lvgl_keys.o $(UOBJ)/lvgl_theme.o
 DESKTOP_APPLICATION_OBJS := $(UOBJ)/desktop_application_settings.o \
                             $(UOBJ)/desktop_application_task_manager.o \
                             $(UOBJ)/desktop_application_widgets.o
+
+# Not in USER_PROGRAMS: the reference table is 12,840 values and the kernel
+# incbins every embedded program, so this one is installed onto the image by
+# tools/math-long-double-test.sh the way /bin/clangtest and /bin/ruststd are.
+.PHONY: mathltest
+mathltest: $(BUILD)/mathltest.elf
+
+# The reference table is a separate translation unit on purpose: it holds
+# thousands of __builtin_ calls GCC folds with MPFR, and the test proves the
+# folding by requiring that object to reference no math symbol. Compiling it
+# beside the grader, which calls every one of those functions for real, would
+# put both in the same object and make that proof unavailable.
+$(BUILD)/mathltest.elf: $(UOBJ)/mathltest.o $(UOBJ)/math_long_double_table.o $(USER_LIBOBJS) $(USER_LD)
+	$(if $(V),,@echo "  LD      $@")
+	$(if $(V),,@)$(LD) --gc-sections -T $(USER_LD) -o $@ $(USER_LIBOBJS) $(UOBJ)/math_long_double_table.o $(UOBJ)/mathltest.o
 
 $(LVGL_PROGRAM_ELFS): $(BUILD)/%.elf: $(UOBJ)/%.o $(USER_LIBOBJS) $(LVGL_PORT_OBJS) $(DESKTOP_APPLICATION_OBJS) $(LVGL_A) $(USER_LD)
 	$(if $(V),,@echo "  LD      $@")

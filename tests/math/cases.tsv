@@ -6,6 +6,8 @@
 #
 # kind  1  one double argument, swept over [lo, hi]
 #       2  two double arguments, swept over the same grid pairwise
+#       s  one float and an integer exponent, the float swept over [lo, hi]
+#          and the exponent over every value a float's own field can hold
 #       i  returns an integer type; compared EXACTLY, no tolerance
 #       -  not graded by this harness; the note says why, and a note is
 #          required, because "not graded" without a reason is the same
@@ -74,3 +76,5 @@ llround	i	-1e18	1e18	401	0	M100: exact
 llroundf	i	-1e9	1e9	401	0	M100: exact
 nextafterf	F	-10	10	61	0	M141: exact or it is not nextafterf. Deliberately NOT exp's treatment - a double step rounded back to float returns x unchanged, so this walks a float's own bits
 expf	f	-20	20	401	1.2e-7	M141: exp in double rounded once to float - one float ulp, like the rest of the M100 set. ICU asked for it, from lstmbe.cpp; adding it also needed HAVE_EXPF in tools/toolchain-port/apply.py, or libstdc++ defines it too
+atan2f	F	-10	10	121	1.2e-7	M142: atan2 in double rounded once to float - one float ulp, like the M100 set. ICU asked for it, from the same lstmbe.cpp that asked for expf and for the whole long double family; HAVE_ATAN2F went into tools/toolchain-port/apply.py with it
+ldexpf	s	-1e3	1e3	81	0	M142: exact, and not approximately - a double carries every float exponent, so scaling there and rounding once is the float answer including where it lands on a subnormal. The exponent sweep reaches past a float's range in both directions on purpose. //base/rand_util.cc asked for it

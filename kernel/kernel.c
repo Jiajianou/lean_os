@@ -8500,6 +8500,97 @@ static void boot_selftests_system(void) {
     }
 
     {
+        os_stat_t ml_stat;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/mathltest",
+                       (uint64_t)&ml_stat, 0) != 0) {
+        kernel_log_puts("[m142] /bin/mathltest is not on this image - skipped. "
+                   "tools/math-long-double-test.sh builds it and installs it; "
+                   "it carries 12,840 answers MPFR computed at this target's "
+                   "own precision, which is more than a kernel that incbins "
+                   "every embedded program should hold.\n\n");
+        } else {
+        int ml_pipe[2];
+        if (do_syscall(SYS_pipe, (uint64_t)ml_pipe, 0, 0) != 0) {
+            panic("M142 self-test: could not make a pipe for the report");
+        }
+        do_syscall(SYS_dup2, (uint64_t)ml_pipe[1], 1, 0);
+
+        size_t ml_bytes = 0;
+        uint8_t *ml_img = read_program(PATH_BIN_DIRECTORY "mathltest", &ml_bytes);
+        if (!ml_img) {
+            panic("M142 self-test: /bin/mathltest is not on this disk");
+        }
+        const char *ml_argv[] = {PATH_BIN_DIRECTORY "mathltest", 0};
+        task_t *ml = process_spawnv("mathltest", ml_img, ml_bytes, ml_argv);
+        kfree(ml_img);
+
+        static char ml_out[8192];
+        size_t ml_got = 0;
+        long ml_rc = -1;
+        long ml_deadline = (long)pit_get_ticks() + 120 * PIT_HZ;
+        for (;;) {
+            long avail = do_syscall(SYS_pipe_poll, (uint64_t)ml_pipe[0], 0, 0);
+            if (avail > 0 && ml_got < sizeof(ml_out) - 1) {
+                size_t room = sizeof(ml_out) - 1 - ml_got;
+                long n = do_syscall(SYS_read, (uint64_t)ml_pipe[0],
+                                    (uint64_t)(ml_out + ml_got),
+                                    (uint64_t)((size_t)avail < room
+                                               ? (size_t)avail : room));
+                if (n > 0) {
+                    ml_got += (size_t)n;
+                }
+                continue;
+            }
+            long done = do_syscall(SYS_wait_nb, (uint64_t)ml->id, 0, 0);
+            if (done != -2) {
+                ml_rc = done;
+                long n;
+                while ((n = do_syscall(SYS_pipe_poll, (uint64_t)ml_pipe[0], 0, 0)) > 0 &&
+                       ml_got < sizeof(ml_out) - 1) {
+                    size_t room = sizeof(ml_out) - 1 - ml_got;
+                    long r = do_syscall(SYS_read, (uint64_t)ml_pipe[0],
+                                        (uint64_t)(ml_out + ml_got),
+                                        (uint64_t)((size_t)n < room ? (size_t)n : room));
+                    if (r <= 0) {
+                        break;
+                    }
+                    ml_got += (size_t)r;
+                }
+                break;
+            }
+            if ((long)pit_get_ticks() > ml_deadline) {
+                break;
+            }
+            do_syscall(SYS_yield, 0, 0, 0);
+        }
+        ml_out[ml_got] = '\0';
+        do_syscall(SYS_close, (uint64_t)ml_pipe[0], 0, 0);
+        do_syscall(SYS_close, (uint64_t)ml_pipe[1], 0, 0);
+        file_descriptor_release(&scheduler_current()->file_descriptors[1]);
+        scheduler_current()->file_descriptors[1].type = FILE_DESCRIPTOR_STDOUT;
+
+        for (char *line = ml_out; *line;) {
+            char *end = line;
+            while (*end && *end != '\n') {
+                end++;
+            }
+            char saved = *end;
+            *end = '\0';
+            kernel_log_puts(line);
+            kernel_log_putc('\n');
+            *end = saved;
+            line = saved ? end + 1 : end;
+        }
+        if (ml_rc != 0) {
+            panic("M142 self-test: this long double library disagrees with MPFR "
+                  "by more than tests/math/long_double_cases.tsv claims, or "
+                  "gets one of C99's special values wrong");
+        }
+        kernel_log_putc('\n');
+        }
+    }
+
+    {
         os_stat_t ct;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/clangtest", (uint64_t)&ct, 0) != 0) {
             kernel_log_puts("[m121] /bin/clangtest is not on this image - skipped. "

@@ -739,6 +739,17 @@ float expf(float x) {
     return (float)exp((double)x);
 }
 
+float atan2f(float y, float x) {
+    return (float)atan2((double)y, (double)x);
+}
+
+/* A double carries every float exponent, so scaling in double and rounding
+   once is exact wherever the result is a normal float, and rounds correctly
+   where it is not. */
+float ldexpf(float x, int exponent) {
+    return (float)ldexp((double)x, exponent);
+}
+
 /* Not exp's treatment of (float)nextafter((double)x, (double)y): the step
    between two adjacent doubles is far below a float's, so rounding it back
    would return x itself for every input. A float's neighbour has to be found

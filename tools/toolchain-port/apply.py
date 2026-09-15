@@ -159,6 +159,35 @@ def port_gcc(root, header_src):
         # present in <math.h> is a multiple definition at link time rather
         # than a missing one. expf is what ICU asked for.
         "    $as_echo \"#define HAVE_EXPF 1\" >>confdefs.h\n"
+        # M142. atan2f and ldexpf join the list for the same reason; the
+        # twenty-three long double names below join it because
+        # math_stubs_long_double.cc is the same file one size up, and this
+        # libc now defines every name in it.
+        "    $as_echo \"#define HAVE_ATAN2F 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_LDEXPF 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_FABSL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_ACOSL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_ASINL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_ATANL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_ATAN2L 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_CEILL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_COSL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_COSHL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_EXPL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_FLOORL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_FMODL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_FREXPL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_SQRTL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_HYPOTL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_LDEXPL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_LOGL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_LOG10L 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_MODFL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_POWL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_SINL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_SINHL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_TANL 1\" >>confdefs.h\n"
+        "    $as_echo \"#define HAVE_TANHL 1\" >>confdefs.h\n"
         "\n"
         "    ;;\n"
         "\n"

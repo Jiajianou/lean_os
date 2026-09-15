@@ -1,0 +1,87 @@
+# tests/math/long_double_cases.tsv - M142. What each long double function in
+# user_space/libc/include/math.h is graded on.
+#
+# One row per `long double` (or long/long long/int of a long double)
+# declaration in that header, and tools/math-long-double-test.sh fails if a
+# declaration has no row here, for the reason tests/math/cases.tsv gives: a
+# libm function nobody grades is the shape these files exist to prevent.
+#
+# The answer comes from MPFR, through GCC. Every expected value in the
+# generated table is a `__builtin_<name>l(...)` call on constant arguments,
+# which GCC folds at COMPILE time using MPFR at this target's own 64-bit
+# mantissa - so the oracle is a library nobody here wrote, evaluating at the
+# precision under test, and the test asserts the generated object references
+# no math symbol at all. A value that failed to fold would have been computed
+# by the implementation under test at run time, which is the one outcome that
+# would make the whole instrument vacuous.
+#
+# kind  1  one argument, swept over [lo, hi]
+#       L  one argument, swept over [lo, hi] in the EXPONENT - log spacing,
+#          which is the only useful sweep for exp and log
+#       E  one argument, lo + (hi - lo) * 2^-k - the sweep that reaches
+#          a function's domain edge, which a linear one never gets near
+#       2  two arguments, swept over the grid pairwise
+#       P  two arguments, the pow grid: base log-spaced, exponent linear
+#       i  returns an integer type; compared EXACTLY, no tolerance
+#       -  not graded by the swept table; the note says what grades it
+#          instead, and a note is required
+#
+# max_ulp is what THIS project claims, in units of the last place of the
+# 64-bit mantissa, against MPFR's correctly rounded answer. 0.5 would be
+# correct rounding. A row above 1 says the implementation composes hardware
+# instructions rather than being one, and the note says which composition
+# costs the bits.
+#
+# name	kind	lo	hi	points	max_ulp	note
+fabsl	1	-1e6	1e6	129	0	it clears a sign bit
+copysignl	2	-1e6	1e6	65	0	it moves a sign bit
+sqrtl	L	-16000	16000	257	0.5	fsqrt is correctly rounded by the hardware
+truncl	1	-1e6	1e6	257	0	exact
+floorl	1	-1e6	1e6	257	0	exact
+ceill	1	-1e6	1e6	257	0	exact
+roundl	1	-1e6	1e6	257	0	exact
+rintl	-	-	-	-	-	graded on the machine by round-to-nearest-even's own definition: the result is integral, within half a unit of x, and even when it is exactly half. GCC will not fold __builtin_rintl - it depends on the rounding mode, which is run-time state - and that refusal is correct rather than a gap
+nearbyintl	-	-	-	-	-	rintl without raising inexact; graded with rintl for the same reason
+lrintl	-	-	-	-	-	graded on the machine against rintl, which the same rounding-mode argument keeps out of the folded table
+llrintl	-	-	-	-	-	graded on the machine against rintl
+lroundl	i	-1e15	1e15	129	0	exact
+llroundl	i	-1e15	1e15	129	0	exact
+ilogbl	i	-1e300	1e300	129	0	exact
+logbl	1	-1e300	1e300	129	0	exact
+ldexpl	-	-	-	-	-	graded by the identity ldexpl(x, n) == x * 2^n exactly, on the machine
+scalbnl	-	-	-	-	-	the same function under C99's name; graded with ldexpl
+scalblnl	-	-	-	-	-	the same function with a long count; graded with ldexpl
+frexpl	-	-	-	-	-	graded by the identity f * 2^e == x with 0.5 <= |f| < 1, exactly
+modfl	-	-	-	-	-	graded by the identity integral + fractional == x, exactly
+expl	1	-11000	11000	513	2	f2xm1 of a reduced argument, scaled - the reduction costs the bits
+exp2l	1	-16000	16000	513	1	f2xm1 needs no reduction here; the argument already is the exponent
+expm1l	1	-1	1	513	2	f2xm1 is exactly this function while |x| stays inside its domain, which reaches ln 2 rather than the 0.34 this first claimed. Past it the form is exp(x) - 1 and the subtraction costs a bit; two ulp is what that costs and the first claim of one was wrong about the function rather than about the code
+logl	L	-16000	16000	513	1	fyl2x by ln2
+log2l	L	-16000	16000	513	0.5	fyl2x by one, which is the instruction itself
+log10l	L	-16000	16000	513	1	fyl2x by log10(2)
+log1pl	1	-0.9	10	513	2	fyl2xp1 below its domain edge, log of one plus x above it. Above it the one in 1 + x rounds, and log multiplies that error by 1/log(1+x), which at the edge is about four - so two ulp, measured
+sinl	1	-1e6	1e6	513	1	not fsin: a five-piece reduction of pi/2 and an eleven-term polynomial, in this format. The range is wide on purpose - it is the reduction that the sweep is for, and thirty radians never asks it anything
+cosl	1	-1e6	1e6	513	2	the same reduction, the other polynomial. One ulp more than sinl because sin keeps its leading r outside the polynomial and cos cannot: at r near pi/4 the correction is a fifth of the result
+tanl	1	-1e6	1e6	513	2	the quotient of the two, which adds their errors to the division's. Two rather than three only because kernel_cos recovers what 1 - r^2/2 rounds away - a correction that does nothing for cosl's own worst case and everything for this one
+asinl	1	-1	1	513	2	atan2 of x over the square root of one minus x squared
+acosl	1	-1	1	513	2	the same, with the arguments the other way round
+atanl	1	-100	100	513	1	fpatan against one
+atan2l	2	-10	10	65	1	fpatan, which is this function in one instruction
+sinhl	1	-20	20	513	2	expm1 below one, where the difference of two exponentials cancels
+coshl	1	-20	20	513	2	half of exp plus its reciprocal
+tanhl	1	-20	20	513	2	expm1 of minus twice the argument
+asinhl	1	-1e6	1e6	513	3	three branches, and the middle one adds before it takes a log
+acoshl	E	1	1e15	513	3	log1p of the square root of a difference of squares. The E sweep is what reaches the place this function is hard - one plus two to the minus eightieth - which a linear sweep from one never gets near
+atanhl	1	-0.999	0.999	513	2	half the log of one plus twice x over one minus x
+hypotl	2	-1e4	1e4	65	2	scaled to the larger argument, then one square root
+cbrtl	1	-1e6	1e6	513	1	exp2 of a third of log2, then one Newton step
+powl	P	-60	60	129	4	the exponent is split so that y times the binade is exact; what is left rounds once
+fmodl	2	-1e4	1e4	65	0	fprem is exact by construction
+remainderl	2	-1e4	1e4	65	0	fprem1 is exact by construction
+remquol	-	-	-	-	-	graded on the machine against remainderl and against the exact quotient's own low three bits. It does not read the FPU's quotient condition codes: this machine returned all three clear for a quotient of seven
+nextafterl	-	-	-	-	-	graded on the machine by stepping a value up and back down again
+nexttowardl	-	-	-	-	-	the same function under C99's name; graded with nextafterl
+fdiml	2	-1e3	1e3	65	0	exact
+fmaxl	2	-1e3	1e3	65	0	exact
+fminl	2	-1e3	1e3	65	0	exact
+nanl	-	-	-	-	-	graded on the machine by isnan
