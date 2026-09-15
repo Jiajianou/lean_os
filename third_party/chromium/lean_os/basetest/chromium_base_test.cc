@@ -191,14 +191,22 @@ bool FilesBehave() {
   return directory.Delete() && !base::PathExists(path);
 }
 
-// base::Thread is NOT exercised here, and the reason is a kernel bug this
-// program found rather than an omission: a thread on this machine gets a
-// COPY of its creator's descriptor table, and the copy clears every
-// close-on-exec descriptor. base/rand_util_posix.cc opens /dev/urandom with
-// O_CLOEXEC and reads it from whatever thread asks for randomness, so the
-// read fails on a worker thread and the CHECK behind it fires. POSIX says a
-// descriptor belongs to the process; M146 is that, and the base::Thread and
-// RunLoop checks come back with it.
+// base::Thread is what found M146: a thread used to get a COPY of its
+// creator's descriptor table with every close-on-exec slot cleared, and
+// base/rand_util_posix.cc opens /dev/urandom with O_CLOEXEC and reads it
+// from whichever thread wants randomness. The read failed on a worker
+// thread and the CHECK behind it fired. The table belongs to the process
+// now, which is what lets the raw-thread check below run at all.
+//
+// base::Thread itself is still NOT exercised here, and that is again a bug
+// rather than an omission - a second one, standing behind the first. A
+// thread_local on this machine is not where the compiler reads it: the
+// runtime places the block a segment-size below the thread pointer where
+// the compiler places it a size-rounded-up-to-the-segment-alignment below.
+// //base's segment is 0x134 bytes aligned to 8, so every thread_local in it
+// sits four bytes off, and base::Thread::Start reaches a constinit
+// thread_local with a vtable before it reaches anything else. That is the
+// next milestone, and these checks come back with it.
 bool RandBytesWorksAtEverySize() {
   for (size_t size = 1; size <= 64; ++size) {
     std::vector<uint8_t> buffer(size, 0);

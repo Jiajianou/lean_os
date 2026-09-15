@@ -3094,7 +3094,7 @@ static void boot_selftests_system(void) {
 
         int comp_file_descriptors = 0;
         for (int f = 0; f < MAX_FILE_DESCRIPTORS; f++) {
-            if (comp_task->file_descriptors[f].type != FILE_DESCRIPTOR_NONE) {
+            if (comp_task->descriptor_table->slots[f].type != FILE_DESCRIPTOR_NONE) {
                 comp_file_descriptors++;
             }
         }
@@ -3690,8 +3690,8 @@ static void boot_selftests_system(void) {
 
         const int ROUNDS = MAX_TASKS * 3;
 
-        file_descriptor_slot_t saved_stdout = scheduler_current()->file_descriptors[1];
-        scheduler_current()->file_descriptors[1].type = FILE_DESCRIPTOR_NONE;
+        file_descriptor_slot_t saved_stdout = scheduler_current()->descriptor_table->slots[1];
+        scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_NONE;
 
         int live_before = scheduler_live_task_count();
         uint64_t frames_before = physical_memory_free_frame_count();
@@ -3716,7 +3716,7 @@ static void boot_selftests_system(void) {
 
         int live_after = scheduler_live_task_count();
         uint64_t frames_after = physical_memory_free_frame_count();
-        scheduler_current()->file_descriptors[1] = saved_stdout;
+        scheduler_current()->descriptor_table->slots[1] = saved_stdout;
         kfree(hello_image);
 
         int all_ok = 1;
@@ -4831,8 +4831,8 @@ static void boot_selftests_system(void) {
             out[got] = '\0';
             do_syscall(SYS_close, (uint64_t)out_file_descriptors[0], 0, 0);
             do_syscall(SYS_close, (uint64_t)out_file_descriptors[1], 0, 0);
-            file_descriptor_release(&scheduler_current()->file_descriptors[1]);
-            scheduler_current()->file_descriptors[1].type = FILE_DESCRIPTOR_STDOUT;
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[1]);
+            scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
 
             long wall_after = do_syscall(SYS_time, 0, 0, 0);
 
@@ -5078,8 +5078,8 @@ static void boot_selftests_system(void) {
             nettime_out[got > 0 ? got : 0] = '\0';
             do_syscall(SYS_close, (uint64_t)out_file_descriptors[0], 0, 0);
             do_syscall(SYS_close, (uint64_t)out_file_descriptors[1], 0, 0);
-            file_descriptor_release(&scheduler_current()->file_descriptors[1]);
-            scheduler_current()->file_descriptors[1].type = FILE_DESCRIPTOR_STDOUT;
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[1]);
+            scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
 
             if (elapsed_ms > 5000) {
                 kernel_log_puts("[m64] nettime took longer than its own deadline to give up\n");
@@ -8484,6 +8484,14 @@ static void boot_selftests_system(void) {
             panic("M141 self-test: the surface Chromium's base and its tracing "
                   "library ask for is not right on this machine");
         }
+        kernel_log_puts("[m146] a descriptor belongs to the process: one "
+                  "opened on the main thread read on a worker, one opened on "
+                  "the worker read back on the main thread, and an O_CLOEXEC "
+                  "descriptor still there after a thread starts - because a "
+                  "thread shares its process's table rather than taking a copy "
+                  "of it with the close-on-exec slots cleared, which is what "
+                  "made base::RandBytes fail on every thread but the first. A "
+                  "fork still gets its own - self-test passed.\n\n");
         kernel_log_puts("[m144] what a fault was, not that one happened: a write "
                   "to a page with no mapping reporting SEGV_MAPERR and a write "
                   "to a read-only one reporting SEGV_ACCERR, each with si_addr "
@@ -8585,8 +8593,8 @@ static void boot_selftests_system(void) {
         ml_out[ml_got] = '\0';
         do_syscall(SYS_close, (uint64_t)ml_pipe[0], 0, 0);
         do_syscall(SYS_close, (uint64_t)ml_pipe[1], 0, 0);
-        file_descriptor_release(&scheduler_current()->file_descriptors[1]);
-        scheduler_current()->file_descriptors[1].type = FILE_DESCRIPTOR_STDOUT;
+        file_descriptor_release(&scheduler_current()->descriptor_table->slots[1]);
+        scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
 
         for (char *line = ml_out; *line;) {
             char *end = line;
@@ -8679,10 +8687,10 @@ static void boot_selftests_system(void) {
             cb_out[cb_got] = '\0';
             do_syscall(SYS_close, (uint64_t)cb_pipe[0], 0, 0);
             do_syscall(SYS_close, (uint64_t)cb_pipe[1], 0, 0);
-            file_descriptor_release(&scheduler_current()->file_descriptors[1]);
-            scheduler_current()->file_descriptors[1].type = FILE_DESCRIPTOR_STDOUT;
-            file_descriptor_release(&scheduler_current()->file_descriptors[2]);
-            scheduler_current()->file_descriptors[2].type = FILE_DESCRIPTOR_STDOUT;
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[1]);
+            scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[2]);
+            scheduler_current()->descriptor_table->slots[2].type = FILE_DESCRIPTOR_STDOUT;
 
             for (char *line = cb_out; *line;) {
                 char *end = line;
@@ -10907,7 +10915,7 @@ static void boot_selftests_system(void) {
         task_t *boot_task = scheduler_current();
         int leaked = 0;
         for (int i = 2; i < MAX_FILE_DESCRIPTORS; i++) {
-            if (boot_task->file_descriptors[i].type != FILE_DESCRIPTOR_NONE) {
+            if (boot_task->descriptor_table->slots[i].type != FILE_DESCRIPTOR_NONE) {
                 leaked++;
             }
         }
@@ -10916,11 +10924,11 @@ static void boot_selftests_system(void) {
         }
         scheduler_reset_file_descriptors_to_std(boot_task);
         for (int i = 2; i < MAX_FILE_DESCRIPTORS; i++) {
-            if (boot_task->file_descriptors[i].type != FILE_DESCRIPTOR_NONE) {
+            if (boot_task->descriptor_table->slots[i].type != FILE_DESCRIPTOR_NONE) {
                 panic("M40 fd-inheritance self-test: sched_reset_fds_to_std left an fd behind");
             }
         }
-        if (boot_task->file_descriptors[0].type != FILE_DESCRIPTOR_STDIN || boot_task->file_descriptors[1].type != FILE_DESCRIPTOR_STDOUT) {
+        if (boot_task->descriptor_table->slots[0].type != FILE_DESCRIPTOR_STDIN || boot_task->descriptor_table->slots[1].type != FILE_DESCRIPTOR_STDOUT) {
             panic("M40 fd-inheritance self-test: sched_reset_fds_to_std did not leave stdin/stdout intact");
         }
         kernel_log_puts("[m40] boot-task fd reset self-test passed (0x");

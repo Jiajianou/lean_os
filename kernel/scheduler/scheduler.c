@@ -323,8 +323,13 @@ void scheduler_init(void) {
     tasks[0].kernel_stack_top = 0;
     tasks[0].pml4_phys = virtual_memory_kernel_pml4_phys();
     fpu_state_init(tasks[0].fpu_state);
-    tasks[0].file_descriptors[0].type = FILE_DESCRIPTOR_STDIN;
-    tasks[0].file_descriptors[1].type = FILE_DESCRIPTOR_STDOUT;
+    /* The first task's table, which every other one is descended from. */
+    tasks[0].descriptor_table = descriptor_table_new();
+    if (!tasks[0].descriptor_table) {
+        panic("scheduler_init: no memory for the first descriptor table");
+    }
+    tasks[0].descriptor_table->slots[0].type = FILE_DESCRIPTOR_STDIN;
+    tasks[0].descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
     tasks[0].parent_id = -1;
     tasks[0].pgid = 0;
     tasks[0].sid = 0;
@@ -366,8 +371,16 @@ void scheduler_init_ap(int cpu_id) {
     t->kernel_stack_top = 0;
     t->pml4_phys = virtual_memory_kernel_pml4_phys();
     fpu_state_init(t->fpu_state);
-    t->file_descriptors[0].type = FILE_DESCRIPTOR_STDIN;
-    t->file_descriptors[1].type = FILE_DESCRIPTOR_STDOUT;
+    /* Each processor's idle identity is its own process and gets its own
+       table, so nothing it does can reach another CPU's. */
+    if (!t->descriptor_table) {
+        t->descriptor_table = descriptor_table_new();
+    }
+    if (!t->descriptor_table) {
+        panic("sched_init_ap: no memory for a CPU's descriptor table");
+    }
+    t->descriptor_table->slots[0].type = FILE_DESCRIPTOR_STDIN;
+    t->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
     t->parent_id = -1;
     t->pgid = 0;
     t->sid = 0;
@@ -397,6 +410,18 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
         return (task_t *)0;
     }
 
+    /* The table is allocated out here for the same reason the kernel stack
+       is: inside the locked region there is nowhere to fail to. A process
+       needs one, a thread shares its creator's and asks for nothing. */
+    file_descriptor_table_t *fresh = (file_descriptor_table_t *)0;
+    if (!thread_of) {
+        fresh = descriptor_table_new();
+        if (!fresh) {
+            physical_memory_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
+            return (task_t *)0;
+        }
+    }
+
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
     int slot = -1;
@@ -411,6 +436,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
             spin_unlock(&scheduler_lock);
             irq_restore(flags);
             physical_memory_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
+            descriptor_table_release(fresh);
             return NULL;
         }
         slot = task_count++;
@@ -425,14 +451,26 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->stack_base = stack_base;
     t->kernel_stack_top = (uint64_t)(stack_base + TASK_STACK_SIZE);
 
-    for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-        t->file_descriptors[i] = caller->file_descriptors[i];
-        if (t->file_descriptors[i].cloexec) {
-            t->file_descriptors[i].type = FILE_DESCRIPTOR_NONE;
-            t->file_descriptors[i].cloexec = 0;
-            continue;
+    if (thread_of) {
+        /* A thread. It does not get a copy of anything: it points at the
+           process's one table, so a descriptor either thread opens is open
+           for both and one either closes is closed for both. */
+        t->descriptor_table = thread_of->descriptor_table;
+        descriptor_table_reference(t->descriptor_table);
+    } else {
+        t->descriptor_table = fresh;
+        for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
+            t->descriptor_table->slots[i] = caller->descriptor_table->slots[i];
+            /* Close-on-exec, and this IS the exec: a spawn replaces the
+               image, which is what the flag is about. A thread above takes
+               the other branch and keeps them. */
+            if (t->descriptor_table->slots[i].cloexec) {
+                t->descriptor_table->slots[i].type = FILE_DESCRIPTOR_NONE;
+                t->descriptor_table->slots[i].cloexec = 0;
+                continue;
+            }
+            file_descriptor_retain(&t->descriptor_table->slots[i]);
         }
-        file_descriptor_retain(&t->file_descriptors[i]);
     }
     t->parent_id = caller->id;
     t->pgid = caller->pgid;
@@ -976,9 +1014,12 @@ int scheduler_file_descriptor_high_water(int *which_task_out) {
         if (tasks[i].state == TASK_FREE) {
             continue;
         }
+        if (!tasks[i].descriptor_table) {
+            continue;
+        }
         int used = 0;
         for (int k = 0; k < MAX_FILE_DESCRIPTORS; k++) {
-            if (tasks[i].file_descriptors[k].type != FILE_DESCRIPTOR_NONE) {
+            if (tasks[i].descriptor_table->slots[k].type != FILE_DESCRIPTOR_NONE) {
                 used++;
             }
         }
@@ -1018,6 +1059,17 @@ int scheduler_has_free_task_slot(void) {
 void scheduler_reap_slot(task_t *t) {
     if (!t || t->state != TASK_TERMINATED) {
         return;
+    }
+    /* task_exit_with_code released this on the way out and it is normally
+       null by now. A task that reached TERMINATED without going through
+       that path still holds one, and since M146 the table is a heap
+       allocation rather than an array inside the task - so leaving it here
+       is a leak rather than nothing. Releasing is idempotent; this is
+       before the lock because closing a descriptor can reach a pipe or a
+       socket, which is not work for a locked region. */
+    if (t->descriptor_table) {
+        descriptor_table_release(t->descriptor_table);
+        t->descriptor_table = (file_descriptor_table_t *)0;
     }
     uint64_t flags;
     {
@@ -1136,8 +1188,8 @@ void scheduler_reap_slot(task_t *t) {
     t->tgid = 0;
     t->cwd[0] = '/';
     t->cwd[1] = '\0';
-    t->file_descriptors[0].type = FILE_DESCRIPTOR_NONE;
-    t->file_descriptors[1].type = FILE_DESCRIPTOR_NONE;
+    /* Already released above. The next task in this slot allocates its own. */
+    t->descriptor_table = (file_descriptor_table_t *)0;
     set_task_name(t, "");
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
@@ -1463,6 +1515,12 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
         return (task_t *)0;
     }
 
+    file_descriptor_table_t *fresh = descriptor_table_new();
+    if (!fresh) {
+        physical_memory_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
+        return (task_t *)0;
+    }
+
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
 
@@ -1478,6 +1536,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
             spin_unlock(&scheduler_lock);
             irq_restore(flags);
             physical_memory_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
+            descriptor_table_release(fresh);
             return NULL;
         }
         slot = task_count++;
@@ -1494,9 +1553,10 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->stack_base = stack_base;
     t->kernel_stack_top = (uint64_t)(stack_base + TASK_STACK_SIZE);
 
+    t->descriptor_table = fresh;
     for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-        t->file_descriptors[i] = parent->file_descriptors[i];
-        file_descriptor_retain(&t->file_descriptors[i]);
+        t->descriptor_table->slots[i] = parent->descriptor_table->slots[i];
+        file_descriptor_retain(&t->descriptor_table->slots[i]);
     }
     t->parent_id = parent->id;
     t->pgid = parent->pgid;
@@ -1770,6 +1830,42 @@ int scheduler_set_env(task_t *t, const char *block, uint32_t length, uint32_t co
     return 0;
 }
 
+/* A table starts with one reference - the task it was made for. A thread
+   adds one by pointing at the same table; a fork does not, it gets its own
+   copy, because after a fork the two processes' descriptors move
+   independently. */
+file_descriptor_table_t *descriptor_table_new(void) {
+    file_descriptor_table_t *table =
+        (file_descriptor_table_t *)kmalloc(sizeof(file_descriptor_table_t));
+    if (!table) {
+        return (file_descriptor_table_t *)0;
+    }
+    k_memset(table, 0, sizeof(*table));
+    table->references = 1;
+    return table;
+}
+
+void descriptor_table_reference(file_descriptor_table_t *table) {
+    if (table) {
+        table->references++;
+    }
+}
+
+void descriptor_table_release(file_descriptor_table_t *table) {
+    if (!table) {
+        return;
+    }
+    if (--table->references > 0) {
+        return;
+    }
+    /* The last task pointing here is gone, so every descriptor in it closes
+       now - once, which is the whole reason the count is here. */
+    for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
+        file_descriptor_release(&table->slots[i]);
+    }
+    kfree(table);
+}
+
 void file_descriptor_release(file_descriptor_slot_t *slot) {
     slot->cloexec = 0;
     slot->nonblock = 0;
@@ -1843,18 +1939,23 @@ void file_descriptor_retain(const file_descriptor_slot_t *slot) {
 }
 
 void scheduler_release_file_descriptors(task_t *t) {
-    for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-        file_descriptor_release(&t->file_descriptors[i]);
-    }
+    /* One reference, not one pass over the slots: the descriptors close when
+       the LAST task sharing this table is gone, and a thread exiting while
+       its siblings run is not that. */
+    descriptor_table_release(t->descriptor_table);
+    t->descriptor_table = (file_descriptor_table_t *)0;
     if (flock_release_pid(t->id) > 0) {
         scheduler_wake_all(FLOCK_CHAN);
     }
 }
 
 void scheduler_reset_file_descriptors_to_std(task_t *t) {
-    for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-        file_descriptor_release(&t->file_descriptors[i]);
+    if (!t->descriptor_table) {
+        return;
     }
-    t->file_descriptors[0].type = FILE_DESCRIPTOR_STDIN;
-    t->file_descriptors[1].type = FILE_DESCRIPTOR_STDOUT;
+    for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
+        file_descriptor_release(&t->descriptor_table->slots[i]);
+    }
+    t->descriptor_table->slots[0].type = FILE_DESCRIPTOR_STDIN;
+    t->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
 }

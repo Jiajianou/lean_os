@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/random.h>
+#include <sys/wait.h>
 #include <sys/sysmacros.h>
 #include <sys/vfs.h>
 #include <sys/ucontext.h>
@@ -1200,6 +1201,139 @@ static int getrandom_fills_what_it_is_asked_for(void) {
     return 0;
 }
 
+/* M146. A descriptor belongs to the PROCESS. Before this milestone a thread
+   got a COPY of its creator's table with every close-on-exec slot cleared, so
+   three things were wrong at once: a descriptor opened after a thread started
+   was invisible to it, one closed in a thread stayed open in its siblings,
+   and close-on-exec meant close on thread creation too. Chromium found the
+   third - base opens /dev/urandom with O_CLOEXEC and reads it from whichever
+   thread wants randomness. */
+static int shared_descriptor;
+static volatile int worker_saw_bytes;
+static volatile int worker_opened;
+static volatile int worker_saw_cloexec;
+
+static void *descriptor_worker(void *unused) {
+    (void)unused;
+    /* A descriptor the MAIN thread opened, read from here. */
+    char buffer[16];
+    memset(buffer, 0, sizeof(buffer));
+    worker_saw_bytes = (int)pread(shared_descriptor, buffer, 5, 0);
+    if (worker_saw_bytes == 5 && memcmp(buffer, "M146!", 5) != 0) {
+        worker_saw_bytes = -1;
+    }
+    /* A close-on-exec descriptor the main thread opened is still open here,
+       because this is not an exec. */
+    worker_saw_cloexec = (fcntl(shared_descriptor, F_GETFD, 0) & FD_CLOEXEC) != 0;
+    /* And one opened HERE is visible to the main thread afterwards. */
+    worker_opened = open(SCRATCH, O_RDONLY | O_CLOEXEC);
+    return (void *)0;
+}
+
+static int a_descriptor_belongs_to_the_process(void) {
+    int file = open(SCRATCH, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (file < 0) {
+        return 210;
+    }
+    if (write(file, "M146!", 5) != 5) {
+        close(file);
+        return 211;
+    }
+    if ((fcntl(file, F_GETFD, 0) & FD_CLOEXEC) == 0) {
+        close(file);
+        return 212;
+    }
+    shared_descriptor = file;
+    worker_saw_bytes = 0;
+    worker_opened = -1;
+    worker_saw_cloexec = 0;
+
+    pthread_t thread;
+    if (pthread_create(&thread, (pthread_attr_t *)0, descriptor_worker,
+                       (void *)0) != 0) {
+        close(file);
+        return 213;
+    }
+    if (pthread_join(thread, (void **)0) != 0) {
+        close(file);
+        return 214;
+    }
+    if (worker_saw_bytes != 5) {
+        close(file);
+        return 215;
+    }
+    if (!worker_saw_cloexec) {
+        close(file);
+        return 216;
+    }
+    if (worker_opened < 0) {
+        close(file);
+        return 217;
+    }
+    /* The worker's descriptor is this thread's too - readable here, and
+       closing it here closes it for good. */
+    char buffer[16];
+    memset(buffer, 0, sizeof(buffer));
+    if (pread(worker_opened, buffer, 5, 0) != 5 ||
+        memcmp(buffer, "M146!", 5) != 0) {
+        close(file);
+        return 218;
+    }
+    if (close(worker_opened) != 0) {
+        close(file);
+        return 219;
+    }
+    if (close(worker_opened) == 0) {
+        close(file);
+        return 220;
+    }
+    close(file);
+    unlink(SCRATCH);
+    return 0;
+}
+
+/* And a FORK still gets its own table: the two processes' descriptors move
+   independently after it, which is the other half of the rule. */
+static int a_fork_gets_its_own_table(void) {
+    int ends[2];
+    if (pipe(ends) != 0) {
+        return 221;
+    }
+    pid_t child = fork();
+    if (child < 0) {
+        close(ends[0]);
+        close(ends[1]);
+        return 222;
+    }
+    if (child == 0) {
+        /* Closing the write end here must not close the parent's. */
+        close(ends[1]);
+        _exit(0);
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) != child) {
+        close(ends[0]);
+        close(ends[1]);
+        return 223;
+    }
+    if (write(ends[1], "still", 5) != 5) {
+        close(ends[0]);
+        close(ends[1]);
+        return 224;
+    }
+    char buffer[8];
+    memset(buffer, 0, sizeof(buffer));
+    if (read(ends[0], buffer, 5) != 5 || memcmp(buffer, "still", 5) != 0) {
+        close(ends[0]);
+        close(ends[1]);
+        return 225;
+    }
+    close(ends[0]);
+    close(ends[1]);
+    return 0;
+}
+
+
 int main(void) {
     int rc;
     if ((rc = the_monotonic_family_is_one_clock()) != 0) {
@@ -1257,6 +1391,12 @@ int main(void) {
         return rc;
     }
     if ((rc = getrandom_fills_what_it_is_asked_for()) != 0) {
+        return rc;
+    }
+    if ((rc = a_descriptor_belongs_to_the_process()) != 0) {
+        return rc;
+    }
+    if ((rc = a_fork_gets_its_own_table()) != 0) {
         return rc;
     }
     return 0;

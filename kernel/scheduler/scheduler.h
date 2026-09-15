@@ -83,6 +83,14 @@ typedef struct {
     uint8_t nonblock;
 } file_descriptor_slot_t;
 
+/* One table per process, reference counted: a thread shares its creator's
+   and a fork gets a copy. The count is the number of TASKS pointing here,
+   which for a single-threaded process is one. */
+typedef struct file_descriptor_table {
+    file_descriptor_slot_t slots[MAX_FILE_DESCRIPTORS];
+    int references;
+} file_descriptor_table_t;
+
 typedef enum {
     PRIO_INTERACTIVE = 0,
     PRIO_BATCH = 1,
@@ -107,7 +115,14 @@ typedef struct task {
     int stopped_sig;
     uint8_t stop_reported;
     uint8_t fpu_state[FPU_STATE_SIZE] __attribute__((aligned(FPU_STATE_ALIGN)));
-    file_descriptor_slot_t file_descriptors[MAX_FILE_DESCRIPTORS];
+    /* The descriptor table belongs to the PROCESS. Every thread of one
+       points at the same table, so a descriptor opened on any of them is
+       open on all of them - which is what POSIX says and what a program
+       that opens a file on one thread and reads it on another needs.
+       Before M146 each thread got a COPY of its creator's table with every
+       close-on-exec slot cleared, which made close-on-exec mean close on
+       thread creation as well. */
+    file_descriptor_table_t *descriptor_table;
     int parent_id;
     uint32_t caps;
     int pgid;
@@ -273,6 +288,10 @@ void scheduler_reap_slot(task_t *t);
 void scheduler_dump_cpus(void);
 
 void scheduler_reset_file_descriptors_to_std(task_t *t);
+
+file_descriptor_table_t *descriptor_table_new(void);
+void descriptor_table_reference(file_descriptor_table_t *table);
+void descriptor_table_release(file_descriptor_table_t *table);
 
 void file_descriptor_release(file_descriptor_slot_t *slot);
 void file_descriptor_retain(const file_descriptor_slot_t *slot);

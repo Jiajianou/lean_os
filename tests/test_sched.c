@@ -530,29 +530,109 @@ TEST(scheduler, a_dying_task_gives_back_every_descriptor_it_held) {
     q13_boot();
     task_t *t = q13_spawn("holder");
     REQUIRE(t != NULL);
+    REQUIRE(t->descriptor_table != NULL);
     fake_objects_reset();
 
-    t->file_descriptors[3].type = FILE_DESCRIPTOR_PIPE_READ;
-    t->file_descriptors[3].pipe = (struct pipe *)0x1000;
-    t->file_descriptors[4].type = FILE_DESCRIPTOR_PIPE_WRITE;
-    t->file_descriptors[4].pipe = (struct pipe *)0x1000;
-    t->file_descriptors[5].type = FILE_DESCRIPTOR_FILE;
-    t->file_descriptors[5].file = (struct open_file *)0x2000;
-    t->file_descriptors[6].type = FILE_DESCRIPTOR_SOCKET;
-    t->file_descriptors[6].sock = (struct socket *)0x3000;
+    t->descriptor_table->slots[3].type = FILE_DESCRIPTOR_PIPE_READ;
+    t->descriptor_table->slots[3].pipe = (struct pipe *)0x1000;
+    t->descriptor_table->slots[4].type = FILE_DESCRIPTOR_PIPE_WRITE;
+    t->descriptor_table->slots[4].pipe = (struct pipe *)0x1000;
+    t->descriptor_table->slots[5].type = FILE_DESCRIPTOR_FILE;
+    t->descriptor_table->slots[5].file = (struct open_file *)0x2000;
+    t->descriptor_table->slots[6].type = FILE_DESCRIPTOR_SOCKET;
+    t->descriptor_table->slots[6].sock = (struct socket *)0x3000;
 
     scheduler_release_file_descriptors(t);
     CHECK_EQ(fake_objects_pipe_read_refs(), -1);
     CHECK_EQ(fake_objects_pipe_write_refs(), -1);
     CHECK_EQ(fake_objects_file_refs(), -1);
     CHECK_EQ(fake_objects_socket_refs(), -1);
-    CHECK_EQ(t->file_descriptors[3].type, FILE_DESCRIPTOR_NONE);
-    CHECK_EQ(t->file_descriptors[6].type, FILE_DESCRIPTOR_NONE);
+    /* The table went with the last reference to it, so there is no slot
+       left to inspect - which is the point. Releasing again must be quiet
+       rather than a second round of closes on freed memory. */
+    CHECK_EQ(t->descriptor_table, NULL);
     scheduler_release_file_descriptors(t);
     CHECK_EQ(fake_objects_pipe_read_refs(), -1);
     CHECK_EQ(fake_objects_socket_refs(), -1);
 
     q13_kill(t);
+}
+
+/* M146. The half a booted machine cannot show: that the descriptors close
+   ONCE, when the last task sharing the table is gone, and not when the
+   first of them exits. On the machine a thread exiting early and a thread
+   exiting late look the same from outside; here the reference count is
+   readable. */
+TEST(scheduler, a_thread_shares_its_process_descriptor_table) {
+    q13_boot();
+    task_t *leader = q13_spawn("leader");
+    REQUIRE(leader != NULL);
+    task_t *worker = task_spawn_thread("worker", leader, q13_body, (void *)0);
+    REQUIRE(worker != NULL);
+
+    /* Not a copy - the same table. */
+    CHECK_EQ(worker->descriptor_table, leader->descriptor_table);
+    CHECK_EQ(leader->descriptor_table->references, 2);
+
+    fake_objects_reset();
+    leader->descriptor_table->slots[7].type = FILE_DESCRIPTOR_SOCKET;
+    leader->descriptor_table->slots[7].sock = (struct socket *)0x4000;
+
+    /* A descriptor opened after the thread started is visible to it, which
+       a copy taken at spawn time could not be. */
+    CHECK_EQ(worker->descriptor_table->slots[7].type, FILE_DESCRIPTOR_SOCKET);
+
+    /* The thread exits first. Its siblings still hold the table, so nothing
+       closes. */
+    scheduler_release_file_descriptors(worker);
+    CHECK_EQ(worker->descriptor_table, NULL);
+    CHECK_EQ(fake_objects_socket_refs(), 0);
+    REQUIRE(leader->descriptor_table != NULL);
+    CHECK_EQ(leader->descriptor_table->references, 1);
+    CHECK_EQ(leader->descriptor_table->slots[7].type, FILE_DESCRIPTOR_SOCKET);
+
+    /* And now the last one does. */
+    scheduler_release_file_descriptors(leader);
+    CHECK_EQ(fake_objects_socket_refs(), -1);
+    CHECK_EQ(leader->descriptor_table, NULL);
+
+    q13_kill(worker);
+    q13_kill(leader);
+}
+
+/* A close-on-exec descriptor survives a thread and does NOT survive a
+   spawn, which is the distinction task_spawn_common could not make before
+   M146 - it ran one loop for both and cleared the flag either way. */
+TEST(scheduler, close_on_exec_means_exec_and_not_thread_creation) {
+    q13_boot();
+    task_t *leader = q13_spawn("cloexec-leader");
+    REQUIRE(leader != NULL);
+    fake_objects_reset();
+    leader->descriptor_table->slots[8].type = FILE_DESCRIPTOR_SOCKET;
+    leader->descriptor_table->slots[8].sock = (struct socket *)0x5000;
+    leader->descriptor_table->slots[8].cloexec = 1;
+
+    task_t *worker = task_spawn_thread("cloexec-worker", leader, q13_body, (void *)0);
+    REQUIRE(worker != NULL);
+    CHECK_EQ(worker->descriptor_table->slots[8].type, FILE_DESCRIPTOR_SOCKET);
+    CHECK_EQ(worker->descriptor_table->slots[8].cloexec, 1);
+
+    scheduler_release_file_descriptors(worker);
+    q13_kill(worker);
+
+    /* A spawn is the exec those flags are about, so the slot is gone there
+       and the table is a different one. */
+    task_t *child = q13_spawn("cloexec-child");
+    REQUIRE(child != NULL);
+    CHECK(child->descriptor_table != leader->descriptor_table);
+    CHECK_EQ(child->descriptor_table->references, 1);
+    CHECK_EQ(child->descriptor_table->slots[8].type, FILE_DESCRIPTOR_NONE);
+    CHECK_EQ(child->descriptor_table->slots[8].cloexec, 0);
+
+    scheduler_release_file_descriptors(child);
+    scheduler_release_file_descriptors(leader);
+    q13_kill(child);
+    q13_kill(leader);
 }
 
 TEST(scheduler, a_dying_task_gives_back_every_record_lock_it_held) {

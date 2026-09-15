@@ -101,6 +101,15 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
   else
     echo "  (no build/repo - run tools/build-packages.sh for [m111])"
   fi
+
+  # M142 and M145 added boot markers and left their installers out of this
+  # list, so `make all` wiped /bin/mathltest and /bin/chromiumbase and the
+  # graded boot below reported two markers missing after every kernel change.
+  # A tier that cannot go green on a clean tree is not an instrument.
+  run_stage "the long double library, onto the image" \
+    ./tools/math-long-double-test.sh
+
+  run_stage "Chromium's //base, onto the image" ./tools/chromium-test.sh
 fi
 
 if [ "$TIER" = "full" ]; then

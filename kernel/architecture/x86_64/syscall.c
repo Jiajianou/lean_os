@@ -272,7 +272,7 @@ static long sys_write(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4
     if (fd >= MAX_FILE_DESCRIPTORS || !user_range_ok(buffer, length, 0)) {
         return -1;
     }
-    file_descriptor_slot_t *slot = &scheduler_current()->file_descriptors[fd];
+    file_descriptor_slot_t *slot = &scheduler_current()->descriptor_table->slots[fd];
     const char *s = (const char *)buffer;
     if (slot->type == FILE_DESCRIPTOR_STDOUT) {
         for (uint64_t i = 0; i < length; i++) {
@@ -390,7 +390,7 @@ static long sys_read(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4,
     if (fd >= MAX_FILE_DESCRIPTORS || !user_range_ok(buffer, length, 1)) {
         return -1;
     }
-    file_descriptor_slot_t *slot = &scheduler_current()->file_descriptors[fd];
+    file_descriptor_slot_t *slot = &scheduler_current()->descriptor_table->slots[fd];
     char *destination = (char *)buffer;
     if (slot->type == FILE_DESCRIPTOR_STDIN) {
         uint64_t n = 0;
@@ -528,7 +528,7 @@ static long pfile_slot(uint64_t fd, uint64_t buffer, uint64_t length,
     if (offset < 0) {
         return -1;
     }
-    file_descriptor_slot_t *slot = &scheduler_current()->file_descriptors[fd];
+    file_descriptor_slot_t *slot = &scheduler_current()->descriptor_table->slots[fd];
     if (slot->type != FILE_DESCRIPTOR_FILE) {
         return slot->type == FILE_DESCRIPTOR_NONE ? -1 : -OS_ERROR_SPIPE;
     }
@@ -1180,7 +1180,7 @@ static long sys_pipe(uint64_t file_descriptors_out_pointer, uint64_t a2, uint64_
     task_t *self = scheduler_current();
     int read_file_descriptor = -1, write_file_descriptor = -1;
     for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-        if (self->file_descriptors[i].type == FILE_DESCRIPTOR_NONE) {
+        if (self->descriptor_table->slots[i].type == FILE_DESCRIPTOR_NONE) {
             if (read_file_descriptor < 0) {
                 read_file_descriptor = i;
             } else {
@@ -1197,12 +1197,12 @@ static long sys_pipe(uint64_t file_descriptors_out_pointer, uint64_t a2, uint64_
     if (!p) {
         return -1;
     }
-    self->file_descriptors[read_file_descriptor].type = FILE_DESCRIPTOR_PIPE_READ;
-    self->file_descriptors[read_file_descriptor].cloexec = 0;
-    self->file_descriptors[read_file_descriptor].pipe = p;
-    self->file_descriptors[write_file_descriptor].type = FILE_DESCRIPTOR_PIPE_WRITE;
-    self->file_descriptors[write_file_descriptor].cloexec = 0;
-    self->file_descriptors[write_file_descriptor].pipe = p;
+    self->descriptor_table->slots[read_file_descriptor].type = FILE_DESCRIPTOR_PIPE_READ;
+    self->descriptor_table->slots[read_file_descriptor].cloexec = 0;
+    self->descriptor_table->slots[read_file_descriptor].pipe = p;
+    self->descriptor_table->slots[write_file_descriptor].type = FILE_DESCRIPTOR_PIPE_WRITE;
+    self->descriptor_table->slots[write_file_descriptor].cloexec = 0;
+    self->descriptor_table->slots[write_file_descriptor].pipe = p;
 
     out[0] = read_file_descriptor;
     out[1] = write_file_descriptor;
@@ -1255,7 +1255,7 @@ static long sys_fsync(uint64_t fd, uint64_t a2, uint64_t a3,
     if (fd >= MAX_FILE_DESCRIPTORS) {
         return -1;
     }
-    if (scheduler_current()->file_descriptors[fd].type != FILE_DESCRIPTOR_FILE) {
+    if (scheduler_current()->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_FILE) {
         return -1;
     }
     virtual_file_system_sync();
@@ -1388,10 +1388,10 @@ static long sys_fdpath(uint64_t fd, uint64_t out_pointer, uint64_t out_length,
         return -1;
     }
     task_t *self = scheduler_current();
-    if (self->file_descriptors[fd].type != FILE_DESCRIPTOR_FILE || !self->file_descriptors[fd].file) {
+    if (self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_FILE || !self->descriptor_table->slots[fd].file) {
         return -1;
     }
-    const char *p = self->file_descriptors[fd].file->path;
+    const char *p = self->descriptor_table->slots[fd].file->path;
     if (p[0] != '/') {
         return -1;
     }
@@ -1526,16 +1526,16 @@ static long sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a3, uint64_t a4
     (void)a5;
     (void)a6;
     task_t *self = scheduler_current();
-    if (fd < MAX_FILE_DESCRIPTORS && self->file_descriptors[fd].type == FILE_DESCRIPTOR_MEMFD) {
-        return memfd_truncate(self->file_descriptors[fd].memfd, length);
+    if (fd < MAX_FILE_DESCRIPTORS && self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_MEMFD) {
+        return memfd_truncate(self->descriptor_table->slots[fd].memfd, length);
     }
     if (!has_cap(CAP_FS_WRITE)) {
         return -1;
     }
-    if (fd >= MAX_FILE_DESCRIPTORS || self->file_descriptors[fd].type != FILE_DESCRIPTOR_FILE) {
+    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_FILE) {
         return -1;
     }
-    open_file_t *of = self->file_descriptors[fd].file;
+    open_file_t *of = self->descriptor_table->slots[fd].file;
     if (!of || !of->writable) {
         return -1;
     }
@@ -1550,7 +1550,7 @@ static tty_t *tty_for_file_descriptor(task_t *self, uint64_t fd, int *pty_number
     if (fd >= MAX_FILE_DESCRIPTORS) {
         return NULL;
     }
-    file_descriptor_slot_t *slot = &self->file_descriptors[fd];
+    file_descriptor_slot_t *slot = &self->descriptor_table->slots[fd];
     if (slot->type == FILE_DESCRIPTOR_STDIN || slot->type == FILE_DESCRIPTOR_STDOUT) {
         return tty_console();
     }
@@ -1574,7 +1574,7 @@ static long sys_ioctl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
         if (fd >= MAX_FILE_DESCRIPTORS) {
             return -1;
         }
-        file_descriptor_slot_t *slot = &self->file_descriptors[fd];
+        file_descriptor_slot_t *slot = &self->descriptor_table->slots[fd];
         int bytes = -1;
         switch (slot->type) {
         case FILE_DESCRIPTOR_PIPE_READ:
@@ -1951,7 +1951,7 @@ static long sys_pipe_open(uint64_t name_pointer, uint64_t file_descriptors_out_p
     task_t *self = scheduler_current();
     int read_file_descriptor = -1, write_file_descriptor = -1;
     for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-        if (self->file_descriptors[i].type == FILE_DESCRIPTOR_NONE) {
+        if (self->descriptor_table->slots[i].type == FILE_DESCRIPTOR_NONE) {
             if (read_file_descriptor < 0) {
                 read_file_descriptor = i;
             } else {
@@ -1968,12 +1968,12 @@ static long sys_pipe_open(uint64_t name_pointer, uint64_t file_descriptors_out_p
     if (!p) {
         return -1;
     }
-    self->file_descriptors[read_file_descriptor].type = FILE_DESCRIPTOR_PIPE_READ;
-    self->file_descriptors[read_file_descriptor].cloexec = 0;
-    self->file_descriptors[read_file_descriptor].pipe = p;
-    self->file_descriptors[write_file_descriptor].type = FILE_DESCRIPTOR_PIPE_WRITE;
-    self->file_descriptors[write_file_descriptor].cloexec = 0;
-    self->file_descriptors[write_file_descriptor].pipe = p;
+    self->descriptor_table->slots[read_file_descriptor].type = FILE_DESCRIPTOR_PIPE_READ;
+    self->descriptor_table->slots[read_file_descriptor].cloexec = 0;
+    self->descriptor_table->slots[read_file_descriptor].pipe = p;
+    self->descriptor_table->slots[write_file_descriptor].type = FILE_DESCRIPTOR_PIPE_WRITE;
+    self->descriptor_table->slots[write_file_descriptor].cloexec = 0;
+    self->descriptor_table->slots[write_file_descriptor].pipe = p;
 
     out[0] = read_file_descriptor;
     out[1] = write_file_descriptor;
@@ -2006,7 +2006,7 @@ static long sys_pipe_poll(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, ui
     if (fd >= MAX_FILE_DESCRIPTORS) {
         return -1;
     }
-    file_descriptor_slot_t *slot = &scheduler_current()->file_descriptors[fd];
+    file_descriptor_slot_t *slot = &scheduler_current()->descriptor_table->slots[fd];
     if (slot->type != FILE_DESCRIPTOR_PIPE_READ) {
         return -1;
     }
@@ -2050,16 +2050,16 @@ static long sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4, u
         return -1;
     }
     task_t *self = scheduler_current();
-    if (self->file_descriptors[oldfd].type == FILE_DESCRIPTOR_NONE) {
+    if (self->descriptor_table->slots[oldfd].type == FILE_DESCRIPTOR_NONE) {
         return -1;
     }
     if (newfd == oldfd) {
         return (long)newfd;
     }
-    drop_record_locks(self, &self->file_descriptors[newfd]);
-    file_descriptor_release(&self->file_descriptors[newfd]);
-    self->file_descriptors[newfd] = self->file_descriptors[oldfd];
-    file_descriptor_retain(&self->file_descriptors[newfd]);
+    drop_record_locks(self, &self->descriptor_table->slots[newfd]);
+    file_descriptor_release(&self->descriptor_table->slots[newfd]);
+    self->descriptor_table->slots[newfd] = self->descriptor_table->slots[oldfd];
+    file_descriptor_retain(&self->descriptor_table->slots[newfd]);
     return (long)newfd;
 }
 
@@ -2073,11 +2073,11 @@ static long sys_close(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64
         return -1;
     }
     task_t *self = scheduler_current();
-    if (self->file_descriptors[fd].type == FILE_DESCRIPTOR_NONE) {
+    if (self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_NONE) {
         return -1;
     }
-    drop_record_locks(self, &self->file_descriptors[fd]);
-    file_descriptor_release(&self->file_descriptors[fd]);
+    drop_record_locks(self, &self->descriptor_table->slots[fd]);
+    file_descriptor_release(&self->descriptor_table->slots[fd]);
     return 0;
 }
 
@@ -2190,7 +2190,7 @@ static long sys_pipe_reset(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, u
     if (fd >= MAX_FILE_DESCRIPTORS) {
         return -1;
     }
-    file_descriptor_slot_t *slot = &scheduler_current()->file_descriptors[fd];
+    file_descriptor_slot_t *slot = &scheduler_current()->descriptor_table->slots[fd];
     if (slot->type != FILE_DESCRIPTOR_PIPE_READ && slot->type != FILE_DESCRIPTOR_PIPE_WRITE) {
         return -1;
     }
@@ -2239,7 +2239,7 @@ static long sys_taskinfo(uint64_t buffer, uint64_t max_entries, uint64_t a3, uin
         e->exit_code = t->exit_code;
         int file_descriptors = 0;
         for (int f = 0; f < MAX_FILE_DESCRIPTORS; f++) {
-            if (t->file_descriptors[f].type != FILE_DESCRIPTOR_NONE) {
+            if (t->descriptor_table->slots[f].type != FILE_DESCRIPTOR_NONE) {
                 file_descriptors++;
             }
         }
@@ -2301,7 +2301,7 @@ static long sys_shutdown(uint64_t mode, uint64_t a2, uint64_t a3, uint64_t a4, u
 
 static int alloc_file_descriptor(task_t *t) {
     for (int i = 2; i < MAX_FILE_DESCRIPTORS; i++) {
-        if (t->file_descriptors[i].type == FILE_DESCRIPTOR_NONE) {
+        if (t->descriptor_table->slots[i].type == FILE_DESCRIPTOR_NONE) {
             return i;
         }
     }
@@ -2359,9 +2359,9 @@ static long sys_open(uint64_t path_pointer, uint64_t flags, uint64_t a3, uint64_
     if (flags & OPEN_APPEND) {
         of->offset = virtual_file_system_handle_size(handle);
     }
-    self->file_descriptors[fd].type = FILE_DESCRIPTOR_FILE;
-    self->file_descriptors[fd].cloexec = (flags & OPEN_CLOEXEC) ? 1 : 0;
-    self->file_descriptors[fd].file = of;
+    self->descriptor_table->slots[fd].type = FILE_DESCRIPTOR_FILE;
+    self->descriptor_table->slots[fd].cloexec = (flags & OPEN_CLOEXEC) ? 1 : 0;
+    self->descriptor_table->slots[fd].file = of;
     return fd;
 }
 
@@ -2372,7 +2372,7 @@ static long sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence, uint64_t a4
     if (fd >= MAX_FILE_DESCRIPTORS) {
         return -1;
     }
-    file_descriptor_slot_t *slot = &scheduler_current()->file_descriptors[fd];
+    file_descriptor_slot_t *slot = &scheduler_current()->descriptor_table->slots[fd];
     if (slot->type != FILE_DESCRIPTOR_FILE) {
         return -1;
     }
@@ -2569,8 +2569,8 @@ static long sys_mmap(uint64_t address, uint64_t length, uint64_t prot, uint64_t 
             return -1;
         }
         task_t *current = scheduler_current();
-        if (current->file_descriptors[fd].type == FILE_DESCRIPTOR_MEMFD) {
-            struct memfd *m = current->file_descriptors[fd].memfd;
+        if (current->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_MEMFD) {
+            struct memfd *m = current->descriptor_table->slots[fd].memfd;
             if (!shared) {
                 return -1;
             }
@@ -2588,16 +2588,16 @@ static long sys_mmap(uint64_t address, uint64_t length, uint64_t prot, uint64_t 
             file_page = (uint32_t)(offset / PAGE_SIZE);
             goto have_backing;
         }
-        if (current->file_descriptors[fd].type != FILE_DESCRIPTOR_FILE || !current->file_descriptors[fd].file) {
+        if (current->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_FILE || !current->descriptor_table->slots[fd].file) {
             return -1;
         }
-        if (shared && (prot & PROT_WRITE) && !current->file_descriptors[fd].file->writable) {
+        if (shared && (prot & PROT_WRITE) && !current->descriptor_table->slots[fd].file->writable) {
             return -1;
         }
         if (shared && (prot & PROT_WRITE) && !has_cap(CAP_FS_WRITE)) {
             return -1;
         }
-        handle = current->file_descriptors[fd].file->handle;
+        handle = current->descriptor_table->slots[fd].file->handle;
         file_page = (uint32_t)(offset / PAGE_SIZE);
     } else {
         if (offset != 0 || (long)fd >= 0) {
@@ -2937,7 +2937,7 @@ static long sys_fstat(uint64_t fd, uint64_t out_pointer, uint64_t a3, uint64_t a
     if (fd >= MAX_FILE_DESCRIPTORS) {
         return -1;
     }
-    file_descriptor_slot_t *slot = &scheduler_current()->file_descriptors[fd];
+    file_descriptor_slot_t *slot = &scheduler_current()->descriptor_table->slots[fd];
     os_stat_t out;
     k_memset(&out, 0, sizeof(out));
 
@@ -3025,10 +3025,10 @@ static long sys_dropcaps(uint64_t keep, uint64_t a2, uint64_t a3, uint64_t a4, u
 
 static struct socket *socket_for_file_descriptor(uint64_t fd) {
     task_t *self = scheduler_current();
-    if (fd >= MAX_FILE_DESCRIPTORS || self->file_descriptors[fd].type != FILE_DESCRIPTOR_SOCKET) {
+    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_SOCKET) {
         return (struct socket *)0;
     }
-    return self->file_descriptors[fd].sock;
+    return self->descriptor_table->slots[fd].sock;
 }
 
 static long install_socket_file_descriptor(struct socket *s) {
@@ -3038,9 +3038,9 @@ static long install_socket_file_descriptor(struct socket *s) {
         socket_unref(s);
         return -1;
     }
-    self->file_descriptors[fd].type = FILE_DESCRIPTOR_SOCKET;
-    self->file_descriptors[fd].cloexec = 0;
-    self->file_descriptors[fd].sock = s;
+    self->descriptor_table->slots[fd].type = FILE_DESCRIPTOR_SOCKET;
+    self->descriptor_table->slots[fd].cloexec = 0;
+    self->descriptor_table->slots[fd].sock = s;
     return fd;
 }
 
@@ -3051,19 +3051,19 @@ static long install_unix_file_descriptor(struct unix_socket *u) {
         unix_socket_unref(u);
         return -1;
     }
-    self->file_descriptors[fd].type = FILE_DESCRIPTOR_UNIX;
-    self->file_descriptors[fd].cloexec = 0;
-    self->file_descriptors[fd].nonblock = 0;
-    self->file_descriptors[fd].un = u;
+    self->descriptor_table->slots[fd].type = FILE_DESCRIPTOR_UNIX;
+    self->descriptor_table->slots[fd].cloexec = 0;
+    self->descriptor_table->slots[fd].nonblock = 0;
+    self->descriptor_table->slots[fd].un = u;
     return fd;
 }
 
 static struct unix_socket *unix_for_file_descriptor(uint64_t fd) {
     task_t *self = scheduler_current();
-    if (fd >= MAX_FILE_DESCRIPTORS || self->file_descriptors[fd].type != FILE_DESCRIPTOR_UNIX) {
+    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_UNIX) {
         return (struct unix_socket *)0;
     }
-    return self->file_descriptors[fd].un;
+    return self->descriptor_table->slots[fd].un;
 }
 
 static long sys_socket(uint64_t type, uint64_t domain, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -3105,10 +3105,10 @@ static long sys_unix_peer_credentials(uint64_t file_descriptor, uint64_t out_poi
     task_t *self = scheduler_current();
     int fd = (int)file_descriptor;
     if (fd < 0 || fd >= MAX_FILE_DESCRIPTORS ||
-        self->file_descriptors[fd].type != FILE_DESCRIPTOR_UNIX) {
+        self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_UNIX) {
         return -1;
     }
-    int pid = unix_socket_peer_pid(self->file_descriptors[fd].un);
+    int pid = unix_socket_peer_pid(self->descriptor_table->slots[fd].un);
     if (pid < 0) {
         return -1;
     }
@@ -3135,29 +3135,29 @@ static long sys_socketpair(uint64_t type, uint64_t file_descriptors_pointer, uin
     task_t *self = scheduler_current();
     int fa = alloc_file_descriptor(self);
     if (fa >= 0) {
-        self->file_descriptors[fa].type = FILE_DESCRIPTOR_UNIX;
-        self->file_descriptors[fa].cloexec = 0;
-        self->file_descriptors[fa].nonblock = 0;
-        self->file_descriptors[fa].un = a;
+        self->descriptor_table->slots[fa].type = FILE_DESCRIPTOR_UNIX;
+        self->descriptor_table->slots[fa].cloexec = 0;
+        self->descriptor_table->slots[fa].nonblock = 0;
+        self->descriptor_table->slots[fa].un = a;
     }
     int framebuffer = fa >= 0 ? alloc_file_descriptor(self) : -1;
     if (framebuffer < 0) {
         if (fa >= 0) {
-            file_descriptor_release(&self->file_descriptors[fa]);
+            file_descriptor_release(&self->descriptor_table->slots[fa]);
         } else {
             unix_socket_unref(a);
         }
         unix_socket_unref(b);
         return -1;
     }
-    self->file_descriptors[framebuffer].type = FILE_DESCRIPTOR_UNIX;
-    self->file_descriptors[framebuffer].cloexec = 0;
-    self->file_descriptors[framebuffer].nonblock = 0;
-    self->file_descriptors[framebuffer].un = b;
+    self->descriptor_table->slots[framebuffer].type = FILE_DESCRIPTOR_UNIX;
+    self->descriptor_table->slots[framebuffer].cloexec = 0;
+    self->descriptor_table->slots[framebuffer].nonblock = 0;
+    self->descriptor_table->slots[framebuffer].un = b;
     int out[2] = {fa, framebuffer};
     if (copy_to_user(file_descriptors_pointer, out, sizeof(out)) != 0) {
-        file_descriptor_release(&self->file_descriptors[fa]);
-        file_descriptor_release(&self->file_descriptors[framebuffer]);
+        file_descriptor_release(&self->descriptor_table->slots[fa]);
+        file_descriptor_release(&self->descriptor_table->slots[framebuffer]);
         return -1;
     }
     return 0;
@@ -3222,10 +3222,10 @@ static long sys_sendmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, u
         }
         for (int i = 0; i < nfds; i++) {
             if (nums[i] < 0 || nums[i] >= MAX_FILE_DESCRIPTORS ||
-                self->file_descriptors[nums[i]].type == FILE_DESCRIPTOR_NONE) {
+                self->descriptor_table->slots[nums[i]].type == FILE_DESCRIPTOR_NONE) {
                 return -1;
             }
-            slots[i] = self->file_descriptors[nums[i]];
+            slots[i] = self->descriptor_table->slots[nums[i]];
         }
     }
     uint8_t staging[UNIX_MESSAGE_STAGING];
@@ -3238,7 +3238,7 @@ static long sys_sendmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, u
         if (n != 0 || (length == 0 && nfds == 0)) {
             return n;
         }
-        if (self->file_descriptors[fd].nonblock) {
+        if (self->descriptor_table->slots[fd].nonblock) {
             return -OS_ERROR_AGAIN;
         }
         if (scheduler_signal_pending()) {
@@ -3289,9 +3289,9 @@ static long sys_recvmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, u
                     rflags |= OS_MESSAGE_CTRUNC;
                     continue;
                 }
-                self->file_descriptors[nfd] = slots[i];
-                self->file_descriptors[nfd].cloexec = 0;
-                self->file_descriptors[nfd].nonblock = 0;
+                self->descriptor_table->slots[nfd] = slots[i];
+                self->descriptor_table->slots[nfd].cloexec = 0;
+                self->descriptor_table->slots[nfd].nonblock = 0;
                 nums[installed++] = nfd;
             }
             message.nfds = (uint32_t)installed;
@@ -3303,13 +3303,13 @@ static long sys_recvmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, u
                 copy_to_user(message_pointer, &message, sizeof(message)) == 0;
             if (!copied) {
                 for (int i = 0; i < installed; i++) {
-                    file_descriptor_release(&self->file_descriptors[nums[i]]);
+                    file_descriptor_release(&self->descriptor_table->slots[nums[i]]);
                 }
                 return -1;
             }
             return n;
         }
-        if (self->file_descriptors[fd].nonblock) {
+        if (self->descriptor_table->slots[fd].nonblock) {
             return -OS_ERROR_AGAIN;
         }
         if (scheduler_signal_pending()) {
@@ -3345,20 +3345,20 @@ static long sys_memfd_create(uint64_t name_pointer, uint64_t flags, uint64_t a3,
         memfd_unref(m);
         return -1;
     }
-    self->file_descriptors[fd].type = FILE_DESCRIPTOR_MEMFD;
-    self->file_descriptors[fd].memfd = m;
-    self->file_descriptors[fd].cloexec = (flags & OS_MFD_CLOEXEC) ? 1 : 0;
-    self->file_descriptors[fd].nonblock = 0;
+    self->descriptor_table->slots[fd].type = FILE_DESCRIPTOR_MEMFD;
+    self->descriptor_table->slots[fd].memfd = m;
+    self->descriptor_table->slots[fd].cloexec = (flags & OS_MFD_CLOEXEC) ? 1 : 0;
+    self->descriptor_table->slots[fd].nonblock = 0;
     return fd;
 }
 
 static long sys_memfd_seal(uint64_t fd, uint64_t add, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3; (void)a4; (void)a5; (void)a6;
     task_t *self = scheduler_current();
-    if (fd >= MAX_FILE_DESCRIPTORS || self->file_descriptors[fd].type != FILE_DESCRIPTOR_MEMFD) {
+    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_MEMFD) {
         return -1;
     }
-    struct memfd *m = self->file_descriptors[fd].memfd;
+    struct memfd *m = self->descriptor_table->slots[fd].memfd;
     if (add != 0 && memfd_add_seals(m, (uint32_t)add) != 0) {
         return -1;
     }
@@ -3690,7 +3690,7 @@ static int file_descriptor_is_ready(task_t *self, int fd) {
     if (fd < 0 || fd >= MAX_FILE_DESCRIPTORS) {
         return 0;
     }
-    file_descriptor_slot_t *slot = &self->file_descriptors[fd];
+    file_descriptor_slot_t *slot = &self->descriptor_table->slots[fd];
     switch (slot->type) {
     case FILE_DESCRIPTOR_STDIN:
         return keyboard_peek() ? 1 : 0;
@@ -3717,7 +3717,7 @@ static uint32_t file_descriptor_epoll_mask_for(task_t *self, int fd, const void 
     if (fd < 0 || fd >= MAX_FILE_DESCRIPTORS) {
         return EPOLL_STALE;
     }
-    file_descriptor_slot_t *slot = &self->file_descriptors[fd];
+    file_descriptor_slot_t *slot = &self->descriptor_table->slots[fd];
     if (slot->type == FILE_DESCRIPTOR_NONE) {
         return EPOLL_STALE;
     }
@@ -3805,10 +3805,10 @@ static long install_file_descriptor_of(file_descriptor_type_t type, void *object
         }
         return -1;
     }
-    self->file_descriptors[fd].type = type;
-    self->file_descriptors[fd].event = (struct eventfd *)object;
-    self->file_descriptors[fd].cloexec = (flags & OS_FILE_DESCRIPTOR_CLOEXEC) ? 1 : 0;
-    self->file_descriptors[fd].nonblock = (flags & OS_FILE_DESCRIPTOR_NONBLOCK) ? 1 : 0;
+    self->descriptor_table->slots[fd].type = type;
+    self->descriptor_table->slots[fd].event = (struct eventfd *)object;
+    self->descriptor_table->slots[fd].cloexec = (flags & OS_FILE_DESCRIPTOR_CLOEXEC) ? 1 : 0;
+    self->descriptor_table->slots[fd].nonblock = (flags & OS_FILE_DESCRIPTOR_NONBLOCK) ? 1 : 0;
     return fd;
 }
 
@@ -3853,13 +3853,13 @@ static long sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_pointe
         return -1;
     }
     task_t *self = scheduler_current();
-    if (fd >= MAX_FILE_DESCRIPTORS || self->file_descriptors[fd].type != FILE_DESCRIPTOR_TIMER) {
+    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_TIMER) {
         return -1;
     }
     if (flags & ~(uint64_t)OS_TFD_ABSTIME) {
         return -1;
     }
-    struct timerfd *t = self->file_descriptors[fd].timer;
+    struct timerfd *t = self->descriptor_table->slots[fd].timer;
     int absolute = (flags & OS_TFD_ABSTIME) != 0;
     os_itimer_t had = {0, 0};
     if (timerfd_settime(t, timer_clock_ns(t, absolute), absolute, want.value_ns,
@@ -3878,11 +3878,11 @@ static long sys_timerfd_gettime(uint64_t fd, uint64_t out_pointer, uint64_t a3, 
         return -1;
     }
     task_t *self = scheduler_current();
-    if (fd >= MAX_FILE_DESCRIPTORS || self->file_descriptors[fd].type != FILE_DESCRIPTOR_TIMER) {
+    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_TIMER) {
         return -1;
     }
     os_itimer_t out = {0, 0};
-    timerfd_gettime(self->file_descriptors[fd].timer, clock_now_ns(), &out.value_ns, &out.interval_ns);
+    timerfd_gettime(self->descriptor_table->slots[fd].timer, clock_now_ns(), &out.value_ns, &out.interval_ns);
     return copy_to_user(out_pointer, &out, sizeof(out)) == 0 ? 0 : -1;
 }
 
@@ -3902,17 +3902,17 @@ static long sys_epoll_control(uint64_t epfd, uint64_t op, uint64_t fd, uint64_t 
     if (op != EPOLL_CTL_DEL && copy_from_user(&ev, ev_pointer, sizeof(ev)) != 0) {
         return -1;
     }
-    if (epfd >= MAX_FILE_DESCRIPTORS || self->file_descriptors[epfd].type != FILE_DESCRIPTOR_EPOLL) {
+    if (epfd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[epfd].type != FILE_DESCRIPTOR_EPOLL) {
         return -1;
     }
-    if (fd >= MAX_FILE_DESCRIPTORS || self->file_descriptors[fd].type == FILE_DESCRIPTOR_NONE) {
+    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_NONE) {
         return -1;
     }
-    if (self->file_descriptors[fd].type == FILE_DESCRIPTOR_EPOLL) {
+    if (self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_EPOLL) {
         return -1;
     }
-    const void *object = (const void *)self->file_descriptors[fd].pipe;
-    return epoll_control_set(self->file_descriptors[epfd].epoll, (int)op, (int)fd, object,
+    const void *object = (const void *)self->descriptor_table->slots[fd].pipe;
+    return epoll_control_set(self->descriptor_table->slots[epfd].epoll, (int)op, (int)fd, object,
                          ev.events, ev.data);
 }
 
@@ -3925,10 +3925,10 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxeven
     if (!user_range_ok(out_pointer, maxevents * sizeof(os_epoll_event_t), 1)) {
         return -1;
     }
-    if (epfd >= MAX_FILE_DESCRIPTORS || self->file_descriptors[epfd].type != FILE_DESCRIPTOR_EPOLL) {
+    if (epfd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[epfd].type != FILE_DESCRIPTOR_EPOLL) {
         return -1;
     }
-    struct epoll *ep = self->file_descriptors[epfd].epoll;
+    struct epoll *ep = self->descriptor_table->slots[epfd].epoll;
     long timeout = (long)timeout_ms;
     uint64_t now = pit_get_ticks() * (1000 / PIT_HZ);
     uint64_t deadline = (timeout < 0) ? 0 : now + (uint64_t)timeout;
@@ -3954,10 +3954,10 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxeven
         }
         uint64_t park_until = deadline;
         for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-            if (self->file_descriptors[i].type != FILE_DESCRIPTOR_TIMER) {
+            if (self->descriptor_table->slots[i].type != FILE_DESCRIPTOR_TIMER) {
                 continue;
             }
-            long ms = timerfd_next_ms(self->file_descriptors[i].timer, clock_now_ns());
+            long ms = timerfd_next_ms(self->descriptor_table->slots[i].timer, clock_now_ns());
             if (ms < 0) {
                 continue;
             }
@@ -4285,24 +4285,24 @@ static long sys_fcntl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
     (void)a5;
     (void)a6;
     task_t *self = scheduler_current();
-    if (fd >= MAX_FILE_DESCRIPTORS || self->file_descriptors[fd].type == FILE_DESCRIPTOR_NONE) {
+    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_NONE) {
         return -1;
     }
     switch (command) {
     case F_GETFD_COMMAND:
-        return self->file_descriptors[fd].cloexec ? FILE_DESCRIPTOR_CLOEXEC_BIT : 0;
+        return self->descriptor_table->slots[fd].cloexec ? FILE_DESCRIPTOR_CLOEXEC_BIT : 0;
     case F_SETFD_COMMAND:
-        self->file_descriptors[fd].cloexec = (arg & FILE_DESCRIPTOR_CLOEXEC_BIT) ? 1 : 0;
+        self->descriptor_table->slots[fd].cloexec = (arg & FILE_DESCRIPTOR_CLOEXEC_BIT) ? 1 : 0;
         return 0;
     case F_GETFL_COMMAND: {
         long access;
-        switch (self->file_descriptors[fd].type) {
+        switch (self->descriptor_table->slots[fd].type) {
         case FILE_DESCRIPTOR_STDIN:      access = OPEN_READ; break;
         case FILE_DESCRIPTOR_STDOUT:     access = OPEN_WRITE; break;
         case FILE_DESCRIPTOR_PIPE_READ:  access = OPEN_READ; break;
         case FILE_DESCRIPTOR_PIPE_WRITE: access = OPEN_WRITE; break;
         case FILE_DESCRIPTOR_FILE:
-            access = OPEN_READ | (self->file_descriptors[fd].file->writable ? OPEN_WRITE : 0);
+            access = OPEN_READ | (self->descriptor_table->slots[fd].file->writable ? OPEN_WRITE : 0);
             break;
         case FILE_DESCRIPTOR_SOCKET:     access = OPEN_READ | OPEN_WRITE; break;
         case FILE_DESCRIPTOR_UNIX:       access = OPEN_READ | OPEN_WRITE; break;
@@ -4312,29 +4312,29 @@ static long sys_fcntl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
         case FILE_DESCRIPTOR_MEMFD:      access = OPEN_READ | OPEN_WRITE; break;
         default:            return -1;
         }
-        return access | (self->file_descriptors[fd].nonblock ? OS_NONBLOCK_BIT : 0);
+        return access | (self->descriptor_table->slots[fd].nonblock ? OS_NONBLOCK_BIT : 0);
     }
     case F_SETFL_COMMAND:
-        self->file_descriptors[fd].nonblock = (arg & OS_NONBLOCK_BIT) ? 1 : 0;
+        self->descriptor_table->slots[fd].nonblock = (arg & OS_NONBLOCK_BIT) ? 1 : 0;
         return 0;
     case F_GETLK_COMMAND:
     case F_SETLK_COMMAND:
     case F_SETLKW_COMMAND: {
         os_flock_t request;
-        if (self->file_descriptors[fd].type != FILE_DESCRIPTOR_FILE ||
+        if (self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_FILE ||
             copy_from_user(&request, arg, sizeof(request)) != 0) {
             return -1;
         }
-        uint32_t ino = slot_inode(&self->file_descriptors[fd]);
+        uint32_t ino = slot_inode(&self->descriptor_table->slots[fd]);
         if (ino == 0) {
             return -1;
         }
         int64_t start = request.start;
         int64_t length = request.length;
         if (request.whence == 1) {
-            start += (int64_t)self->file_descriptors[fd].file->offset;
+            start += (int64_t)self->descriptor_table->slots[fd].file->offset;
         } else if (request.whence == 2) {
-            start += (int64_t)virtual_file_system_handle_size(self->file_descriptors[fd].file->handle);
+            start += (int64_t)virtual_file_system_handle_size(self->descriptor_table->slots[fd].file->handle);
         } else if (request.whence != 0) {
             return -1;
         }
@@ -4577,10 +4577,10 @@ static long sys_execve(isr_regs_t *regs) {
     self->fs_base = 0;
 
     for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-        if (self->file_descriptors[i].cloexec) {
-            drop_record_locks(self, &self->file_descriptors[i]);
-            file_descriptor_release(&self->file_descriptors[i]);
-            self->file_descriptors[i].type = FILE_DESCRIPTOR_NONE;
+        if (self->descriptor_table->slots[i].cloexec) {
+            drop_record_locks(self, &self->descriptor_table->slots[i]);
+            file_descriptor_release(&self->descriptor_table->slots[i]);
+            self->descriptor_table->slots[i].type = FILE_DESCRIPTOR_NONE;
         }
     }
 

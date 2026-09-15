@@ -225,6 +225,7 @@ REQUIRED_MARKERS=(
   "[m143] the POSIX surface //base's own sources ask for:"
   "[m144] what a fault was, not that one happened:"
   "[m145] Chromium's //base links and runs on this machine:"
+  "[m146] a descriptor belongs to the process:"
   "chromiumbase: done"
   "mathltest: done"
   "[m125] lvgl rendered"
