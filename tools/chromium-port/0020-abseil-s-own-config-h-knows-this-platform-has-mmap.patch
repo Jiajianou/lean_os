@@ -1,0 +1,13 @@
+diff --git a/third_party/abseil-cpp/absl/base/config.h b/third_party/abseil-cpp/absl/base/config.h
+index e3e2c96a39..04035d0de4 100644
+--- a/third_party/abseil-cpp/absl/base/config.h
++++ b/third_party/abseil-cpp/absl/base/config.h
+@@ -344,7 +344,7 @@ static_assert(ABSL_INTERNAL_INLINE_NAMESPACE_STR[0] != 'h' ||
+     defined(__EMSCRIPTEN__) || defined(__Fuchsia__) || defined(__sun) ||  \
+     defined(__myriad2__) || defined(__HAIKU__) || defined(__OpenBSD__) || \
+     defined(__NetBSD__) || defined(__QNX__) || defined(__VXWORKS__) ||    \
+-    defined(__hexagon__) || defined(__XTENSA__) ||                        \
++    defined(__hexagon__) || defined(__XTENSA__) || defined(__lean_os__) ||\
+     defined(_WASI_EMULATED_MMAN)
+ #define ABSL_HAVE_MMAP 1
+ #endif

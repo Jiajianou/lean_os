@@ -81,6 +81,14 @@ typedef struct {
     };
     uint8_t cloexec;
     uint8_t nonblock;
+    /* The access this DESCRIPTOR has, as opposed to the access the object
+       allows. A memfd is created writable and a second descriptor for the
+       same pages, reopened through /proc/<pid>/fd/<n>, can be read-only -
+       which is what lets a process hand out memory somebody else can read
+       and cannot change. It only ever shrinks, like the capability set.
+       Types whose access is fixed by what they are - a pipe end, an epoll
+       set - do not consult it. */
+    uint8_t writable;
 } file_descriptor_slot_t;
 
 /* One table per process, reference counted: a thread shares its creator's

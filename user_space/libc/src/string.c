@@ -41,6 +41,16 @@ void *memchr(const void *s, int c, size_t n) {
     return (void *)0;
 }
 
+void *memrchr(const void *s, int c, size_t n) {
+    const unsigned char *p = (const unsigned char *)s;
+    for (size_t i = n; i > 0; i--) {
+        if (p[i - 1] == (unsigned char)c) {
+            return (void *)(p + i - 1);
+        }
+    }
+    return (void *)0;
+}
+
 int strncmp(const char *a, const char *b, size_t n) {
     for (size_t i = 0; i < n; i++) {
         unsigned char x = (unsigned char)a[i], y = (unsigned char)b[i];

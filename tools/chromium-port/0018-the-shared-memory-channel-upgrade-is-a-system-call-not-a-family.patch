@@ -1,0 +1,66 @@
+diff --git a/mojo/core/BUILD.gn b/mojo/core/BUILD.gn
+index acb701fff3..744bb7fca0 100644
+--- a/mojo/core/BUILD.gn
++++ b/mojo/core/BUILD.gn
+@@ -113,7 +113,12 @@ source_set("impl_for_embedder") {
+       "channel_posix.h",
+     ]
+ 
+-    if (is_linux || is_chromeos || is_android) {
++    # The shared-memory channel upgrade is memfd_create through syscall(2),
++    # eventfd(2) and futex(2) - the Linux kernel's own interfaces rather than
++    # the family's - so what decides whether it is compiled is whether those
++    # are there. A POSIX platform without them has ChannelPosix, which is the
++    # same channel over the same socket without the fast path.
++    if (has_linux_kernel || is_android) {
+       sources += [
+         "channel_linux.cc",
+         "channel_linux.h",
+diff --git a/mojo/core/channel.cc b/mojo/core/channel.cc
+index b2fff23c5d..33a3c56559 100644
+--- a/mojo/core/channel.cc
++++ b/mojo/core/channel.cc
+@@ -1304,8 +1304,10 @@ bool Channel::OnControlMessage(Message::MessageType message_type,
+   return false;
+ }
+ 
+-// Currently only CrOs, Linux, and Android support upgrades.
+-#if !(BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID))
++// The upgrade is memfd_create, eventfd and futex, so what decides whether a
++// channel can offer one is whether the Linux kernel's own interfaces are
++// there - not which family the platform is gated as.
++#if !(BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID))
+ // static
+ MOJO_SYSTEM_IMPL_EXPORT bool Channel::SupportsChannelUpgrade() {
+   return false;
+diff --git a/mojo/core/channel_posix.cc b/mojo/core/channel_posix.cc
+index 29ad72a05a..3c508d57f6 100644
+--- a/mojo/core/channel_posix.cc
++++ b/mojo/core/channel_posix.cc
+@@ -621,7 +621,7 @@ scoped_refptr<Channel> Channel::Create(
+     ConnectionParams connection_params,
+     HandlePolicy handle_policy,
+     scoped_refptr<base::SingleThreadTaskRunner> io_task_runner) {
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+   return new ChannelLinux(delegate, std::move(connection_params), handle_policy,
+                           io_task_runner);
+ #else
+@@ -630,7 +630,7 @@ scoped_refptr<Channel> Channel::Create(
+ #endif
+ }
+ 
+-#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID))
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+ // static
+ bool Channel::SupportsChannelUpgrade() {
+   return ChannelLinux::KernelSupportsUpgradeRequirements() &&
+@@ -643,7 +643,6 @@ void Channel::OfferChannelUpgrade() {
+   }
+   static_cast<ChannelLinux*>(this)->OfferSharedMemUpgrade();
+ }
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) ||
+-        // BUILDFLAG(IS_ANDROID)
++#endif  // BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+ 
+ }  // namespace mojo::core

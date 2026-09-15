@@ -6,5 +6,8 @@
 
 group("lean_os") {
   testonly = false
-  deps = [ "//lean_os/basetest" ]
+  deps = [
+    "//lean_os/basetest",
+    "//lean_os/mojotest",
+  ]
 }

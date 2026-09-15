@@ -228,6 +228,8 @@ REQUIRED_MARKERS=(
   "[m146] a descriptor belongs to the process:"
   "[m147] a thread_local is where the compiler reads it:"
   "chromiumbase: done"
+  "[m148] Chromium's //mojo runs on this machine:"
+  "chromiummojo: done"
   "mathltest: done"
   "[m125] lvgl rendered"
   "[m125] a third-party toolkit on this compositor:"

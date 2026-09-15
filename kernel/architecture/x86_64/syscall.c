@@ -1527,6 +1527,9 @@ static long sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a3, uint64_t a4
     (void)a6;
     task_t *self = scheduler_current();
     if (fd < MAX_FILE_DESCRIPTORS && self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_MEMFD) {
+        if (!self->descriptor_table->slots[fd].writable) {
+            return -1;
+        }
         return memfd_truncate(self->descriptor_table->slots[fd].memfd, length);
     }
     if (!has_cap(CAP_FS_WRITE)) {
@@ -2308,6 +2311,61 @@ static int alloc_file_descriptor(task_t *t) {
     return -1;
 }
 
+/* /proc/<pid>/fd/<n>, which is how Unix spells "another descriptor for the
+   object this one already names". Chromium's shared memory is the caller
+   that made this necessary: it creates a memfd it can write to and then
+   wants a second, read-only descriptor for the same pages to hand to a
+   process it does not trust, and the only name a memfd has is this one.
+
+   The rights can only shrink. A descriptor opened read-only cannot be
+   reopened for writing through its own name, which is the same rule the
+   capability set follows - and without it a read-only region would be a
+   claim rather than a boundary, which M65 has a word for.
+
+   Only this process's own descriptors: another task's table is not
+   something a path lookup should reach into. */
+static int process_file_descriptor_path(const char *path, int *out_fd) {
+    const char *p = path;
+    const char *prefix = "/proc/";
+    for (int i = 0; prefix[i]; i++) {
+        if (p[i] != prefix[i]) {
+            return 0;
+        }
+    }
+    p += 6;
+    if (p[0] == 's' && p[1] == 'e' && p[2] == 'l' && p[3] == 'f' && p[4] == '/') {
+        p += 5;
+    } else {
+        int pid = 0;
+        int digits = 0;
+        while (*p >= '0' && *p <= '9') {
+            pid = pid * 10 + (*p - '0');
+            p++;
+            digits++;
+        }
+        if (digits == 0 || *p != '/' || pid != scheduler_current()->id) {
+            return 0;
+        }
+        p++;
+    }
+    if (p[0] != 'f' || p[1] != 'd' || p[2] != '/') {
+        return 0;
+    }
+    p += 3;
+    int fd = 0;
+    int digits = 0;
+    while (*p >= '0' && *p <= '9') {
+        fd = fd * 10 + (*p - '0');
+        p++;
+        digits++;
+    }
+    if (digits == 0 || *p != '\0' || fd < 0 || fd >= MAX_FILE_DESCRIPTORS) {
+        return 0;
+    }
+    *out_fd = fd;
+    return 1;
+}
+
 static long sys_open(uint64_t path_pointer, uint64_t flags, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
@@ -2318,6 +2376,51 @@ static long sys_open(uint64_t path_pointer, uint64_t flags, uint64_t a3, uint64_
         return -1;
     }
     int writable = (flags & OPEN_WRITE) != 0;
+
+    int source_fd = -1;
+    if (process_file_descriptor_path(path, &source_fd)) {
+        task_t *opener = scheduler_current();
+        file_descriptor_slot_t *source =
+            &opener->descriptor_table->slots[source_fd];
+        if (source->type == FILE_DESCRIPTOR_NONE ||
+            (flags & (OPEN_CREATE | OPEN_EXCL | OPEN_TRUNCATE))) {
+            return -1;
+        }
+        if (source->type == FILE_DESCRIPTOR_FILE) {
+            /* A file on the disk has a name of its own, and reopening it
+               through procfs gives a new file description with its own
+               offset rather than a second reference to this one - which is
+               what Linux does and what a program reading the same file twice
+               expects. So this becomes an ordinary open of that path. */
+            if (!source->file || (writable && !source->file->writable)) {
+                return -1;
+            }
+            k_memcpy(path, source->file->path, OPEN_FILE_PATH_MAX);
+            path[OPEN_FILE_PATH_MAX - 1] = '\0';
+        } else {
+            /* Everything else - a memfd, a pipe end, a socket - has no name
+               but this one, so the new descriptor refers to the same object.
+               Its access is what was asked for, bounded by what the
+               descriptor being reopened holds. */
+            if (writable && source->type == FILE_DESCRIPTOR_MEMFD &&
+                !source->writable) {
+                return -1;
+            }
+            int fd = alloc_file_descriptor(opener);
+            if (fd < 0) {
+                return -1;
+            }
+            opener->descriptor_table->slots[fd] = *source;
+            file_descriptor_retain(&opener->descriptor_table->slots[fd]);
+            opener->descriptor_table->slots[fd].cloexec =
+                (flags & OPEN_CLOEXEC) ? 1 : 0;
+            if (source->type == FILE_DESCRIPTOR_MEMFD) {
+                opener->descriptor_table->slots[fd].writable = writable ? 1 : 0;
+            }
+            return fd;
+        }
+    }
+
     if ((flags & (OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE)) && !may_write_path(path)) {
         return -1;
     }
@@ -2579,7 +2682,9 @@ static long sys_mmap(uint64_t address, uint64_t length, uint64_t prot, uint64_t 
             if (size == 0 || want_end < offset || want_end > size) {
                 return -1;
             }
-            if ((prot & PROT_WRITE) && !memfd_may_write(m)) {
+            if ((prot & PROT_WRITE) &&
+                (!memfd_may_write(m) ||
+                 !current->descriptor_table->slots[fd].writable)) {
                 return -1;
             }
             memfd_region_reference(m);
@@ -3349,6 +3454,7 @@ static long sys_memfd_create(uint64_t name_pointer, uint64_t flags, uint64_t a3,
     self->descriptor_table->slots[fd].memfd = m;
     self->descriptor_table->slots[fd].cloexec = (flags & OS_MFD_CLOEXEC) ? 1 : 0;
     self->descriptor_table->slots[fd].nonblock = 0;
+    self->descriptor_table->slots[fd].writable = 1;
     return fd;
 }
 
@@ -4309,7 +4415,10 @@ static long sys_fcntl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
         case FILE_DESCRIPTOR_EVENT:      access = OPEN_READ | OPEN_WRITE; break;
         case FILE_DESCRIPTOR_TIMER:      access = OPEN_READ; break;
         case FILE_DESCRIPTOR_EPOLL:      access = OPEN_READ; break;
-        case FILE_DESCRIPTOR_MEMFD:      access = OPEN_READ | OPEN_WRITE; break;
+        case FILE_DESCRIPTOR_MEMFD:
+            access = OPEN_READ |
+                     (self->descriptor_table->slots[fd].writable ? OPEN_WRITE : 0);
+            break;
         default:            return -1;
         }
         return access | (self->descriptor_table->slots[fd].nonblock ? OS_NONBLOCK_BIT : 0);

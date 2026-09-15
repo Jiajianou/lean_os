@@ -142,17 +142,41 @@ dcheck_always_on = false
 clang_use_chrome_plugins = false
 treat_warnings_as_errors = false
 
+# Off because the apple toolchain's objcxx tool writes its object to a path it
+# spells out rather than to {{output}} - deliberately, with a comment saying
+# why - so a precompiled header, whose output GN renames to .gch, is written
+# to precompile.o and the build stops on a file that is not there. It is
+# dormant upstream: enable_precompiled_headers is already false whenever clang
+# modules are on, and they are on for any build using Chromium's own sysroot.
+# This one does not, because the target is not Linux.
+enable_precompiled_headers = false
+
+# The features NOT turned off here are the reason this list is shorter than
+# M144 left it. GN resolves every target defined in a file it loads, whether
+# or not --root-target's tree reaches it, so //mojo pulls //net pulls //ipc
+# pulls //content/test pulls //chrome - and a feature switched off makes
+# every assert() guarding that feature's directory fire in a directory this
+# build never compiles. A default is a configuration Chromium tests; an
+# unusual one is a configuration only this port is in. So the flags left are
+# the ones that decide what the LINKED programs contain and the ones naming a
+# host library that is not here, and nothing else.
+#
+# use_ozone and use_aura are gone for a sharper reason: a declare_args()
+# default is evaluated per toolchain and a value in args.gn is not. Setting
+# both true set them for the mac HOST toolchain as well, where is_mac and
+# use_ozone together make //ui/base/clipboard depend on //ui/base, which
+# depends on it - a dependency cycle that exists in no configuration
+# Chromium ships.
 use_sysroot = false
 lean_os_sysroot = "$SYSROOT"
 lean_os_target = "$LEANOS_TARGET_FLAG"
 use_custom_libcxx = true
 libcxx_provides_default_rune_table = true
 use_glib = false
-use_dbus = false
+use_nss_client_certs = false
+use_nss_server_certs = false
 use_udev = false
 use_gio = false
-use_ozone = true
-use_aura = true
 angle_enable_metal = false
 use_gtk = false
 use_qt5 = false
@@ -163,14 +187,9 @@ use_pulseaudio = false
 use_libpci = false
 use_kerberos = false
 use_bluez = false
-use_atk = false
 use_vaapi = false
 use_v4l2_codec = false
-enable_printing = false
 enable_remoting = false
-enable_pdf = false
-enable_plugins = false
-enable_extensions = false
 rtc_use_pipewire = false
 ARGS
 

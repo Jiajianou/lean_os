@@ -354,6 +354,129 @@ static int test_exhaustion(void) {
     return 0;
 }
 
+/* A memfd has no name but /proc/<pid>/fd/<n>, and reopening it there is how
+   a process gets a SECOND descriptor for the same pages with less access -
+   the descriptor it can hand to somebody it does not trust. The checks that
+   matter are the refusals: a read-only descriptor that can still be mapped
+   writable, or truncated, or reopened for writing, is a claim rather than a
+   boundary. */
+static int test_reopen(void) {
+    int fd = memfd_create("reopen", MFD_ALLOW_SEALING);
+    if (fd < 0 || ftruncate(fd, 4096) != 0) {
+        FAIL(19);
+    }
+    char *writable = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (writable == MAP_FAILED) {
+        FAIL(19);
+    }
+    memcpy(writable, "reopened", 8);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+    int readonly = open(path, O_RDONLY);
+    if (readonly < 0) {
+        FAIL(20);
+    }
+
+    if ((fcntl(fd, F_GETFL) & O_ACCMODE) != O_RDWR) {
+        FAIL(20);
+    }
+    if ((fcntl(readonly, F_GETFL) & O_ACCMODE) != O_RDONLY) {
+        FAIL(20);
+    }
+
+    char *seen = mmap(0, 4096, PROT_READ, MAP_SHARED, readonly, 0);
+    if (seen == MAP_FAILED || memcmp(seen, "reopened", 8) != 0) {
+        FAIL(21);
+    }
+    /* The same pages, not a copy: what the writable mapping does next is
+       visible through the read-only one. */
+    memcpy(writable, "changed!", 8);
+    if (memcmp(seen, "changed!", 8) != 0) {
+        FAIL(21);
+    }
+
+    if (mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, readonly, 0) !=
+        MAP_FAILED) {
+        FAIL(22);
+    }
+    if (ftruncate(readonly, 8192) == 0) {
+        FAIL(22);
+    }
+
+    /* And the rights cannot grow back. */
+    char readonly_path[64];
+    snprintf(readonly_path, sizeof(readonly_path), "/proc/self/fd/%d", readonly);
+    if (open(readonly_path, O_RDWR) >= 0) {
+        FAIL(23);
+    }
+    int again = open(readonly_path, O_RDONLY);
+    if (again < 0) {
+        FAIL(23);
+    }
+    close(again);
+
+    munmap(seen, 4096);
+    munmap(writable, 4096);
+    close(readonly);
+    close(fd);
+
+    /* A descriptor that is not open has no name under procfs, and another
+       process's table is not something a path lookup reaches into. */
+    if (open(path, O_RDONLY) >= 0) {
+        FAIL(24);
+    }
+    if (open("/proc/1/fd/0", O_RDONLY) >= 0) {
+        FAIL(24);
+    }
+    if (open("/proc/self/fd/", O_RDONLY) >= 0 ||
+        open("/proc/self/fd/x", O_RDONLY) >= 0) {
+        FAIL(24);
+    }
+
+    /* A pipe end has no other name either, and the copy is the same pipe. */
+    int ends[2];
+    if (pipe(ends) != 0) {
+        FAIL(25);
+    }
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", ends[0]);
+    int copy = open(path, O_RDONLY);
+    if (copy < 0) {
+        FAIL(25);
+    }
+    char got[6] = {0};
+    if (write(ends[1], "hello", 5) != 5 || read(copy, got, 5) != 5 ||
+        memcmp(got, "hello", 5) != 0) {
+        FAIL(25);
+    }
+    close(copy);
+    close(ends[0]);
+    close(ends[1]);
+
+    /* A file on the disk DOES have a name of its own, so reopening it
+       through procfs gives a new file description with its own offset
+       rather than a second reference to this one. */
+    int file = open("/tmp/memfd-reopen", O_RDWR | O_CREAT | O_TRUNC);
+    if (file < 0 || write(file, "0123456789", 10) != 10) {
+        FAIL(26);
+    }
+    close(file);
+    file = open("/tmp/memfd-reopen", O_RDONLY);
+    char four[4] = {0};
+    if (file < 0 || read(file, four, 4) != 4 || memcmp(four, "0123", 4) != 0) {
+        FAIL(26);
+    }
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", file);
+    int fresh = open(path, O_RDONLY);
+    if (fresh < 0 || read(fresh, four, 4) != 4 || memcmp(four, "0123", 4) != 0) {
+        FAIL(26);
+    }
+    close(fresh);
+    close(file);
+    unlink("/tmp/memfd-reopen");
+    return 0;
+}
+
 int main(void) {
     int rc;
     if ((rc = test_basics()) != 0) return rc;
@@ -362,6 +485,7 @@ int main(void) {
     if ((rc = test_seals()) != 0) return rc;
     if ((rc = test_no_capabilities()) != 0) return rc;
     if ((rc = test_exhaustion()) != 0) return rc;
-    printf("memfdtest: all six sections passed\n");
+    if ((rc = test_reopen()) != 0) return rc;
+    printf("memfdtest: all seven sections passed\n");
     return 0;
 }

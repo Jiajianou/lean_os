@@ -1,0 +1,73 @@
+diff --git a/mojo/public/cpp/platform/BUILD.gn b/mojo/public/cpp/platform/BUILD.gn
+index 0538b28741..8cf14b3aab 100644
+--- a/mojo/public/cpp/platform/BUILD.gn
++++ b/mojo/public/cpp/platform/BUILD.gn
+@@ -56,7 +56,7 @@ component("platform") {
+       "platform_channel_server_posix.cc",
+       "socket_utils_posix.cc",
+     ]
+-    deps += [ "//net" ]
++    deps += [ "//net:sockaddr_util" ]
+   }
+ 
+   if (is_fuchsia) {
+diff --git a/net/BUILD.gn b/net/BUILD.gn
+index 54a40951c0..170031856b 100644
+--- a/net/BUILD.gn
++++ b/net/BUILD.gn
+@@ -136,6 +136,29 @@ source_set("net_features") {
+   ]
+ }
+ 
++# The sockaddr helpers, which need nothing from the network stack: a
++# sockaddr_storage wrapper and the function that fills in a sockaddr_un.
++# //mojo/public/cpp/platform needs exactly these to name a Unix-domain
++# socket, and until this target existed the only way to reach them was a
++# dependency on all of //net - which is a layer above mojo rather than below
++# it, and which drags in BoringSSL, ICU and SQLite behind it.
++source_set("sockaddr_util") {
++  sources = [
++  ]
++
++  if (is_posix || is_fuchsia) {
++    sources += [
++    ]
++  }
++
++  defines = [ "NET_IMPLEMENTATION" ]
++
++  deps = [
++    "//base",
++    "//net/base:net_export_header",
++  ]
++}
++
+ component("net") {
+   sources = [
+     "base/address_family.cc",
+@@ -283,8 +306,6 @@ component("net") {
+     "base/scheme_host_port_matcher_rule.cc",
+     "base/scheme_host_port_matcher_rule.h",
+     "base/session_usage.h",
+-    "base/sockaddr_storage.cc",
+-    "base/sockaddr_storage.h",
+     "base/switches.h",
+     "base/sys_addrinfo.h",
+     "base/task/task_runner.cc",
+@@ -1232,6 +1253,7 @@ component("net") {
+     ":disk_cache_buildflags",
+     ":net_features",
+     ":net_public_deps",
++    ":sockaddr_util",
+     "//base",
+     "//net/base:net_export_header",
+     "//net/dns",
+@@ -1548,8 +1570,6 @@ component("net") {
+       "base/file_stream_context_posix.cc",
+       "base/network_interfaces_posix.cc",
+       "base/network_interfaces_posix.h",
+-      "base/sockaddr_util_posix.cc",
+-      "base/sockaddr_util_posix.h",
+       "disk_cache/cache_util_posix.cc",
+       "disk_cache/simple/simple_util_posix.cc",
+       "http/url_security_manager_posix.cc",

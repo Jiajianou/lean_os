@@ -1,0 +1,14 @@
+# A program that uses //mojo, and that this machine runs. Mojo is the layer
+# Chromium's multi-process design is made of, and the three kernel features
+# it is made from are all here: M118's SCM_RIGHTS, M119's epoll and M120's
+# memfd_create.
+
+executable("mojotest") {
+  sources = [ "chromium_mojo_test.cc" ]
+  deps = [
+    "//base",
+    "//mojo/core/embedder",
+    "//mojo/public/cpp/platform",
+    "//mojo/public/cpp/system",
+  ]
+}

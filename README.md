@@ -368,6 +368,25 @@ Several instruments, and none of them subsumes another:
   surface there". They are not the same question, and `getdents64`,
   `clone`, `tgkill`, `exit_group`, `prctl`, `inotify`, the futex and
   `<linux/magic.h>` are all on the far side of it.
+- **And `//mojo` runs here too.** The layer every multi-process piece of
+  Chromium is made of: message pipes that carry bytes and each other's
+  endpoints, data pipes, shared buffers, ipcz underneath them, and two
+  `mojo::core::Channel`s over the two ends of one socketpair carrying a
+  message and a descriptor - driven by Chromium's own
+  `base::MessagePumpEpoll` on this kernel's epoll. The Linux fast path is
+  *not* compiled: `ChannelLinux` is `memfd_create` through `syscall(2)`,
+  `eventfd` and `futex(2)`, so what decides between it and `ChannelPosix`
+  is whether Linux's kernel interfaces are there rather than which family
+  the build gates this platform as.
+
+  The one thing it asked this kernel for was **`/proc/<pid>/fd/<n>`**. A
+  memfd has no name but that one, and a process that wants to hand out
+  memory nobody else can change needs a second descriptor for the same
+  pages with less access. Reopening a descriptor there can only ever
+  shrink its rights - a read-only one cannot be mapped writable,
+  truncated, or reopened for writing - which is the same rule the
+  capability set follows, and the difference between a boundary and a
+  claim.
 - **A libm for the format the hardware has.** `long double` on x86-64 is
   the x87's 80-bit extended type, and this libc has the C99 set for it -
   fifty-two functions, graded to the unit in the last place of a 64-bit

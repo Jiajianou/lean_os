@@ -334,6 +334,54 @@ PROBE
       check $? "installed as /bin/chromiumbase - the [m145] boot self-test runs it"
     fi
   fi
+
+  # M148. //mojo, which is the layer every multi-process piece of Chromium is
+  # made of. The same rule as everything above: these grade what a build
+  # produced, and the machine answers whether it works.
+  MOJOPROGRAM="$SRC/out/$OUT_NAME/mojotest"
+  if [ ! -x "$MOJOPROGRAM" ]; then
+    echo "chromium-test: //mojo has not been linked - skipping" \
+         "(tools/build-chromium.sh lean_os)"
+  else
+    SHAPE=$("${PREFIX}readelf" -h "$MOJOPROGRAM" |
+            awk '/^  Type:/{t=$2} /Entry point/{e=$4} END{print t, e}')
+    case "$SHAPE" in
+      "EXEC 0x80"*) true;;
+      *) false;;
+    esac
+    check $? "a program linked from //mojo is an EXEC in this OS's image region ($SHAPE)"
+
+    # ChannelPosix, not ChannelLinux. The shared-memory upgrade is
+    # memfd_create through syscall(2), eventfd and futex(2) - the Linux
+    # kernel's own interfaces - and a build that compiled it for this machine
+    # would link and then fail at run time on a kernel version check. The
+    # symbol table is where that decision is visible from outside.
+    HAVE_LINUX_CHANNEL=$("${PREFIX}nm" -C "$MOJOPROGRAM" |
+                         grep -c "mojo::core::ChannelLinux")
+    [ "$HAVE_LINUX_CHANNEL" = "0" ]
+    check $? "and carries ChannelPosix rather than ChannelLinux ($HAVE_LINUX_CHANNEL Linux-channel symbols)"
+
+    HAVE_POSIX_CHANNEL=$("${PREFIX}nm" -C "$MOJOPROGRAM" |
+                         grep -c "mojo::core::ChannelPosix")
+    [ "$HAVE_POSIX_CHANNEL" -gt 0 ]
+    check $? "with ChannelPosix in it ($HAVE_POSIX_CHANNEL symbols)"
+
+    # And Chromium's own epoll message pump, which is what an IO thread here
+    # runs on. M119 built the epoll it calls.
+    HAVE_EPOLL_PUMP=$("${PREFIX}nm" -C "$MOJOPROGRAM" |
+                      grep -c "base::MessagePumpEpoll")
+    [ "$HAVE_EPOLL_PUMP" -gt 0 ]
+    check $? "on base::MessagePumpEpoll ($HAVE_EPOLL_PUMP symbols)"
+
+    IMAGE="$ROOT/build/os-image.bin"
+    if [ ! -f "$IMAGE" ]; then
+      echo "chromium-test: no $IMAGE - run make, then this again"
+    else
+      make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
+      "$ROOT/build/leanfs-put" "$IMAGE" "$MOJOPROGRAM" /bin/chromiummojo > /dev/null
+      check $? "installed as /bin/chromiummojo - the [m148] boot self-test runs it"
+    fi
+  fi
 fi
 
 echo "chromium-test: $PASS passed, $FAIL failed"
