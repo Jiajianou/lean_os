@@ -160,6 +160,79 @@ PROBE
     check $? "a Chromium rust_static_library builds for this target"
     rm -rf "$WORK"
   fi
+
+  # M141. //base's dependencies - perfetto, abseil and ICU - which is where
+  # M140 stopped. Same rule as the PartitionAlloc checks above: these grade
+  # what a build produced rather than running one, because a //base compile is
+  # minutes and this battery is already long.
+  PERFETTO_OBJECT="$SRC/out/$OUT_NAME/obj/third_party/perfetto/src/base/base/time.o"
+  if [ ! -f "$PERFETTO_OBJECT" ]; then
+    echo "chromium-test: perfetto has not been built - skipping" \
+         "(tools/build-chromium.sh base)"
+  else
+    "${PREFIX}readelf" -h "$PERFETTO_OBJECT" |
+      grep -q "Advanced Micro Devices X86-64"
+    check $? "perfetto's base compiles for this target and is x86-64 ELF"
+
+    # The same question M140 asked of PartitionAlloc, asked of perfetto, which
+    # keeps its OWN copy of the platform detection: is this the Linux FAMILY
+    # (yes - the build is configured that way and PosixSharedMemory is gated on
+    # it) and does it have Linux's KERNEL API (no - inotify, prctl and abstract
+    # socket names are not here). Perfetto already separates those two claims,
+    # so this probe asks the preprocessor which side of the seam it is on.
+    WORK=$(mktemp -d)
+    cat > "$WORK/seam.cc" <<'PROBE'
+#include "perfetto/base/build_config.h"
+static_assert(PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX),
+              "perfetto gates this platform's code paths as Linux");
+static_assert(!PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX_BUT_NOT_QNX),
+              "but it does not have Linux's kernel API");
+static_assert(!PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID), "not Android");
+static_assert(!PERFETTO_BUILDFLAG(PERFETTO_OS_APPLE), "not Apple");
+static_assert(!PERFETTO_BUILDFLAG(PERFETTO_OS_WIN), "not Windows");
+PROBE
+    "${PREFIX}clang++" -std=c++20 -fsyntax-only \
+      -I"$SRC/third_party/perfetto/include" \
+      -I"$SRC/out/$OUT_NAME/gen/third_party/perfetto/build_config" \
+      "$WORK/seam.cc" 2>"$WORK/seam.log"
+    check $? "perfetto: the Linux family yes, Linux's kernel API no"
+    [ -s "$WORK/seam.log" ] && cat "$WORK/seam.log" >&2
+    rm -rf "$WORK"
+  fi
+
+  # abseil's crash handler is the one file in //base's dependencies that needs
+  # sigaltstack, and ICU's is the one that needed expf. Both are third-party
+  # C++ nobody here wrote, compiled by this project's clang against this
+  # project's libc.
+  ABSL_OBJECT="$SRC/out/$OUT_NAME/obj/third_party/abseil-cpp/absl/debugging/failure_signal_handler/failure_signal_handler.o"
+  if [ ! -f "$ABSL_OBJECT" ]; then
+    echo "chromium-test: abseil has not been built - skipping"
+  else
+    "${PREFIX}readelf" -h "$ABSL_OBJECT" |
+      grep -q "Advanced Micro Devices X86-64"
+    check $? "abseil's crash handler compiles against this sigaltstack"
+  fi
+
+  ICU_OBJECT="$SRC/out/$OUT_NAME/obj/third_party/icu/icuuc_private/unisetspan.o"
+  if [ ! -f "$ICU_OBJECT" ]; then
+    echo "chromium-test: ICU has not been built - skipping"
+  else
+    "${PREFIX}readelf" -h "$ICU_OBJECT" |
+      grep -q "Advanced Micro Devices X86-64"
+    check $? "ICU compiles for this target and is x86-64 ELF"
+  fi
+
+  # <fstream> is what enabling libc++'s filesystem bought, and abseil's time
+  # zone reader is what asked for it. A libc++ without it compiles every other
+  # file in this tree and fails exactly this one.
+  CCTZ_OBJECT="$SRC/out/$OUT_NAME/obj/third_party/abseil-cpp/absl/time/internal/cctz/time_zone/time_zone_info.o"
+  if [ ! -f "$CCTZ_OBJECT" ]; then
+    echo "chromium-test: abseil's time zone reader has not been built - skipping"
+  else
+    "${PREFIX}readelf" -h "$CCTZ_OBJECT" |
+      grep -q "Advanced Micro Devices X86-64"
+    check $? "std::ifstream reaches this filesystem - libc++ has <fstream>"
+  fi
 fi
 
 echo "chromium-test: $PASS passed, $FAIL failed"

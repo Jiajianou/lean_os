@@ -24,6 +24,8 @@ float hypotf(float x, float y);
 float sqrtf(float x);
 float atanf(float x);
 float roundf(float x);
+float expf(float x);
+float nextafterf(float x, float y);
 
 double fabs(double x);
 double sqrt(double x);

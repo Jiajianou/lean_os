@@ -29,6 +29,12 @@ typedef struct unix_socket {
 
     struct unix_socket *backlog[UNIX_BACKLOG];
     int backlog_count;
+
+    /* The process that this end belongs to, for SO_PEERCRED - which reports
+       the credentials of the socket at the OTHER end. A connected pair is
+       made by the connecting task, so the server's end is stamped with the
+       listener's owner rather than with its maker's. */
+    int owner_pid;
 } unix_socket_t;
 
 typedef struct {
@@ -70,6 +76,8 @@ static unix_socket_t *unix_new(int type) {
     k_memset(s, 0, sizeof(*s));
     s->type = type;
     s->refs = 1;
+    task_t *self = scheduler_current();
+    s->owner_pid = self ? self->tgid : 0;
     live_count++;
     return s;
 }
@@ -100,6 +108,13 @@ int unix_socket_pair(int type, struct unix_socket **a_out, struct unix_socket **
     *a_out = a;
     *b_out = b;
     return 0;
+}
+
+int unix_socket_peer_pid(const struct unix_socket *s) {
+    if (!s || !s->peer) {
+        return -1;
+    }
+    return s->peer->owner_pid;
 }
 
 int unix_socket_type(const struct unix_socket *s) {
@@ -249,6 +264,7 @@ int unix_socket_connect(struct unix_socket *s, const char *name, int length) {
         spin_unlock_irqrestore(&unix_lock, f);
         return -1;
     }
+    srv->owner_pid = listener->owner_pid;
     srv->peer = s;
     s->peer = srv;
     listener->backlog[listener->backlog_count++] = srv;

@@ -172,6 +172,9 @@ static const entry_t table[] = {
 
     {SYS_memfd_create,   CLASS_SKIP, 0, "creates a descriptor and takes a pointer; checked by name in section 7"},
     {SYS_memfd_seal,     CLASS_PLAIN, 0, NULL},
+
+    {SYS_unix_peer_credentials, CLASS_POINTER, 2, NULL},
+    {SYS_sigaltstack,    CLASS_POINTER, 1, NULL},
 };
 #define N_TABLE ((int)(sizeof(table) / sizeof(table[0])))
 
@@ -359,6 +362,33 @@ int main(void) {
         if (epfd >= 0) {
             sys_raw(SYS_close, epfd, 0, 0);
         }
+    }
+
+    {
+        /* M141. sigaltstack's SECOND argument is a pointer too, and the table
+           above can only name one per syscall. bad_ptrs[0] is skipped on
+           purpose: a null pointer is not a bad address to this call, it is
+           how POSIX spells "do not report the old stack", and
+           sigaltstack(NULL, NULL) returning 0 is the specified behaviour
+           rather than a refusal this kernel forgot. */
+        for (int p = 1; p < N_BAD_PTRS; p++) {
+            check(sys_raw(SYS_sigaltstack, 0, (long)bad_ptrs[p], 0) < 0,
+                  "sigaltstack wrote the old stack through a bad pointer",
+                  SYS_sigaltstack);
+        }
+        check(sys_raw(SYS_sigaltstack, 0, 0, 0) == 0,
+              "sigaltstack(NULL, NULL) is a query POSIX allows, not an error",
+              SYS_sigaltstack);
+        /* And SO_PEERCRED has to refuse a descriptor that is not a socket at
+           all rather than answer about one. */
+        char credentials[32];
+        check(sys_raw(SYS_unix_peer_credentials, 1, (long)credentials, 0) < 0,
+              "peer credentials were reported for stdout",
+              SYS_unix_peer_credentials);
+        check(sys_raw(SYS_unix_peer_credentials, UNOPENABLE_FILE_DESCRIPTOR,
+                      (long)credentials, 0) < 0,
+              "peer credentials were reported for an fd that was never opened",
+              SYS_unix_peer_credentials);
     }
 
     printf("syscalltest: %d checks, %d failures\n", checks, failures);

@@ -3,6 +3,7 @@
 
 #include <stdarg.h>
 #include <stddef.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,6 +30,12 @@ size_t fread(void *buf, size_t size, size_t count, FILE *f);
 size_t fwrite(const void *buf, size_t size, size_t count, FILE *f);
 int fseek(FILE *f, long offset, int whence);
 long ftell(FILE *f);
+
+/* off_t is long on this system, so these are fseek and ftell under the
+   names a large-file interface uses rather than a wider pair beside
+   them. A target whose off_t outgrew long would have to split them. */
+int fseeko(FILE *f, off_t offset, int whence);
+off_t ftello(FILE *f);
 
 typedef struct {
     long __pos;

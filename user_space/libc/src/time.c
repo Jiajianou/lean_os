@@ -48,27 +48,84 @@ int gettimeofday(struct timeval *tv, void *tz) {
     return 0;
 }
 
+/* Three of the clocks below are the SAME clock as CLOCK_MONOTONIC on this
+   machine, and each for a reason that is a property of this system rather
+   than an approximation:
+
+   CLOCK_BOOTTIME differs from CLOCK_MONOTONIC on Linux only across a suspend,
+   and this OS has no suspend path at all - kernel/power powers the machine
+   off and nothing else. If one is ever added, this is a line that has to
+   change with it.
+
+   CLOCK_MONOTONIC_RAW differs where the monotonic clock is slewed by an
+   adjtime/NTP discipline. sys_uptime_ms is PIT ticks and nothing adjusts it.
+
+   The _COARSE pair are the cheap low-resolution reads of their neighbours.
+   Every clock here is already a millisecond, so there is no cheaper one to
+   offer and no resolution being claimed that is not there. */
+static int cpu_time_ns(int who, long long *out_ns) {
+    os_rusage_t r;
+    if (sys_rusage(who, &r) != 0) {
+        return -1;
+    }
+    long hz = sysconf(_SC_CLK_TCK);
+    if (hz <= 0) {
+        return -1;
+    }
+    *out_ns = (long long)(r.user_ticks + r.sys_ticks) * (1000000000LL / (long long)hz);
+    return 0;
+}
+
 int clock_gettime(clockid_t clk, struct timespec *ts) {
     if (!ts) {
         return -1;
     }
-    if (clk == CLOCK_MONOTONIC) {
+    if (clk == CLOCK_MONOTONIC || clk == CLOCK_MONOTONIC_RAW ||
+        clk == CLOCK_MONOTONIC_COARSE || clk == CLOCK_BOOTTIME) {
         long ms = sys_uptime_ms();
         ts->tv_sec = ms / 1000;
         ts->tv_nsec = (ms % 1000) * 1000000L;
         return 0;
     }
-    if (clk == CLOCK_REALTIME) {
+    if (clk == CLOCK_REALTIME || clk == CLOCK_REALTIME_COARSE) {
         long long ms = realtime_ms();
         ts->tv_sec = (time_t)(ms / 1000);
         ts->tv_nsec = (long)(ms % 1000) * 1000000L;
+        return 0;
+    }
+    if (clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID) {
+        long long ns;
+        if (cpu_time_ns(clk == CLOCK_PROCESS_CPUTIME_ID ? OS_RUSAGE_SELF
+                                                        : OS_RUSAGE_THREAD,
+                        &ns) != 0) {
+            return -1;
+        }
+        ts->tv_sec = (time_t)(ns / 1000000000LL);
+        ts->tv_nsec = (long)(ns % 1000000000LL);
         return 0;
     }
     return -1;
 }
 
 int clock_getres(clockid_t clk, struct timespec *res) {
-    if (!res || (clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC)) {
+    if (!res) {
+        return -1;
+    }
+    if (clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID) {
+        /* Processor time is accounted a scheduler tick at a time, so the
+           resolution of these two is _SC_CLK_TCK and not the millisecond the
+           wall clocks report. */
+        long hz = sysconf(_SC_CLK_TCK);
+        if (hz <= 0) {
+            return -1;
+        }
+        res->tv_sec = 0;
+        res->tv_nsec = (long)(1000000000L / hz);
+        return 0;
+    }
+    if (clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC &&
+        clk != CLOCK_MONOTONIC_RAW && clk != CLOCK_REALTIME_COARSE &&
+        clk != CLOCK_MONOTONIC_COARSE && clk != CLOCK_BOOTTIME) {
         return -1;
     }
     res->tv_sec = 0;

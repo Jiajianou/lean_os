@@ -26,6 +26,12 @@ typedef int sig_atomic_t;
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *old);
 
+/* POSIX declares this in <signal.h> rather than <pthread.h>, and on this
+   system it is sigprocmask: a signal mask belongs to a task, a thread IS
+   a task, so sigprocmask already acts on the calling thread alone. The
+   two differ only in how they report an error. */
+int pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset);
+
 struct sigaction {
     union {
         sighandler_t sa_handler;
@@ -41,6 +47,20 @@ struct sigaction {
 #define SA_RESETHAND 0x80000000
 #define SA_NOCLDSTOP 0x00000001
 #define SA_NOCLDWAIT 0x00000002
+
+typedef struct {
+    void  *ss_sp;
+    int    ss_flags;
+    size_t ss_size;
+} stack_t;
+
+#define SS_ONSTACK OS_SS_ONSTACK
+#define SS_DISABLE OS_SS_DISABLE
+
+#define MINSIGSTKSZ OS_MINSIGSTKSZ
+#define SIGSTKSZ    OS_SIGSTKSZ
+
+int sigaltstack(const stack_t *new_stack, stack_t *old_stack);
 
 int sigaction(int sig, const struct sigaction *act, struct sigaction *old);
 

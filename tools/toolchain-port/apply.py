@@ -153,6 +153,12 @@ def port_gcc(root, header_src):
         "    $as_echo \"#define HAVE_ATANF 1\" >>confdefs.h\n"
         "    $as_echo \"#define HAVE_SQRTF 1\" >>confdefs.h\n"
         "    $as_echo \"#define HAVE_HYPOTF 1\" >>confdefs.h\n"
+        # M141. This list is not decoration: libstdc++ carries its own
+        # definition of every float function it is not told the C library
+        # has, in src/c++98/math_stubs_float.cc, so a name missing here and
+        # present in <math.h> is a multiple definition at link time rather
+        # than a missing one. expf is what ICU asked for.
+        "    $as_echo \"#define HAVE_EXPF 1\" >>confdefs.h\n"
         "\n"
         "    ;;\n"
         "\n"

@@ -386,6 +386,14 @@ long sys_socketpair(int type, int file_descriptors_out[2]) {
     return do_syscall(SYS_socketpair, type, (long)file_descriptors_out, 0);
 }
 
+long sys_unix_peer_credentials(int fd, void *out) {
+    return do_syscall(SYS_unix_peer_credentials, fd, (long)out, 0);
+}
+
+long sys_sigaltstack(const void *new_stack, void *old_stack) {
+    return do_syscall(SYS_sigaltstack, (long)new_stack, (long)old_stack, 0);
+}
+
 long sys_bindun(int fd, const char *name, int length) {
     return do_syscall(SYS_bindun, fd, (long)name, length);
 }

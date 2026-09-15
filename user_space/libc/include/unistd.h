@@ -51,6 +51,7 @@ int ttyname_r(int fd, char *buf, size_t len);
 long lseek(int fd, long offset, int whence);
 int dup2(int oldfd, int newfd);
 int ftruncate(int fd, off_t length);
+int truncate(const char *path, off_t length);
 
 uid_t getuid(void);
 uid_t geteuid(void);

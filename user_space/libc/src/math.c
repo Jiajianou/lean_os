@@ -734,3 +734,32 @@ float atanf(float x) {
 float roundf(float x) {
     return (float)round((double)x);
 }
+
+float expf(float x) {
+    return (float)exp((double)x);
+}
+
+/* Not exp's treatment of (float)nextafter((double)x, (double)y): the step
+   between two adjacent doubles is far below a float's, so rounding it back
+   would return x itself for every input. A float's neighbour has to be found
+   in a float's own bits. */
+float nextafterf(float x, float y) {
+    if (isnan(x) || isnan(y)) {
+        return x + y;
+    }
+    if (x == y) {
+        return y;
+    }
+    union { float f; unsigned int u; } v;
+    if (x == 0.0f) {
+        v.u = 1;
+        return y > 0.0f ? v.f : -v.f;
+    }
+    v.f = x;
+    if ((y > x) == (x > 0.0f)) {
+        v.u++;
+    } else {
+        v.u--;
+    }
+    return v.f;
+}

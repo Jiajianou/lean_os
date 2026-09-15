@@ -36,6 +36,15 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *old) {
     return (int)sys_sigprocmask(how, mask, old);
 }
 
+int pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset) {
+    /* The one real difference from sigprocmask: this returns the error number
+       and leaves errno alone. */
+    if (sigprocmask(how, set, oldset) != 0) {
+        return errno ? errno : EINVAL;
+    }
+    return 0;
+}
+
 int sigaction(int sig, const struct sigaction *act, struct sigaction *old) {
     if (sig < 0 || sig > SIG_MAX) {
         errno = EINVAL;
@@ -66,6 +75,28 @@ int sigaction(int sig, const struct sigaction *act, struct sigaction *old) {
         old->sa_handler = (sighandler_t)previous;
         old->sa_mask = 0;
         old->sa_flags = previous_flags;
+    }
+    return 0;
+}
+
+int sigaltstack(const stack_t *new_stack, stack_t *old_stack) {
+    os_stack_t want;
+    os_stack_t had;
+    if (new_stack) {
+        want.base = (uint64_t)(uintptr_t)new_stack->ss_sp;
+        want.size = (uint64_t)new_stack->ss_size;
+        want.flags = (uint32_t)new_stack->ss_flags;
+        want.reserved = 0;
+    }
+    if (sys_sigaltstack(new_stack ? &want : (os_stack_t *)0,
+                        old_stack ? &had : (os_stack_t *)0) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (old_stack) {
+        old_stack->ss_sp = (void *)(uintptr_t)had.base;
+        old_stack->ss_size = (size_t)had.size;
+        old_stack->ss_flags = (int)had.flags;
     }
     return 0;
 }

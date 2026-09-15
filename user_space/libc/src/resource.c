@@ -38,6 +38,8 @@ int getrusage(int who, struct rusage *usage) {
         which = OS_RUSAGE_SELF;
     } else if (who == RUSAGE_CHILDREN) {
         which = OS_RUSAGE_CHILDREN;
+    } else if (who == RUSAGE_THREAD) {
+        which = OS_RUSAGE_THREAD;
     } else {
         errno = EINVAL;
         return -1;

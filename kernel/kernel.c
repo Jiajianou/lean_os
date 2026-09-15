@@ -136,6 +136,7 @@
     X(epolltest)                \
     X(memfdtest)                \
     X(posixtest)                \
+    X(basetest)                 \
     X(desktop_applications)
 
 #define DECLARE_EMBEDDED_PROGRAM(name) \
@@ -8463,6 +8464,39 @@ static void boot_selftests_system(void) {
                   "this <elf.h> - the linker's e_ehsize and e_phentsize "
                   "agreeing with these struct sizes, and the entry point "
                   "landing inside an executable PT_LOAD - self-test passed.\n\n");
+    }
+
+    {
+        size_t bt_bytes = 0;
+        uint8_t *bt_img = read_program(PATH_BIN_DIRECTORY "basetest", &bt_bytes);
+        if (!bt_img) {
+            panic("M141 self-test: /bin/basetest is not on this disk");
+        }
+        const char *bt_argv[] = {PATH_BIN_DIRECTORY "basetest", 0};
+        task_t *bt = process_spawnv("basetest", bt_img, bt_bytes, bt_argv);
+        long rc = bt ? do_syscall(SYS_wait, (uint64_t)bt->id, 0, 0) : -1;
+        kfree(bt_img);
+        if (rc != 0) {
+            kernel_log_puts("[m141] basetest exited ");
+            kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
+            kernel_log_puts(" - see user_space/binaries/basetest.c for what each "
+                      "code means\n");
+            panic("M141 self-test: the surface Chromium's base and its tracing "
+                  "library ask for is not right on this machine");
+        }
+        kernel_log_puts("[m141] what //base's dependencies ask of this machine: "
+                  "CLOCK_BOOTTIME, CLOCK_MONOTONIC_RAW and the two _COARSE "
+                  "clocks reading as the one clock this machine has, and each "
+                  "reporting the resolution it actually carries; a second "
+                  "thread's processor time showing up in "
+                  "CLOCK_PROCESS_CPUTIME_ID and NOT in the joiner's "
+                  "CLOCK_THREAD_CPUTIME_ID, with getrusage agreeing; a signal "
+                  "handler's own local living on the sigaltstack it was given, "
+                  "and on the ordinary stack without SA_ONSTACK; SO_PEERCRED "
+                  "naming this process at both ends of a socketpair and "
+                  "refusing a plain file; truncate, fseeko and ftello; and the "
+                  "symbol-versioning structures at the sizes the gABI fixes - "
+                  "self-test passed.\n\n");
     }
 
     {

@@ -210,6 +210,14 @@ long ftell(FILE *f) {
     return position;
 }
 
+int fseeko(FILE *f, off_t offset, int whence) {
+    return fseek(f, (long)offset, whence);
+}
+
+off_t ftello(FILE *f) {
+    return (off_t)ftell(f);
+}
+
 int fflush(FILE *f) {
     if (!f) {
         __lean_stdio_flush_all();

@@ -414,6 +414,12 @@ posixtest_elf_start:
     incbin "build/posixtest.elf"
 posixtest_elf_end:
 
+global basetest_elf_start
+global basetest_elf_end
+basetest_elf_start:
+    incbin "build/basetest.elf"
+basetest_elf_end:
+
 global desktop_applications_elf_start
 global desktop_applications_elf_end
 desktop_applications_elf_start:

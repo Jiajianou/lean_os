@@ -238,7 +238,10 @@ typedef struct {
 #define SYS_memfd_create 126
 #define SYS_memfd_seal   127
 
-#define SYSCALL_COUNT 128
+#define SYS_unix_peer_credentials 128
+#define SYS_sigaltstack           129
+
+#define SYSCALL_COUNT 130
 
 #ifdef __cplusplus
 }

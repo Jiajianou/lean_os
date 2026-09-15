@@ -2,6 +2,7 @@
 
 #include <sys/types.h>
 #include <sys/uio.h>
+#include <sys/time.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -67,6 +68,17 @@ struct msghdr {
 #define SO_LINGER    13
 #define SO_RCVTIMEO  20
 #define SO_SNDTIMEO  21
+#define SO_PEERCRED  17
+
+/* The credentials of the process at the other end of a connected AF_UNIX
+   socket. This machine has one principal, so uid and gid are always 0 and
+   the pid is the only field carrying information - which is the field
+   programs that ask for this actually want. */
+struct ucred {
+    pid_t pid;
+    uid_t uid;
+    gid_t gid;
+};
 
 #define SHUT_RD   0
 #define SHUT_WR   1

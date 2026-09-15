@@ -1,0 +1,34 @@
+diff --git a/third_party/perfetto/include/perfetto/base/build_config.h b/third_party/perfetto/include/perfetto/base/build_config.h
+index 0c519a31..05e9f736 100644
+--- a/third_party/perfetto/include/perfetto/base/build_config.h
++++ b/third_party/perfetto/include/perfetto/base/build_config.h
+@@ -78,6 +78,29 @@
+ #define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_QNX() 0
+ #define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_APPLE_TVOS() 0
+ #define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_FREEBSD() 0
++#elif defined(__lean_os__)
++// lean_os, which is in exactly the position this file already has a word for.
++// PERFETTO_OS_LINUX selects the Linux family's code paths, and this platform
++// wants them: its build is configured as Linux and every other copy of the
++// platform detection in the tree says so too. PERFETTO_OS_LINUX_BUT_NOT_QNX
++// is the separate claim that Linux's KERNEL API is there, and that one is
++// false here - it gates inotify, prctl, eventfd, timerfd and abstract socket
++// names together, of which this OS has two. A conjunction two-fifths true is
++// answered false; the cost is the pipe-backed EventFd and the fallback
++// PeriodicTask that this file's other non-Linux platforms already use.
++#define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_ANDROID() 0
++#define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_LINUX() 1
++#define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_LINUX_BUT_NOT_QNX() 0
++#define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_WIN() 0
++#define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_APPLE() 0
++#define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_MAC() 0
++#define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_IOS() 0
++#define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_WASM() 0
++#define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_FUCHSIA() 0
++#define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_NACL() 0
++#define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_QNX() 0
++#define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_APPLE_TVOS() 0
++#define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_FREEBSD() 0
+ #elif defined(__QNXNTO__)
+ #define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_ANDROID() 0
+ #define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_LINUX() 1

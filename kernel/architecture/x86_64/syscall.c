@@ -1420,6 +1420,14 @@ static long sys_rusage(uint64_t who, uint64_t out_pointer, uint64_t a3,
     task_t *self = scheduler_current();
     os_rusage_t r;
     if (who == OS_RUSAGE_SELF) {
+        /* POSIX says RUSAGE_SELF is the process, and a thread here is a task
+           that accrues its own ticks - so this has to be the thread group's
+           sum rather than the caller's own. OS_RUSAGE_THREAD is the question
+           this used to answer. */
+        scheduler_thread_group_ticks(self, &r.user_ticks, &r.sys_ticks);
+        uint64_t peak = virtual_memory_rss_peak_pages(self->pml4_phys);
+        r.max_rss_pages = (peak > self->max_rss_pages) ? peak : self->max_rss_pages;
+    } else if (who == OS_RUSAGE_THREAD) {
         r.user_ticks = self->user_ticks;
         r.sys_ticks = self->sys_ticks;
         uint64_t peak = virtual_memory_rss_peak_pages(self->pml4_phys);
@@ -2998,6 +3006,37 @@ static long sys_socket(uint64_t type, uint64_t domain, uint64_t a3, uint64_t a4,
     return install_socket_file_descriptor(s);
 }
 
+/* SO_PEERCRED, and nothing else - there is no general getsockopt behind the
+   kernel wall, so this answers the one question that needs one rather than
+   inventing the whole interface for it. It needs no capability, for M118's
+   reason: the process on the other end of a socket you already hold is not a
+   fact this machine is keeping from you. */
+static long sys_unix_peer_credentials(uint64_t file_descriptor, uint64_t out_pointer,
+                                      uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    if (!user_range_ok(out_pointer, sizeof(os_ucred_t), 1)) {
+        return -1;
+    }
+    task_t *self = scheduler_current();
+    int fd = (int)file_descriptor;
+    if (fd < 0 || fd >= MAX_FILE_DESCRIPTORS ||
+        self->file_descriptors[fd].type != FILE_DESCRIPTOR_UNIX) {
+        return -1;
+    }
+    int pid = unix_socket_peer_pid(self->file_descriptors[fd].un);
+    if (pid < 0) {
+        return -1;
+    }
+    os_ucred_t out;
+    out.pid = (int32_t)pid;
+    out.uid = 0;
+    out.gid = 0;
+    if (copy_to_user(out_pointer, &out, sizeof(out)) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
 static long sys_socketpair(uint64_t type, uint64_t file_descriptors_pointer, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3; (void)a4; (void)a5; (void)a6;
     if (!user_range_ok(file_descriptors_pointer, 2 * sizeof(int), 1)) {
@@ -3953,10 +3992,73 @@ static long sys_sigaction(uint64_t signo, uint64_t handler, uint64_t restorer,
     } else {
         self->sig_siginfo &= ~(1u << signo);
     }
+    if (flags & SA_ONSTACK) {
+        self->sig_onstack |= (1u << signo);
+    } else {
+        self->sig_onstack &= ~(1u << signo);
+    }
     if (handler == SIG_IGN_ADDR || handler == SIG_DFL_ADDR) {
         self->sig_pending &= ~(1u << signo);
     }
     return previous;
+}
+
+/* An alternate stack for signal delivery. The point of it is the one case
+   the ordinary path cannot serve: a SIGSEGV raised BY the stack, where there
+   is no room below rsp to build a frame. */
+static long sys_sigaltstack(uint64_t new_pointer, uint64_t old_pointer,
+                            uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    task_t *self = scheduler_current();
+    os_stack_t current;
+    current.base = self->sig_alt_stack_base;
+    current.size = self->sig_alt_stack_size;
+    current.flags = 0;
+    if (self->sig_alt_stack_base == 0) {
+        current.flags |= OS_SS_DISABLE;
+    } else if (self->sig_on_alt_stack) {
+        current.flags |= OS_SS_ONSTACK;
+    }
+    current.reserved = 0;
+
+    if (new_pointer) {
+        if (!user_range_ok(new_pointer, sizeof(os_stack_t), 0)) {
+            return -1;
+        }
+        /* Changing it while a handler is running on it would move the ground
+           out from under that handler. */
+        if (self->sig_on_alt_stack) {
+            return -1;
+        }
+        os_stack_t want;
+        if (copy_from_user(&want, new_pointer, sizeof(want)) != 0) {
+            return -1;
+        }
+        if (want.flags & OS_SS_DISABLE) {
+            self->sig_alt_stack_base = 0;
+            self->sig_alt_stack_size = 0;
+        } else {
+            if (want.flags != 0) {
+                return -1;
+            }
+            if (want.size < OS_MINSIGSTKSZ) {
+                return -1;
+            }
+            if (!user_range_ok(want.base, want.size, 1)) {
+                return -1;
+            }
+            self->sig_alt_stack_base = want.base;
+            self->sig_alt_stack_size = want.size;
+        }
+    }
+
+    if (old_pointer) {
+        if (!user_range_ok(old_pointer, sizeof(os_stack_t), 1) ||
+            copy_to_user(old_pointer, &current, sizeof(current)) != 0) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 #define USER_RFLAGS_MASK 0x0000000000000CD5ULL
@@ -4404,6 +4506,12 @@ static long sys_execve(isr_regs_t *regs) {
     }
     self->sig_restorer = 0;
     self->sig_siginfo = 0;
+    self->sig_onstack = 0;
+    /* The new program's address space is not the old one's, so an alternate
+       stack registered by what came before is an address it does not own. */
+    self->sig_alt_stack_base = 0;
+    self->sig_alt_stack_size = 0;
+    self->sig_on_alt_stack = 0;
     self->si_pid = 0;
     self->si_status = 0;
     self->si_address = 0;
@@ -4589,6 +4697,8 @@ static const syscall_function_t syscall_table[SYSCALL_COUNT] = {
     [SYS_pread] = sys_pread,
     [SYS_pwrite] = sys_pwrite,
     [SYS_socketpair] = sys_socketpair,
+    [SYS_unix_peer_credentials] = sys_unix_peer_credentials,
+    [SYS_sigaltstack] = sys_sigaltstack,
     [SYS_bindun] = sys_bindun,
     [SYS_connectun] = sys_connectun,
     [SYS_sendmsg] = sys_sendmsg,
@@ -4634,6 +4744,15 @@ static long sys_sigreturn(uint64_t frame_pointer, uint64_t a2, uint64_t a3,
     (void)a5;
     (void)a6;
     return -1;
+}
+
+/* Whether a stack pointer is inside the alternate stack. Recomputed rather
+   than carried in sig_frame_t, because that frame is ABI this libc's
+   sigreturn trampoline already lays out - and the address answers the
+   question exactly, including for a handler that nested. */
+static int on_alt_stack(const task_t *t, uint64_t sp) {
+    return t->sig_alt_stack_base != 0 && sp >= t->sig_alt_stack_base &&
+           sp < t->sig_alt_stack_base + t->sig_alt_stack_size;
 }
 
 static int signal_deliver(isr_regs_t *regs) {
@@ -4682,8 +4801,19 @@ static int signal_deliver(isr_regs_t *regs) {
         }
     }
 
-    uint64_t sp = regs->rsp;
-    sp -= 128;
+    /* SA_ONSTACK, and only when there is a stack to go to and we are not
+       already on it - a nested signal on the alternate stack keeps building
+       frames where it is, exactly as it would on the ordinary one. */
+    int use_alt = (self->sig_onstack & (1u << signo)) != 0 &&
+                  self->sig_alt_stack_base != 0 && !self->sig_on_alt_stack;
+    uint64_t sp = use_alt ? self->sig_alt_stack_base + self->sig_alt_stack_size
+                          : regs->rsp;
+    sp &= ~15ULL;
+    /* The red zone is the caller's, below the interrupted rsp. A fresh
+       alternate stack has no caller and so has none to skip. */
+    if (!use_alt) {
+        sp -= 128;
+    }
     if (want_info) {
         sp -= sizeof(siginfo_t);
         sp &= ~15ULL;
@@ -4733,6 +4863,8 @@ static int signal_deliver(isr_regs_t *regs) {
 
     self->sig_pending &= ~(1u << signo);
     self->sig_blocked |= (1u << signo);
+
+    self->sig_on_alt_stack = (uint8_t)on_alt_stack(self, new_rsp);
 
     regs->rsp = new_rsp;
     regs->rip = handler;
@@ -4798,6 +4930,7 @@ static int signal_return(isr_regs_t *regs) {
     regs->rsp = frame.rsp;
     regs->rflags = (frame.rflags & USER_RFLAGS_MASK) | RFLAGS_IF;
     self->sig_blocked = frame.saved_blocked & ~(1u << SIGKILL) & ~(1u << SIGSEGV);
+    self->sig_on_alt_stack = (uint8_t)on_alt_stack(self, frame.rsp);
     return 0;
 }
 

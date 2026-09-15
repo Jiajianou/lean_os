@@ -45,6 +45,24 @@ extern "C" {
     ((sig) > 0 && (sig) <= SIG_MAX && (sig) != SIGKILL && (sig) != SIGSTOP)
 
 #define SA_SIGINFO 0x00000004
+#define SA_ONSTACK 0x08000000
+
+#define OS_SS_ONSTACK 1
+#define OS_SS_DISABLE 2
+
+/* The minimum an alternate signal stack may be, and the size a program that
+   has no opinion should ask for. A frame here is a sig_frame_t plus a
+   siginfo_t plus the 128-byte red zone the ABI reserves, so the floor is
+   what that costs with room for the handler itself on top. */
+#define OS_MINSIGSTKSZ 2048
+#define OS_SIGSTKSZ    8192
+
+typedef struct {
+    uint64_t base;
+    uint64_t size;
+    uint32_t flags;
+    uint32_t reserved;
+} os_stack_t;
 
 typedef struct {
     int si_signo;

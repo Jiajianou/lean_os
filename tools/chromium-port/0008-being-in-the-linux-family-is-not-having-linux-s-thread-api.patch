@@ -1,0 +1,96 @@
+diff --git a/third_party/perfetto/include/perfetto/base/thread_utils.h b/third_party/perfetto/include/perfetto/base/thread_utils.h
+index 0cc0803f..80fd2453 100644
+--- a/third_party/perfetto/include/perfetto/base/thread_utils.h
++++ b/third_party/perfetto/include/perfetto/base/thread_utils.h
+@@ -32,7 +32,7 @@ __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId();
+ #elif PERFETTO_BUILDFLAG(PERFETTO_OS_QNX)
+ #include <sys/types.h>
+ #include <unistd.h>
+-#elif PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX) || \
++#elif PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX_BUT_NOT_QNX) || \
+     PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID)
+ #include <sys/syscall.h>
+ #include <sys/types.h>
+@@ -53,7 +53,12 @@ using PlatformThreadId = pid_t;
+ inline PlatformThreadId GetThreadId() {
+   return gettid();
+ }
+-#elif PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX)
++// PERFETTO_OS_LINUX_BUT_NOT_QNX rather than PERFETTO_OS_LINUX: __NR_gettid is
++// a Linux SYSTEM CALL NUMBER, which is the narrower of the two claims that
++// flag pair separates. A platform that is Linux for the build's sake without
++// being Linux to the kernel falls through to the pthread_self() default
++// below. QNX is unaffected - it is answered by an earlier branch.
++#elif PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX_BUT_NOT_QNX)
+ using PlatformThreadId = pid_t;
+ inline PlatformThreadId GetThreadId() {
+   return static_cast<pid_t>(syscall(__NR_gettid));
+diff --git a/third_party/perfetto/include/perfetto/ext/base/thread_utils.h b/third_party/perfetto/include/perfetto/ext/base/thread_utils.h
+index 52ae09d2..b54f3805 100644
+--- a/third_party/perfetto/include/perfetto/ext/base/thread_utils.h
++++ b/third_party/perfetto/include/perfetto/ext/base/thread_utils.h
+@@ -23,9 +23,14 @@
+ #include "perfetto/base/export.h"
+ #include "perfetto/ext/base/string_utils.h"
+ 
+-#if PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX) ||   \
+-    PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID) || \
+-    PERFETTO_BUILDFLAG(PERFETTO_OS_APPLE)
++// pthread_setname_np and pthread_getname_np are glibc's, not POSIX's, so the
++// question is whether this is a Linux C library rather than whether the build
++// calls itself Linux - PERFETTO_OS_LINUX_BUT_NOT_QNX is that narrower claim.
++// QNX is named explicitly so that it keeps the branch it already took.
++#if PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX_BUT_NOT_QNX) || \
++    PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID) ||             \
++    PERFETTO_BUILDFLAG(PERFETTO_OS_APPLE) ||               \
++    PERFETTO_BUILDFLAG(PERFETTO_OS_QNX)
+ #include <pthread.h>
+ #include <string.h>
+ #include <algorithm>
+@@ -41,9 +46,10 @@
+ namespace perfetto {
+ namespace base {
+ 
+-#if PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX) ||   \
+-    PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID) || \
+-    PERFETTO_BUILDFLAG(PERFETTO_OS_APPLE)
++#if PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX_BUT_NOT_QNX) || \
++    PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID) ||             \
++    PERFETTO_BUILDFLAG(PERFETTO_OS_APPLE) ||               \
++    PERFETTO_BUILDFLAG(PERFETTO_OS_QNX)
+ // Sets the "comm" of the calling thread to the first 15 chars of the given
+ // string.
+ inline bool MaybeSetThreadName(const std::string& name) {
+diff --git a/third_party/perfetto/src/base/scoped_sched_boost.cc b/third_party/perfetto/src/base/scoped_sched_boost.cc
+index b57170ed..5d73b291 100644
+--- a/third_party/perfetto/src/base/scoped_sched_boost.cc
++++ b/third_party/perfetto/src/base/scoped_sched_boost.cc
+@@ -18,8 +18,14 @@
+ 
+ #include "perfetto/ext/base/status_macros.h"
+ 
+-#if PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX) || \
+-    PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID)
++// setpriority/getpriority/sched_getparam are the nice-value interface, which
++// not every platform in the Linux family has - so this asks
++// PERFETTO_OS_LINUX_BUT_NOT_QNX, the flag that means the Linux kernel API is
++// present, rather than PERFETTO_OS_LINUX, which only means the build is
++// configured as Linux. QNX is named so that it keeps the branch it had.
++#if PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX_BUT_NOT_QNX) || \
++    PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID) ||             \
++    PERFETTO_BUILDFLAG(PERFETTO_OS_QNX)
+ #include <sched.h>         // for 'SCHED_' macros and 'sched_' functions
+ #include <sys/resource.h>  // for 'setpriority', 'getpriority', 'PRIO_PROCESS'
+ #include <sys/types.h>     // for 'pid_t'
+@@ -31,8 +37,9 @@
+ 
+ namespace perfetto::base {
+ 
+-#if PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX) || \
+-    PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID)
++#if PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX_BUT_NOT_QNX) || \
++    PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID) ||             \
++    PERFETTO_BUILDFLAG(PERFETTO_OS_QNX)
+ 
+ namespace {
+ constexpr pid_t kCurrentPid = 0;

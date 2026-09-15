@@ -444,6 +444,8 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->sys_ticks = 0;
     t->child_user_ticks = 0;
     t->child_sys_ticks = 0;
+    t->dead_thread_user_ticks = 0;
+    t->dead_thread_sys_ticks = 0;
     t->max_rss_pages = 0;
     t->child_max_rss_pages = 0;
     for (int i = 0; i < PATH_MAX_LENGTH; i++) {
@@ -466,6 +468,10 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->sig_pending = 0;
     t->sig_blocked = 0;
     t->sig_siginfo = 0;
+    t->sig_onstack = 0;
+    t->sig_alt_stack_base = 0;
+    t->sig_alt_stack_size = 0;
+    t->sig_on_alt_stack = 0;
     t->si_pid = 0;
     t->si_status = 0;
     t->si_address = 0;
@@ -1046,8 +1052,17 @@ void scheduler_reap_slot(task_t *t) {
     task_t *parent = scheduler_task_by_id(t->parent_id);
     if (parent) {
         if (t->is_thread && t->tgid == parent->tgid) {
-            parent->user_ticks += t->user_ticks;
-            parent->sys_ticks += t->sys_ticks;
+            /* A dead thread's processor time belongs to the PROCESS, not to
+               whichever thread happened to create it. Adding it to the
+               parent's own counters would have made that thread's
+               CLOCK_THREAD_CPUTIME_ID jump every time one of its children was
+               joined, so it goes to an accumulator on the group leader that
+               only scheduler_thread_group_ticks reads. */
+            task_t *leader = scheduler_task_by_id(t->tgid);
+            if (leader) {
+                leader->dead_thread_user_ticks += t->user_ticks;
+                leader->dead_thread_sys_ticks += t->sys_ticks;
+            }
             parent->child_user_ticks += t->child_user_ticks;
             parent->child_sys_ticks += t->child_sys_ticks;
             if (t->max_rss_pages > parent->max_rss_pages) {
@@ -1082,6 +1097,8 @@ void scheduler_reap_slot(task_t *t) {
     t->sys_ticks = 0;
     t->child_user_ticks = 0;
     t->child_sys_ticks = 0;
+    t->dead_thread_user_ticks = 0;
+    t->dead_thread_sys_ticks = 0;
     t->max_rss_pages = 0;
     t->child_max_rss_pages = 0;
     t->exit_signal = 0;
@@ -1098,6 +1115,10 @@ void scheduler_reap_slot(task_t *t) {
     t->sig_blocked = 0;
     t->sig_restorer = 0;
     t->sig_siginfo = 0;
+    t->sig_onstack = 0;
+    t->sig_alt_stack_base = 0;
+    t->sig_alt_stack_size = 0;
+    t->sig_on_alt_stack = 0;
     t->si_pid = 0;
     t->si_status = 0;
     t->si_address = 0;
@@ -1461,6 +1482,8 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->sys_ticks = 0;
     t->child_user_ticks = 0;
     t->child_sys_ticks = 0;
+    t->dead_thread_user_ticks = 0;
+    t->dead_thread_sys_ticks = 0;
     t->max_rss_pages = 0;
     t->child_max_rss_pages = 0;
 
@@ -1574,6 +1597,46 @@ void scheduler_kill_thread_group(task_t *t) {
     irq_restore(flags);
     for (int i = 0; i < n; i++) {
         scheduler_raise_signal(victims[i], SIGKILL);
+    }
+}
+
+/* POSIX asks two different questions about processor time: how much this
+   thread has used, and how much the whole process has. This kernel accounts a
+   tick to whichever task was running, and a thread IS a task, so the second
+   answer is a sum over the thread group. A thread that has already exited is
+   not missing from it: sched_reap_slot rolls a dead thread's ticks into its
+   parent, which is another task in the same group. */
+void scheduler_thread_group_ticks(task_t *t, uint64_t *user_ticks_out, uint64_t *sys_ticks_out) {
+    uint64_t user = 0;
+    uint64_t sys = 0;
+    if (t) {
+        int group = t->tgid;
+        uint64_t flags = irq_save_disable();
+        spin_lock(&scheduler_lock);
+        for (int i = 0; i < task_count; i++) {
+            task_t *o = &tasks[i];
+            /* TASK_TERMINATED is deliberately counted: such a task still holds
+               its own ticks until it is reaped, and reaping zeroes them in the
+               same step that adds them to the parent, so neither window can
+               count them twice. */
+            if (o->state == TASK_FREE || o->tgid != group) {
+                continue;
+            }
+            user += o->user_ticks;
+            sys += o->sys_ticks;
+            if (o->id == group) {
+                user += o->dead_thread_user_ticks;
+                sys += o->dead_thread_sys_ticks;
+            }
+        }
+        spin_unlock(&scheduler_lock);
+        irq_restore(flags);
+    }
+    if (user_ticks_out) {
+        *user_ticks_out = user;
+    }
+    if (sys_ticks_out) {
+        *sys_ticks_out = sys;
     }
 }
 

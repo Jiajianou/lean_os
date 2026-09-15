@@ -129,6 +129,8 @@ typedef struct task {
     uint64_t sys_ticks;
     uint64_t child_user_ticks;
     uint64_t child_sys_ticks;
+    uint64_t dead_thread_user_ticks;
+    uint64_t dead_thread_sys_ticks;
     uint64_t max_rss_pages;
     uint64_t child_max_rss_pages;
     uint8_t idle_wait_depth;
@@ -141,6 +143,10 @@ typedef struct task {
     uint32_t sig_pending;
     uint32_t sig_blocked;
     uint32_t sig_siginfo;
+    uint32_t sig_onstack;
+    uint64_t sig_alt_stack_base;
+    uint64_t sig_alt_stack_size;
+    uint8_t  sig_on_alt_stack;
     int32_t  si_pid;
     int32_t  si_status;
     uint64_t si_address;
@@ -248,6 +254,8 @@ task_t *task_spawn_thread(const char *name, task_t *leader, void (*entry)(void *
 task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs);
 
 void scheduler_kill_thread_group(task_t *t);
+
+void scheduler_thread_group_ticks(task_t *t, uint64_t *user_ticks_out, uint64_t *sys_ticks_out);
 
 int scheduler_count_sharing_address_space(uint64_t pml4_phys);
 

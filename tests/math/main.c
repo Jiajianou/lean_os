@@ -22,6 +22,8 @@ float lean_fabsf(float), lean_floorf(float), lean_ceilf(float);
 float lean_sinf(float), lean_cosf(float), lean_tanf(float);
 float lean_hypotf(float, float);
 float lean_sqrtf(float), lean_atanf(float), lean_roundf(float);
+float lean_expf(float);
+float lean_nextafterf(float, float);
 long lean_lround(double), lean_lroundf(float);
 long long lean_llround(double), lean_llroundf(float);
 
@@ -91,6 +93,8 @@ static const struct entry TABLE[] = {
     {.name = "hypot", .ours2 = lean_hypot, .theirs2 = hypot},
     {.name = "copysign", .ours2 = lean_copysign, .theirs2 = copysign},
     {.name = "nextafter", .ours2 = lean_nextafter, .theirs2 = nextafter},
+    {.name = "expf", .oursf = lean_expf, .theirsf = expf},
+    {.name = "nextafterf", .oursF = lean_nextafterf, .theirsF = nextafterf},
     {.name = "fmax", .ours2 = lean_fmax, .theirs2 = fmax},
     {.name = "fmin", .ours2 = lean_fmin, .theirs2 = fmin},
     {.name = "cbrt", .ours1 = lean_cbrt, .theirs1 = cbrt},

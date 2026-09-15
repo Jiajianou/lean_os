@@ -24,7 +24,16 @@ if [ ! -d "$TREE" ]; then
   exit 1
 fi
 
-make -s -C "$ROOT" sysroot >/dev/null || exit 1
+# NOT `make sysroot`: its recipe begins with rm -rf and would take the fifteen
+# third-party libraries installed under usr/lib with it, so building libc++
+# would silently cost this tree its browser. The two halves M139 and M140 split
+# out refresh the same headers and the same libc without deleting anything.
+if [ -d "$SYSROOT/usr/include" ]; then
+  make -s -C "$ROOT" sysroot-headers >/dev/null || exit 1
+  make -s -C "$ROOT" sysroot-libc >/dev/null || exit 1
+else
+  make -s -C "$ROOT" sysroot >/dev/null || exit 1
+fi
 
 python3 "$ROOT/tools/clang-port/apply.py" "$TREE" >/dev/null || exit 1
 
@@ -55,7 +64,7 @@ if [ ! -f "$BUILDDIR/build.ninja" ]; then
     -DLIBCXXABI_USE_COMPILER_RT=OFF \
     -DLIBCXX_USE_COMPILER_RT=OFF \
     -DLIBCXX_HAS_MUSL_LIBC=OFF \
-    -DLIBCXX_ENABLE_FILESYSTEM="${LEANOS_LIBCXX_FILESYSTEM:-OFF}" \
+    -DLIBCXX_ENABLE_FILESYSTEM="${LEANOS_LIBCXX_FILESYSTEM:-ON}" \
     -DLIBCXX_ENABLE_LOCALIZATION="${LEANOS_LIBCXX_LOCALIZATION:-ON}" \
     -DLIBCXX_ENABLE_WIDE_CHARACTERS=ON \
     -DLIBCXX_ENABLE_RANDOM_DEVICE=ON \

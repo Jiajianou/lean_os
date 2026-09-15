@@ -28,6 +28,7 @@ typedef struct {
 
 #define OS_RUSAGE_SELF     0
 #define OS_RUSAGE_CHILDREN 1
+#define OS_RUSAGE_THREAD   2
 
 typedef struct {
     uint64_t user_ticks;

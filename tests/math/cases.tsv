@@ -72,3 +72,5 @@ lround	i	-1e18	1e18	401	0	M100: exact, and swept inside +/-1e18 - well under 2^6
 lroundf	i	-1e9	1e9	401	0	M100: exact. A float grid, like roundf's
 llround	i	-1e18	1e18	401	0	M100: exact
 llroundf	i	-1e9	1e9	401	0	M100: exact
+nextafterf	F	-10	10	61	0	M141: exact or it is not nextafterf. Deliberately NOT exp's treatment - a double step rounded back to float returns x unchanged, so this walks a float's own bits
+expf	f	-20	20	401	1.2e-7	M141: exp in double rounded once to float - one float ulp, like the rest of the M100 set. ICU asked for it, from lstmbe.cpp; adding it also needed HAVE_EXPF in tools/toolchain-port/apply.py, or libstdc++ defines it too

@@ -18,6 +18,15 @@ typedef struct {
 #define OS_AF_INET 0
 #define OS_AF_UNIX 1
 
+/* SO_PEERCRED. The pid is the thread group at the other end of a connected
+   AF_UNIX socket; uid and gid are this machine's single principal, which is
+   what M65 says a one-principal machine reports. */
+typedef struct {
+    int32_t  pid;
+    uint32_t uid;
+    uint32_t gid;
+} os_ucred_t;
+
 typedef struct {
     uint64_t data;
     uint32_t length;

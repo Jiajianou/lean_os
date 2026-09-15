@@ -29,6 +29,7 @@ typedef long time_t;
 typedef long clock_t;
 #endif
 typedef long suseconds_t;
+typedef unsigned int useconds_t;
 
 #ifdef __cplusplus
 }

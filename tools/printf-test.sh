@@ -125,7 +125,7 @@ RENAMES=""
 for s in __assert_fail __fpending __lean_stdio_flush_all \
          clearerr dprintf fclose fdopen feof \
          ferror fflush fgetc fgetpos fgets fileno fopen fprintf fputc \
-         fputs fread freopen fseek fsetpos ftell fwrite getc getchar \
+         fputs fread freopen fseek fseeko fsetpos ftell ftello fwrite getc getchar \
          getdelim getline perror printf putc putchar puts remove rename \
          rewind setbuf setvbuf snprintf sprintf stderr stdin stdout \
          tmpfile ungetc vdprintf vfprintf vprintf vsnprintf vsprintf \

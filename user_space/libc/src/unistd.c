@@ -431,6 +431,26 @@ int ftruncate(int fd, off_t length) {
     return (int)sys_ftruncate(fd, (long)length);
 }
 
+/* There is no path-based truncate syscall behind this: the kernel resizes a
+   file through a descriptor, so this opens one. The difference that buys is
+   that it is two operations rather than one - a path replaced between the
+   open and the resize would be truncated by its old identity. Nothing here
+   needs that to be atomic, and inventing a syscall for it would be building
+   a second way to do the same thing. */
+int truncate(const char *path, off_t length) {
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) {
+        return -1;
+    }
+    int r = ftruncate(fd, length);
+    int saved = errno;
+    close(fd);
+    if (r != 0) {
+        errno = saved;
+    }
+    return r;
+}
+
 int symlink(const char *target, const char *path) {
     if (sys_symlink(target, path) != 0) {
         errno = __lean_path_errno(path, 1);

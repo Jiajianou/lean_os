@@ -488,7 +488,20 @@ int setsockopt(int fd, int level, int option, const void *value, socklen_t lengt
 }
 
 int getsockopt(int fd, int level, int option, void *value, socklen_t *length) {
-    (void)fd;
+    if (level == SOL_SOCKET && option == SO_PEERCRED && value && length &&
+        *length >= (socklen_t)sizeof(struct ucred)) {
+        os_ucred_t c;
+        if (sys_unix_peer_credentials(fd, &c) != 0) {
+            errno = ENOTCONN;
+            return -1;
+        }
+        struct ucred *out = (struct ucred *)value;
+        out->pid = (pid_t)c.pid;
+        out->uid = (uid_t)c.uid;
+        out->gid = (gid_t)c.gid;
+        *length = (socklen_t)sizeof(struct ucred);
+        return 0;
+    }
     if (level == SOL_SOCKET && option == SO_ERROR && value && length &&
         *length >= (socklen_t)sizeof(int)) {
         *(int *)value = 0;

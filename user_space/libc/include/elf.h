@@ -160,9 +160,14 @@ typedef struct {
 #define SHF_EXECINSTR 0x4
 #define SHF_TLS       0x400
 
-#define SHN_UNDEF  0
-#define SHN_ABS    0xfff1
-#define SHN_COMMON 0xfff2
+#define SHN_UNDEF     0
+#define SHN_LORESERVE 0xff00
+#define SHN_LOPROC    0xff00
+#define SHN_HIPROC    0xff1f
+#define SHN_ABS       0xfff1
+#define SHN_COMMON    0xfff2
+#define SHN_XINDEX    0xffff
+#define SHN_HIRESERVE 0xffff
 
 typedef struct {
     Elf32_Word sh_name;
@@ -259,6 +264,83 @@ typedef struct {
 #define DT_FLAGS    30
 #define DT_GNU_HASH 0x6ffffef5
 #define DT_RELACOUNT 0x6ffffff9
+#define DT_VERSYM     0x6ffffff0
+#define DT_VERDEF     0x6ffffffc
+#define DT_VERDEFNUM  0x6ffffffd
+#define DT_VERNEED    0x6ffffffe
+#define DT_VERNEEDNUM 0x6fffffff
+
+/* Symbol versioning. These describe bytes in an ELF file rather than
+   naming anything this C library implements, which is why they can be
+   declared here where dl_iterate_phdr could not: a caller that reads a
+   version table reads it out of a file or a mapping it already has, and
+   this header promises it no function. */
+#define VER_NDX_LOCAL   0
+#define VER_NDX_GLOBAL  1
+#define VER_FLG_BASE    0x1
+#define VER_FLG_WEAK    0x2
+
+typedef struct {
+    Elf32_Half vd_version;
+    Elf32_Half vd_flags;
+    Elf32_Half vd_ndx;
+    Elf32_Half vd_cnt;
+    Elf32_Word vd_hash;
+    Elf32_Word vd_aux;
+    Elf32_Word vd_next;
+} Elf32_Verdef;
+
+typedef struct {
+    Elf64_Half vd_version;
+    Elf64_Half vd_flags;
+    Elf64_Half vd_ndx;
+    Elf64_Half vd_cnt;
+    Elf64_Word vd_hash;
+    Elf64_Word vd_aux;
+    Elf64_Word vd_next;
+} Elf64_Verdef;
+
+typedef struct {
+    Elf32_Word vda_name;
+    Elf32_Word vda_next;
+} Elf32_Verdaux;
+
+typedef struct {
+    Elf64_Word vda_name;
+    Elf64_Word vda_next;
+} Elf64_Verdaux;
+
+typedef struct {
+    Elf32_Half vn_version;
+    Elf32_Half vn_cnt;
+    Elf32_Word vn_file;
+    Elf32_Word vn_aux;
+    Elf32_Word vn_next;
+} Elf32_Verneed;
+
+typedef struct {
+    Elf64_Half vn_version;
+    Elf64_Half vn_cnt;
+    Elf64_Word vn_file;
+    Elf64_Word vn_aux;
+    Elf64_Word vn_next;
+} Elf64_Verneed;
+
+typedef struct {
+    Elf32_Word vna_hash;
+    Elf32_Half vna_flags;
+    Elf32_Half vna_other;
+    Elf32_Word vna_name;
+    Elf32_Word vna_next;
+} Elf32_Vernaux;
+
+typedef struct {
+    Elf64_Word vna_hash;
+    Elf64_Half vna_flags;
+    Elf64_Half vna_other;
+    Elf64_Word vna_name;
+    Elf64_Word vna_next;
+} Elf64_Vernaux;
 
 typedef struct {
     Elf32_Sword d_tag;
