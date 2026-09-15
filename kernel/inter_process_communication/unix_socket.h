@@ -55,6 +55,7 @@ long unix_socket_receive(struct unix_socket *s, uint8_t *out, uint32_t max,
                    int *flags_out);
 
 int unix_socket_pending(const struct unix_socket *s);
+int unix_socket_readable_bytes(const struct unix_socket *s);
 
 int unix_socket_writable(const struct unix_socket *s);
 int unix_socket_hup(const struct unix_socket *s);

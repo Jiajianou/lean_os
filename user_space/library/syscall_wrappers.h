@@ -36,6 +36,7 @@ long sys_link(const char *old_path, const char *new_path);
 long sys_fsync(int fd);
 long sys_mprotect(void *address, unsigned long length, int prot);
 long sys_madvise(void *address, unsigned long length, int advice);
+long sys_mincore(void *address, unsigned long length, unsigned char *vector);
 
 long sys_chdir(const char *path);
 long sys_getcwd(char *buffer, size_t maxlen);

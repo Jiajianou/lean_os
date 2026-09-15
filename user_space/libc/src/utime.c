@@ -29,6 +29,20 @@ int utimes(const char *path, const struct timeval tv[2]) {
     return set_mtime(path, tv ? tv[1].tv_sec : time((time_t *)0));
 }
 
+/* The descriptor's own path, then the same one operation. There is no
+   syscall that sets a time through a descriptor, and adding one for this
+   would be a second way to do what sys_utime already does. */
+int futimes(int fd, const struct timeval tv[2]) {
+    char path[PATH_MAX];
+    long n = sys_fdpath(fd, path, sizeof(path));
+    if (n < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    path[n] = '\0';
+    return utimes(path, tv);
+}
+
 int utimensat(int dirfd, const char *path, const struct timespec ts[2], int flags) {
     (void)flags;
     char full[PATH_MAX];

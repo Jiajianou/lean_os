@@ -1,16 +1,29 @@
+#include <dlfcn.h>
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <poll.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <sys/ucontext.h>
 #include <time.h>
+#include <ucontext.h>
 #include <unistd.h>
+
+#include "signal.h"
 
 #include "paths.h"
 
@@ -425,6 +438,588 @@ static int the_version_structures_are_the_shape_the_gabi_fixes(void) {
     return 0;
 }
 
+
+/* M143. A handler's third argument used to be a null pointer, and a sampling
+   profiler is a program that dereferences it. These check that the registers
+   in it are the ones that were interrupted - RIP inside this function's
+   caller, RSP somewhere on this thread's stack - and then that an EDIT to
+   uc_mcontext takes effect, which is what makes it a context rather than a
+   description of one. */
+static volatile int context_signal_seen;
+static volatile unsigned long context_rip;
+static volatile unsigned long context_rsp;
+
+static void context_reader(int signal_number, siginfo_t *info, void *raw) {
+    (void)signal_number;
+    (void)info;
+    ucontext_t *context = (ucontext_t *)raw;
+    context_signal_seen = raw != 0;
+    if (context) {
+        context_rip = (unsigned long)context->uc_mcontext.gregs[REG_RIP];
+        context_rsp = (unsigned long)context->uc_mcontext.gregs[REG_RSP];
+    }
+}
+
+static int a_handler_is_given_the_registers_it_interrupted(void) {
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = context_reader;
+    action.sa_flags = SA_SIGINFO;
+    if (sigaction(SIGUSR1, &action, (struct sigaction *)0) != 0) {
+        return 160;
+    }
+    int local = 0;
+    context_signal_seen = 0;
+    context_rip = 0;
+    context_rsp = 0;
+    if (raise(SIGUSR1) != 0) {
+        return 161;
+    }
+    if (!context_signal_seen) {
+        return 162;
+    }
+    if (context_rip == 0) {
+        return 163;
+    }
+    /* The interrupted stack pointer has to be near this frame's own local -
+       within a few kilobytes - and not zero, which is what it used to be. */
+    unsigned long here = (unsigned long)&local;
+    unsigned long distance = context_rsp > here ? context_rsp - here
+                                                : here - context_rsp;
+    if (context_rsp == 0 || distance > 65536u) {
+        return 164;
+    }
+    return 0;
+}
+
+/* raise() is sys_kill, and the signal is delivered on that syscall's own
+   return path - so the RAX the handler is shown is the syscall's result, and
+   an edit to it is what raise() goes on to return. That makes the difference
+   between an edited context and an untouched one directly observable, which
+   is the only way to tell a real ucontext from a faithful copy of one.
+
+   It also caught this test's first version, which asserted raise() == 0 with
+   the editing handler installed and failed - because the edit had worked. */
+#define CONTEXT_EDIT_SENTINEL 0x5EED
+
+static volatile int context_edit_enabled;
+
+static void context_editor(int signal_number, siginfo_t *info, void *raw) {
+    (void)signal_number;
+    (void)info;
+    ucontext_t *context = (ucontext_t *)raw;
+    if (context && context_edit_enabled) {
+        context->uc_mcontext.gregs[REG_RAX] = CONTEXT_EDIT_SENTINEL;
+    }
+}
+
+static int an_edit_to_the_context_takes_effect(void) {
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = context_editor;
+    action.sa_flags = SA_SIGINFO;
+    if (sigaction(SIGUSR2, &action, (struct sigaction *)0) != 0) {
+        return 165;
+    }
+    context_edit_enabled = 0;
+    int untouched = raise(SIGUSR2);
+    if (untouched != 0) {
+        return 166;
+    }
+    context_edit_enabled = 1;
+    int edited = raise(SIGUSR2);
+    context_edit_enabled = 0;
+    if (edited != CONTEXT_EDIT_SENTINEL) {
+        return 167;
+    }
+    /* And the process is still standing: an rsp taken back out of the
+       ucontext that was not the one it went in with would have faulted
+       between there and here. */
+    if (raise(SIGUSR2) != 0) {
+        return 168;
+    }
+    return 0;
+}
+
+static int the_two_ucontext_layouts_agree(void) {
+    /* One structure, two declarations: the kernel fills an os_ucontext_t and
+       the handler reads a ucontext_t. M138's rule - a wrong offset compiles
+       and links perfectly well - so the offsets are compared rather than
+       trusted. */
+    if (sizeof(ucontext_t) != sizeof(os_ucontext_t)) {
+        return 169;
+    }
+    if (offsetof(ucontext_t, uc_stack) != offsetof(os_ucontext_t, uc_stack)) {
+        return 170;
+    }
+    if (offsetof(ucontext_t, uc_mcontext) !=
+        offsetof(os_ucontext_t, uc_mcontext)) {
+        return 171;
+    }
+    if (offsetof(ucontext_t, uc_sigmask) !=
+        offsetof(os_ucontext_t, uc_sigmask)) {
+        return 172;
+    }
+    if (offsetof(mcontext_t, gregs) != offsetof(os_mcontext_t, gregs)) {
+        return 173;
+    }
+    if (sizeof(((mcontext_t *)0)->gregs) !=
+        sizeof(((os_mcontext_t *)0)->gregs)) {
+        return 174;
+    }
+    stack_t declared;
+    os_signal_stack_t inside;
+    if (sizeof(declared) != sizeof(inside) ||
+        offsetof(stack_t, ss_sp) != offsetof(os_signal_stack_t, ss_sp) ||
+        offsetof(stack_t, ss_flags) != offsetof(os_signal_stack_t, ss_flags) ||
+        offsetof(stack_t, ss_size) != offsetof(os_signal_stack_t, ss_size)) {
+        return 175;
+    }
+    return 0;
+}
+
+/* M143. A semaphore that two threads actually pass through, not one that
+   compiles. */
+static sem_t handoff;
+static volatile int handoff_count;
+
+static void *semaphore_waiter(void *unused) {
+    (void)unused;
+    for (int i = 0; i < 100; i++) {
+        if (sem_wait(&handoff) != 0) {
+            return (void *)1;
+        }
+        handoff_count++;
+    }
+    return (void *)0;
+}
+
+static int a_semaphore_blocks_and_wakes(void) {
+    if (sem_init(&handoff, 0, 0) != 0) {
+        return 76;
+    }
+    int value = -1;
+    if (sem_getvalue(&handoff, &value) != 0 || value != 0) {
+        return 77;
+    }
+    if (sem_trywait(&handoff) == 0 || errno != EAGAIN) {
+        return 78;
+    }
+    handoff_count = 0;
+    pthread_t thread;
+    if (pthread_create(&thread, (pthread_attr_t *)0, semaphore_waiter,
+                       (void *)0) != 0) {
+        return 153;
+    }
+    for (int i = 0; i < 100; i++) {
+        if (sem_post(&handoff) != 0) {
+            return 79;
+        }
+    }
+    void *result = (void *)1;
+    if (pthread_join(thread, &result) != 0 || result != (void *)0) {
+        return 80;
+    }
+    if (handoff_count != 100) {
+        return 81;
+    }
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+        return 82;
+    }
+    deadline.tv_nsec += 20000000;
+    if (deadline.tv_nsec >= 1000000000) {
+        deadline.tv_nsec -= 1000000000;
+        deadline.tv_sec++;
+    }
+    if (sem_timedwait(&handoff, &deadline) == 0 || errno != ETIMEDOUT) {
+        return 83;
+    }
+    if (sem_destroy(&handoff) != 0) {
+        return 84;
+    }
+    return 0;
+}
+
+/* M143. The attributes //base sets on a thread and a mutex. Each of these is
+   either carried out or refused; none of them is stored and forgotten. */
+static void *detached_body(void *unused) {
+    (void)unused;
+    return (void *)0;
+}
+
+static int the_thread_attributes_are_answered_truthfully(void) {
+    pthread_attr_t attributes;
+    if (pthread_attr_init(&attributes) != 0) {
+        return 85;
+    }
+    int state = -1;
+    if (pthread_attr_getdetachstate(&attributes, &state) != 0 ||
+        state != PTHREAD_CREATE_JOINABLE) {
+        return 86;
+    }
+    if (pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED) != 0) {
+        return 87;
+    }
+    if (pthread_attr_getdetachstate(&attributes, &state) != 0 ||
+        state != PTHREAD_CREATE_DETACHED) {
+        return 88;
+    }
+    if (pthread_attr_setdetachstate(&attributes, 47) != EINVAL) {
+        return 89;
+    }
+    if (PTHREAD_STACK_MIN < 4096u || PTHREAD_STACK_MIN < (unsigned)MINSIGSTKSZ) {
+        return 90;
+    }
+    if (pthread_attr_setstacksize(&attributes, PTHREAD_STACK_MIN) != 0) {
+        return 91;
+    }
+    pthread_t thread;
+    if (pthread_create(&thread, &attributes, detached_body, (void *)0) != 0) {
+        return 92;
+    }
+    if (pthread_attr_destroy(&attributes) != 0) {
+        return 93;
+    }
+
+    pthread_mutexattr_t mutex_attributes;
+    if (pthread_mutexattr_init(&mutex_attributes) != 0) {
+        return 94;
+    }
+    if (pthread_mutexattr_setprotocol(&mutex_attributes, PTHREAD_PRIO_NONE) != 0) {
+        return 95;
+    }
+    /* Refused, not accepted: there is no priority here to inherit. */
+    if (pthread_mutexattr_setprotocol(&mutex_attributes,
+                                      PTHREAD_PRIO_INHERIT) != ENOTSUP) {
+        return 96;
+    }
+    if (pthread_mutexattr_destroy(&mutex_attributes) != 0) {
+        return 97;
+    }
+
+    pthread_condattr_t condition_attributes;
+    if (pthread_condattr_init(&condition_attributes) != 0) {
+        return 98;
+    }
+    int clock = -1;
+    if (pthread_condattr_getclock(&condition_attributes, &clock) != 0 ||
+        clock != CLOCK_MONOTONIC) {
+        return 99;
+    }
+    if (pthread_condattr_setclock(&condition_attributes, CLOCK_MONOTONIC) != 0) {
+        return 100;
+    }
+    if (pthread_condattr_setclock(&condition_attributes,
+                                  CLOCK_REALTIME) != ENOTSUP) {
+        return 101;
+    }
+    if (pthread_condattr_destroy(&condition_attributes) != 0) {
+        return 102;
+    }
+    return 0;
+}
+
+/* M143. One nice value, reported and defended. */
+static int the_machine_reports_one_priority(void) {
+    errno = 0;
+    if (getpriority(PRIO_PROCESS, (id_t)getpid()) != 0 || errno != 0) {
+        return 103;
+    }
+    errno = 0;
+    if (getpriority(4711, (id_t)0) != -1 || errno != EINVAL) {
+        return 104;
+    }
+    if (setpriority(PRIO_PROCESS, (id_t)0, 0) != 0) {
+        return 105;
+    }
+    errno = 0;
+    if (setpriority(PRIO_PROCESS, (id_t)0, -5) != -1 || errno != EPERM) {
+        return 106;
+    }
+    errno = 0;
+    if (setpriority(PRIO_PROCESS, (id_t)0, 5) != -1 || errno != EPERM) {
+        return 107;
+    }
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_NICE, &limit) != 0 || limit.rlim_cur != 0) {
+        return 108;
+    }
+    if (NZERO < 20) {
+        return 109;
+    }
+    return 0;
+}
+
+/* M143. mincore answers from the page tables, so a page that has been touched
+   is resident and one that has only been reserved is not. With no swap on
+   this machine those two answers are exact rather than advisory. */
+static int mincore_reports_what_is_resident(void) {
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0) {
+        return 110;
+    }
+    size_t pages = 8;
+    size_t length = (size_t)page * pages;
+    unsigned char *region = mmap((void *)0, length, PROT_READ | PROT_WRITE,
+                                 MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (region == MAP_FAILED) {
+        return 111;
+    }
+    unsigned char resident[8];
+    memset(resident, 0xFF, sizeof(resident));
+    if (mincore(region, length, resident) != 0) {
+        munmap(region, length);
+        return 112;
+    }
+    int any_before = 0;
+    for (size_t i = 0; i < pages; i++) {
+        if (resident[i] & 1) {
+            any_before = 1;
+        }
+    }
+    region[0] = 1;
+    region[(size_t)page * 3] = 1;
+    memset(resident, 0, sizeof(resident));
+    if (mincore(region, length, resident) != 0) {
+        munmap(region, length);
+        return 113;
+    }
+    int touched_are_resident = (resident[0] & 1) && (resident[3] & 1);
+    munmap(region, length);
+    if (any_before) {
+        return 114;
+    }
+    if (!touched_are_resident) {
+        return 115;
+    }
+    return 0;
+}
+
+/* M143. FIONREAD is a count, not a readiness bit, and the count has to be
+   right for the three kinds of descriptor that carry bytes. */
+static int fionread_counts_what_is_waiting(void) {
+    int ends[2];
+    if (pipe(ends) != 0) {
+        return 116;
+    }
+    int available = -1;
+    if (ioctl(ends[0], FIONREAD, &available) != 0 || available != 0) {
+        close(ends[0]);
+        close(ends[1]);
+        return 117;
+    }
+    if (write(ends[1], "abcdefghij", 10) != 10) {
+        close(ends[0]);
+        close(ends[1]);
+        return 118;
+    }
+    if (ioctl(ends[0], FIONREAD, &available) != 0 || available != 10) {
+        close(ends[0]);
+        close(ends[1]);
+        return 119;
+    }
+    close(ends[0]);
+    close(ends[1]);
+
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) {
+        return 120;
+    }
+    if (write(pair[0], "12345", 5) != 5) {
+        close(pair[0]);
+        close(pair[1]);
+        return 121;
+    }
+    if (ioctl(pair[1], FIONREAD, &available) != 0 || available != 5) {
+        close(pair[0]);
+        close(pair[1]);
+        return 122;
+    }
+    close(pair[0]);
+    close(pair[1]);
+    return 0;
+}
+
+/* M143. The rest of what //base names, each checked for the behaviour rather
+   than for the symbol existing. */
+static int the_remaining_surface_behaves(void) {
+    /* pipe2's flags actually reach the descriptors. */
+    int ends[2];
+    if (pipe2(ends, O_CLOEXEC | O_NONBLOCK) != 0) {
+        return 123;
+    }
+    if ((fcntl(ends[0], F_GETFD, 0) & FD_CLOEXEC) == 0) {
+        close(ends[0]);
+        close(ends[1]);
+        return 124;
+    }
+    if ((fcntl(ends[1], F_GETFL, 0) & O_NONBLOCK) == 0) {
+        close(ends[0]);
+        close(ends[1]);
+        return 125;
+    }
+    if (pipe2(ends, 0x40000000) == 0) {
+        return 126;
+    }
+    close(ends[0]);
+    close(ends[1]);
+
+    /* Sealing through fcntl reaches M120's own seals. */
+    int memory = memfd_create("basetest", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (memory < 0) {
+        return 127;
+    }
+    if (ftruncate64(memory, 4096) != 0) {
+        close(memory);
+        return 128;
+    }
+    if (fcntl(memory, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW) != 0) {
+        close(memory);
+        return 129;
+    }
+    int seals = fcntl(memory, F_GET_SEALS);
+    if (seals < 0 || (seals & F_SEAL_SHRINK) == 0 ||
+        (seals & F_SEAL_GROW) == 0) {
+        close(memory);
+        return 130;
+    }
+    if (ftruncate(memory, 8192) == 0) {
+        close(memory);
+        return 131;
+    }
+    close(memory);
+
+    /* fallocate makes the space and refuses what it cannot do. */
+    int file = open(SCRATCH, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (file < 0) {
+        return 132;
+    }
+    if (fallocate(file, 0, 0, 4096) != 0) {
+        close(file);
+        return 133;
+    }
+    struct stat info;
+    if (fstat(file, &info) != 0 || info.st_size < 4096) {
+        close(file);
+        return 134;
+    }
+    if (fallocate(file, FALLOC_FL_PUNCH_HOLE, 0, 1024) == 0 ||
+        errno != EOPNOTSUPP) {
+        close(file);
+        return 135;
+    }
+    if (posix_fadvise(file, 0, 4096, POSIX_FADV_SEQUENTIAL) != 0) {
+        close(file);
+        return 136;
+    }
+    if (posix_fadvise(file, 0, 4096, 4711) != EINVAL) {
+        close(file);
+        return 137;
+    }
+
+    /* sendfile moves the bytes and leaves the source's own position alone.
+       The string goes AT 4096 rather than at the position fallocate left
+       alone, which is zero - the first version of this read the hole and
+       said so. */
+    if (lseek(file, 4096, SEEK_SET) != 4096) {
+        close(file);
+        return 138;
+    }
+    if (write(file, "sendfile-source", 15) != 15) {
+        close(file);
+        return 139;
+    }
+    if (lseek(file, 4096, SEEK_SET) != 4096) {
+        close(file);
+        return 152;
+    }
+    int destination_ends[2];
+    if (pipe(destination_ends) != 0) {
+        close(file);
+        return 140;
+    }
+    off_t at = 4096;
+    if (sendfile(destination_ends[1], file, &at, 15) != 15 || at != 4111) {
+        close(file);
+        close(destination_ends[0]);
+        close(destination_ends[1]);
+        return 141;
+    }
+    if (lseek(file, 0, SEEK_CUR) != 4096) {
+        close(file);
+        close(destination_ends[0]);
+        close(destination_ends[1]);
+        return 142;
+    }
+    char landed[16];
+    memset(landed, 0, sizeof(landed));
+    if (read(destination_ends[0], landed, 15) != 15 ||
+        memcmp(landed, "sendfile-source", 15) != 0) {
+        close(file);
+        close(destination_ends[0]);
+        close(destination_ends[1]);
+        return 143;
+    }
+
+    /* futimes reaches the same file the descriptor names. */
+    struct timeval when[2];
+    when[0].tv_sec = 1000000;
+    when[0].tv_usec = 0;
+    when[1].tv_sec = 1000000;
+    when[1].tv_usec = 0;
+    if (futimes(file, when) != 0) {
+        close(file);
+        close(destination_ends[0]);
+        close(destination_ends[1]);
+        return 144;
+    }
+    close(destination_ends[0]);
+    close(destination_ends[1]);
+    close(file);
+    unlink(SCRATCH);
+
+    /* MADV_REMOVE is refused rather than quietly accepted. */
+    long page = sysconf(_SC_PAGESIZE);
+    void *region = mmap((void *)0, (size_t)page, PROT_READ | PROT_WRITE,
+                        MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (region == MAP_FAILED) {
+        return 145;
+    }
+    int refused = madvise(region, (size_t)page, MADV_REMOVE) != 0;
+    int accepted = madvise(region, (size_t)page, MADV_DONTNEED) == 0;
+    munmap(region, (size_t)page);
+    if (!refused) {
+        return 146;
+    }
+    if (!accepted) {
+        return 147;
+    }
+
+    /* dladdr says no rather than saying something wrong. */
+    Dl_info where;
+    memset(&where, 0xAB, sizeof(where));
+    if (dladdr((const void *)the_remaining_surface_behaves, &where) != 0) {
+        return 148;
+    }
+    if (where.dli_fname != (const char *)0 || where.dli_saddr != (void *)0) {
+        return 149;
+    }
+
+    /* The device-number macros take apart what they put together. */
+    dev_t device = makedev(259, 4098);
+    if (major(device) != 259u || minor(device) != 4098u) {
+        return 150;
+    }
+
+    /* POLLRDHUP and EPOLLRDHUP are the same bit, because the kernel reports
+       one of them and portable code names the other. */
+    if ((unsigned)POLLRDHUP != EPOLLRDHUP) {
+        return 151;
+    }
+    return 0;
+}
+
 int main(void) {
     int rc;
     if ((rc = the_monotonic_family_is_one_clock()) != 0) {
@@ -446,6 +1041,33 @@ int main(void) {
         return rc;
     }
     if ((rc = the_version_structures_are_the_shape_the_gabi_fixes()) != 0) {
+        return rc;
+    }
+    if ((rc = the_two_ucontext_layouts_agree()) != 0) {
+        return rc;
+    }
+    if ((rc = a_handler_is_given_the_registers_it_interrupted()) != 0) {
+        return rc;
+    }
+    if ((rc = an_edit_to_the_context_takes_effect()) != 0) {
+        return rc;
+    }
+    if ((rc = a_semaphore_blocks_and_wakes()) != 0) {
+        return rc;
+    }
+    if ((rc = the_thread_attributes_are_answered_truthfully()) != 0) {
+        return rc;
+    }
+    if ((rc = the_machine_reports_one_priority()) != 0) {
+        return rc;
+    }
+    if ((rc = mincore_reports_what_is_resident()) != 0) {
+        return rc;
+    }
+    if ((rc = fionread_counts_what_is_waiting()) != 0) {
+        return rc;
+    }
+    if ((rc = the_remaining_surface_behaves()) != 0) {
         return rc;
     }
     return 0;

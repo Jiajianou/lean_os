@@ -77,6 +77,13 @@ static int limit_for(int resource, struct rlimit *out) {
     case RLIMIT_CORE:
         out->rlim_cur = out->rlim_max = 0;
         return 0;
+    /* Zero is how far niceness may be lowered here, and it is zero because
+       there is nothing to lower. base/posix/can_lower_nice_to.cc reads this
+       and correctly concludes no. */
+    case RLIMIT_NICE:
+    case RLIMIT_RTPRIO:
+        out->rlim_cur = out->rlim_max = 0;
+        return 0;
     case RLIMIT_CPU:
     case RLIMIT_FSIZE:
     case RLIMIT_DATA:
@@ -98,6 +105,35 @@ int getrlimit(int resource, struct rlimit *rlim) {
         return -1;
     }
     return 0;
+}
+
+/* Every process on this machine has a nice value of zero, and that is a
+   property of the scheduler rather than a default: kernel/scheduler has two
+   priority CLASSES and no per-task priority number at all. So getpriority
+   reports the one value there is, and setpriority takes it and refuses any
+   other with EPERM. M65's rule is what decides the second half - a
+   setpriority that returned 0 and changed nothing would be a call that
+   pretends to enforce something. */
+int getpriority(int which, id_t who) {
+    (void)who;
+    if (which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER) {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+int setpriority(int which, id_t who, int value) {
+    (void)who;
+    if (which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (value == 0) {
+        return 0;
+    }
+    errno = EPERM;
+    return -1;
 }
 
 int setrlimit(int resource, const struct rlimit *rlim) {

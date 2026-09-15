@@ -1566,6 +1566,47 @@ static long sys_ioctl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
     (void)a5;
     (void)a6;
     task_t *self = scheduler_current();
+
+    /* FIONREAD is not a terminal question - it is asked of pipes and sockets
+       far more often - so it is answered before the tty lookup rather than
+       inside it. The number is the one poll already has to know. */
+    if (command == FIONREAD) {
+        if (fd >= MAX_FILE_DESCRIPTORS) {
+            return -1;
+        }
+        file_descriptor_slot_t *slot = &self->file_descriptors[fd];
+        int bytes = -1;
+        switch (slot->type) {
+        case FILE_DESCRIPTOR_PIPE_READ:
+            bytes = pipe_buffered(slot->pipe);
+            break;
+        case FILE_DESCRIPTOR_SOCKET:
+            bytes = socket_pending(slot->sock);
+            break;
+        case FILE_DESCRIPTOR_UNIX:
+            bytes = unix_socket_readable_bytes(slot->un);
+            break;
+        case FILE_DESCRIPTOR_FILE: {
+            leanfs_stat_t st;
+            if (virtual_file_system_handle_stat(slot->file->handle, &st) != 0) {
+                return -1;
+            }
+            uint64_t at = slot->file->offset;
+            bytes = st.size > at ? (int)(st.size - at) : 0;
+            break;
+        }
+        default:
+            break;
+        }
+        if (bytes < 0) {
+            return -1;
+        }
+        if (copy_to_user(arg, &bytes, sizeof(bytes)) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+
     int pty_number = -1;
     tty_t *t = tty_for_file_descriptor(self, fd, &pty_number);
     if (!t) {
@@ -2817,6 +2858,36 @@ static long sys_mprotect(uint64_t address, uint64_t length, uint64_t prot, uint6
     return 0;
 }
 
+/* Which pages of a range are resident. This kernel has no swap, so "in this
+   address space's page tables" IS resident, and the answer is exact rather
+   than an estimate - which is the whole reason a memory report asks. */
+static long sys_mincore(uint64_t address, uint64_t length, uint64_t vector,
+                        uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if ((address & (PAGE_SIZE - 1)) != 0 || length == 0) {
+        return -1;
+    }
+    uint64_t pages = (length + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint64_t end = address + pages * PAGE_SIZE;
+    if (end <= address) {
+        return -1;
+    }
+    task_t *self = scheduler_vm_owner(scheduler_current());
+    if (self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
+        return -1;
+    }
+    for (uint64_t i = 0; i < pages; i++) {
+        uint8_t resident = virtual_memory_user_range_ok(
+            self->pml4_phys, address + i * PAGE_SIZE, 1, 0) ? 1 : 0;
+        if (copy_to_user(vector + i, &resident, 1) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static long sys_madvise(uint64_t address, uint64_t length, uint64_t advice, uint64_t a4,
                          uint64_t a5, uint64_t a6) {
     (void)a4;
@@ -2830,6 +2901,20 @@ static long sys_madvise(uint64_t address, uint64_t length, uint64_t advice, uint
         return -1;
     }
     if (address < USER_MMAP_BASE || end > USER_MMAP_LIMIT) {
+        return -1;
+    }
+    /* MADV_REMOVE punches a hole in the object BEHIND a shared mapping, so
+       every process mapping it sees zeros afterwards. This kernel's memfds
+       are reference counted and do not know who has them mapped, so the
+       pages cannot be dropped from the other mappers' page tables - and
+       dropping them from this one only would free memory somebody else is
+       still pointing at. Refused, not quietly accepted: M65's rule. The
+       condition is a memfd that knows its mappers.
+
+       Linux itself returns EINVAL here for every mapping that is not on a
+       shared-memory filesystem, so this is also the answer most callers
+       already handle. */
+    if (advice == MADV_REMOVE) {
         return -1;
     }
     if (advice != MADV_DONTNEED) {
@@ -4664,6 +4749,7 @@ static const syscall_function_t syscall_table[SYSCALL_COUNT] = {
     [SYS_mmap] = sys_mmap,
     [SYS_mprotect] = sys_mprotect,
     [SYS_madvise] = sys_madvise,
+    [SYS_mincore] = sys_mincore,
     [SYS_munmap] = sys_munmap,
     [SYS_thread_create] = sys_thread_create,
     [SYS_thread_exit] = sys_thread_exit,
@@ -4819,6 +4905,9 @@ static int signal_deliver(isr_regs_t *regs) {
         sp &= ~15ULL;
     }
     uint64_t info_address = sp;
+    sp -= sizeof(os_ucontext_t);
+    sp &= ~15ULL;
+    uint64_t ucontext_address = sp;
     sp -= sizeof(sig_frame_t);
     sp &= ~15ULL;
     uint64_t frame_address = sp;
@@ -4845,6 +4934,45 @@ static int signal_deliver(isr_regs_t *regs) {
     frame.rsp = regs->rsp;
     frame.saved_blocked = self->sig_blocked;
     frame.signo = (uint32_t)signo;
+    frame.ucontext_address = ucontext_address;
+
+    /* A real ucontext, not a null third argument. The registers below are
+       the ones the handler interrupted, and sys_sigreturn reads them back
+       out of this structure - so a handler that changes uc_mcontext changes
+       where it returns to, which is what makes this a context rather than a
+       description of one. A sampling profiler is the caller that needs it:
+       it reads RIP, RSP and RBP here and walks the stack from them. */
+    os_ucontext_t context;
+    k_memset(&context, 0, sizeof(context));
+    context.uc_flags = 0;
+    context.uc_link = 0;
+    context.uc_stack.ss_sp = self->sig_alt_stack_base;
+    context.uc_stack.ss_size = self->sig_alt_stack_size;
+    context.uc_stack.ss_flags = self->sig_alt_stack_base == 0
+                                    ? OS_SS_DISABLE
+                                    : (self->sig_on_alt_stack ? OS_SS_ONSTACK : 0);
+    context.uc_sigmask = self->sig_blocked;
+    context.uc_mcontext.gregs[OS_REG_R8] = (int64_t)regs->r8;
+    context.uc_mcontext.gregs[OS_REG_R9] = (int64_t)regs->r9;
+    context.uc_mcontext.gregs[OS_REG_R10] = (int64_t)regs->r10;
+    context.uc_mcontext.gregs[OS_REG_R11] = (int64_t)regs->r11;
+    context.uc_mcontext.gregs[OS_REG_R12] = (int64_t)regs->r12;
+    context.uc_mcontext.gregs[OS_REG_R13] = (int64_t)regs->r13;
+    context.uc_mcontext.gregs[OS_REG_R14] = (int64_t)regs->r14;
+    context.uc_mcontext.gregs[OS_REG_R15] = (int64_t)regs->r15;
+    context.uc_mcontext.gregs[OS_REG_RDI] = (int64_t)regs->rdi;
+    context.uc_mcontext.gregs[OS_REG_RSI] = (int64_t)regs->rsi;
+    context.uc_mcontext.gregs[OS_REG_RBP] = (int64_t)regs->rbp;
+    context.uc_mcontext.gregs[OS_REG_RBX] = (int64_t)regs->rbx;
+    context.uc_mcontext.gregs[OS_REG_RDX] = (int64_t)regs->rdx;
+    context.uc_mcontext.gregs[OS_REG_RAX] = (int64_t)regs->rax;
+    context.uc_mcontext.gregs[OS_REG_RCX] = (int64_t)regs->rcx;
+    context.uc_mcontext.gregs[OS_REG_RSP] = (int64_t)regs->rsp;
+    context.uc_mcontext.gregs[OS_REG_RIP] = (int64_t)regs->rip;
+    context.uc_mcontext.gregs[OS_REG_EFL] = (int64_t)regs->rflags;
+    context.uc_mcontext.gregs[OS_REG_CSGSFS] = (int64_t)(regs->cs & 0xFFFF);
+    context.uc_mcontext.gregs[OS_REG_CR2] = (int64_t)self->si_address;
+    context.uc_mcontext.fpregs = 0;
 
     if (copy_to_user(frame_address, &frame, sizeof(frame)) != 0) {
         self->sig_pending &= ~(1u << signo);
@@ -4860,6 +4988,10 @@ static int signal_deliver(isr_regs_t *regs) {
         self->sig_pending &= ~(1u << signo);
         return 0;
     }
+    if (copy_to_user(ucontext_address, &context, sizeof(context)) != 0) {
+        self->sig_pending &= ~(1u << signo);
+        return 0;
+    }
 
     self->sig_pending &= ~(1u << signo);
     self->sig_blocked |= (1u << signo);
@@ -4870,7 +5002,7 @@ static int signal_deliver(isr_regs_t *regs) {
     regs->rip = handler;
     regs->rdi = (uint64_t)signo;
     regs->rsi = want_info ? info_address : 0;
-    regs->rdx = 0;
+    regs->rdx = ucontext_address;
     regs->rax = 0;
     return 1;
 }
@@ -4905,32 +5037,65 @@ static int signal_return(isr_regs_t *regs) {
     if (copy_from_user(&frame, frame_address, sizeof(frame)) != 0) {
         return -1;
     }
-    if (frame.rip < USER_REGION_BASE || frame.rip >= USER_REGION_LIMIT) {
+    /* The ucontext is what the handler was given and what it may have
+       edited, so it is the authority here; the frame's own copy is the
+       fallback for a frame this kernel did not write a ucontext for. */
+    os_ucontext_t context;
+    int have_context = frame.ucontext_address != 0 &&
+                       copy_from_user(&context, frame.ucontext_address,
+                                      sizeof(context)) == 0;
+    uint64_t rip = have_context ? (uint64_t)context.uc_mcontext.gregs[OS_REG_RIP]
+                                : frame.rip;
+    uint64_t rsp = have_context ? (uint64_t)context.uc_mcontext.gregs[OS_REG_RSP]
+                                : frame.rsp;
+    if (rip < USER_REGION_BASE || rip >= USER_REGION_LIMIT) {
         return -1;
     }
-    if (frame.rsp < USER_REGION_BASE || frame.rsp >= USER_REGION_LIMIT) {
+    if (rsp < USER_REGION_BASE || rsp >= USER_REGION_LIMIT) {
         return -1;
     }
-    regs->rax = frame.rax;
-    regs->rbx = frame.rbx;
-    regs->rcx = frame.rcx;
-    regs->rdx = frame.rdx;
-    regs->rsi = frame.rsi;
-    regs->rdi = frame.rdi;
-    regs->rbp = frame.rbp;
-    regs->r8 = frame.r8;
-    regs->r9 = frame.r9;
-    regs->r10 = frame.r10;
-    regs->r11 = frame.r11;
-    regs->r12 = frame.r12;
-    regs->r13 = frame.r13;
-    regs->r14 = frame.r14;
-    regs->r15 = frame.r15;
-    regs->rip = frame.rip;
-    regs->rsp = frame.rsp;
-    regs->rflags = (frame.rflags & USER_RFLAGS_MASK) | RFLAGS_IF;
-    self->sig_blocked = frame.saved_blocked & ~(1u << SIGKILL) & ~(1u << SIGSEGV);
-    self->sig_on_alt_stack = (uint8_t)on_alt_stack(self, frame.rsp);
+    if (have_context) {
+        regs->rax = (uint64_t)context.uc_mcontext.gregs[OS_REG_RAX];
+        regs->rbx = (uint64_t)context.uc_mcontext.gregs[OS_REG_RBX];
+        regs->rcx = (uint64_t)context.uc_mcontext.gregs[OS_REG_RCX];
+        regs->rdx = (uint64_t)context.uc_mcontext.gregs[OS_REG_RDX];
+        regs->rsi = (uint64_t)context.uc_mcontext.gregs[OS_REG_RSI];
+        regs->rdi = (uint64_t)context.uc_mcontext.gregs[OS_REG_RDI];
+        regs->rbp = (uint64_t)context.uc_mcontext.gregs[OS_REG_RBP];
+        regs->r8 = (uint64_t)context.uc_mcontext.gregs[OS_REG_R8];
+        regs->r9 = (uint64_t)context.uc_mcontext.gregs[OS_REG_R9];
+        regs->r10 = (uint64_t)context.uc_mcontext.gregs[OS_REG_R10];
+        regs->r11 = (uint64_t)context.uc_mcontext.gregs[OS_REG_R11];
+        regs->r12 = (uint64_t)context.uc_mcontext.gregs[OS_REG_R12];
+        regs->r13 = (uint64_t)context.uc_mcontext.gregs[OS_REG_R13];
+        regs->r14 = (uint64_t)context.uc_mcontext.gregs[OS_REG_R14];
+        regs->r15 = (uint64_t)context.uc_mcontext.gregs[OS_REG_R15];
+        regs->rflags = ((uint64_t)context.uc_mcontext.gregs[OS_REG_EFL] &
+                        USER_RFLAGS_MASK) | RFLAGS_IF;
+        self->sig_blocked = context.uc_sigmask;
+    } else {
+        regs->rax = frame.rax;
+        regs->rbx = frame.rbx;
+        regs->rcx = frame.rcx;
+        regs->rdx = frame.rdx;
+        regs->rsi = frame.rsi;
+        regs->rdi = frame.rdi;
+        regs->rbp = frame.rbp;
+        regs->r8 = frame.r8;
+        regs->r9 = frame.r9;
+        regs->r10 = frame.r10;
+        regs->r11 = frame.r11;
+        regs->r12 = frame.r12;
+        regs->r13 = frame.r13;
+        regs->r14 = frame.r14;
+        regs->r15 = frame.r15;
+        regs->rflags = (frame.rflags & USER_RFLAGS_MASK) | RFLAGS_IF;
+        self->sig_blocked = frame.saved_blocked;
+    }
+    regs->rip = rip;
+    regs->rsp = rsp;
+    self->sig_blocked &= ~(1u << SIGKILL) & ~(1u << SIGSEGV);
+    self->sig_on_alt_stack = (uint8_t)on_alt_stack(self, rsp);
     return 0;
 }
 

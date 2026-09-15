@@ -18,6 +18,7 @@ extern "C" {
 #define EPOLLWRBAND    0x200u
 #define EPOLLMSG       0x400u
 #define EPOLLRDHUP     0x2000u
+#define EPOLLRDHUP     0x2000u
 #define EPOLLEXCLUSIVE 0x10000000u
 #define EPOLLWAKEUP    0x20000000u
 #define EPOLLONESHOT   0x40000000u

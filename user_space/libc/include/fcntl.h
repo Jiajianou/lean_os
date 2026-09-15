@@ -39,6 +39,36 @@ int creat(const char *path, mode_t mode);
 
 #define F_DUPFD_CLOEXEC 8
 
+/* M120 built sealing as memfd_add_seals and memfd_seals. These are the same
+   two operations under the names portable code reaches for; fcntl routes
+   them to that one syscall rather than inventing a second path. */
+/* posix_fadvise is advisory BY DEFINITION - POSIX says an implementation may
+   ignore the hint - so returning success without acting on it is conformant
+   rather than the kind of no-op M65 refuses. What would make it worth acting
+   on is a block cache that took a hint; kernel/drivers/blk.c's does not have
+   one yet. */
+#define POSIX_FADV_NORMAL     0
+#define POSIX_FADV_RANDOM     1
+#define POSIX_FADV_SEQUENTIAL 2
+#define POSIX_FADV_WILLNEED   3
+#define POSIX_FADV_DONTNEED   4
+#define POSIX_FADV_NOREUSE    5
+
+int posix_fadvise(int fd, off_t offset, off_t length, int advice);
+
+/* fallocate's modes. Only mode zero - make sure the space is there - is
+   something this filesystem can carry out; punching a hole and the rest are
+   refused rather than accepted, because a caller that asked for a hole and
+   got success would believe the file had one. */
+#define FALLOC_FL_KEEP_SIZE  0x01
+#define FALLOC_FL_PUNCH_HOLE 0x02
+
+int fallocate(int fd, int mode, off_t offset, off_t length);
+int posix_fallocate(int fd, off_t offset, off_t length);
+
+#define F_ADD_SEALS 1033
+#define F_GET_SEALS 1034
+
 #define F_GETLK  5
 #define F_SETLK  6
 #define F_SETLKW 7

@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <sys/time.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +31,13 @@ extern "C" {
 #define RLIMIT_RTTIME  15
 #endif
 #define RLIM_NLIMITS   16
+
+/* This machine has one nice value and it is zero. getpriority reports it;
+   setpriority accepts zero and refuses everything else, because M65's rule
+   is that a call which pretends to enforce something is worse than one that
+   fails honestly - this scheduler has two priority CLASSES, not a range. */
+int getpriority(int which, id_t who);
+int setpriority(int which, id_t who, int value);
 
 #define PRIO_PROCESS 0
 #define PRIO_PGRP    1

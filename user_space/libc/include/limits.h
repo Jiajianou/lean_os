@@ -96,3 +96,8 @@ extern "C" {
 #ifdef __cplusplus
 }
 #endif
+
+/* The nice value every process on this machine has. It is a constant rather
+   than a range because this scheduler has two priority CLASSES and no nice
+   values at all - see getpriority in <sys/resource.h>. */
+#define NZERO 20

@@ -321,6 +321,7 @@ static const struct leanos_abi_fact FACTS[] = {
     {"F_DUPFD_CLOEXEC", (unsigned long)(long long)(F_DUPFD_CLOEXEC)},
     {"AT_FDCWD", (unsigned long)(long long)(AT_FDCWD)},
     {"S_IFMT", (unsigned long)(long long)(S_IFMT)},
+    {"PTHREAD_STACK_MIN", (unsigned long)(long long)(PTHREAD_STACK_MIN)},
     {"S_IFSOCK", (unsigned long)(long long)(S_IFSOCK)},
     {"S_IRWXU", (unsigned long)(long long)(S_IRWXU)},
     {"EPOLLET", (unsigned long)(long long)(EPOLLET)},

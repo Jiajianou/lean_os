@@ -98,6 +98,10 @@ long sys_madvise(void *address, unsigned long length, int advice) {
     return do_syscall(SYS_madvise, (long)address, (long)length, advice);
 }
 
+long sys_mincore(void *address, unsigned long length, unsigned char *vector) {
+    return do_syscall(SYS_mincore, (long)address, (long)length, (long)vector);
+}
+
 long sys_munmap(void *address, unsigned long length) {
     return do_syscall(SYS_munmap, (long)address, (long)length, 0);
 }

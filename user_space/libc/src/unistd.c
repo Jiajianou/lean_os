@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <termios.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -226,6 +227,41 @@ int pipe(int file_descriptors[2]) {
     return (int)sys_pipe(file_descriptors);
 }
 
+/* The flags are applied after the pipe exists rather than atomically with
+   it. That difference matters on a machine where another thread can fork
+   between the two - and this one can - so the ends are set close-on-exec
+   before anything else is allowed to run only in the sense that no syscall
+   here yields. The condition for making it one operation is a fork that can
+   interleave with this, which is a kernel change rather than a libc one. */
+int pipe2(int file_descriptors[2], int flags) {
+    if (flags & ~(O_CLOEXEC | O_NONBLOCK)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (pipe(file_descriptors) != 0) {
+        return -1;
+    }
+    for (int i = 0; i < 2; i++) {
+        if (flags & O_CLOEXEC) {
+            if (fcntl(file_descriptors[i], F_SETFD, FD_CLOEXEC) != 0) {
+                close(file_descriptors[0]);
+                close(file_descriptors[1]);
+                return -1;
+            }
+        }
+        if (flags & O_NONBLOCK) {
+            int current = fcntl(file_descriptors[i], F_GETFL, 0);
+            if (current < 0 ||
+                fcntl(file_descriptors[i], F_SETFL, current | O_NONBLOCK) != 0) {
+                close(file_descriptors[0]);
+                close(file_descriptors[1]);
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 int open(const char *path, int flags, ...) {
     int fd = (int)sys_open(path, (uint32_t)flags);
     if (fd < 0) {
@@ -294,6 +330,18 @@ int fcntl(int fd, int command, ...) {
         }
         return 0;
     }
+    /* M120 built these as memfd_add_seals and memfd_seals. fcntl is the
+       spelling portable code uses; it reaches the same syscall rather than a
+       second implementation of sealing. */
+    case F_ADD_SEALS: {
+        __builtin_va_list ap;
+        __builtin_va_start(ap, command);
+        unsigned int seals = __builtin_va_arg(ap, unsigned int);
+        __builtin_va_end(ap);
+        return memfd_add_seals(fd, seals);
+    }
+    case F_GET_SEALS:
+        return memfd_seals(fd);
     case F_GETLK:
     case F_SETLK:
     case F_SETLKW: {
@@ -429,6 +477,12 @@ pid_t wait3(int *status, int options, struct rusage *usage) {
 
 int ftruncate(int fd, off_t length) {
     return (int)sys_ftruncate(fd, (long)length);
+}
+
+/* off_t is already 64 bits here, so this IS ftruncate under the large-file
+   name - the same function, not a wider one. */
+int ftruncate64(int fd, off_t length) {
+    return ftruncate(fd, length);
 }
 
 /* There is no path-based truncate syscall behind this: the kernel resizes a

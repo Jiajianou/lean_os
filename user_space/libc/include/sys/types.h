@@ -15,6 +15,9 @@ typedef long          off_t;
 typedef int           pid_t;
 typedef unsigned int  nlink_t;
 typedef unsigned long dev_t;
+/* Wide enough to hold a pid_t, a uid_t or a gid_t, which is all POSIX
+   asks of it; getpriority and setpriority are what name it here. */
+typedef unsigned int  id_t;
 typedef unsigned int  uid_t;
 typedef unsigned int  gid_t;
 typedef unsigned long blksize_t;

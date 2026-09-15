@@ -88,6 +88,7 @@ const O_CLOEXEC | c_int
 const F_DUPFD_CLOEXEC | c_int
 const AT_FDCWD | c_int
 const S_IFMT | mode_t
+const PTHREAD_STACK_MIN | size_t
 const S_IFSOCK | mode_t
 const S_IRWXU | mode_t
 const EPOLLET | u32

@@ -13,9 +13,32 @@ typedef int pthread_t;
 typedef struct {
     size_t stack_size;
     void *stack_base;
+    int detach_state;
 } pthread_attr_t;
 
 #define PTHREAD_STACK_DEFAULT (64u * 1024u)
+
+/* pthread_create rounds a request up to a page and puts the thread_block_t
+   at the top, so the floor is what is left over after that bookkeeping and
+   after a signal frame - which is OS_MINSIGSTKSZ, 4 KiB since M143 gave
+   handlers a ucontext. Sixteen kilobytes is also the number the Rust port
+   had already published for this constant, and M143 found the two sides
+   disagreeing about it with nothing comparing them; PTHREAD_STACK_MIN is in
+   tools/rust-port/abi-facts.list now, so the next disagreement is a failure
+   on the machine rather than a difference nobody looks at. */
+#define PTHREAD_STACK_MIN (16u * 1024u)
+
+#define PTHREAD_CREATE_JOINABLE 0
+#define PTHREAD_CREATE_DETACHED 1
+
+/* Priority inheritance needs priorities to inherit. This scheduler has two
+   priority CLASSES and no per-thread priority, so a mutex cannot raise the
+   holder to the waiter's - the constant is here because portable code names
+   it, and pthread_mutexattr_setprotocol refuses it rather than accepting it
+   and doing nothing. M65 is the rule. */
+#define PTHREAD_PRIO_NONE    0
+#define PTHREAD_PRIO_INHERIT 1
+#define PTHREAD_PRIO_PROTECT 2
 
 typedef struct {
     volatile unsigned int state;
@@ -39,8 +62,8 @@ typedef struct {
 
 #define PTHREAD_COND_INITIALIZER {0}
 
-typedef struct { int unused; } pthread_condattr_t;
-typedef struct { int type; } pthread_mutexattr_t;
+typedef struct { int clock; } pthread_condattr_t;
+typedef struct { int type; int protocol; } pthread_mutexattr_t;
 
 #define PTHREAD_ONCE_INIT {0, PTHREAD_MUTEX_INITIALIZER}
 
@@ -112,6 +135,12 @@ int pthread_create(pthread_t *out, const pthread_attr_t *attr,
 int pthread_join(pthread_t thread, void **retval);
 
 int pthread_detach(pthread_t thread);
+int pthread_attr_setdetachstate(pthread_attr_t *attr, int state);
+int pthread_attr_getdetachstate(const pthread_attr_t *attr, int *out);
+int pthread_mutexattr_setprotocol(pthread_mutexattr_t *attr, int protocol);
+int pthread_mutexattr_getprotocol(const pthread_mutexattr_t *attr, int *out);
+int pthread_condattr_setclock(pthread_condattr_t *attr, int clock);
+int pthread_condattr_getclock(const pthread_condattr_t *attr, int *out);
 
 void pthread_exit(void *retval) __attribute__((noreturn));
 

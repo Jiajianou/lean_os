@@ -385,6 +385,7 @@ int pthread_attr_init(pthread_attr_t *attribute) {
         return 22;
     }
     attribute->stack_size = 0;
+    attribute->detach_state = PTHREAD_CREATE_JOINABLE;
     attribute->stack_base = 0;
     return 0;
 }
@@ -495,6 +496,78 @@ int pthread_create(pthread_t *out, const pthread_attr_t *attribute,
     }
 
     *out = (pthread_t)tid;
+    if (attribute && attribute->detach_state == PTHREAD_CREATE_DETACHED) {
+        pthread_detach((pthread_t)tid);
+    }
+    return 0;
+}
+
+int pthread_attr_setdetachstate(pthread_attr_t *attribute, int state) {
+    if (!attribute || (state != PTHREAD_CREATE_JOINABLE &&
+                       state != PTHREAD_CREATE_DETACHED)) {
+        return EINVAL;
+    }
+    attribute->detach_state = state;
+    return 0;
+}
+
+int pthread_attr_getdetachstate(const pthread_attr_t *attribute, int *out) {
+    if (!attribute || !out) {
+        return EINVAL;
+    }
+    *out = attribute->detach_state;
+    return 0;
+}
+
+/* A protocol this scheduler could carry out is accepted and one it could not
+   is refused. Priority inheritance needs a priority to inherit and this
+   machine has two classes instead, so PTHREAD_PRIO_INHERIT returns ENOTSUP
+   rather than being stored and forgotten - M65's rule about a call that
+   pretends to enforce something. */
+int pthread_mutexattr_setprotocol(pthread_mutexattr_t *attribute, int protocol) {
+    if (!attribute) {
+        return EINVAL;
+    }
+    if (protocol == PTHREAD_PRIO_NONE) {
+        attribute->protocol = protocol;
+        return 0;
+    }
+    if (protocol == PTHREAD_PRIO_INHERIT || protocol == PTHREAD_PRIO_PROTECT) {
+        return ENOTSUP;
+    }
+    return EINVAL;
+}
+
+int pthread_mutexattr_getprotocol(const pthread_mutexattr_t *attribute, int *out) {
+    if (!attribute || !out) {
+        return EINVAL;
+    }
+    *out = attribute->protocol;
+    return 0;
+}
+
+/* A condition variable here times out against CLOCK_MONOTONIC, because that
+   is the clock a relative wait must not be moved by. CLOCK_REALTIME is
+   refused for the same reason the protocol above is. */
+int pthread_condattr_setclock(pthread_condattr_t *attribute, int clock) {
+    if (!attribute) {
+        return EINVAL;
+    }
+    if (clock == CLOCK_MONOTONIC) {
+        attribute->clock = clock;
+        return 0;
+    }
+    if (clock == CLOCK_REALTIME) {
+        return ENOTSUP;
+    }
+    return EINVAL;
+}
+
+int pthread_condattr_getclock(const pthread_condattr_t *attribute, int *out) {
+    if (!attribute || !out) {
+        return EINVAL;
+    }
+    *out = attribute->clock;
     return 0;
 }
 
@@ -710,7 +783,7 @@ int pthread_condattr_init(pthread_condattr_t *attribute) {
     if (!attribute) {
         return 22;
     }
-    attribute->unused = 0;
+    attribute->clock = CLOCK_MONOTONIC;
     return 0;
 }
 

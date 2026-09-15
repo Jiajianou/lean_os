@@ -52,10 +52,11 @@ extern "C" {
 
 /* The minimum an alternate signal stack may be, and the size a program that
    has no opinion should ask for. A frame here is a sig_frame_t plus a
-   siginfo_t plus the 128-byte red zone the ABI reserves, so the floor is
-   what that costs with room for the handler itself on top. */
-#define OS_MINSIGSTKSZ 2048
-#define OS_SIGSTKSZ    8192
+   siginfo_t plus an os_ucontext_t plus the 128-byte red zone the ABI
+   reserves, so the floor is what that costs with room for the handler itself
+   on top. M143 added the ucontext, which is 304 bytes of it. */
+#define OS_MINSIGSTKSZ 4096
+#define OS_SIGSTKSZ    16384
 
 typedef struct {
     uint64_t base;
@@ -113,7 +114,65 @@ typedef struct {
     uint64_t rip, rflags, rsp;
     uint32_t saved_blocked;
     uint32_t signo;
+    /* Where the os_ucontext_t for this delivery sits, so sigreturn can take
+       the registers back from it. That is what makes a handler's edit to
+       uc_mcontext take effect instead of being quietly discarded, which is
+       the difference between a ucontext and a report that looks like one. */
+    uint64_t ucontext_address;
 } sig_frame_t;
+
+/* The register order is glibc's - see user_space/libc/include/sys/ucontext.h
+   for why a differently ordered array would be worse than none. */
+#define OS_REG_R8       0
+#define OS_REG_R9       1
+#define OS_REG_R10      2
+#define OS_REG_R11      3
+#define OS_REG_R12      4
+#define OS_REG_R13      5
+#define OS_REG_R14      6
+#define OS_REG_R15      7
+#define OS_REG_RDI      8
+#define OS_REG_RSI      9
+#define OS_REG_RBP     10
+#define OS_REG_RBX     11
+#define OS_REG_RDX     12
+#define OS_REG_RAX     13
+#define OS_REG_RCX     14
+#define OS_REG_RSP     15
+#define OS_REG_RIP     16
+#define OS_REG_EFL     17
+#define OS_REG_CSGSFS  18
+#define OS_REG_ERR     19
+#define OS_REG_TRAPNO  20
+#define OS_REG_OLDMASK 21
+#define OS_REG_CR2     22
+#define OS_NGREG       23
+
+typedef struct {
+    int64_t gregs[OS_NGREG];
+    uint64_t fpregs;
+    uint64_t reserved[8];
+} os_mcontext_t;
+
+/* NOT os_stack_t. That one is this OS's own sigaltstack argument, and it
+   orders its fields base/size/flags; the stack_t inside a ucontext is the
+   one <signal.h> declares, and a handler reads it through that declaration.
+   Two structures for the same three numbers, because two callers disagree
+   about their order - basetest compares the offsets from both sides. */
+typedef struct {
+    uint64_t ss_sp;
+    int32_t ss_flags;
+    int32_t reserved;
+    uint64_t ss_size;
+} os_signal_stack_t;
+
+typedef struct {
+    uint64_t uc_flags;
+    uint64_t uc_link;
+    os_signal_stack_t uc_stack;
+    os_mcontext_t uc_mcontext;
+    uint32_t uc_sigmask;
+} os_ucontext_t;
 
 #ifdef __cplusplus
 }

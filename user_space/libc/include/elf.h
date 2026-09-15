@@ -151,6 +151,11 @@ typedef struct {
 #define SHT_HASH     5
 #define SHT_DYNAMIC  6
 #define SHT_NOTE     7
+
+/* The note type a linker writes its build identifier under. Like the rest of
+   this header it names bytes in a FILE rather than anything this library
+   does. */
+#define NT_GNU_BUILD_ID 3
 #define SHT_NOBITS   8
 #define SHT_REL      9
 #define SHT_DYNSYM   11

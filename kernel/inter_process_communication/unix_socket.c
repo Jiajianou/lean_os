@@ -482,6 +482,19 @@ long unix_socket_receive(struct unix_socket *s, uint8_t *out, uint32_t max,
     return 0;
 }
 
+/* How many bytes a read would return right now, which is a count rather
+   than the readiness bit unix_socket_pending answers with - FIONREAD asks
+   for the number and nothing else in this kernel needed it before. */
+int unix_socket_readable_bytes(const struct unix_socket *s) {
+    if (!s) {
+        return 0;
+    }
+    uint64_t f = spin_lock_irqsave(&unix_lock);
+    int bytes = (int)s->count;
+    spin_unlock_irqrestore(&unix_lock, f);
+    return bytes;
+}
+
 int unix_socket_pending(const struct unix_socket *s) {
     if (!s) {
         return 0;

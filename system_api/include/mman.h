@@ -25,6 +25,8 @@ extern "C" {
 #define MADV_SEQUENTIAL 2
 #define MADV_WILLNEED   3
 #define MADV_DONTNEED   4
+#define MADV_REMOVE     9
+#define MADV_FREE       8
 
 #define OS_MFD_CLOEXEC       0x0001
 #define OS_MFD_ALLOW_SEALING 0x0002

@@ -83,6 +83,8 @@ struct winsize {
     unsigned short ws_ypixel;
 };
 
+#define FIONREAD 0x541B
+
 #define TCGETS     0x5401
 #define TCSETS     0x5402
 #define TIOCGWINSZ 0x5413

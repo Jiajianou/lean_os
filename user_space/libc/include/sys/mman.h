@@ -16,7 +16,12 @@ int msync(void *addr, size_t length, int flags);
 
 int mprotect(void *addr, size_t length, int prot);
 int madvise(void *addr, size_t length, int advice);
+int mincore(void *addr, size_t length, unsigned char *vector);
 int posix_madvise(void *addr, size_t length, int advice);
+
+/* BSD's spelling of MAP_ANONYMOUS, which portable code reaches for first
+   and Linux also defines. The same bit, not a second kind of mapping. */
+#define MAP_ANON MAP_ANONYMOUS
 
 #define MFD_CLOEXEC       0x0001
 #define MFD_ALLOW_SEALING 0x0002

@@ -69,6 +69,7 @@ struct msghdr {
 #define SO_RCVTIMEO  20
 #define SO_SNDTIMEO  21
 #define SO_PEERCRED  17
+#define SO_PASSCRED  16
 
 /* The credentials of the process at the other end of a connected AF_UNIX
    socket. This machine has one principal, so uid and gid are always 0 and
@@ -111,6 +112,11 @@ struct cmsghdr {
 };
 
 #define SCM_RIGHTS 1
+
+/* The sender's identity, as a control message rather than a socket option.
+   The kernel stamps it; a process cannot claim to be another one, which is
+   the whole reason this exists beside SO_PEERCRED. */
+#define SCM_CREDENTIALS 2
 
 #define CMSG_ALIGN(len) (((len) + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1))
 #define CMSG_SPACE(len) (CMSG_ALIGN(len) + CMSG_ALIGN(sizeof(struct cmsghdr)))

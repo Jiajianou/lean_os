@@ -130,3 +130,61 @@ int fstatat(int dirfd, const char *path, struct stat *out, int flags) {
     }
     return (flags & AT_SYMLINK_NOFOLLOW) ? lstat(full, out) : stat(full, out);
 }
+
+int posix_fadvise(int fd, off_t offset, off_t length, int advice) {
+    (void)offset;
+    (void)length;
+    if (fd < 0) {
+        return EBADF;
+    }
+    switch (advice) {
+    case POSIX_FADV_NORMAL:
+    case POSIX_FADV_RANDOM:
+    case POSIX_FADV_SEQUENTIAL:
+    case POSIX_FADV_WILLNEED:
+    case POSIX_FADV_DONTNEED:
+    case POSIX_FADV_NOREUSE:
+        return 0;
+    default:
+        return EINVAL;
+    }
+}
+
+/* Making sure the space is there is one operation this filesystem has:
+   extending the file. It is not the same guarantee Linux gives - leanfs
+   allocates blocks when they are written rather than when the size moves, so
+   a later write can still fail for want of a block - and the comment is here
+   rather than a claim that it cannot. */
+int fallocate(int fd, int mode, off_t offset, off_t length) {
+    if (length <= 0 || offset < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (mode & FALLOC_FL_PUNCH_HOLE) {
+        errno = EOPNOTSUPP;
+        return -1;
+    }
+    if (mode & ~FALLOC_FL_KEEP_SIZE) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (mode & FALLOC_FL_KEEP_SIZE) {
+        return 0;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        return -1;
+    }
+    off_t want = offset + length;
+    if (st.st_size >= want) {
+        return 0;
+    }
+    return ftruncate(fd, want);
+}
+
+int posix_fallocate(int fd, off_t offset, off_t length) {
+    if (fallocate(fd, 0, offset, length) != 0) {
+        return errno;
+    }
+    return 0;
+}

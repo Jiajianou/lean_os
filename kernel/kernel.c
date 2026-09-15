@@ -8484,6 +8484,18 @@ static void boot_selftests_system(void) {
             panic("M141 self-test: the surface Chromium's base and its tracing "
                   "library ask for is not right on this machine");
         }
+        kernel_log_puts("[m143] the POSIX surface //base's own sources ask for: "
+                  "a signal handler given a real ucontext - the registers it "
+                  "interrupted, at the offsets both declarations of that "
+                  "structure agree on, and an edit to it that sigreturn takes "
+                  "back; POSIX semaphores two threads pass a hundred handoffs "
+                  "through; thread, mutex and condition attributes each "
+                  "carried out or refused rather than stored and forgotten; "
+                  "one nice value, reported and defended; mincore answering "
+                  "from the page tables; FIONREAD as a count on a pipe and on "
+                  "a socket; pipe2, fallocate, sendfile, futimes, the seals "
+                  "reached through fcntl, and a MADV_REMOVE that says no - "
+                  "self-test passed.\n\n");
         kernel_log_puts("[m141] what //base's dependencies ask of this machine: "
                   "CLOCK_BOOTTIME, CLOCK_MONOTONIC_RAW and the two _COARSE "
                   "clocks reading as the one clock this machine has, and each "

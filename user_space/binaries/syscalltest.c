@@ -175,6 +175,7 @@ static const entry_t table[] = {
 
     {SYS_unix_peer_credentials, CLASS_POINTER, 2, NULL},
     {SYS_sigaltstack,    CLASS_POINTER, 1, NULL},
+    {SYS_mincore,        CLASS_POINTER, 3, NULL},
 };
 #define N_TABLE ((int)(sizeof(table) / sizeof(table[0])))
 

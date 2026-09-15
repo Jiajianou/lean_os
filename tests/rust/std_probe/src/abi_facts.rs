@@ -283,6 +283,7 @@ pub static FACTS: &[(&str, u64)] = &[
     ("F_DUPFD_CLOEXEC", libc::F_DUPFD_CLOEXEC as i64 as u64),
     ("AT_FDCWD", libc::AT_FDCWD as i64 as u64),
     ("S_IFMT", libc::S_IFMT as u64),
+    ("PTHREAD_STACK_MIN", libc::PTHREAD_STACK_MIN as u64),
     ("S_IFSOCK", libc::S_IFSOCK as u64),
     ("S_IRWXU", libc::S_IRWXU as u64),
     ("EPOLLET", libc::EPOLLET as u64),

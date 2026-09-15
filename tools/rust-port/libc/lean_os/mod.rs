@@ -166,6 +166,7 @@ s! {
     pub struct pthread_attr_t {
         pub stack_size: size_t,
         pub stack_base: *mut c_void,
+        pub detach_state: c_int,
     }
 
     pub struct pthread_mutex_t {
@@ -185,10 +186,11 @@ s! {
 
     pub struct pthread_mutexattr_t {
         type_: c_int,
+        protocol: c_int,
     }
 
     pub struct pthread_condattr_t {
-        unused: c_int,
+        clock: c_int,
     }
 
     pub struct pthread_rwlockattr_t {

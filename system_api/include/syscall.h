@@ -240,8 +240,9 @@ typedef struct {
 
 #define SYS_unix_peer_credentials 128
 #define SYS_sigaltstack           129
+#define SYS_mincore               130
 
-#define SYSCALL_COUNT 130
+#define SYSCALL_COUNT 131
 
 #ifdef __cplusplus
 }
