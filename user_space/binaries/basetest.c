@@ -19,6 +19,7 @@
 #include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/random.h>
 #include <sys/sysmacros.h>
 #include <sys/vfs.h>
 #include <sys/ucontext.h>
@@ -1146,6 +1147,59 @@ static int the_last_of_the_base_surface_behaves(void) {
     return 0;
 }
 
+/* M145. getrandom, asked the way Chromium asks it: the whole length in one
+   call, from the main thread and from another one. base/rand_util_posix.cc
+   requires the return value to equal the length exactly and falls through to
+   /dev/urandom otherwise, so a short answer is not a smaller amount of
+   randomness, it is a different code path. */
+static volatile int worker_random_result;
+
+static void *random_worker(void *unused) {
+    (void)unused;
+    unsigned char buffer[64];
+    memset(buffer, 0, sizeof(buffer));
+    ssize_t got = getrandom(buffer, sizeof(buffer), 0);
+    worker_random_result = (got == (ssize_t)sizeof(buffer)) ? 1 : (int)got;
+    return (void *)0;
+}
+
+static int getrandom_fills_what_it_is_asked_for(void) {
+    unsigned char buffer[64];
+    memset(buffer, 0, sizeof(buffer));
+    if (getrandom(buffer, sizeof(buffer), 0) != (ssize_t)sizeof(buffer)) {
+        return 198;
+    }
+    /* A heap buffer, which is a different region from the stack. */
+    unsigned char *heap = malloc(64);
+    if (!heap) {
+        return 199;
+    }
+    memset(heap, 0, 64);
+    ssize_t got = getrandom(heap, 64, 0);
+    free(heap);
+    if (got != 64) {
+        return 200;
+    }
+    /* And from a thread, whose stack this kernel fills on demand. */
+    worker_random_result = 0;
+    pthread_t thread;
+    if (pthread_create(&thread, (pthread_attr_t *)0, random_worker, (void *)0) != 0) {
+        return 201;
+    }
+    if (pthread_join(thread, (void **)0) != 0) {
+        return 202;
+    }
+    if (worker_random_result != 1) {
+        return 203;
+    }
+    /* Eight bytes, which is the size base::RandUint64 asks for. */
+    unsigned long long value = 0;
+    if (getrandom(&value, sizeof(value), 0) != (ssize_t)sizeof(value)) {
+        return 204;
+    }
+    return 0;
+}
+
 int main(void) {
     int rc;
     if ((rc = the_monotonic_family_is_one_clock()) != 0) {
@@ -1200,6 +1254,9 @@ int main(void) {
         return rc;
     }
     if ((rc = the_last_of_the_base_surface_behaves()) != 0) {
+        return rc;
+    }
+    if ((rc = getrandom_fills_what_it_is_asked_for()) != 0) {
         return rc;
     }
     return 0;

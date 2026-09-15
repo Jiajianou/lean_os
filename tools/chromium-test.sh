@@ -34,26 +34,34 @@ HAVE=$(cd "$SRC" && git rev-parse HEAD 2>/dev/null)
 [ "$REVISION" = "$HAVE" ]
 check $? "the checkout is at the revision $VENDORED pins"
 
+# Does the fork still fit the pinned revision? The way to ask is to reset the
+# files the series touches and apply it in order - which is exactly what
+# tools/build-chromium.sh does, and for the reason M145 found: two patches can
+# touch one file, and then "is this one already applied" has no answer,
+# because reversing the earlier one against a file the later one moved past
+# fails. This leaves the checkout in the state a build wants it in.
 APPLIED=0
 DRIFTED=0
-for p in "$ROOT/$PATCHES"/*.patch; do
-  [ -e "$p" ] || continue
+PATCH_FILES=$(ls "$ROOT/$PATCHES"/*.patch 2>/dev/null)
+for f in $(sed -n 's|^--- a/||p' $PATCH_FILES | sort -u); do
+  # A path git does not track here belongs to one of the sub-repositories the
+  # checkout is assembled from, and those are left alone.
+  (cd "$SRC" && git ls-files --error-unmatch "$f" > /dev/null 2>&1) || continue
+  (cd "$SRC" && git checkout -- "$f")
+done
+for p in $PATCH_FILES; do
   APPLIED=$((APPLIED + 1))
-  if (cd "$SRC" && git apply --check -p1 < "$p") 2>/dev/null; then
+  if (cd "$SRC" && git apply -p1 < "$p") 2>/dev/null; then
     continue
   fi
-  # Already on the tree is not drift. tools/build-chromium.sh leaves the
-  # series applied, so the question this check asks is "does the fork still
-  # fit the pinned revision", not "is the tree pristine".
   if (cd "$SRC" && git apply --check --reverse -p1 < "$p") 2>/dev/null; then
     continue
   fi
-  echo "chromium-test: $(basename "$p") neither applies to nor is applied" \
-       "to $REVISION" >&2
+  echo "chromium-test: $(basename "$p") does not apply to $REVISION" >&2
   DRIFTED=$((DRIFTED + 1))
 done
 [ "$DRIFTED" = "0" ]
-check $? "all $APPLIED fork patches fit the pinned revision"
+check $? "all $APPLIED fork patches apply to the pinned revision, in order"
 
 if [ ! -x "$BASELINE" ]; then
   echo "chromium-test: no baseline build - skipping the render check"
@@ -67,7 +75,12 @@ fi
 if [ ! -x "$ROOT/build/toolchain/bin/x86_64-lean_os-clang" ]; then
   echo "chromium-test: no cross toolchain - skipping the configure check"
 else
+  # Into its OWN output directory. gn gen prunes the graph to the root target
+  # it is given, so generating a narrow one over out/LeanOS would delete every
+  # other target from it - which is what happened in M145, an hour after the
+  # build that had just produced them.
   LEANOS_CHROMIUM_CONFIGURE_ONLY=1 LEANOS_CHROMIUM_CC=chromium \
+      LEANOS_CHROMIUM_OUT=ConfigureCheck \
       "$ROOT/tools/build-chromium.sh" base/third_party/double_conversion \
       > "$ROOT/build/chromium-configure.log" 2>&1
   check $? "the lean_os GN configuration generates"
@@ -274,6 +287,52 @@ PROBE
     check $? "IS_LINUX for the gating, HAS_LINUX_KERNEL=0 for the kernel"
     [ -s "$WORK/seam.log" ] && cat "$WORK/seam.log" >&2
     rm -rf "$WORK"
+  fi
+
+  # M145. //base LINKS, into a program this machine can run - which is a
+  # different claim from compiling, and the one that found -no-pie being
+  # ignored, two definitions of calloc and an interposing close(2).
+  BASEPROGRAM="$SRC/out/$OUT_NAME/basetest"
+  if [ ! -x "$BASEPROGRAM" ]; then
+    echo "chromium-test: //base has not been linked - skipping" \
+         "(tools/build-chromium.sh lean_os)"
+  else
+    SHAPE=$("${PREFIX}readelf" -h "$BASEPROGRAM" |
+            awk '/^  Type:/{t=$2} /Entry point/{e=$4} END{print t, e}')
+    case "$SHAPE" in
+      "EXEC 0x80"*) true;;
+      *) false;;
+    esac
+    check $? "a program linked from //base is an EXEC in this OS's image region ($SHAPE)"
+
+    # No interpreter. A position-independent executable would name one, and
+    # the path it would name is not on this machine.
+    [ "$("${PREFIX}readelf" -l "$BASEPROGRAM" | grep -c INTERP)" = "0" ]
+    check $? "and names no interpreter - nothing has to relocate it"
+
+    # Exactly one definition of each allocator name. Two is what a static
+    # link produced while this libc kept calloc and realloc in a different
+    # translation unit from malloc: PartitionAlloc's shim brings its own set
+    # and the linker found both.
+    DOUBLED=""
+    for symbol in malloc calloc realloc free; do
+      COUNT=$("${PREFIX}nm" "$BASEPROGRAM" | grep -cE " T $symbol\$")
+      [ "$COUNT" = "1" ] || DOUBLED="$DOUBLED $symbol=$COUNT"
+    done
+    [ -z "$DOUBLED" ]
+    check $? "with exactly one definition of malloc, calloc, realloc and free${DOUBLED:+ -$DOUBLED}"
+
+    # Onto the image, so the [m145] boot self-test can run it. Compiling and
+    # linking are what the checks above grade; whether //base WORKS on this
+    # machine is a question only the machine answers.
+    IMAGE="$ROOT/build/os-image.bin"
+    if [ ! -f "$IMAGE" ]; then
+      echo "chromium-test: no $IMAGE - run make, then this again"
+    else
+      make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
+      "$ROOT/build/leanfs-put" "$IMAGE" "$BASEPROGRAM" /bin/chromiumbase > /dev/null
+      check $? "installed as /bin/chromiumbase - the [m145] boot self-test runs it"
+    fi
   fi
 fi
 

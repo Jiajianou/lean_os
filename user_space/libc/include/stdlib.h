@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <sys/cdefs.h>
 
+#include <locale.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -92,6 +94,19 @@ size_t wcstombs(char *dst, const wchar_t *src, size_t n);
 #define RAND_MAX 32767
 int rand(void);
 void srand(unsigned int seed);
+
+
+/* POSIX 2008's locale-argument forms. See
+   user_space/libc/src/locale_functions.c for why they are what they are on
+   a machine with exactly one locale - and for what they do NOT do, which is
+   accept a locale this machine never made. */
+double strtod_l(const char *text, char **end, locale_t locale);
+float strtof_l(const char *text, char **end, locale_t locale);
+long double strtold_l(const char *text, char **end, locale_t locale);
+long strtol_l(const char *text, char **end, int base, locale_t locale);
+long long strtoll_l(const char *text, char **end, int base, locale_t locale);
+unsigned long strtoul_l(const char *text, char **end, int base, locale_t locale);
+unsigned long long strtoull_l(const char *text, char **end, int base, locale_t locale);
 
 #ifdef __cplusplus
 }

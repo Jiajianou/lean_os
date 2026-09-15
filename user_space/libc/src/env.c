@@ -99,10 +99,15 @@ void setprogname(const char *name) {
 }
 
 extern void *__lean_tls_setup(void);
+extern void __lean_stack_protector_init(void);
 
 int __lean_start(int argc, char **argv, char **envp,
                  int (*mainfn)(int, char **, char **)) {
     (void)__lean_tls_setup();
+    /* Before anything else, because every function after this one may be
+       compiled with -fstack-protector and would then be checking a guard
+       that had not been set. */
+    __lean_stack_protector_init();
     environ = envp;
     if (argc > 0 && argv && argv[0]) {
         setprogname(argv[0]);

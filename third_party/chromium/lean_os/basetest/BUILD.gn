@@ -1,0 +1,9 @@
+# A program that uses //base and that this machine runs. Compiling //base is
+# what M144 proved; this is the other half - that its objects link into an
+# executable and that the executable does what base says it does, on leanfs,
+# with this libc under it.
+
+executable("basetest") {
+  sources = [ "chromium_base_test.cc" ]
+  deps = [ "//base" ]
+}

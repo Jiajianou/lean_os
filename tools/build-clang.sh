@@ -8,7 +8,18 @@ LLVM_VER=19.1.7
 TARGET=x86_64-lean_os
 
 SRC="$ROOT/build/clang-src"
-TREE="${LEANOS_LLVM_TREE:-$SRC/llvm-project-$LLVM_VER.src}"
+# M136 built the compiler from LLVM 24 - Chromium's own tree, unpacked at
+# build/llvm24 - and left this default pointing at 19, so the two halves of
+# one toolchain could be built from different sources without anybody saying
+# so. M145 found out the way such things are found out: libc++ 19 defines its
+# own isalpha_l when it is not told the C library has one, and this libc grew
+# the _l family, and every C++ program stopped compiling. They take the same
+# tree now.
+DEFAULT_TREE="$ROOT/build/llvm24"
+if [ ! -d "$DEFAULT_TREE" ]; then
+  DEFAULT_TREE="$SRC/llvm-project-$LLVM_VER.src"
+fi
+TREE="${LEANOS_LLVM_TREE:-$DEFAULT_TREE}"
 PREFIX="${LEANOS_TOOLCHAIN_PREFIX:-$ROOT/build/toolchain}"
 SYSROOT="$ROOT/build/sysroot"
 BUILDDIR="$ROOT/build/clang-build"

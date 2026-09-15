@@ -8,7 +8,18 @@ LLVM_VER=19.1.7
 TARGET=x86_64-lean_os
 
 SRC="$ROOT/build/clang-src"
-TREE="${LEANOS_LLVM_TREE:-$SRC/llvm-project-$LLVM_VER.src}"
+# M136 built the compiler from LLVM 24 - Chromium's own tree, unpacked at
+# build/llvm24 - and left this default pointing at 19, so the two halves of
+# one toolchain could be built from different sources without anybody saying
+# so. M145 found out the way such things are found out: libc++ 19 defines its
+# own isalpha_l when it is not told the C library has one, and this libc grew
+# the _l family, and every C++ program stopped compiling. They take the same
+# tree now.
+DEFAULT_TREE="$ROOT/build/llvm24"
+if [ ! -d "$DEFAULT_TREE" ]; then
+  DEFAULT_TREE="$SRC/llvm-project-$LLVM_VER.src"
+fi
+TREE="${LEANOS_LLVM_TREE:-$DEFAULT_TREE}"
 PREFIX="${LEANOS_TOOLCHAIN_PREFIX:-$ROOT/build/toolchain}"
 SYSROOT="$ROOT/build/sysroot"
 BUILDDIR="$ROOT/build/libcxx-build"
@@ -38,6 +49,16 @@ fi
 python3 "$ROOT/tools/clang-port/apply.py" "$TREE" >/dev/null || exit 1
 
 SITE_DEFINES="_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE;_LIBCPP_HAS_NO_LIBRARY_ALIGNED_ALLOCATION"
+
+# A cmake cache remembers which source tree it was configured against, and
+# nothing else here would notice it pointing at a different one - which is how
+# M145 rebuilt libc++ three times from the tree it was trying to move off.
+CACHED_TREE=$(awk -F= '/^CMAKE_HOME_DIRECTORY:/{print $2}' \
+              "$BUILDDIR/CMakeCache.txt" 2>/dev/null)
+if [ -n "$CACHED_TREE" ] && [ "$CACHED_TREE" != "$TREE/runtimes" ]; then
+  echo "build-libcxx: configured against $CACHED_TREE, want $TREE - reconfiguring"
+  rm -rf "$BUILDDIR"
+fi
 
 if [ ! -f "$BUILDDIR/build.ninja" ]; then
   echo "build-libcxx: configuring"
@@ -82,7 +103,13 @@ fi
 echo "build-libcxx: building with $JOBS jobs"
 ninja -C "$BUILDDIR" -j "$JOBS" || exit 1
 
+# The header directory is emptied first, because an install only ADDS files
+# and a header the new version does not ship stays behind from the one that
+# did. M145 moved this from libc++ 19 to 24 and libc++ 19's ctype.h survived
+# in front of the C library's, which <cctype> in 24 notices and refuses to
+# compile against - loudly, and only because it checks.
 echo "build-libcxx: installing into $PREFIX/$TARGET"
+rm -rf "$PREFIX/$TARGET/include/c++/v1"
 ninja -C "$BUILDDIR" -j "$JOBS" install > /dev/null || exit 1
 
 ls -l "$PREFIX/$TARGET/lib/libc++.a" "$PREFIX/$TARGET/lib/libc++abi.a" 2>/dev/null

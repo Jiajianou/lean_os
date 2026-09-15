@@ -102,6 +102,9 @@ typedef struct {
 #define FPE_FLTINV 7
 #define FPE_FLTSUB 8
 
+#define TRAP_BRKPT 1
+#define TRAP_TRACE 2
+
 #define ILL_ILLOPC 1
 #define ILL_ILLOPN 2
 #define ILL_ILLADR 3

@@ -23,6 +23,9 @@ typedef struct __attribute__((packed)) {
 #define IDT_ENTRIES 256
 #define IDT_GATE_INTERRUPT_RING0 0x8E
 #define IDT_GATE_INTERRUPT_RING3 0xEE
+
+#define BREAKPOINT_VECTOR 3
+#define OVERFLOW_VECTOR   4
 #define IDT_GATE_TRAP_RING3      0xEF
 
 #define DOUBLE_FAULT_VECTOR 8
@@ -48,7 +51,18 @@ static void idt_set_gate(uint8_t vector, uint64_t handler, uint8_t ist, uint8_t 
 void idt_init(void) {
     for (int vector = 0; vector < 32; vector++) {
         uint8_t ist = (vector == DOUBLE_FAULT_VECTOR) ? DOUBLE_FAULT_IST : 0;
-        idt_set_gate((uint8_t)vector, isr_stub_table[vector], ist, IDT_GATE_INTERRUPT_RING0);
+        /* int3 and into are the two exceptions a ring-3 program RAISES on
+           purpose, so their gates are reachable from ring 3. With a ring-0
+           gate the processor answers an int3 with a general protection fault
+           carrying the breakpoint vector in its error code - which is what
+           this kernel did until M145, and what made a program that traps
+           deliberately look like one that went wrong. Chromium's
+           ImmediateCrash() is int3, and every CHECK it fails ends there. */
+        uint8_t attribute = (vector == BREAKPOINT_VECTOR ||
+                             vector == OVERFLOW_VECTOR)
+                                ? IDT_GATE_INTERRUPT_RING3
+                                : IDT_GATE_INTERRUPT_RING0;
+        idt_set_gate((uint8_t)vector, isr_stub_table[vector], ist, attribute);
     }
     for (int line = 0; line < 16; line++) {
         idt_set_gate((uint8_t)(32 + line), irq_stub_table[line], 0, IDT_GATE_INTERRUPT_RING0);

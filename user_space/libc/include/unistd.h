@@ -7,6 +7,11 @@
 
 #define _POSIX_THREADS 200809L
 
+/* The Timers option: clock_getres, clock_gettime, clock_settime, nanosleep
+   and the timer_* family, all of which are here. _POSIX_MONOTONIC_CLOCK
+   above is defined in terms of this one, and claimed it from M96 until M145
+   built the half that was missing. */
+#define _POSIX_TIMERS 200809L
 #define _POSIX_MONOTONIC_CLOCK 200809L
 
 #ifdef __cplusplus

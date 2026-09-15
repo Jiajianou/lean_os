@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <strings.h>
 
+#include <locale.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -41,6 +43,14 @@ char *stpncpy(char *dst, const char *src, size_t n);
 void *memmem(const void *haystack, size_t hlen, const void *needle, size_t nlen);
 void *memccpy(void *dst, const void *src, int c, size_t n);
 size_t strnlen(const char *s, size_t n);
+
+
+/* POSIX 2008's locale-argument forms. See
+   user_space/libc/src/locale_functions.c for why they are what they are on
+   a machine with exactly one locale - and for what they do NOT do, which is
+   accept a locale this machine never made. */
+int strcoll_l(const char *a, const char *b, locale_t locale);
+size_t strxfrm_l(char *out, const char *in, size_t length, locale_t locale);
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,25 @@
+--- a/base/debug/stack_trace_posix.cc
++++ b/base/debug/stack_trace_posix.cc
+@@ -1098,14 +1098,20 @@
+ #endif
+ }
+ 
+-#if defined(HAVE_BACKTRACE)
+ void StackTrace::OutputToStreamWithPrefixImpl(
+     std::ostream* os,
+     cstring_view prefix_string) const {
++#if defined(HAVE_BACKTRACE)
+   StreamBacktraceOutputHandler handler(os);
+   ProcessBacktrace(addresses(), prefix_string, &handler);
+-}
++#else
++  // Declared unconditionally in stack_trace.h and called unconditionally by
++  // OutputToStreamWithPrefix, so it is defined unconditionally too - the
++  // same shape PrintWithPrefixImpl above already has.
++  std::ignore = os;
++  std::ignore = prefix_string;
+ #endif
++}
+ 
+ namespace internal {
+ 

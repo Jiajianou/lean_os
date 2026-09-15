@@ -8610,6 +8610,101 @@ static void boot_selftests_system(void) {
     }
 
     {
+        os_stat_t cb;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/chromiumbase", (uint64_t)&cb, 0) != 0) {
+            kernel_log_puts("[m145] /bin/chromiumbase is not on this image - skipped. "
+                       "tools/build-chromium.sh lean_os links it out of //base's "
+                       "own objects and tools/chromium-test.sh installs it.\n\n");
+        } else {
+            int cb_pipe[2];
+            if (do_syscall(SYS_pipe, (uint64_t)cb_pipe, 0, 0) != 0) {
+                panic("M145 self-test: could not make a pipe for the report");
+            }
+            do_syscall(SYS_dup2, (uint64_t)cb_pipe[1], 1, 0);
+            /* And stderr: a failed CHECK writes its reason there, and
+               without it the only evidence of one is the trap. */
+            do_syscall(SYS_dup2, (uint64_t)cb_pipe[1], 2, 0);
+
+            size_t cb_bytes = 0;
+            uint8_t *cb_image = read_program(PATH_BIN_DIRECTORY "chromiumbase",
+                                             &cb_bytes);
+            if (!cb_image) {
+                panic("M145 self-test: /bin/chromiumbase could not be read");
+            }
+            const char *cb_argv[] = {PATH_BIN_DIRECTORY "chromiumbase", 0};
+            task_t *cbt = process_spawnv("chromiumbase", cb_image, cb_bytes,
+                                         cb_argv);
+            kfree(cb_image);
+
+            static char cb_out[8192];
+            size_t cb_got = 0;
+            long cb_rc = -1;
+            long cb_deadline = (long)pit_get_ticks() + 120 * PIT_HZ;
+            for (;;) {
+                long avail = do_syscall(SYS_pipe_poll, (uint64_t)cb_pipe[0], 0, 0);
+                if (avail > 0 && cb_got < sizeof(cb_out) - 1) {
+                    size_t room = sizeof(cb_out) - 1 - cb_got;
+                    long n = do_syscall(SYS_read, (uint64_t)cb_pipe[0],
+                                        (uint64_t)(cb_out + cb_got),
+                                        (uint64_t)((size_t)avail < room
+                                                   ? (size_t)avail : room));
+                    if (n > 0) {
+                        cb_got += (size_t)n;
+                    }
+                    continue;
+                }
+                long done = cbt ? do_syscall(SYS_wait_nb, (uint64_t)cbt->id, 0, 0)
+                                : -1;
+                if (done != -2) {
+                    cb_rc = done;
+                    long n;
+                    while ((n = do_syscall(SYS_pipe_poll, (uint64_t)cb_pipe[0], 0, 0)) > 0 &&
+                           cb_got < sizeof(cb_out) - 1) {
+                        size_t room = sizeof(cb_out) - 1 - cb_got;
+                        long r = do_syscall(SYS_read, (uint64_t)cb_pipe[0],
+                                            (uint64_t)(cb_out + cb_got),
+                                            (uint64_t)((size_t)n < room ? (size_t)n : room));
+                        if (r <= 0) {
+                            break;
+                        }
+                        cb_got += (size_t)r;
+                    }
+                    break;
+                }
+                if ((long)pit_get_ticks() > cb_deadline) {
+                    break;
+                }
+                do_syscall(SYS_yield, 0, 0, 0);
+            }
+            cb_out[cb_got] = '\0';
+            do_syscall(SYS_close, (uint64_t)cb_pipe[0], 0, 0);
+            do_syscall(SYS_close, (uint64_t)cb_pipe[1], 0, 0);
+            file_descriptor_release(&scheduler_current()->file_descriptors[1]);
+            scheduler_current()->file_descriptors[1].type = FILE_DESCRIPTOR_STDOUT;
+            file_descriptor_release(&scheduler_current()->file_descriptors[2]);
+            scheduler_current()->file_descriptors[2].type = FILE_DESCRIPTOR_STDOUT;
+
+            for (char *line = cb_out; *line;) {
+                char *end = line;
+                while (*end && *end != '\n') {
+                    end++;
+                }
+                char saved = *end;
+                *end = '\0';
+                kernel_log_puts(line);
+                kernel_log_putc('\n');
+                *end = saved;
+                line = saved ? end + 1 : end;
+            }
+            if (cb_rc != 0) {
+                panic("M145 self-test: Chromium's //base does not work on this "
+                      "machine - see the chromiumbase lines above");
+            }
+            kernel_log_putc('\n');
+        }
+    }
+
+    {
         os_stat_t ct;
         if (do_syscall(SYS_stat, (uint64_t)"/bin/clangtest", (uint64_t)&ct, 0) != 0) {
             kernel_log_puts("[m121] /bin/clangtest is not on this image - skipped. "

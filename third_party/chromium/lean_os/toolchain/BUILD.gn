@@ -11,6 +11,20 @@ declare_args() {
   lean_os_target = ""
 }
 
+# Static, and not position independent.
+#
+# Chromium's //build/config/gcc:executable_config puts -pie on every
+# executable, which needs something at load time to relocate the image and an
+# interpreter named in the file to do it. This OS has a dynamic loader
+# (user_space/loader, M95) and it is not the one that path names, and nothing
+# on this machine is built -pie - every program here, including the twenty
+# megabytes of NetSurf, is a static executable the kernel maps where it says
+# it goes. -no-pie comes after the -pie that config adds, and wins.
+lean_os_link_flags = [
+  "-no-pie",
+  "-static",
+]
+
 gcc_toolchain("x64") {
   cc = lean_os_cc
   cxx = lean_os_cxx
@@ -19,7 +33,8 @@ gcc_toolchain("x64") {
   ld = cxx
   extra_cflags = lean_os_target
   extra_cppflags = lean_os_target
-  extra_ldflags = lean_os_target
+  extra_ldflags = lean_os_target + " " +
+                  string_join(" ", lean_os_link_flags)
   readelf = lean_os_readelf
 
   toolchain_args = {

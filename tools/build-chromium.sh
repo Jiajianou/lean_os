@@ -53,15 +53,32 @@ ln -s "$FORK" "$LINK"
 
 # The fork's patch series. Every one of these is meant to be a seam somebody
 # else could use rather than a mention of this OS, which is why Chromium's
-# tree still contains the word lean_os nowhere. Applying is idempotent: a
-# patch already on the tree is left alone.
-for patch in "$ROOT"/tools/chromium-port/*.patch; do
-  [ -e "$patch" ] || continue
+# tree still contains the word lean_os nowhere.
+#
+# The series is applied to a CLEAN tree every time rather than patch by patch
+# onto whatever is there. M145 is why: two patches can touch one file - 0013
+# edits base/BUILD.gn after 0009 does - and then "is this patch already
+# applied" has no answer, because reversing the earlier one against a file the
+# later one has moved past fails. Resetting first makes the question
+# unnecessary, and it also means an edit made by hand in the checkout is
+# discarded rather than silently becoming part of the build.
+PATCH_FILES=$(ls "$ROOT"/tools/chromium-port/*.patch 2>/dev/null)
+if [ -n "$PATCH_FILES" ]; then
+  TOUCHED=$(sed -n 's|^--- a/||p' $PATCH_FILES | sort -u)
+  for f in $TOUCHED; do
+    # A path git does not track here belongs to one of the sub-repositories
+    # the checkout is assembled from - third_party/perfetto is one - and
+    # those are left as they are.
+    (cd "$SRC" && git ls-files --error-unmatch "$f" > /dev/null 2>&1) || continue
+    (cd "$SRC" && git checkout -- "$f") || exit 1
+  done
+fi
+for patch in $PATCH_FILES; do
   name=$(basename "$patch")
-  if (cd "$SRC" && git apply --check --reverse -p1 < "$patch") 2>/dev/null; then
-    echo "build-chromium: $name already applied"
-  elif (cd "$SRC" && git apply -p1 < "$patch") 2>/dev/null; then
+  if (cd "$SRC" && git apply -p1 < "$patch") 2>/dev/null; then
     echo "build-chromium: $name applied"
+  elif (cd "$SRC" && git apply --check --reverse -p1 < "$patch") 2>/dev/null; then
+    echo "build-chromium: $name already applied - it is outside this repository"
   else
     echo "build-chromium: $name does not apply to this checkout" >&2
     exit 1
@@ -108,6 +125,8 @@ lean_os_readelf = "$READELF"
 enable_rust = $ENABLE_RUST
 rust_abi_target_override = "$RUST_TARGET"
 has_linux_kernel = false
+libc_provides_libatomic = false
+has_symbol_interposition = false
 partition_alloc_has_linux_kernel = false
 enable_pkeys = false
 clang_base_path = "$CLANG_BASE"

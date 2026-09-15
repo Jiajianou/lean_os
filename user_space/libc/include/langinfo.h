@@ -1,5 +1,7 @@
 #pragma once
 
+#include <locale.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -69,6 +71,13 @@ extern "C" {
 typedef int nl_item;
 
 char *nl_langinfo(nl_item item);
+
+
+/* POSIX 2008's locale-argument forms. See
+   user_space/libc/src/locale_functions.c for why they are what they are on
+   a machine with exactly one locale - and for what they do NOT do, which is
+   accept a locale this machine never made. */
+char *nl_langinfo_l(nl_item item, locale_t locale);
 
 #ifdef __cplusplus
 }

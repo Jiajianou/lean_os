@@ -1,0 +1,16 @@
+--- a/buildtools/third_party/libc++abi/BUILD.gn
++++ b/buildtools/third_party/libc++abi/BUILD.gn
+@@ -59,7 +59,12 @@
+ 
+   defines = [ "LIBCXXABI_SILENT_TERMINATE" ]
+ 
+-  if (is_linux || is_android) {
++  # The futex guard implementation is the futex system call and nothing
++  # else - cxa_guard_impl.h static_asserts that the platform has it - so
++  # what selects it is whether that call is there, not which family the
++  # platform belongs to. Without it libc++abi uses its own condition
++  # variable, which is what every other POSIX platform gets.
++  if (has_linux_kernel || is_android) {
+     defines += [ "_LIBCXXABI_USE_FUTEX" ]
+   }
+ 

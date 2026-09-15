@@ -1,0 +1,53 @@
+--- a/base/BUILD.gn
++++ b/base/BUILD.gn
+@@ -1216,7 +1216,8 @@
+   # building inside the cros_sdk environment - use host_toolchain as a
+   # more robust check for this.
+   if (!use_sysroot && (is_android || is_chromeos || (is_linux && !is_castos)) &&
+-      host_toolchain != "//build/toolchain/cros:host") {
++      host_toolchain != "//build/toolchain/cros:host" &&
++      libc_provides_libatomic) {
+     libs += [ "atomic" ]
+   }
+ 
+--- a/build/config/BUILDCONFIG.gn
++++ b/build/config/BUILDCONFIG.gn
+@@ -359,6 +359,15 @@
+   # partition_alloc_has_linux_kernel, and build/build_config.h derives
+   # BUILDFLAG(HAS_LINUX_KERNEL) from __linux__ for the preprocessor's half.
+   has_linux_kernel = is_linux || is_chromeos || is_android
++
++  # Whether this platform's C library ships libatomic.
++  #
++  # It is a separate question from the architecture: on x86-64 every atomic
++  # up to sixteen bytes is lock-free and the library is never called, and a
++  # link against it there is a link against something nothing references.
++  # glibc ships it; a C library that does not is not missing a feature, it
++  # has nothing to put in the file.
++  libc_provides_libatomic = is_linux || is_chromeos || is_android
+ }
+ 
+ # =============================================================================
+--- a/build/config/linux/BUILD.gn
++++ b/build/config/linux/BUILD.gn
+@@ -40,7 +40,8 @@
+   }
+ 
+   if ((!is_chromeos || default_toolchain != "//build/toolchain/cros:target") &&
+-      (!use_custom_libcxx || current_cpu == "mipsel")) {
++      (!use_custom_libcxx || current_cpu == "mipsel") &&
++      libc_provides_libatomic) {
+     libs = [ "atomic" ]
+   }
+ }
+--- a/buildtools/third_party/libc++/BUILD.gn
++++ b/buildtools/third_party/libc++/BUILD.gn
+@@ -441,7 +441,7 @@
+     no_default_deps = true
+   }
+ 
+-  if (is_linux && !is_clang) {
++  if (is_linux && !is_clang && libc_provides_libatomic) {
+     libs = [ "atomic" ]
+   }
+ 

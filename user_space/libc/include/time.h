@@ -2,6 +2,8 @@
 
 #include <stddef.h>
 
+#include <locale.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -84,6 +86,32 @@ time_t time(time_t *out);
 clock_t clock(void);
 
 double difftime(time_t end, time_t start);
+
+
+/* POSIX 2008's locale-argument forms. See
+   user_space/libc/src/locale_functions.c for why they are what they are on
+   a machine with exactly one locale - and for what they do NOT do, which is
+   accept a locale this machine never made. */
+size_t strftime_l(char *out, size_t max, const char *format, const struct tm *when, locale_t locale);
+
+/* POSIX per-process timers. This libc has claimed _POSIX_MONOTONIC_CLOCK
+   since M96 and that option is defined in terms of this one, so until M145
+   it was claiming an option group it did not have. These are built on
+   M119's timerfd and a thread apiece - see user_space/libc/src/timer.c for
+   what that costs and what it buys. */
+#define TIMER_ABSTIME 1
+
+typedef struct __timer *timer_t;
+
+struct sigevent;
+
+int timer_create(clockid_t clock, struct sigevent *notification,
+                 timer_t *out);
+int timer_delete(timer_t timer);
+int timer_settime(timer_t timer, int flags, const struct itimerspec *value,
+                  struct itimerspec *previous);
+int timer_gettime(timer_t timer, struct itimerspec *out);
+int timer_getoverrun(timer_t timer);
 
 #ifdef __cplusplus
 }

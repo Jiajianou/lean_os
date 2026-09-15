@@ -4,6 +4,7 @@
 
 #include "mman.h"
 #include "syscall_wrappers.h"
+#include <string.h>
 
 #define HEAP_ALIGN 16UL
 #define PAGE_SIZE  4096UL
@@ -288,4 +289,39 @@ size_t malloc_usable_size(void *ptr) {
         return 0;
     }
     return ((block_header_t *)ptr - 1)->size;
+}
+
+/* calloc and realloc are here rather than in libc's stdlib.c so that the
+   whole allocator is one translation unit, and so one archive member: a
+   program that supplies its own allocator replaces all of it or none of it,
+   and never ends up with two definitions of one name. */
+
+void *calloc(size_t count, size_t size) {
+    size_t total = count * size;
+    if (count != 0 && total / count != size) {
+        return (void *)0;
+    }
+    void *p = malloc(total);
+    if (p) {
+        memset(p, 0, total);
+    }
+    return p;
+}
+
+void *realloc(void *ptr, size_t size) {
+    if (!ptr) {
+        return malloc(size);
+    }
+    if (size == 0) {
+        free(ptr);
+        return (void *)0;
+    }
+    size_t old = malloc_usable_size(ptr);
+    void *p = malloc(size);
+    if (!p) {
+        return (void *)0;
+    }
+    memcpy(p, ptr, old < size ? old : size);
+    free(ptr);
+    return p;
 }

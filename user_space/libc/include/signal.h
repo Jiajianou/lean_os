@@ -48,6 +48,25 @@ struct sigaction {
 #define SA_NOCLDSTOP 0x00000001
 #define SA_NOCLDWAIT 0x00000002
 
+/* POSIX's notification descriptor, which says what should happen when a
+   timer expires. See user_space/libc/src/timer.c. */
+#define SIGEV_SIGNAL 0
+#define SIGEV_NONE   1
+#define SIGEV_THREAD 2
+
+union sigval {
+    int sival_int;
+    void *sival_ptr;
+};
+
+struct sigevent {
+    int sigev_notify;
+    int sigev_signo;
+    union sigval sigev_value;
+    void (*sigev_notify_function)(union sigval);
+    void *sigev_notify_attributes;
+};
+
 typedef struct {
     void  *ss_sp;
     int    ss_flags;

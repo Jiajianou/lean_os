@@ -186,6 +186,16 @@ void isr_handler(isr_regs_t *r) {
             fault_signo = SIGFPE;
             fault_code = sse_exception_code();
             break;
+        case 3:
+            /* int3. A program that executes one is asking to stop, not
+               failing - TRAP_BRKPT says which. */
+            fault_signo = SIGTRAP;
+            fault_code = TRAP_BRKPT;
+            break;
+        case 4:
+            fault_signo = SIGFPE;
+            fault_code = FPE_INTOVF;
+            break;
         case 6:
             fault_signo = SIGILL;
             fault_code = ILL_ILLOPC;

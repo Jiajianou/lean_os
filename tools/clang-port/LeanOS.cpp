@@ -141,7 +141,16 @@ void leanos::Linker::ConstructJob(Compilation &C, const JobAction &JA,
   ArgStringList CmdArgs;
 
   const bool Shared = Args.hasArg(options::OPT_shared);
-  const bool Pie = Args.hasArg(options::OPT_pie) && !Shared;
+  // hasFlag, not hasArg: -pie and -no-pie are a pair and the LAST one on the
+  // command line wins, which is how every other toolchain here reads them and
+  // how a build system that adds -pie for everybody expects to be able to
+  // take it back. M121 wrote hasArg, so -no-pie was silently ignored and a
+  // caller that asked for a static executable got a position-independent one
+  // with an interpreter this machine has no path for. M145 found it by
+  // linking Chromium's //base, whose executable_config adds -pie to every
+  // link.
+  const bool Pie =
+      Args.hasFlag(options::OPT_pie, options::OPT_no_pie, false) && !Shared;
   const bool Static = !Shared && !Pie;
 
   Args.ClaimAllArgs(options::OPT_g_Group);

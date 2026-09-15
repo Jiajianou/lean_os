@@ -353,9 +353,14 @@ Several instruments, and none of them subsumes another:
   is the only instrument here that grades the *tests* rather than the
   machine, and the first thing it found was a file at 100% line coverage
   whose mutation score was zero.
-- **Chromium's `//base` compiles here.** 428 objects, every one of them
-  x86-64 ELF, out of Chromium's own ninja - the foundation library the
-  rest of the browser is written on top of. Getting there took the same
+- **Chromium's `//base` links and runs here.** 428 objects out of
+  Chromium's own ninja, linked into `/bin/chromiumbase` - 2 MB, ET_EXEC,
+  entry `0x8000000040`, no interpreter: a lean_os executable in exactly
+  the shape every other program on this machine has, whose C++ is
+  Chromium's foundation library and whose C library is this one. It takes
+  a path apart with `base::FilePath`, writes and reads a file through
+  `base::File` on leanfs, measures a sleep with `base::TimeTicks`, and
+  reaches this libc's `getrandom` through `base::RandBytes`. Getting there took the same
   distinction three times over, and the patch that draws it the third
   time is 804 lines across nineteen files in which the word `lean_os`
   does not appear: `is_linux` answers "does the build gate the right

@@ -224,6 +224,8 @@ REQUIRED_MARKERS=(
   "[m142] a long double library for the x87's own format:"
   "[m143] the POSIX surface //base's own sources ask for:"
   "[m144] what a fault was, not that one happened:"
+  "[m145] Chromium's //base links and runs on this machine:"
+  "chromiumbase: done"
   "mathltest: done"
   "[m125] lvgl rendered"
   "[m125] a third-party toolkit on this compositor:"

@@ -1,0 +1,20 @@
+--- a/base/rand_util_posix.cc
++++ b/base/rand_util_posix.cc
+@@ -73,8 +73,17 @@
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
+ 
+ bool KernelSupportsGetRandom() {
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+   return base::SysInfo::KernelVersionNumber::Current() >=
+          base::SysInfo::KernelVersionNumber(3, 17);
++#else
++  // The question is whether the call is there, and on a platform that is not
++  // Linux the Linux kernel version does not answer it: uname reports that
++  // platform's own version, which is not on Linux's number line. GetRandomSyscall
++  // above reaches the C library's getrandom on this branch, and a C library
++  // without it would not have compiled.
++  return true;
++#endif
+ }
+ 
+ bool GetRandomSyscall(void* output, size_t output_length) {

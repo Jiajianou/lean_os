@@ -8,35 +8,12 @@
 #include "malloc.h"
 #include "syscall_wrappers.h"
 
-void *calloc(size_t count, size_t size) {
-    size_t total = count * size;
-    if (count != 0 && total / count != size) {
-        return (void *)0;
-    }
-    void *p = malloc(total);
-    if (p) {
-        memset(p, 0, total);
-    }
-    return p;
-}
+/* calloc and realloc live in user_space/library/malloc.c with malloc and
+   free, not here. An allocator has to be ONE archive member: a program that
+   brings its own - Chromium's PartitionAlloc shim does - defines every name
+   in the set, and a linker that pulls this object for some other symbol in
+   it would then find two of each. M145 hit exactly that. */
 
-void *realloc(void *ptr, size_t size) {
-    if (!ptr) {
-        return malloc(size);
-    }
-    if (size == 0) {
-        free(ptr);
-        return (void *)0;
-    }
-    size_t old = malloc_usable_size(ptr);
-    void *p = malloc(size);
-    if (!p) {
-        return (void *)0;
-    }
-    memcpy(p, ptr, old < size ? old : size);
-    free(ptr);
-    return p;
-}
 
 extern void __lean_run_exit_handlers(void);
 extern void __lean_stdio_flush_all(void);
@@ -391,9 +368,9 @@ char *setstate(char *state) {
     return state;
 }
 
-long double strtold(const char *s, char **end) {
-    return (long double)strtod(s, end);
-}
+/* strtold is in user_space/libc/src/strtold.c. It used to be here, as
+   (long double)strtod(s, end), which returned a double's answer to a
+   question a double cannot hold - the trap M142 named and refused. */
 
 float strtof(const char *s, char **end) {
     return (float)strtod(s, end);

@@ -1,0 +1,10 @@
+# This project's own targets inside Chromium's build. Nothing under
+# third_party/chromium/lean_os is Chromium's, and nothing here is patched
+# into Chromium: tools/build-chromium.sh symlinks this directory in as
+# //lean_os, so these targets name //base the way any other consumer of
+# //base would, from outside it.
+
+group("lean_os") {
+  testonly = false
+  deps = [ "//lean_os/basetest" ]
+}

@@ -3,6 +3,8 @@
 #include <ctype.h>
 #include <wchar.h>
 
+#include <locale.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -33,6 +35,30 @@ wint_t    towctrans(wint_t c, wctrans_t desc);
 
 int wcwidth(wchar_t c);
 int wcswidth(const wchar_t *s, size_t n);
+
+
+/* POSIX 2008's locale-argument forms. See
+   user_space/libc/src/locale_functions.c for why they are what they are on
+   a machine with exactly one locale - and for what they do NOT do, which is
+   accept a locale this machine never made. */
+int iswalnum_l(wint_t c, locale_t locale);
+int iswalpha_l(wint_t c, locale_t locale);
+int iswblank_l(wint_t c, locale_t locale);
+int iswcntrl_l(wint_t c, locale_t locale);
+int iswdigit_l(wint_t c, locale_t locale);
+int iswgraph_l(wint_t c, locale_t locale);
+int iswlower_l(wint_t c, locale_t locale);
+int iswprint_l(wint_t c, locale_t locale);
+int iswpunct_l(wint_t c, locale_t locale);
+int iswspace_l(wint_t c, locale_t locale);
+int iswupper_l(wint_t c, locale_t locale);
+int iswxdigit_l(wint_t c, locale_t locale);
+int iswctype_l(wint_t c, wctype_t type, locale_t locale);
+wctype_t wctype_l(const char *name, locale_t locale);
+wint_t towlower_l(wint_t c, locale_t locale);
+wint_t towupper_l(wint_t c, locale_t locale);
+wctrans_t wctrans_l(const char *name, locale_t locale);
+wint_t towctrans_l(wint_t c, wctrans_t transform, locale_t locale);
 
 #ifdef __cplusplus
 }

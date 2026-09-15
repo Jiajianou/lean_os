@@ -1,0 +1,66 @@
+--- a/base/BUILD.gn
++++ b/base/BUILD.gn
+@@ -1181,6 +1181,7 @@
+     ":anchor_functions_buildflags",
+     ":base_static",
+     ":cfi_buildflags",
++    ":symbol_buildflags",
+     ":clang_profiling_buildflags",
+     ":dcheck_is_on",
+     ":debugging_buildflags",
+@@ -2962,6 +2963,12 @@
+ 
+ # Build flags for Control Flow Integrity
+ # https://www.chromium.org/developers/testing/control-flow-integrity
++buildflag_header("symbol_buildflags") {
++  header = "symbol_buildflags.h"
++  header_dir = "base"
++  flags = [ "HAS_SYMBOL_INTERPOSITION=$has_symbol_interposition" ]
++}
++
+ buildflag_header("cfi_buildflags") {
+   header = "cfi_buildflags.h"
+ 
+--- a/build/config/BUILDCONFIG.gn
++++ b/build/config/BUILDCONFIG.gn
+@@ -360,6 +360,15 @@
+   # BUILDFLAG(HAS_LINUX_KERNEL) from __linux__ for the preprocessor's half.
+   has_linux_kernel = is_linux || is_chromeos || is_android
+ 
++  # Whether a symbol defined in an executable takes precedence over one of
++  # the same name in a library it links against.
++  #
++  # That ordering is what dlsym(RTLD_NEXT) walks and what an interposing
++  # wrapper - base/files/scoped_file_linux.cc's close(2) is one - depends on.
++  # A statically linked program has no such ordering: there is one definition
++  # of each name and the linker refuses a second rather than choosing.
++  has_symbol_interposition = true
++
+   # Whether this platform's C library ships libatomic.
+   #
+   # It is a separate question from the architecture: on x86-64 every atomic
+--- a/base/files/scoped_file_linux.cc
++++ b/base/files/scoped_file_linux.cc
+@@ -11,6 +11,7 @@
+ #include <atomic>
+ 
+ #include "base/compiler_specific.h"
++#include "base/symbol_buildflags.h"
+ #include "base/debug/stack_trace.h"
+ #include "base/immediate_crash.h"
+ #include "base/logging.h"
+@@ -82,7 +83,13 @@
+ 
+ }  // namespace base
+ 
+-#if !defined(COMPONENT_BUILD)
++// Wrapping close(2) means defining a second one and reaching the first
++// through dlsym(RTLD_NEXT). That is a property of dynamic linking rather
++// than of the platform: in a statically linked program there is one
++// definition of each name and the linker refuses a second, so there is
++// nothing for the wrapper to forward to. The fd-ownership tracking above
++// does not depend on any of that and is compiled either way.
++#if !defined(COMPONENT_BUILD) && BUILDFLAG(HAS_SYMBOL_INTERPOSITION)
+ using LibcCloseFuncPtr = int (*)(int);
+ 
+ // Load the libc close symbol to forward to from the close wrapper.

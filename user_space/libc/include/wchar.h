@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <locale.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -99,6 +101,14 @@ int      fwide(FILE *f, int mode);
 
 int wcwidth(wchar_t c);
 int wcswidth(const wchar_t *s, size_t n);
+
+
+/* POSIX 2008's locale-argument forms. See
+   user_space/libc/src/locale_functions.c for why they are what they are on
+   a machine with exactly one locale - and for what they do NOT do, which is
+   accept a locale this machine never made. */
+int wcscoll_l(const wchar_t *a, const wchar_t *b, locale_t locale);
+size_t wcsxfrm_l(wchar_t *out, const wchar_t *in, size_t length, locale_t locale);
 
 #ifdef __cplusplus
 }

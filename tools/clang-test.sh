@@ -82,6 +82,30 @@ case "$PICSPEC" in
 esac
 echo "clang-test: and -fPIC -shared flips the code model, the PLT and the TLS model"
 
+# M145. -pie and -no-pie are a PAIR and the last one wins. M121's driver read
+# only -pie, so -no-pie was silently ignored and a build system that adds -pie
+# to every link - Chromium's does - could not take it back. The bug produced a
+# position-independent executable naming an interpreter this machine has no
+# path for, and nothing here asked the question until //base was linked.
+PIESPEC=$("$CC" -### -pie tests/clang/hello.c -o /dev/null 2>&1)
+case "$PIESPEC" in
+  *'"-pie"'*) ;;
+  *) fail "-pie did not reach the linker";;
+esac
+NOPIESPEC=$("$CC" -### -pie -no-pie tests/clang/hello.c -o /dev/null 2>&1)
+case "$NOPIESPEC" in
+  *'"-pie"'*) fail "-no-pie after -pie still linked position-independent";;
+esac
+case "$NOPIESPEC" in
+  *'"-static"'*) ;;
+  *) fail "-no-pie did not fall back to a static link";;
+esac
+case "$NOPIESPEC" in
+  *lean_os.ld*) ;;
+  *) fail "-no-pie did not get the linker script a static program needs";;
+esac
+echo "clang-test: and -no-pie after -pie wins, which is what a pair of flags means"
+
 [ "$FAILED" -eq 0 ] || exit 1
 
 echo "clang-test: $(basename "$CC") tests/clang/hello.c -o $OUT"
