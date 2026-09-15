@@ -8484,6 +8484,14 @@ static void boot_selftests_system(void) {
             panic("M141 self-test: the surface Chromium's base and its tracing "
                   "library ask for is not right on this machine");
         }
+        kernel_log_puts("[m147] a thread_local is where the compiler reads "
+                  "it: a thread-local segment whose size is NOT a whole "
+                  "number of its own alignment, read and written on a worker "
+                  "thread and left alone on this one - because the block is "
+                  "placed a rounded-up span below the thread pointer now "
+                  "rather than a raw size, which is the four bytes that "
+                  "turned //base's first constinit thread_local into a jump "
+                  "through half a vtable pointer - self-test passed.\n\n");
         kernel_log_puts("[m146] a descriptor belongs to the process: one "
                   "opened on the main thread read on a worker, one opened on "
                   "the worker read back on the main thread, and an O_CLOEXEC "

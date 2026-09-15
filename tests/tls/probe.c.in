@@ -1,0 +1,24 @@
+/* One probe program for tools/tls-layout-test.sh. The shapes are substituted
+   in by the harness; what matters is that each one produces a different
+   (alignment, size) pair for the thread-local segment, including sizes that
+   are NOT a whole number of alignment units - which is the case the runtime
+   used to get wrong.
+
+   The .tlsprobe section is the oracle. `symbol@tpoff` is the linker's own
+   answer to "how far below the thread pointer does this variable sit", so a
+   table of them is what the compiled program will actually do, written down
+   where a host tool can read it without disassembling anything. */
+
+_Thread_local WIDE_TYPE probe_wide = 1;
+_Thread_local unsigned char probe_middle[MIDDLE_SIZE] = {1};
+_Thread_local unsigned char probe_tail[TAIL_SIZE];
+
+__asm__(".section .tlsprobe,\"a\"\n"
+        ".quad probe_wide@tpoff\n"
+        ".quad probe_middle@tpoff\n"
+        ".quad probe_tail@tpoff\n"
+        ".previous\n");
+
+int main(void) {
+    return (int)probe_wide + probe_middle[0] + probe_tail[0];
+}

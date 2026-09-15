@@ -71,6 +71,14 @@ SECTIONS
     } :data :tls
     __lean_tls_end = ADDR(.tbss) + SIZEOF(.tbss);
 
+    /* The alignment of the thread-local segment, which the compiler needs and
+       the size alone does not carry. A thread_local is read at
+       tp - ALIGN(segment size, this) + its offset in the segment, so a
+       runtime that subtracts the raw size puts every variable in the wrong
+       place whenever the size is not already a multiple of the alignment.
+       See __lean_tls_setup. */
+    __lean_tls_align = MAX(ALIGNOF(.tdata), ALIGNOF(.tbss));
+
     .data : {
         *(.data*)
     } :data

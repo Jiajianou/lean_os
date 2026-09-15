@@ -226,6 +226,7 @@ REQUIRED_MARKERS=(
   "[m144] what a fault was, not that one happened:"
   "[m145] Chromium's //base links and runs on this machine:"
   "[m146] a descriptor belongs to the process:"
+  "[m147] a thread_local is where the compiler reads it:"
   "chromiumbase: done"
   "mathltest: done"
   "[m125] lvgl rendered"

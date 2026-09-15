@@ -22,6 +22,11 @@
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
+#include "base/run_loop.h"
+#include "base/synchronization/waitable_event.h"
+#include "base/task/single_thread_task_executor.h"
+#include "base/threading/thread.h"
 #include "base/containers/span.h"
 #include "base/rand_util.h"
 #include "base/strings/string_number_conversions.h"
@@ -196,17 +201,7 @@ bool FilesBehave() {
 // base/rand_util_posix.cc opens /dev/urandom with O_CLOEXEC and reads it
 // from whichever thread wants randomness. The read failed on a worker
 // thread and the CHECK behind it fired. The table belongs to the process
-// now, which is what lets the raw-thread check below run at all.
-//
-// base::Thread itself is still NOT exercised here, and that is again a bug
-// rather than an omission - a second one, standing behind the first. A
-// thread_local on this machine is not where the compiler reads it: the
-// runtime places the block a segment-size below the thread pointer where
-// the compiler places it a size-rounded-up-to-the-segment-alignment below.
-// //base's segment is 0x134 bytes aligned to 8, so every thread_local in it
-// sits four bytes off, and base::Thread::Start reaches a constinit
-// thread_local with a vtable before it reaches anything else. That is the
-// next milestone, and these checks come back with it.
+// now, and these checks are back.
 bool RandBytesWorksAtEverySize() {
   for (size_t size = 1; size <= 64; ++size) {
     std::vector<uint8_t> buffer(size, 0);
@@ -233,6 +228,93 @@ bool RandBytesWorksOnARawThread() {
     return false;
   }
   return result != nullptr;
+}
+
+// base::Thread is a thread with a message loop on it, which is the thing
+// //base is mostly used for and the thing M119's epoll was built to carry.
+bool ThreadsAndTasksBehave() {
+  base::Thread worker("chromiumbase-worker");
+  if (!worker.Start()) {
+    return false;
+  }
+  base::WaitableEvent done(base::WaitableEvent::ResetPolicy::MANUAL,
+                           base::WaitableEvent::InitialState::NOT_SIGNALED);
+  int counter = 0;
+  base::PlatformThreadId task_thread;
+  worker.task_runner()->PostTask(
+      FROM_HERE, base::BindOnce(
+                     [](int* counter, base::PlatformThreadId* id,
+                        base::WaitableEvent* done) {
+                       *counter = 41;
+                       *id = base::PlatformThread::CurrentId();
+                       done->Signal();
+                     },
+                     &counter, &task_thread, &done));
+  done.Wait();
+  worker.Stop();
+  if (counter != 41) {
+    return false;
+  }
+  // The task really ran somewhere else.
+  return task_thread != base::PlatformThread::CurrentId();
+}
+
+// A RunLoop on this thread, quit from inside a task it posted to itself.
+bool RunLoopBehaves() {
+  base::SingleThreadTaskExecutor executor;
+  base::RunLoop loop;
+  int order = 0;
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce([](int* order) { *order = 1; }, &order));
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(
+                     [](int* order, base::OnceClosure quit) {
+                       if (*order == 1) {
+                         *order = 2;
+                       }
+                       std::move(quit).Run();
+                     },
+                     &order, loop.QuitClosure()));
+  loop.Run();
+  return order == 2;
+}
+
+// A descriptor opened on one thread and read on another, which is the thing
+// M146 made true and the thing every //base file assumes.
+bool DescriptorsAreSharedBetweenThreads() {
+  base::ScopedTempDir directory;
+  if (!directory.CreateUniqueTempDirUnderPath(base::FilePath("/tmp"))) {
+    return false;
+  }
+  base::FilePath path = directory.GetPath().Append("opened-on-this-thread");
+  if (!base::WriteFile(path, "shared")) {
+    return false;
+  }
+  base::File file(path, base::File::FLAG_OPEN | base::File::FLAG_READ);
+  if (!file.IsValid()) {
+    return false;
+  }
+  base::Thread worker("chromiumbase-descriptors");
+  if (!worker.Start()) {
+    return false;
+  }
+  base::WaitableEvent done(base::WaitableEvent::ResetPolicy::MANUAL,
+                           base::WaitableEvent::InitialState::NOT_SIGNALED);
+  bool read_on_worker = false;
+  worker.task_runner()->PostTask(
+      FROM_HERE, base::BindOnce(
+                     [](base::File* file, bool* ok, base::WaitableEvent* done) {
+                       char buffer[7] = {0};
+                       *ok = file->ReadAndCheck(
+                           0, base::as_writable_byte_span(buffer).first(6u));
+                       *ok = *ok && std::string(buffer) == "shared";
+                       done->Signal();
+                     },
+                     &file, &read_on_worker, &done));
+  done.Wait();
+  worker.Stop();
+  file.Close();
+  return read_on_worker && directory.Delete();
 }
 
 // base::Time and base::TimeTicks over M141's clocks, and a sleep that has
@@ -325,6 +407,12 @@ int main(int argc, char** argv) {
         RandBytesWorksAtEverySize());
   Check("base::RandUint64 on a thread this program made itself",
         RandBytesWorksOnARawThread());
+  Check("base::Thread ran a posted task on another thread",
+        ThreadsAndTasksBehave());
+  Check("a base::RunLoop ran two tasks in order and quit from inside one",
+        RunLoopBehaves());
+  Check("a base::File opened on one thread read on another",
+        DescriptorsAreSharedBetweenThreads());
   Check("base::FilePath takes a path apart and puts one together",
         PathsBehave());
   Check("base::File and base::WriteFile over leanfs, in a temporary "
@@ -345,7 +433,7 @@ int main(int argc, char** argv) {
   std::printf(
       "[m145] Chromium's //base links and runs on this machine: %d checks, "
       "from a static EXEC this project's own clang linked out of //base's "
-      "own 428 objects.\n",
+      "own 428 objects - threads, tasks and a run loop among them.\n",
       checks);
   std::printf("chromiumbase: done\n");
   return 0;

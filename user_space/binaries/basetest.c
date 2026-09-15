@@ -1334,6 +1334,128 @@ static int a_fork_gets_its_own_table(void) {
 }
 
 
+/* M147: a thread_local is not where its size says it is.
+ *
+ * The compiler reads one at tp - ALIGN(segment size, segment alignment) plus
+ * the variable's offset in the segment. __lean_tls_setup used to subtract the
+ * segment size itself, which is the same number whenever the size is already a
+ * multiple of the alignment - and it was, in every program in this tree, for
+ * sixty-eight milestones. Chromium's //base has a segment of 0x134 bytes
+ * aligned to 8, so every one of its thread_locals sat four bytes above where
+ * it was read, and a constinit thread_local with a vtable turned that into a
+ * jump through a pointer assembled from half of one address and half of
+ * nothing.
+ *
+ * So these variables exist to give THIS program a skewed segment too, and the
+ * first thing the check does is insist that the skew is really there. A test
+ * for an off-by-alignment bug in a segment that happens to be aligned grades
+ * nothing, and would go on passing after the fix was reverted.
+ */
+extern char __lean_tls_init_start[] __attribute__((weak));
+extern char __lean_tls_end[] __attribute__((weak));
+extern char __lean_tls_align[] __attribute__((weak));
+
+static _Thread_local unsigned long long tls_wide = 0x0123456789ABCDEFULL;
+static _Thread_local unsigned char tls_odd[5] = {0xA1, 0xB2, 0xC3, 0xD4, 0xE5};
+static _Thread_local unsigned int tls_zero;
+static _Thread_local unsigned char tls_tail[3];
+
+static int tls_worker_result;
+
+static unsigned long thread_pointer(void) {
+    unsigned long tp = 0;
+    __asm__ volatile("movq %%fs:0, %0" : "=r"(tp));
+    return tp;
+}
+
+static int the_thread_local_values_are_right(void) {
+    if (tls_wide != 0x0123456789ABCDEFULL) {
+        return 1;
+    }
+    if (tls_odd[0] != 0xA1 || tls_odd[1] != 0xB2 || tls_odd[2] != 0xC3 ||
+        tls_odd[3] != 0xD4 || tls_odd[4] != 0xE5) {
+        return 2;
+    }
+    if (tls_zero != 0) {
+        return 3;
+    }
+    if (tls_tail[0] != 0 || tls_tail[1] != 0 || tls_tail[2] != 0) {
+        return 5;
+    }
+    /* And they live inside the block the thread pointer ends, which is the
+       structural half of the same claim: a value can be right by accident,
+       an address cannot be in range by accident. */
+    unsigned long tp = thread_pointer();
+    unsigned long align = (unsigned long)__lean_tls_align;
+    unsigned long total = (unsigned long)(__lean_tls_end - __lean_tls_init_start);
+    unsigned long span = (total + align - 1u) & ~(align - 1u);
+    unsigned long first = (unsigned long)&tls_wide;
+    unsigned long last = (unsigned long)&tls_tail[2];
+    if (first < tp - span || first >= tp || last < tp - span || last >= tp) {
+        return 4;
+    }
+    return 0;
+}
+
+static void *tls_worker(void *unused) {
+    (void)unused;
+    tls_worker_result = the_thread_local_values_are_right();
+    if (tls_worker_result == 0) {
+        /* Writing here must not reach the main thread's copies. */
+        tls_wide = 0xFEEDFACECAFEBEEFULL;
+        tls_odd[0] = 0x5A;
+        tls_zero = 0x7777;
+        tls_tail[0] = 0x31;
+        tls_tail[1] = 0x32;
+        tls_tail[2] = 0x33;
+    }
+    return (void *)0;
+}
+
+static int a_thread_local_is_where_the_compiler_reads_it(void) {
+    unsigned long align = (unsigned long)__lean_tls_align;
+    unsigned long total = (unsigned long)(__lean_tls_end - __lean_tls_init_start);
+    if (align < 1 || (align & (align - 1)) != 0) {
+        return 226;
+    }
+    if (total == 0) {
+        return 227;
+    }
+    /* The guard against a vacuous test: if this program's segment ever
+       becomes a whole number of alignment units, the bug it grades cannot
+       happen here and the padding above has to be re-chosen. */
+    if (total % align == 0) {
+        return 228;
+    }
+
+    /* 229 to 233 on this thread, 236 to 240 on the worker - the same five
+       checks, numbered apart so a failure says which thread saw it. */
+    int mine = the_thread_local_values_are_right();
+    if (mine != 0) {
+        return 228 + mine;
+    }
+
+    pthread_t worker;
+    tls_worker_result = -1;
+    if (pthread_create(&worker, (pthread_attr_t *)0, tls_worker, (void *)0) != 0) {
+        return 234;
+    }
+    if (pthread_join(worker, (void **)0) != 0) {
+        return 235;
+    }
+    if (tls_worker_result != 0) {
+        /* 236 to 240, one per check, so the log says WHICH one moved. */
+        return 235 + tls_worker_result;
+    }
+
+    /* The worker's writes stayed in the worker's block. */
+    if (tls_wide != 0x0123456789ABCDEFULL || tls_odd[0] != 0xA1 ||
+        tls_zero != 0 || tls_tail[0] != 0 || tls_tail[2] != 0) {
+        return 241;
+    }
+    return 0;
+}
+
 int main(void) {
     int rc;
     if ((rc = the_monotonic_family_is_one_clock()) != 0) {
@@ -1397,6 +1519,9 @@ int main(void) {
         return rc;
     }
     if ((rc = a_fork_gets_its_own_table()) != 0) {
+        return rc;
+    }
+    if ((rc = a_thread_local_is_where_the_compiler_reads_it()) != 0) {
         return rc;
     }
     return 0;

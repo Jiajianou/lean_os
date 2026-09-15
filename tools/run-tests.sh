@@ -129,6 +129,7 @@ run_stage "the FILE layer, off the machine" ./tools/stdio-test.sh
 run_stage "packages, against the host's sha256 and cmp" ./tools/pkg-test.sh
 run_stage "iconv, against the host's" ./tools/iconv-test.sh
 run_stage "realpath, against the host's" ./tools/realpath-test.sh
+run_stage "where a thread_local is, against the linker's own answer" ./tools/tls-layout-test.sh
 run_stage "set-resolution's modes are the driver's" ./tools/set-resolution.sh --check
 
 if [ "$TIER" = "full" ]; then
