@@ -111,6 +111,19 @@ if [ ! -f "$BUILTINS_DIR/libclang_rt.builtins.a" ]; then
   cp "$LIBGCC" "$BUILTINS_DIR/libclang_rt.builtins.a" || exit 1
 fi
 
+# Asked of the compiler rather than spelled out, because the version directory
+# under lib/clang moves whenever the toolchain is rebuilt. This is both the
+# directory bindgen parses with (M154's patch 0025) and the one named in
+# default_toolchain_cflags below - and they have to be the SAME directory.
+LEANOS_RESOURCE_DIR=$("${PREFIX}clang" -print-resource-dir)
+if [ ! -d "$LEANOS_RESOURCE_DIR/include" ]; then
+  echo "build-chromium: ${PREFIX}clang has no resource directory" >&2
+  exit 1
+fi
+if [ "${LEANOS_CHROMIUM_CC:-lean_os}" = "chromium" ]; then
+  LEANOS_RESOURCE_DIR="$CLANG_BASE/lib/clang/$CLANG_VER"
+fi
+
 mkdir -p "$OUT"
 cat > "$OUT/args.gn" <<ARGS
 target_os = "linux"
@@ -131,6 +144,7 @@ partition_alloc_has_linux_kernel = false
 enable_pkeys = false
 clang_base_path = "$CLANG_BASE"
 clang_version = "$CLANG_VER"
+bindgen_resource_dir = "$LEANOS_RESOURCE_DIR"
 ozone_extra_path = "//lean_os/ozone_extra.gni"
 
 # Ozone's platform backends, which are the one place a Linux GN
@@ -180,8 +194,53 @@ enable_precompiled_headers = false
 # depends on it - a dependency cycle that exists in no configuration
 # Chromium ships.
 use_sysroot = false
-lean_os_sysroot = "$SYSROOT"
 lean_os_target = "$LEANOS_TARGET_FLAG"
+
+# What this target IS, said in a place every tool can read.
+#
+# The toolchain's extra_cflags are baked into the command string its tools
+# run, so bindgen - which assembles its own libclang command line out of
+# {{defines}}, {{include_dirs}} and {{cflags}} - never sees them, and computes
+# this target's type layouts from whatever triple //build/config/compiler put
+# in {{cflags}} instead. That is x86_64-unknown-linux-gnu, which has a
+# different struct stat, a different sigset_t and a glibc that is not here.
+# M154's config carries the four facts that decide the answer:
+#
+#   --target      the triple, which has to win over the one already in cflags
+#   --sysroot     where this OS's headers are, which the clang parsing them
+#                 has no default for the way x86_64-lean_os-clang does
+#   -D__lean_os__ the identity build_config.h branches on, which a clang that
+#                 has never heard of this triple cannot derive from it
+#   -idirafter    the resource directory of the clang doing the parsing
+#
+# The last one is M153's prediction and it is right for the reason M153 gave -
+# libc++'s own stddef.h does #include_next <stddef.h> and, for a target this
+# libclang has never heard of, finds nothing after it - but it is right only
+# for ONE value. It has to be the resource directory of x86_64-lean_os-clang,
+# which is also what patch 0025 makes bindgen parse with, because TWO
+# DIFFERENT clang resource directories in one include path are fatal: clang's
+# stdint.h ends with
+#
+#   #if __STDC_HOSTED__ && __has_include_next(<stdint.h>)
+#
+# so each of them includes the other, the include guard the first one set
+# swallows the second, and nothing declares uint8_t. It fails in a header
+# three levels away that is not wrong about anything. Naming one directory
+# twice is harmless; naming a second one is not, and both halves of this
+# milestone spent an hour each proving that from opposite ends.
+#
+# Everything here is already true for the real compile - x86_64-lean_os-clang
+# defines __lean_os__ itself, was configured with DEFAULT_SYSROOT, and has its
+# own resource directory ahead of this one - so this changes what bindgen
+# reads and nothing about what the compiler does.
+default_toolchain_cflags = [
+  "--target=x86_64-lean_os",
+  "--sysroot=$SYSROOT",
+  "-D__lean_os__=1",
+  "-D__lean_os=1",
+  "-idirafter",
+  "$LEANOS_RESOURCE_DIR/include",
+]
 use_custom_libcxx = true
 libcxx_provides_default_rune_table = true
 use_glib = false

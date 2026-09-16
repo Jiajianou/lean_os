@@ -6,8 +6,6 @@ declare_args() {
   lean_os_ar = ""
   lean_os_nm = ""
   lean_os_readelf = ""
-  lean_os_sysroot = ""
-  lean_os_cxx_include = ""
   lean_os_target = ""
 }
 
@@ -37,13 +35,21 @@ gcc_toolchain("x64") {
                   string_join(" ", lean_os_link_flags)
   readelf = lean_os_readelf
 
+  # These are INERT and are kept only because gcc_toolchain asserts that
+  # current_cpu and current_os are among them. GN's rule is that "the
+  # toolchain_args will be ignored when the toolchain being defined is the
+  # default", and custom_toolchain makes this one the default - so every line
+  # here has always been decoration. M154 found that out the slow way, looking
+  # for why --sysroot never reached a command line: everything this block
+  # appears to set is in fact set by args.gn, which is why nothing ever broke,
+  # and `sysroot` is the one that was not, which is why gn commands that load
+  # the whole tree still report /usr/include as this build's system headers.
+  #
+  # Where a flag has to reach every target, put it in
+  # default_toolchain_cflags - a config, which bindgen can read - rather than
+  # here or in extra_cflags. See //build/config/BUILD.gn.
   toolchain_args = {
     current_cpu = "x64"
     current_os = "linux"
-    is_clang = true
-    clang_use_chrome_plugins = false
-    use_debug_fission = false
-    is_component_build = false
-    sysroot = lean_os_sysroot
   }
 }

@@ -98,6 +98,36 @@ else
       > "$ROOT/build/chromium-configure.log" 2>&1
   check $? "the lean_os GN configuration generates"
 
+  # M154. The configure check above runs gn; this asks what gn WROTE. The
+  # triple and the sysroot have to be in {{cflags}} and not only in the tool
+  # command string, because bindgen builds its libclang command line out of
+  # {{cflags}} and would otherwise compute this target's type layouts for
+  # x86_64-unknown-linux-gnu. tools/chromium-bindgen-test.py grades the
+  # answers; this grades the configuration that produces them, in the output
+  # directory a person actually builds in.
+  BASE_NINJA="$SRC/out/$OUT_NAME/obj/base/base.ninja"
+  if [ ! -f "$BASE_NINJA" ]; then
+    echo "chromium-test: out/$OUT_NAME has not been generated - skipping" \
+         "the cflags check"
+  else
+    CFLAGS_LINE=$(grep -m1 "^cflags = " "$BASE_NINJA")
+    case "$CFLAGS_LINE" in
+      *--target=x86_64-lean_os*--sysroot=*|*--sysroot=*--target=x86_64-lean_os*)
+        LEANOS_IN_CFLAGS=0 ;;
+      *) LEANOS_IN_CFLAGS=1 ;;
+    esac
+    [ "$LEANOS_IN_CFLAGS" = "0" ]
+    check $? "the triple and the sysroot are in {{cflags}}, where bindgen reads"
+
+    # And after the one //build/config/compiler derives from current_os, which
+    # is the whole reason the config is last in default_compiler_configs. A
+    # clang takes the last --target on the line; so does libclang.
+    LEANOS_AT=$(printf '%s' "$CFLAGS_LINE" | grep -bo -- "--target=x86_64-lean_os" | head -1 | cut -d: -f1)
+    LINUX_AT=$(printf '%s' "$CFLAGS_LINE" | grep -bo -- "--target=x86_64-unknown-linux-gnu" | head -1 | cut -d: -f1)
+    [ -n "$LEANOS_AT" ] && [ -n "$LINUX_AT" ] && [ "$LEANOS_AT" -gt "$LINUX_AT" ]
+    check $? "and this target's triple comes after the one current_os implies"
+  fi
+
   RUST_SYSROOT="$ROOT/build/rust-sysroot-lean_os"
   TARGET_LIBDIR="$RUST_SYSROOT/lib/rustlib/x86_64-unknown-lean_os/lib"
   if [ ! -x "$RUST_SYSROOT/bin/rustc" ]; then

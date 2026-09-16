@@ -1,0 +1,59 @@
+diff --git a/build/config/BUILD.gn b/build/config/BUILD.gn
+--- a/build/config/BUILD.gn
++++ b/build/config/BUILD.gn
+@@ -23,6 +23,37 @@
+   import("//build/config/android/abi.gni")
+ }
+ 
++declare_args() {
++  # Compiler flags every target built with the DEFAULT toolchain carries in a
++  # config, rather than in the command string its tools run.
++  #
++  # gcc_toolchain's extra_cflags are baked into the tool command
++  # ("$cc ... {{cflags}} {{cflags_c}}${extra_cppflags}${extra_cflags} ..."),
++  # so a tool that builds its own command line out of {{defines}},
++  # {{include_dirs}} and {{cflags}} never sees them. bindgen and Crubit both
++  # do exactly that: they parse the header with libclang instead of compiling
++  # it, and what they read there decides the type layouts they write into
++  # Rust. A toolchain for a target outside this tree keeps its triple and its
++  # sysroot in extra_cflags, which is to say in the one place those two tools
++  # cannot look - so the bindings come out for whatever platform libclang
++  # defaulted to, and they are wrong in a way that compiles.
++  #
++  # The flags named here reach both. They are applied only to the default
++  # toolchain because that is the one describing the target being built for;
++  # a host toolchain in the same build has a compiler of its own.
++  default_toolchain_cflags = []
++}
++
++# See default_toolchain_cflags above. This is in default_compiler_configs and
++# is deliberately last in it, so that a flag named here wins over the same
++# flag set by an earlier config - the target triple, in particular, which
++# //build/config/compiler:compiler derives from current_os.
++config("default_toolchain_flags") {
++  if (current_toolchain == default_toolchain) {
++    cflags = default_toolchain_cflags
++  }
++}
++
+ # ==============================================
+ #   PLEASE DO NOT ADD MORE THINGS TO THIS LIST
+ # ==============================================
+diff --git a/build/config/BUILDCONFIG.gn b/build/config/BUILDCONFIG.gn
+--- a/build/config/BUILDCONFIG.gn
++++ b/build/config/BUILDCONFIG.gn
+@@ -477,6 +477,14 @@
+ if (current_os == "zos") {
+   default_compiler_configs += [ "//build/config/zos:compiler" ]
+ }
++
++# Last on purpose. A toolchain for a target outside this tree names its triple
++# and its sysroot here rather than only in its tools' command strings, because
++# bindgen and Crubit read {{cflags}} and never see a command string - see
++# default_toolchain_cflags in //build/config/BUILD.gn. Being last is what
++# makes the triple named there win over the one //build/config/compiler
++# derives from current_os.
++default_compiler_configs += [ "//build/config:default_toolchain_flags" ]
+ 
+ # Static libraries and source sets use only the compiler ones.
+ set_defaults("static_library") {
