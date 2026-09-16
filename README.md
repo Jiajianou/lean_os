@@ -337,9 +337,9 @@ Several instruments, and none of them subsumes another:
   bit, and the NVMe request splitter, **which is the one path QEMU cannot
   reach at all**: its namespace has 512-byte blocks, so a 4Kn drive's
   read-modify-write path is dead code here and would first execute on
-  somebody's real filesystem. 564 tests.
+  somebody's real filesystem. 633 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
-  image and grade the serial log against 134 markers and 44 performance
+  image and grade the serial log against 160 markers and 44 performance
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It
@@ -448,20 +448,29 @@ Several instruments, and none of them subsumes another:
   CHACHA20-POLY1305** and verifies the certificate against a trust anchor
   added through `CertVerifierWithUpdatableProc` - the interface a browser
   uses for enterprise roots, not a test hook.
-- **A JavaScript engine, most of the way.** **V8** builds for this machine out
-  of Chromium's own ninja - 51 MB, ET_EXEC, entry `0x80000b9600`, with the
-  startup snapshot linked into the file rather than sitting beside it,
-  because a program on this machine is one file the kernel maps. It starts
-  here: a platform, an isolate and a context on this kernel's threads, and it
-  **interprets JavaScript** - arithmetic, strings, arrays, JSON and a
-  recursive Fibonacci.
+- **A JavaScript engine.** **V8** builds for this machine out of Chromium's
+  own ninja - 51 MB, ET_EXEC, entry `0x80000b9600`, with the startup snapshot
+  linked into the file rather than sitting beside it, because a program on
+  this machine is one file the kernel maps. It is `/bin/chromiumv8` and the
+  boot battery runs it: a platform, an isolate and a context on this kernel's
+  threads; **JavaScript interpreted** - arithmetic, strings, arrays, JSON and
+  a recursive Fibonacci; **a hot loop compiled to x86-64** and run out of
+  pages this kernel made executable; the regular expression engine matching
+  and replacing; a thrown `Error` reaching `v8::TryCatch` with
+  `-fno-exceptions`; JavaScript calling a C++ function through a
+  `v8::FunctionTemplate`, which is the shape every DOM method has; and a
+  garbage collector that grew a heap of 200,000 objects and gave it back.
 
-  It does not finish. PartitionAlloc calls `mprotect` on sub-ranges of one
-  large reservation often enough to exhaust this kernel's fixed 128-entry
-  mmap region table, and a fixed table is the wrong shape for what a browser
-  does to an address space. That is the next piece of kernel work rather than
-  more porting, and until it is built there is no `/bin/chromiumv8` on the
-  image and no boot marker claiming one.
+  **Getting the last of that took a kernel change rather than more porting.**
+  A process's mmap regions lived in a fixed array of 128 entries inside the
+  task. PartitionAlloc reserves one large range and then commits, decommits
+  and protects sub-ranges of it, and each of those splits an entry - so the
+  count is not how many things a program has mapped but how many different
+  answers one range has, and a browser exhausts 128 before it finishes
+  starting. The table is a heap allocation that doubles now, from 32 entries
+  to a ceiling of 65536, which is where Linux keeps its own. `/bin/vmtest`
+  splits one mapping into 512 regions and requires every one of them to keep
+  its own contents and its own protection.
 
   Nine of the ten patches it cost are the same sentence: **being in the Linux
   family is not having Linux's kernel.** `mremap`, `prctl`, `__NR_gettid`,
@@ -527,8 +536,9 @@ Several instruments, and none of them subsumes another:
   filesystem has survived all of them.
 
 Booting the machine is no longer the same thing as testing it. `make run`
-boots to the desktop in about eight seconds; the ~190-second self-test
-battery runs only when something asks for it, which
+boots to the desktop in about eight seconds; the self-test battery - about
+470 seconds now that a JavaScript engine is in it - runs only when something
+asks for it, which
 `tools/qemu-serial-test.sh` does and `tools/run-qemu.sh` does not. The
 image is identical either way - the switch comes from outside the image
 via fw_cfg rather than from a `#ifdef`.

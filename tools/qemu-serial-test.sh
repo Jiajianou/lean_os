@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SECONDS_TO_RUN="${1:-900}"
+# This is the harness's patience, not a budget. A full battery reaches the
+# desktop handoff in about 470 seconds on a quiet machine, and the ceiling
+# was 900 until M156 - which added a JavaScript engine to it and then watched
+# the whole thing get cut off at 900 with the last six markers missing,
+# because Spotlight was indexing a 100 GB Chromium checkout at the time. The
+# battery had not got slower; the host had. 1500 is headroom, so a busy desk
+# costs a slow run rather than a failure that reads like a regression.
+SECONDS_TO_RUN="${1:-1500}"
 shift || true
 EXTRA_ARGS=("$@")
 
@@ -235,6 +242,8 @@ REQUIRED_MARKERS=(
   "[m151] Chromium's //net opens a connection here:"
   "[m152] https on this machine:"
   "chromiumnet: done"
+  "[m156] V8 runs on this machine:"
+  "chromiumv8: done"
   "mathltest: done"
   "[m125] lvgl rendered"
   "[m125] a third-party toolkit on this compositor:"

@@ -244,10 +244,37 @@ TEST(memfd, a_size_change_inside_one_page_is_recorded) {
     clean();
 }
 
+#include "memory_management/heap.h"
 #include "scheduler/scheduler.h"
 
 static task_t parent_task;
 static task_t child_task;
+
+/* The region table is a heap allocation since M156, so a task in a test is
+   one that has been through scheduler_regions_reserve rather than a zeroed
+   struct with an array in it - which means these tests need a kernel heap
+   under them, and a heap that nothing else has a live pointer into. */
+static void regions_heap(void) {
+    fake_physical_memory_reset();
+    fake_virtual_memory_reset();
+    heap_init();
+}
+
+static void task_with_regions(task_t *t) {
+    scheduler_regions_release(t);
+    memset(t, 0, sizeof(*t));
+    REQUIRE(scheduler_regions_reserve(t) == 0);
+}
+
+static void copy_regions(task_t *to, task_t *from) {
+    REQUIRE(scheduler_regions_reserve(to) == 0);
+    while (to->mmap_capacity < from->mmap_capacity) {
+        REQUIRE(scheduler_regions_reserve(to) == 0);
+    }
+    for (uint32_t i = 0; i < from->mmap_capacity; i++) {
+        to->mmaps[i] = from->mmaps[i];
+    }
+}
 
 static void region_of(task_t *t, int slot, struct memfd *m, uint32_t pages) {
     t->mmaps[slot].base = 0x100000 + (uint64_t)slot * 0x10000;
@@ -261,9 +288,10 @@ static void region_of(task_t *t, int slot, struct memfd *m, uint32_t pages) {
 }
 
 TEST(memfd, a_mapping_is_a_holder_and_a_fork_makes_a_second_one) {
+    regions_heap();
     clean();
-    memset(&parent_task, 0, sizeof(parent_task));
-    memset(&child_task, 0, sizeof(child_task));
+    task_with_regions(&parent_task);
+    task_with_regions(&child_task);
     struct memfd *m = memfd_create_object("mapped");
     REQUIRE(m != NULL);
     CHECK_EQ(memfd_truncate(m, 2 * PAGE_SIZE), 0);
@@ -274,9 +302,7 @@ TEST(memfd, a_mapping_is_a_holder_and_a_fork_makes_a_second_one) {
     CHECK_EQ(memfd_in_use(), 1);
     CHECK_EQ(memfd_pages_held(), 2);
 
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
-        child_task.mmaps[i] = parent_task.mmaps[i];
-    }
+    copy_regions(&child_task, &parent_task);
     scheduler_regions_retain_memfds(&child_task);
     CHECK_EQ(memfd_in_use(), 1);
 
@@ -291,12 +317,15 @@ TEST(memfd, a_mapping_is_a_holder_and_a_fork_makes_a_second_one) {
     scheduler_regions_forget_memfds(&child_task);
     CHECK_EQ(memfd_in_use(), 0);
     CHECK_EQ(memfd_pages_held(), 0);
+    scheduler_regions_release(&parent_task);
+    scheduler_regions_release(&child_task);
     clean();
 }
 
 TEST(memfd, a_split_region_is_two_holders) {
+    regions_heap();
     clean();
-    memset(&parent_task, 0, sizeof(parent_task));
+    task_with_regions(&parent_task);
     struct memfd *m = memfd_create_object("split");
     REQUIRE(m != NULL);
     CHECK_EQ(memfd_truncate(m, 4 * PAGE_SIZE), 0);
@@ -314,7 +343,7 @@ TEST(memfd, a_split_region_is_two_holders) {
     scheduler_region_forget_memfd(&parent_task.mmaps[1]);
     CHECK_EQ(memfd_in_use(), 0);
 
-    memset(&parent_task, 0, sizeof(parent_task));
+    task_with_regions(&parent_task);
     parent_task.mmaps[0].pages = 1;
     parent_task.mmaps[0].handle = -1;
     scheduler_region_forget_memfd(&parent_task.mmaps[0]);
@@ -322,12 +351,14 @@ TEST(memfd, a_split_region_is_two_holders) {
     scheduler_regions_retain_memfds(&parent_task);
     CHECK_EQ(parent_task.mmaps[0].pages, 1);
     scheduler_region_forget_memfd(NULL);
+    scheduler_regions_release(&parent_task);
     clean();
 }
 
 TEST(memfd, a_duplicate_tag_in_a_freed_slot_does_not_drop_a_reference) {
+    regions_heap();
     clean();
-    memset(&parent_task, 0, sizeof(parent_task));
+    task_with_regions(&parent_task);
     struct memfd *m = memfd_create_object("duplicate");
     REQUIRE(m != NULL);
     CHECK_EQ(memfd_truncate(m, PAGE_SIZE), 0);
@@ -343,13 +374,15 @@ TEST(memfd, a_duplicate_tag_in_a_freed_slot_does_not_drop_a_reference) {
     CHECK_EQ(memfd_in_use(), 1);
     memfd_unref(m);
     CHECK_EQ(memfd_in_use(), 0);
+    scheduler_regions_release(&parent_task);
     clean();
 }
 
 TEST(memfd, a_fork_of_a_region_whose_object_died_takes_no_reference) {
+    regions_heap();
     clean();
-    memset(&parent_task, 0, sizeof(parent_task));
-    memset(&child_task, 0, sizeof(child_task));
+    task_with_regions(&parent_task);
+    task_with_regions(&child_task);
     struct memfd *m = memfd_create_object("vanished");
     REQUIRE(m != NULL);
     CHECK_EQ(memfd_truncate(m, PAGE_SIZE), 0);
@@ -360,9 +393,7 @@ TEST(memfd, a_fork_of_a_region_whose_object_died_takes_no_reference) {
     CHECK_EQ(memfd_in_use(), 0);
     CHECK(memfd_by_tag(slot, gen) == NULL);
 
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
-        child_task.mmaps[i] = parent_task.mmaps[i];
-    }
+    copy_regions(&child_task, &parent_task);
     scheduler_regions_retain_memfds(&child_task);
     CHECK_EQ(child_task.mmaps[0].memfd_id, 0);
     CHECK_EQ(memfd_in_use(), 0);
@@ -371,5 +402,7 @@ TEST(memfd, a_fork_of_a_region_whose_object_died_takes_no_reference) {
     CHECK_EQ(memfd_slot(next), slot);
     CHECK(memfd_by_tag(slot, gen) == NULL);
     memfd_unref(next);
+    scheduler_regions_release(&parent_task);
+    scheduler_regions_release(&child_task);
     clean();
 }

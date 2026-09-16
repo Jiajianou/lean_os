@@ -513,12 +513,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->si_pid = 0;
     t->si_status = 0;
     t->si_address = 0;
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
-        t->mmaps[i].base = 0;
-        t->mmaps[i].pages = 0;
-        t->mmaps[i].memfd_id = 0;
-        t->mmaps[i].memfd_gen = 0;
-    }
+    scheduler_regions_release(t);
     t->fs_base = 0;
     t->tgid = thread_of ? thread_of->tgid : t->id;
     t->is_thread = thread_of ? 1 : 0;
@@ -1178,10 +1173,7 @@ void scheduler_reap_slot(task_t *t) {
         t->sig_handler[i] = SIG_DFL_ADDR;
     }
     scheduler_regions_forget_memfds(t);
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
-        t->mmaps[i].base = 0;
-        t->mmaps[i].pages = 0;
-    }
+    scheduler_regions_release(t);
     t->fs_base = 0;
     t->is_thread = 0;
     t->exiting = 0;
@@ -1239,7 +1231,7 @@ static uint64_t fill_policy(task_t *self, uint64_t page, int for_write, int for_
         return FILL_REFUSE;
     }
     const mmap_region_t *region = 0;
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+    for (uint32_t i = 0; i < self->mmap_capacity; i++) {
         if (self->mmaps[i].pages == 0) {
             break;
         }
@@ -1276,7 +1268,7 @@ static const mmap_region_t *mmap_region_for(task_t *self, uint64_t page) {
     if (page < USER_MMAP_BASE || page >= USER_MMAP_LIMIT) {
         return 0;
     }
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+    for (uint32_t i = 0; i < self->mmap_capacity; i++) {
         if (self->mmaps[i].pages == 0) {
             break;
         }
@@ -1299,14 +1291,67 @@ void scheduler_region_forget_memfd(mmap_region_t *r) {
     memfd_region_unref(m);
 }
 
+/* The table's lifetime lives here rather than beside the mmap syscalls,
+   because a task is what owns it and a task is what this file makes and
+   unmakes. */
+int scheduler_regions_reserve(task_t *t) {
+    uint32_t used = 0;
+    while (used < t->mmap_capacity && t->mmaps[used].pages != 0) {
+        used++;
+    }
+    if (used + 1 < t->mmap_capacity) {
+        return 0;
+    }
+    /* One spare entry is kept past the last region in use, because the array
+       is terminated by a zero `pages` and every reader stops there. */
+    uint32_t wanted = t->mmap_capacity ? t->mmap_capacity * 2
+                                       : MMAP_REGIONS_INITIAL;
+    if (wanted > MAX_MMAP_REGIONS) {
+        wanted = MAX_MMAP_REGIONS;
+    }
+    if (wanted <= t->mmap_capacity) {
+        return -1;
+    }
+    mmap_region_t *grown = (mmap_region_t *)kmalloc(sizeof(mmap_region_t) *
+                                                    (size_t)wanted);
+    if (!grown) {
+        return -1;
+    }
+    for (uint32_t i = 0; i < wanted; i++) {
+        grown[i].base = 0;
+        grown[i].pages = 0;
+        grown[i].prot = 0;
+        grown[i].handle = -1;
+        grown[i].file_page = 0;
+        grown[i].shared = 0;
+        grown[i].memfd_id = 0;
+        grown[i].memfd_gen = 0;
+    }
+    for (uint32_t i = 0; i < t->mmap_capacity; i++) {
+        grown[i] = t->mmaps[i];
+    }
+    mmap_region_t *old = t->mmaps;
+    t->mmaps = grown;
+    t->mmap_capacity = wanted;
+    kfree(old);
+    return 0;
+}
+
+void scheduler_regions_release(task_t *t) {
+    mmap_region_t *table = t->mmaps;
+    t->mmaps = 0;
+    t->mmap_capacity = 0;
+    kfree(table);
+}
+
 void scheduler_regions_forget_memfds(task_t *t) {
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+    for (uint32_t i = 0; i < t->mmap_capacity; i++) {
         scheduler_region_forget_memfd(&t->mmaps[i]);
     }
 }
 
 void scheduler_regions_retain_memfds(task_t *t) {
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+    for (uint32_t i = 0; i < t->mmap_capacity; i++) {
         if (t->mmaps[i].pages == 0 || !t->mmaps[i].memfd_id) {
             continue;
         }
@@ -1323,7 +1368,7 @@ void scheduler_regions_retain_memfds(task_t *t) {
 
 int scheduler_release_shared_range(task_t *t, uint64_t start, uint64_t end) {
     int dropped = 0;
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+    for (uint32_t i = 0; i < t->mmap_capacity; i++) {
         if (t->mmaps[i].pages == 0) {
             break;
         }
@@ -1521,6 +1566,24 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
         return (task_t *)0;
     }
 
+    /* The child's region table is allocated BEFORE the scheduler lock,
+       because kmalloc with interrupts off and a spinlock held is a different
+       promise from the one this allocator makes. The parent is the caller, so
+       its table cannot change size underneath this. */
+    task_t *forking = scheduler_current();
+    uint32_t child_capacity = forking ? forking->mmap_capacity : 0;
+    mmap_region_t *child_regions = 0;
+    if (child_capacity) {
+        child_regions = (mmap_region_t *)kmalloc(sizeof(mmap_region_t) *
+                                                 (size_t)child_capacity);
+        if (!child_regions) {
+            physical_memory_free_contiguous((uint64_t)(uintptr_t)stack_base,
+                                            TASK_STACK_SIZE / 4096);
+            descriptor_table_release(fresh);
+            return (task_t *)0;
+        }
+    }
+
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
 
@@ -1537,6 +1600,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
             irq_restore(flags);
             physical_memory_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
             descriptor_table_release(fresh);
+            kfree(child_regions);
             return NULL;
         }
         slot = task_count++;
@@ -1598,7 +1662,13 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->si_status = 0;
     t->si_address = 0;
 
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+    /* The table allocated above, filled from the parent's. The slot the child
+       is taking may have belonged to a task that mapped things, so whatever is
+       there is given back first. */
+    scheduler_regions_release(t);
+    t->mmaps = child_regions;
+    t->mmap_capacity = child_capacity;
+    for (uint32_t i = 0; i < child_capacity; i++) {
         t->mmaps[i] = parent->mmaps[i];
     }
     scheduler_regions_retain_memfds(t);

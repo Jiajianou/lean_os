@@ -248,7 +248,7 @@ int main(int argc, char* argv[]) {
     return 1;
   }
   std::printf(
-      "[m155] V8 runs on this machine: %d checks, a JavaScript engine out of "
+      "[m156] V8 runs on this machine: %d checks, a JavaScript engine out of "
       "Chromium's own build, compiling to x86-64 at run time on an operating "
       "system it has never heard of.\n",
       checks);

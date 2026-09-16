@@ -135,6 +135,51 @@ static int ordinary(void) {
         return 15;
     }
 
+    /* M156. One reservation, split until it is hundreds of regions - which is
+       what PartitionAlloc does to an address space and what a fixed 128-entry
+       table could not describe. Alternate pages are given different
+       protections, so no two neighbours can merge and the count is the number
+       of pages rather than the number of calls.
+
+       The check is not that a particular number works. It is that the regions
+       are all still THERE afterwards: every writable page holds what was
+       written to it, which is only true if the table kept every split
+       separate. A table that silently lost one would read back a zero. */
+    enum { SPLIT_PAGES = 512 };
+    unsigned char *field = (unsigned char *)mmap(0, SPLIT_PAGES * PAGE,
+                                                 PROT_READ | PROT_WRITE,
+                                                 MAP_ANONYMOUS | MAP_PRIVATE,
+                                                 -1, 0);
+    if (field == (unsigned char *)MAP_FAILED) {
+        return 25;
+    }
+    for (unsigned long i = 0; i < SPLIT_PAGES; i += 2) {
+        if (mprotect(field + i * PAGE, PAGE, PROT_READ) != 0) {
+            printf("vmtest: the %lu'th split of one mapping was refused\n", i);
+            return 25;
+        }
+    }
+    for (unsigned long i = 1; i < SPLIT_PAGES; i += 2) {
+        field[i * PAGE] = (unsigned char)(i & 0xFF);
+    }
+    for (unsigned long i = 1; i < SPLIT_PAGES; i += 2) {
+        if (field[i * PAGE] != (unsigned char)(i & 0xFF)) {
+            printf("vmtest: page %lu of a split mapping lost its contents\n", i);
+            return 25;
+        }
+    }
+    /* And the read-only halves are still readable, which says the splits kept
+       their own protections rather than the last one winning. */
+    for (unsigned long i = 0; i < SPLIT_PAGES; i += 2) {
+        if (field[i * PAGE] != 0) {
+            printf("vmtest: a PROT_READ page of a split mapping is not zero\n");
+            return 25;
+        }
+    }
+    if (munmap(field, SPLIT_PAGES * PAGE) != 0) {
+        return 25;
+    }
+
     void *scratch = mmap(0, 8 * PAGE, PROT_READ | PROT_WRITE,
                          MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (scratch == MAP_FAILED) {

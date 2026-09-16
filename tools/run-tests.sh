@@ -153,7 +153,7 @@ else
 
   if [ "$TIER" = "full" ]; then
     run_stage "the same battery, through the I/O APIC" \
-      bash -c 'LEANOS_IOAPIC=1 ./tools/qemu-serial-test.sh 1200'
+      bash -c 'LEANOS_IOAPIC=1 ./tools/qemu-serial-test.sh 1500'
   fi
 
   if [ "$TIER" = "full" ]; then

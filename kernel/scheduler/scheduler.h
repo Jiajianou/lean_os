@@ -44,7 +44,23 @@ typedef enum {
 
 #define MAX_FILE_DESCRIPTORS 128
 
-#define MAX_MMAP_REGIONS 128
+/* How many regions a process may describe. It is a ceiling rather than a
+   size: the table below is allocated when a process first maps something and
+   doubles from MMAP_REGIONS_INITIAL as it fills, so a process that maps
+   nothing carries a pointer and a count rather than a table.
+
+   It was a fixed array of 128 entries until M155 measured what a browser does
+   to an address space. PartitionAlloc reserves one large range and then
+   commits, decommits and protects sub-ranges of it, and every one of those
+   splits an entry - so the count is not "how many things has this program
+   mapped" but "how many different answers does one range have". V8 exhausts
+   128 before it finishes starting.
+
+   65536 is Linux's own neighbourhood (its default vm.max_map_count is 65530)
+   and costs 2 MB for a process that actually reaches it. Nothing else here
+   has ever needed more than a few dozen. */
+#define MAX_MMAP_REGIONS      65536
+#define MMAP_REGIONS_INITIAL  32
 
 typedef struct {
     uint64_t base;
@@ -174,7 +190,11 @@ typedef struct task {
     int32_t  si_status;
     uint64_t si_address;
     int32_t  si_fault_code;
-    mmap_region_t mmaps[MAX_MMAP_REGIONS];
+    /* Allocated on the first mapping and grown as it fills - see
+       MAX_MMAP_REGIONS above. Zero and NULL until then, which every loop over
+       it tolerates because they are all bounded by mmap_capacity. */
+    mmap_region_t *mmaps;
+    uint32_t mmap_capacity;
     int tgid;
     uint8_t is_thread;
     uint8_t exiting;
@@ -251,6 +271,18 @@ unsigned int scheduler_set_alarm(task_t *t, unsigned int seconds);
 int scheduler_release_shared_range(task_t *t, uint64_t start, uint64_t end);
 
 void scheduler_region_forget_memfd(mmap_region_t *r);
+/* Make room for one more region, growing the table if it is full. Returns 0
+   when t->mmap_capacity is greater than the number of regions in use - so
+   there is a free entry AND a zero-`pages` one after it, which is the
+   terminator every reader stops at - and -1 when the ceiling is reached or
+   the heap refuses. Both of these take the heap lock, so nothing holding it
+   may call them; the scheduler lock is the other way round and that ordering
+   is one-way, because the heap never reaches the scheduler. */
+int scheduler_regions_reserve(task_t *t);
+
+/* Give the table back. Safe on a task that never mapped anything. */
+void scheduler_regions_release(task_t *t);
+
 void scheduler_regions_forget_memfds(task_t *t);
 void scheduler_regions_retain_memfds(task_t *t);
 

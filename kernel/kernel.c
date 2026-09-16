@@ -8908,6 +8908,102 @@ static void boot_selftests_system(void) {
             kernel_log_putc('\n');
         }
     }
+    {
+        os_stat_t cv;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/chromiumv8", (uint64_t)&cv, 0) != 0) {
+            kernel_log_puts("[m156] /bin/chromiumv8 is not on this image - skipped. "
+                       "tools/build-chromium.sh lean_os links it out of V8's "
+                       "own objects and tools/chromium-test.sh installs it.\n\n");
+        } else {
+            int cv_pipe[2];
+            if (do_syscall(SYS_pipe, (uint64_t)cv_pipe, 0, 0) != 0) {
+                panic("M156 self-test: could not make a pipe for the report");
+            }
+            do_syscall(SYS_dup2, (uint64_t)cv_pipe[1], 1, 0);
+            do_syscall(SYS_dup2, (uint64_t)cv_pipe[1], 2, 0);
+
+            size_t cv_bytes = 0;
+            uint8_t *cv_image = read_program(PATH_BIN_DIRECTORY "chromiumv8",
+                                             &cv_bytes);
+            if (!cv_image) {
+                panic("M156 self-test: /bin/chromiumv8 could not be read");
+            }
+            const char *cv_argv[] = {PATH_BIN_DIRECTORY "chromiumv8", 0};
+            task_t *cvt = process_spawnv("chromiumv8", cv_image, cv_bytes,
+                                         cv_argv);
+            kfree(cv_image);
+
+            static char cv_out[8192];
+            size_t cv_got = 0;
+            long cv_rc = -1;
+            /* A JavaScript engine compiles a hot loop and then collects a heap
+               of 200,000 objects, which is real work rather than a handful of
+               system calls - so this deadline is the longest in the battery. */
+            long cv_deadline = (long)pit_get_ticks() + 600 * PIT_HZ;
+            for (;;) {
+                long avail = do_syscall(SYS_pipe_poll, (uint64_t)cv_pipe[0], 0, 0);
+                if (avail > 0 && cv_got < sizeof(cv_out) - 1) {
+                    size_t room = sizeof(cv_out) - 1 - cv_got;
+                    long n = do_syscall(SYS_read, (uint64_t)cv_pipe[0],
+                                        (uint64_t)(cv_out + cv_got),
+                                        (uint64_t)((size_t)avail < room
+                                                   ? (size_t)avail : room));
+                    if (n > 0) {
+                        cv_got += (size_t)n;
+                    }
+                    continue;
+                }
+                long done = cvt ? do_syscall(SYS_wait_nb, (uint64_t)cvt->id, 0, 0)
+                                : -1;
+                if (done != -2) {
+                    cv_rc = done;
+                    long n;
+                    while ((n = do_syscall(SYS_pipe_poll, (uint64_t)cv_pipe[0], 0, 0)) > 0 &&
+                           cv_got < sizeof(cv_out) - 1) {
+                        size_t room = sizeof(cv_out) - 1 - cv_got;
+                        long r = do_syscall(SYS_read, (uint64_t)cv_pipe[0],
+                                            (uint64_t)(cv_out + cv_got),
+                                            (uint64_t)((size_t)n < room ? (size_t)n : room));
+                        if (r <= 0) {
+                            break;
+                        }
+                        cv_got += (size_t)r;
+                    }
+                    break;
+                }
+                if ((long)pit_get_ticks() > cv_deadline) {
+                    break;
+                }
+                do_syscall(SYS_yield, 0, 0, 0);
+            }
+            cv_out[cv_got] = '\0';
+            do_syscall(SYS_close, (uint64_t)cv_pipe[0], 0, 0);
+            do_syscall(SYS_close, (uint64_t)cv_pipe[1], 0, 0);
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[1]);
+            scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[2]);
+            scheduler_current()->descriptor_table->slots[2].type = FILE_DESCRIPTOR_STDOUT;
+
+            for (char *line = cv_out; *line;) {
+                char *end = line;
+                while (*end && *end != '\n') {
+                    end++;
+                }
+                char saved = *end;
+                *end = '\0';
+                kernel_log_puts(line);
+                kernel_log_putc('\n');
+                *end = saved;
+                line = saved ? end + 1 : end;
+            }
+            if (cv_rc != 0) {
+                panic("M156 self-test: V8 does not work on this machine - "
+                      "see the chromiumv8 lines above");
+            }
+            kernel_log_putc('\n');
+        }
+    }
+
 
     {
         os_stat_t ct;
@@ -10391,7 +10487,9 @@ static void boot_selftests_system(void) {
         kernel_log_puts(", and all four faults that must stay fatal - executing a "
                    "non-executable page, writing to one mprotect made read-only, touching "
                    "a guard page, and touching far below the stack pointer - still "
-                   "killing only the program that made them - self-test passed (");
+                   "killing only the program that made them - and one mapping split "
+                   "into 512 regions that all kept their own contents and protections "
+                   "- self-test passed (");
         kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
         kernel_log_puts(" ms).\n\n");
     }

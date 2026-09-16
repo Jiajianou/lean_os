@@ -558,15 +558,14 @@ PROBE
     [ "$JIT" -gt 20 ]
     check $? "and TurboFan, Ignition and the regular expression assembler in it ($JIT symbols)"
 
-    # NOT installed onto the image, and that is the whole difference between
-    # what M155 finished and what it did not. V8 builds, links and starts on
-    # this machine and interprets JavaScript; it stops inside PartitionAlloc,
-    # which calls mprotect on sub-ranges of one big reservation often enough
-    # to exhaust this kernel's fixed 128-entry mmap region table. That is a
-    # kernel data structure question rather than a porting one - see the M155
-    # commit body - so there is no boot self-test running /bin/chromiumv8
-    # yet, and a program on the image that nothing runs would be 51 MB of
-    # pretending.
+    IMAGE="$ROOT/build/os-image.bin"
+    if [ ! -f "$IMAGE" ]; then
+      echo "chromium-test: no $IMAGE - run make, then this again"
+    else
+      make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
+      "$ROOT/build/leanfs-put" "$IMAGE" "$V8PROGRAM" /bin/chromiumv8 > /dev/null
+      check $? "installed as /bin/chromiumv8 - the [m156] boot self-test runs it"
+    fi
   fi
 fi
 

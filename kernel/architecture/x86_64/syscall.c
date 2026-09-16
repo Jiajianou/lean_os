@@ -2537,7 +2537,7 @@ static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32
                                 int handle, uint32_t file_page, int shared, int merge,
                                 uint8_t memfd_id, uint16_t memfd_gen) {
     uint64_t end = base + (uint64_t)pages * PAGE_SIZE;
-    for (int i = 0; merge && i < MAX_MMAP_REGIONS; i++) {
+    for (uint32_t i = 0; merge && i < t->mmap_capacity; i++) {
         if (t->mmaps[i].pages == 0) {
             break;
         }
@@ -2548,7 +2548,7 @@ static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32
         uint64_t rend = rstart + (uint64_t)t->mmaps[i].pages * PAGE_SIZE;
         if (rend == base) {
             t->mmaps[i].pages += pages;
-            if (i + 1 < MAX_MMAP_REGIONS &&
+            if (i + 1 < t->mmap_capacity &&
                 mmap_mergeable(&t->mmaps[i + 1], prot, handle, shared) &&
                 t->mmaps[i + 1].base == end) {
                 t->mmaps[i].pages += t->mmaps[i + 1].pages;
@@ -2562,10 +2562,16 @@ static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32
             return 0;
         }
     }
+    /* Room for one more, which may mean a bigger table. Growing here rather
+       than at the call sites keeps the rule in one place: after this returns
+       0 there is a zero-`pages` entry to write into. */
+    if (scheduler_regions_reserve(t) != 0) {
+        return -1;
+    }
     int free_slot = -1;
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+    for (uint32_t i = 0; i < t->mmap_capacity; i++) {
         if (t->mmaps[i].pages == 0) {
-            free_slot = i;
+            free_slot = (int)i;
             break;
         }
     }
@@ -2594,24 +2600,35 @@ static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32
 }
 
 static void mmap_slot_remove(task_t *t, int index) {
-    scheduler_region_forget_memfd(&t->mmaps[index]);
-    for (int i = index; i < MAX_MMAP_REGIONS - 1; i++) {
-        t->mmaps[i] = t->mmaps[i + 1];
+    if (t->mmap_capacity == 0) {
+        return;
     }
-    t->mmaps[MAX_MMAP_REGIONS - 1].base = 0;
-    t->mmaps[MAX_MMAP_REGIONS - 1].pages = 0;
-    t->mmaps[MAX_MMAP_REGIONS - 1].prot = 0;
-    t->mmaps[MAX_MMAP_REGIONS - 1].handle = -1;
-    t->mmaps[MAX_MMAP_REGIONS - 1].file_page = 0;
-    t->mmaps[MAX_MMAP_REGIONS - 1].memfd_id = 0;
-    t->mmaps[MAX_MMAP_REGIONS - 1].memfd_gen = 0;
-    t->mmaps[MAX_MMAP_REGIONS - 1].shared = 0;
+    uint32_t last = t->mmap_capacity - 1;
+    scheduler_region_forget_memfd(&t->mmaps[index]);
+    for (uint32_t i = (uint32_t)index; i < last; i++) {
+        t->mmaps[i] = t->mmaps[i + 1];
+        /* The table is compacted, so everything past the first zero-`pages`
+           entry is already zero. Once that entry has been moved down there
+           is nothing left to shift, which is what keeps an unmap from
+           copying a megabyte when the table has grown to one. */
+        if (t->mmaps[i].pages == 0) {
+            return;
+        }
+    }
+    t->mmaps[last].base = 0;
+    t->mmaps[last].pages = 0;
+    t->mmaps[last].prot = 0;
+    t->mmaps[last].handle = -1;
+    t->mmaps[last].file_page = 0;
+    t->mmaps[last].memfd_id = 0;
+    t->mmaps[last].memfd_gen = 0;
+    t->mmaps[last].shared = 0;
 }
 
 static uint64_t mmap_find_gap(task_t *t, uint32_t pages) {
     uint64_t need = (uint64_t)pages * PAGE_SIZE;
     uint64_t candidate = USER_MMAP_BASE;
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+    for (uint32_t i = 0; i < t->mmap_capacity; i++) {
         if (t->mmaps[i].pages == 0) {
             break;
         }
@@ -2632,7 +2649,7 @@ static uint64_t mmap_find_gap(task_t *t, uint32_t pages) {
 
 static int mmap_range_is_free(task_t *t, uint64_t base, uint64_t pages) {
     uint64_t end = base + pages * PAGE_SIZE;
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+    for (uint32_t i = 0; i < t->mmap_capacity; i++) {
         if (t->mmaps[i].pages == 0) {
             break;
         }
@@ -2781,7 +2798,7 @@ static long sys_munmap(uint64_t address, uint64_t length, uint64_t a3, uint64_t 
     }
     task_t *self = scheduler_vm_owner(scheduler_current());
 
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+    for (uint32_t i = 0; i < self->mmap_capacity; i++) {
         if (self->mmaps[i].pages == 0) {
             break;
         }
@@ -2848,7 +2865,7 @@ static long sys_msync(uint64_t address, uint64_t length, uint64_t flags, uint64_
         return -1;
     }
     task_t *self = scheduler_vm_owner(scheduler_current());
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+    for (uint32_t i = 0; i < self->mmap_capacity; i++) {
         if (self->mmaps[i].pages == 0) {
             break;
         }
@@ -2865,7 +2882,7 @@ static long sys_msync(uint64_t address, uint64_t length, uint64_t flags, uint64_
 }
 
 static int mmap_split_for(task_t *t, uint64_t address, uint64_t end) {
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+    for (uint32_t i = 0; i < t->mmap_capacity; i++) {
         if (t->mmaps[i].pages == 0) {
             break;
         }
@@ -2950,7 +2967,7 @@ static long sys_mprotect(uint64_t address, uint64_t length, uint64_t prot, uint6
         }
     } else {
         uint64_t covered = 0;
-        for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        for (uint32_t i = 0; i < self->mmap_capacity; i++) {
             if (self->mmaps[i].pages == 0) {
                 break;
             }
@@ -2970,7 +2987,7 @@ static long sys_mprotect(uint64_t address, uint64_t length, uint64_t prot, uint6
         }
     }
     if (in_mmap) {
-        for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        for (uint32_t i = 0; i < self->mmap_capacity; i++) {
             if (self->mmaps[i].pages == 0) {
                 break;
             }
@@ -4732,16 +4749,11 @@ static long sys_execve(isr_regs_t *regs) {
     self->heap_mapped_end = USER_HEAP_START;
     self->shared_memory_next_vaddr = USER_SHARED_MEMORY_BASE;
     scheduler_regions_forget_memfds(self);
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
-        self->mmaps[i].base = 0;
-        self->mmaps[i].pages = 0;
-        self->mmaps[i].prot = 0;
-        self->mmaps[i].handle = -1;
-        self->mmaps[i].file_page = 0;
-        self->mmaps[i].shared = 0;
-        self->mmaps[i].memfd_id = 0;
-        self->mmaps[i].memfd_gen = 0;
-    }
+    /* An exec keeps nothing of the old address space, so the table goes back
+       to the heap rather than being cleared in place: the program replacing
+       this one may map nothing at all, and the one being replaced may have
+       grown the table to megabytes. */
+    scheduler_regions_release(self);
     self->fs_base = 0;
 
     for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
