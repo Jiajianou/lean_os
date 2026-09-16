@@ -233,6 +233,7 @@ REQUIRED_MARKERS=(
   "chromiummojo: done"
   "[m150] Chromium's //url and //net run on this machine:"
   "[m151] Chromium's //net opens a connection here:"
+  "[m152] https on this machine:"
   "chromiumnet: done"
   "mathltest: done"
   "[m125] lvgl rendered"

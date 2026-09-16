@@ -439,6 +439,15 @@ Several instruments, and none of them subsumes another:
   configuration with a port of zero - right about the address and a lie
   about the port, and useless to anything that binds to port zero and then
   needs to say where it is.
+- **And https.** **BoringSSL** builds here, x86-64 assembly and all, and
+  `/bin/chromiumnet` uses both halves of it: it generates a **P-256
+  certificate** when it starts - key, serial, validity, a subjectAltName
+  for `127.0.0.1`, signed with SHA-256 - serves TLS on this kernel's
+  loopback with it, and then fetches `https://127.0.0.1/` through
+  **Chromium's own stack**, which negotiates **TLS 1.3 with
+  CHACHA20-POLY1305** and verifies the certificate against a trust anchor
+  added through `CertVerifierWithUpdatableProc` - the interface a browser
+  uses for enterprise roots, not a test hook.
 - **A libm for the format the hardware has.** `long double` on x86-64 is
   the x87's 80-bit extended type, and this libc has the C99 set for it -
   fifty-two functions, graded to the unit in the last place of a 64-bit

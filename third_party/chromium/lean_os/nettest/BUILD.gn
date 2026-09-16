@@ -8,6 +8,7 @@ executable("nettest") {
   deps = [
     "//base",
     "//net",
+    "//third_party/boringssl",
     "//url",
   ]
 }

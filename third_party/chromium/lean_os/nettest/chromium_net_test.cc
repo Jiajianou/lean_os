@@ -38,6 +38,15 @@
 #include "net/proxy_resolution/proxy_config_with_annotation.h"
 #include "net/proxy_resolution/configured_proxy_resolution_service.h"
 #include "net/proxy_resolution/proxy_config_service.h"
+#include "third_party/boringssl/src/include/openssl/bn.h"
+#include "third_party/boringssl/src/include/openssl/ec_key.h"
+#include "third_party/boringssl/src/include/openssl/evp.h"
+#include "third_party/boringssl/src/include/openssl/nid.h"
+#include "third_party/boringssl/src/include/openssl/rand.h"
+#include "third_party/boringssl/src/include/openssl/ssl.h"
+#include "third_party/boringssl/src/include/openssl/x509.h"
+#include "third_party/boringssl/src/include/openssl/x509v3.h"
+
 #include "net/base/address_list.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/io_buffer.h"
@@ -50,6 +59,11 @@
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "net/url_request/url_request.h"
 #include "net/url_request/url_request_context.h"
+#include "net/cert/cert_verifier.h"
+#include "net/cert/x509_util.h"
+#include "net/ssl/ssl_connection_status_flags.h"
+#include "net/cert/cert_verify_proc.h"
+#include "third_party/boringssl/src/pki/parsed_certificate.h"
 #include "net/url_request/url_request_context_builder.h"
 #include "url/gurl.h"
 
@@ -492,6 +506,212 @@ bool HttpRequestIsAnswered() {
   return collector.status() == 200 && collector.body() == kBody;
 }
 
+// https, which is the half of a browser's network stack that nothing above
+// has touched. Both ends are here: the server is BoringSSL directly, on a
+// certificate this program generates when it starts, and the client is
+// Chromium's own stack with that certificate's issuer added as a trust
+// anchor - which is the production API for it, not a test hook.
+struct TlsIdentity {
+  bssl::UniquePtr<EVP_PKEY> key;
+  bssl::UniquePtr<X509> certificate;
+  std::string der;
+};
+
+bool MakeSelfSignedCertificate(TlsIdentity* identity) {
+  bssl::UniquePtr<EC_KEY> ec(
+      EC_KEY_new_by_curve_name(NID_X9_62_prime256v1));
+  if (!ec || !EC_KEY_generate_key(ec.get())) {
+    return false;
+  }
+  bssl::UniquePtr<EVP_PKEY> key(EVP_PKEY_new());
+  if (!key || !EVP_PKEY_assign_EC_KEY(key.get(), ec.release())) {
+    return false;
+  }
+  bssl::UniquePtr<X509> certificate(X509_new());
+  if (!certificate) {
+    return false;
+  }
+  X509_set_version(certificate.get(), 2 /* X509v3 */);
+
+  bssl::UniquePtr<BIGNUM> serial(BN_new());
+  if (!serial || !BN_rand(serial.get(), 63, BN_RAND_TOP_ANY,
+                          BN_RAND_BOTTOM_ANY) ||
+      !BN_to_ASN1_INTEGER(serial.get(),
+                          X509_get_serialNumber(certificate.get()))) {
+    return false;
+  }
+
+  /* An hour either side of now, so a clock that is a little out still
+     produces a certificate this machine considers current - and so that a
+     clock that is WILDLY out fails the check rather than hiding it. */
+  X509_gmtime_adj(X509_getm_notBefore(certificate.get()), -3600);
+  X509_gmtime_adj(X509_getm_notAfter(certificate.get()), 3600);
+
+  X509_NAME* name = X509_get_subject_name(certificate.get());
+  if (!X509_NAME_add_entry_by_txt(
+          name, "CN", MBSTRING_ASC,
+          reinterpret_cast<const uint8_t*>("lean_os self-test"), -1, -1, 0) ||
+      !X509_set_issuer_name(certificate.get(), name) ||
+      !X509_set_pubkey(certificate.get(), key.get())) {
+    return false;
+  }
+
+  /* Chromium will not look at a common name, so the address this server
+     answers on has to be in a subjectAltName. */
+  bssl::UniquePtr<X509_EXTENSION> alternative_name(X509V3_EXT_nconf_nid(
+      nullptr, nullptr, NID_subject_alt_name, "IP:127.0.0.1"));
+  bssl::UniquePtr<X509_EXTENSION> basic_constraints(X509V3_EXT_nconf_nid(
+      nullptr, nullptr, NID_basic_constraints, "critical,CA:TRUE"));
+  if (!alternative_name || !basic_constraints ||
+      !X509_add_ext(certificate.get(), alternative_name.get(), -1) ||
+      !X509_add_ext(certificate.get(), basic_constraints.get(), -1)) {
+    return false;
+  }
+
+  if (!X509_sign(certificate.get(), key.get(), EVP_sha256())) {
+    return false;
+  }
+
+  uint8_t* encoded = nullptr;
+  int length = i2d_X509(certificate.get(), &encoded);
+  if (length <= 0) {
+    return false;
+  }
+  identity->der.assign(reinterpret_cast<char*>(encoded),
+                       static_cast<size_t>(length));
+  OPENSSL_free(encoded);
+  identity->key = std::move(key);
+  identity->certificate = std::move(certificate);
+  return true;
+}
+
+struct TlsServer {
+  int listener = -1;
+  uint16_t port = 0;
+  pthread_t thread = 0;
+  SSL_CTX* context = nullptr;
+};
+
+void* ServeTlsOnce(void* argument) {
+  TlsServer* server = static_cast<TlsServer*>(argument);
+  int connection = accept(server->listener, nullptr, nullptr);
+  if (connection < 0) {
+    return nullptr;
+  }
+  SSL* ssl = SSL_new(server->context);
+  SSL_set_fd(ssl, connection);
+  if (SSL_accept(ssl) == 1) {
+    char request[1024];
+    SSL_read(ssl, request, sizeof(request));
+    char response[512];
+    int n = std::snprintf(
+        response, sizeof(response),
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+        "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
+        sizeof(kBody) - 1, kBody);
+    SSL_write(ssl, response, n);
+    SSL_shutdown(ssl);
+  }
+  SSL_free(ssl);
+  close(connection);
+  return nullptr;
+}
+
+bool StartTlsServer(TlsServer* server, const TlsIdentity& identity) {
+  server->context = SSL_CTX_new(TLS_method());
+  if (!server->context ||
+      !SSL_CTX_use_certificate(server->context, identity.certificate.get()) ||
+      !SSL_CTX_use_PrivateKey(server->context, identity.key.get())) {
+    return false;
+  }
+  server->listener = socket(AF_INET, SOCK_STREAM, 0);
+  if (server->listener < 0) {
+    return false;
+  }
+  struct sockaddr_in address;
+  std::memset(&address, 0, sizeof(address));
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  if (bind(server->listener, (struct sockaddr*)&address, sizeof(address)) != 0 ||
+      listen(server->listener, 4) != 0) {
+    return false;
+  }
+  socklen_t length = sizeof(address);
+  if (getsockname(server->listener, (struct sockaddr*)&address, &length) != 0) {
+    return false;
+  }
+  server->port = ntohs(address.sin_port);
+  return pthread_create(&server->thread, nullptr, ServeTlsOnce, server) == 0;
+}
+
+bool HttpsRequestIsAnswered() {
+  TlsIdentity identity;
+  if (!MakeSelfSignedCertificate(&identity)) {
+    std::printf("chromiumnet:   could not make a certificate\n");
+    return false;
+  }
+  std::printf("chromiumnet:   made a P-256 certificate, %zu bytes of DER\n",
+              identity.der.size());
+
+  TlsServer server;
+  if (!StartTlsServer(&server, identity)) {
+    std::printf("chromiumnet:   could not start the TLS server\n");
+    return false;
+  }
+
+  // The production way to say "trust this one": a CertVerifier that can be
+  // given instance parameters, and an additional trust anchor in them.
+  std::shared_ptr<const bssl::ParsedCertificate> anchor =
+      bssl::ParsedCertificate::Create(
+          net::x509_util::CreateCryptoBuffer(
+              base::as_byte_span(identity.der)),
+          {}, nullptr);
+  if (!anchor) {
+    std::printf("chromiumnet:   the certificate did not parse\n");
+    return false;
+  }
+  net::CertVerifyProc::InstanceParams parameters;
+  parameters.additional_trust_anchors.push_back(anchor);
+
+  std::unique_ptr<net::CertVerifierWithUpdatableProc> verifier =
+      net::CertVerifier::CreateDefaultWithoutCaching(nullptr);
+  verifier->UpdateVerifyProcData(nullptr, {}, parameters);
+
+  net::URLRequestContextBuilder builder;
+  builder.set_proxy_resolution_service(
+      net::ConfiguredProxyResolutionService::CreateDirect());
+  builder.SetCertVerifier(std::move(verifier));
+  std::unique_ptr<net::URLRequestContext> context = builder.Build();
+
+  std::string url = "https://127.0.0.1:" + std::to_string(server.port) + "/";
+  std::printf("chromiumnet:   GET %s\n", url.c_str());
+
+  base::RunLoop loop;
+  Collector collector(&loop);
+  std::unique_ptr<net::URLRequest> request = context->CreateRequest(
+      GURL(url), net::DEFAULT_PRIORITY, &collector, kAnnotation,
+      net::handles::kInvalidNetworkHandle);
+  request->Start();
+  loop.Run();
+
+  pthread_join(server.thread, nullptr);
+  close(server.listener);
+  SSL_CTX_free(server.context);
+
+  if (collector.error() != net::OK) {
+    std::printf("chromiumnet:   net error %d\n", collector.error());
+    return false;
+  }
+  std::printf("chromiumnet:   negotiated TLS version %d, cipher suite 0x%04x\n",
+              net::SSLConnectionStatusToVersion(
+                  request->ssl_info().connection_status),
+              net::SSLConnectionStatusToCipherSuite(
+                  request->ssl_info().connection_status));
+  return collector.status() == 200 && collector.body() == kBody &&
+         request->ssl_info().is_valid();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -524,6 +744,9 @@ int main(int argc, char** argv) {
         SocketsConnectOverLoopback());
   Check("a net::URLRequest fetched a page and parsed the response",
         HttpRequestIsAnswered());
+  Check("and an https one, against BoringSSL and a certificate this "
+        "program made",
+        HttpsRequestIsAnswered());
 
   if (failures != 0) {
     std::printf("chromiumnet: FAILED - %d of %d checks\n", failures, checks);
@@ -535,6 +758,11 @@ int main(int argc, char** argv) {
       "getifaddrs, this machine's nameservers through res_ninit, and a "
       "proxy configuration that is honestly direct.\n",
       checks);
+  std::printf(
+      "[m152] https on this machine: a P-256 certificate generated here by "
+      "BoringSSL, a TLS server on this kernel's loopback, and Chromium's "
+      "own stack verifying it against a trust anchor added through the "
+      "same interface a browser uses.\n");
   std::printf(
       "[m151] Chromium's //net opens a connection here: a TCPServerSocket "
       "and a TCPClientSocket met over this kernel's loopback, and a "

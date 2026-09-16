@@ -449,13 +449,41 @@ PROBE
     [ "$RESOLV" = "1" ]
     check $? "and exactly one res_ninit, this libc's ($RESOLV)"
 
+    # M152. BoringSSL, which is where a browser's https lives. Its assembly
+    # is generated per-architecture, so an object from the _asm target being
+    # x86-64 ELF is the claim that matters - a C-only fallback would compile
+    # for anything.
+    BSSL=$(find "$SRC/out/$OUT_NAME/obj/third_party/boringssl" -name "*.o" \
+           2>/dev/null | wc -l | tr -d ' ')
+    [ "$BSSL" -gt 300 ]
+    check $? "BoringSSL built $BSSL objects for this target"
+
+    BSSL_ASM=$(find "$SRC/out/$OUT_NAME/obj/third_party/boringssl/boringssl_asm" \
+               -name "*.o" 2>/dev/null | head -1)
+    if [ -z "$BSSL_ASM" ]; then
+      echo "chromium-test: no BoringSSL assembly objects - skipping"
+    else
+      "${PREFIX}readelf" -h "$BSSL_ASM" |
+        grep -q "Advanced Micro Devices X86-64"
+      check $? "including its x86-64 assembly ($(basename "$BSSL_ASM"))"
+    fi
+
+    # Both ends. SSL_accept is the server half this program runs itself and
+    # SSL_do_handshake is what Chromium's SSLClientSocket drives - SSL_connect
+    # is not here because nothing calls it and the link garbage-collects what
+    # nothing calls, which is itself worth knowing.
+    TLS=$("${PREFIX}nm" "$NETPROGRAM" |
+          grep -cE " [Tt] (SSL_accept|SSL_do_handshake)\$")
+    [ "$TLS" = "2" ]
+    check $? "and the program carries both ends of BoringSSL's handshake ($TLS)"
+
     IMAGE="$ROOT/build/os-image.bin"
     if [ ! -f "$IMAGE" ]; then
       echo "chromium-test: no $IMAGE - run make, then this again"
     else
       make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
       "$ROOT/build/leanfs-put" "$IMAGE" "$NETPROGRAM" /bin/chromiumnet > /dev/null
-      check $? "installed as /bin/chromiumnet - the [m150] boot self-test runs it"
+      check $? "installed as /bin/chromiumnet - the [m150] to [m152] boot self-tests run it"
     fi
   fi
 fi
