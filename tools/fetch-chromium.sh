@@ -50,6 +50,17 @@ if [ ! -d "$SRC" ]; then
   (cd "$WORK" && fetch --no-history chromium) || exit 1
 fi
 
+# The checkout has to be a LINUX one even though the host is a Mac, because
+# that is what target_os = "linux" in args.gn means: DEPS gates
+# third_party/fontconfig, third_party/wayland and a dozen others on
+# checkout_linux, and `fetch chromium` on a Mac leaves every one of them an
+# empty directory with a BUILD.gn in it. //base, //mojo, //url and //net do
+# not notice; //services/network stops on a missing scanner.c.
+if ! grep -q "target_os" "$WORK/.gclient" 2>/dev/null; then
+  echo "fetch-chromium: asking for the Linux half of the checkout"
+  printf "target_os = ['linux']\ntarget_os_only = True\n" >> "$WORK/.gclient"
+fi
+
 HAVE=$(cd "$SRC" && git rev-parse HEAD 2>/dev/null)
 if [ "$HAVE" != "$REVISION" ]; then
   echo "fetch-chromium: syncing to $REVISION"

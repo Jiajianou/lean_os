@@ -34,6 +34,19 @@ HAVE=$(cd "$SRC" && git rev-parse HEAD 2>/dev/null)
 [ "$REVISION" = "$HAVE" ]
 check $? "the checkout is at the revision $VENDORED pins"
 
+# And that it is a LINUX checkout, which is what target_os = "linux" in
+# args.gn means. DEPS gates a dozen sub-repositories on checkout_linux, and
+# `fetch chromium` on a Mac leaves every one of them an empty directory with
+# a BUILD.gn in it - which //base, //mojo, //url and //net never notice and
+# //services/network stops dead on. M153 measured that; the fix is in
+# tools/fetch-chromium.sh and this is the check that says it took.
+MISSING=""
+for d in third_party/fontconfig/src third_party/wayland/src; do
+  [ -d "$SRC/$d" ] && [ -n "$(ls -A "$SRC/$d" 2>/dev/null)" ] || MISSING="$MISSING $d"
+done
+[ -z "$MISSING" ]
+check $? "and it has the Linux half of its sub-repositories${MISSING:+ - missing:$MISSING}"
+
 # Does the fork still fit the pinned revision? The way to ask is to reset the
 # files the series touches and apply it in order - which is exactly what
 # tools/build-chromium.sh does, and for the reason M145 found: two patches can

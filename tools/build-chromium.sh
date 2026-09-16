@@ -133,6 +133,18 @@ clang_base_path = "$CLANG_BASE"
 clang_version = "$CLANG_VER"
 ozone_extra_path = "//lean_os/ozone_extra.gni"
 
+# Ozone's platform backends, which are the one place a Linux GN
+# configuration reaches for a host library this machine has no idea about:
+# the automatic selection turns on X11 and Wayland, and the Wayland one
+# wants third_party/wayland, which this checkout does not even contain.
+# Headless is the one that needs nothing, and this OS's compositor is not
+# ozone's to talk to anyway.
+ozone_auto_platforms = false
+ozone_platform = "headless"
+ozone_platform_headless = true
+ozone_platform_x11 = false
+ozone_platform_wayland = false
+
 is_debug = false
 is_component_build = false
 symbol_level = 0
