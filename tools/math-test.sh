@@ -50,7 +50,14 @@ $HOSTCC -O2 -std=c11 -Wall -Wextra -Werror -c \
   -o "$OUT/math.o" "$SRC" || exit 1
 $HOSTCC -O2 -std=c11 -Wall -Wextra -Werror -c \
   -o "$OUT/main.o" tests/math/main.c || exit 1
-$HOSTCC -o "$OUT/math-test" "$OUT/math.o" "$OUT/main.o" -lm || exit 1
+# The one translation unit that sees THIS libc's <math.h>, so that the XSI
+# constants can be compared against what the host's libm computes rather than
+# against the host's copy of the same decimal literals. main.c above is
+# deliberately compiled without the -I.
+$HOSTCC -O2 -std=c11 -Wall -Wextra -Werror -c \
+  -I user_space/libc/include \
+  -o "$OUT/constants.o" tests/math/constants.c || exit 1
+$HOSTCC -o "$OUT/math-test" "$OUT/math.o" "$OUT/main.o" "$OUT/constants.o" -lm || exit 1
 
 "$OUT/math-test" "$CASES"
 rc=$?

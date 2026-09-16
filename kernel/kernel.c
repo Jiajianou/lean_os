@@ -9101,6 +9101,103 @@ static void boot_selftests_system(void) {
         }
     }
 
+    {
+        os_stat_t cc;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/chromiumcc", (uint64_t)&cc, 0) != 0) {
+            kernel_log_puts("[m158] /bin/chromiumcc is not on this image - skipped. "
+                       "tools/build-chromium.sh lean_os links it out of //cc's "
+                       "own objects and tools/chromium-test.sh installs it.\n\n");
+        } else {
+            int cc_pipe[2];
+            if (do_syscall(SYS_pipe, (uint64_t)cc_pipe, 0, 0) != 0) {
+                panic("M158 self-test: could not make a pipe for the report");
+            }
+            do_syscall(SYS_dup2, (uint64_t)cc_pipe[1], 1, 0);
+            do_syscall(SYS_dup2, (uint64_t)cc_pipe[1], 2, 0);
+
+            size_t cc_bytes = 0;
+            uint8_t *cc_image = read_program(PATH_BIN_DIRECTORY "chromiumcc",
+                                             &cc_bytes);
+            if (!cc_image) {
+                panic("M158 self-test: /bin/chromiumcc could not be read");
+            }
+            const char *cc_argv[] = {PATH_BIN_DIRECTORY "chromiumcc", 0};
+            task_t *cct = process_spawnv("chromiumcc", cc_image, cc_bytes,
+                                         cc_argv);
+            kfree(cc_image);
+
+            static char cc_out[8192];
+            size_t cc_got = 0;
+            long cc_rc = -1;
+            /* Eight tiles of at most 4096 pixels each, which is less drawing
+               than [m157] does. The deadline is the same size anyway because
+               what dominates it is starting a program with //base and
+               PartitionAlloc in it on an emulated CPU, not the rastering. */
+            long cc_deadline = (long)pit_get_ticks() + 240 * PIT_HZ;
+            for (;;) {
+                long avail = do_syscall(SYS_pipe_poll, (uint64_t)cc_pipe[0], 0, 0);
+                if (avail > 0 && cc_got < sizeof(cc_out) - 1) {
+                    size_t room = sizeof(cc_out) - 1 - cc_got;
+                    long n = do_syscall(SYS_read, (uint64_t)cc_pipe[0],
+                                        (uint64_t)(cc_out + cc_got),
+                                        (uint64_t)((size_t)avail < room
+                                                   ? (size_t)avail : room));
+                    if (n > 0) {
+                        cc_got += (size_t)n;
+                    }
+                    continue;
+                }
+                long done = cct ? do_syscall(SYS_wait_nb, (uint64_t)cct->id, 0, 0)
+                                : -1;
+                if (done != -2) {
+                    cc_rc = done;
+                    long n;
+                    while ((n = do_syscall(SYS_pipe_poll, (uint64_t)cc_pipe[0], 0, 0)) > 0 &&
+                           cc_got < sizeof(cc_out) - 1) {
+                        size_t room = sizeof(cc_out) - 1 - cc_got;
+                        long r = do_syscall(SYS_read, (uint64_t)cc_pipe[0],
+                                            (uint64_t)(cc_out + cc_got),
+                                            (uint64_t)((size_t)n < room ? (size_t)n : room));
+                        if (r <= 0) {
+                            break;
+                        }
+                        cc_got += (size_t)r;
+                    }
+                    break;
+                }
+                if ((long)pit_get_ticks() > cc_deadline) {
+                    break;
+                }
+                do_syscall(SYS_yield, 0, 0, 0);
+            }
+            cc_out[cc_got] = '\0';
+            do_syscall(SYS_close, (uint64_t)cc_pipe[0], 0, 0);
+            do_syscall(SYS_close, (uint64_t)cc_pipe[1], 0, 0);
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[1]);
+            scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[2]);
+            scheduler_current()->descriptor_table->slots[2].type = FILE_DESCRIPTOR_STDOUT;
+
+            for (char *line = cc_out; *line;) {
+                char *end = line;
+                while (*end && *end != '\n') {
+                    end++;
+                }
+                char saved = *end;
+                *end = '\0';
+                kernel_log_puts(line);
+                kernel_log_putc('\n');
+                *end = saved;
+                line = saved ? end + 1 : end;
+            }
+            if (cc_rc != 0) {
+                panic("M158 self-test: cc does not raster correctly on this "
+                      "machine - see the chromiumcc lines above");
+            }
+            kernel_log_putc('\n');
+        }
+    }
+
 
     {
         os_stat_t ct;

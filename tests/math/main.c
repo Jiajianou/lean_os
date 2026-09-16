@@ -668,6 +668,59 @@ int main(int argc, char **argv) {
                "nan/nanf");
     }
 
+    /* The XSI constants. They are not functions, so the sweep above cannot
+       see them, and they failed to exist for ninety-nine milestones without
+       anything noticing - until pffft, reached through WebRTC in Chromium's
+       //cc graph, asked for M_SQRT2 in a build that had already compiled a
+       long double libm. The oracle is the host's libm rather than the host's
+       own M_ macros: comparing two headers' decimal literals would only say
+       that somebody copied them correctly, and what is worth knowing is
+       whether the number IS the number. */
+    {
+        extern const double lean_math_constants[];
+        extern const char *const lean_math_constant_names[];
+        extern const int lean_math_constant_count;
+
+        const double pi = acos(-1.0);
+        const double oracle[] = {
+            exp(1.0), 1.0 / log(2.0), 1.0 / log(10.0), log(2.0), log(10.0),
+            pi, pi / 2.0, pi / 4.0, 1.0 / pi, 2.0 / pi,
+            2.0 / sqrt(pi), sqrt(2.0), sqrt(0.5),
+        };
+        const int oracle_count = (int)(sizeof(oracle) / sizeof(oracle[0]));
+
+        int constant_failures = 0;
+        if (oracle_count != lean_math_constant_count) {
+            printf("FAIL %-10s this libc declares %d of them and this test "
+                   "has %d oracles\n", "M_*",
+                   lean_math_constant_count, oracle_count);
+            constant_failures++;
+        } else {
+            for (int i = 0; i < oracle_count; i++) {
+                /* Two units in the last place. A decimal literal that rounds
+                   to the right double is exact; the derived ones - 2/sqrt(pi)
+                   above all - can sit one ulp away from a correctly written
+                   constant, and a mistyped digit that mattered at all would
+                   be further out than this. */
+                double ours = lean_math_constants[i];
+                double theirs = oracle[i];
+                double tolerance = 2.0 * (nextafter(theirs, INFINITY) - theirs);
+                if (!(fabs(ours - theirs) <= tolerance)) {
+                    printf("FAIL %-10s ours %.17g, the host's libm says "
+                           "%.17g\n", lean_math_constant_names[i], ours,
+                           theirs);
+                    constant_failures++;
+                }
+            }
+            if (constant_failures == 0) {
+                printf("ok   %-10s all %d XSI constants are within two ulps "
+                       "of what the host's libm computes\n", "M_*",
+                       oracle_count);
+            }
+        }
+        failures += constant_failures;
+    }
+
     printf("math-test: %d functions graded against the host's libm, "
            "%d not graded here, %d over their claimed tolerance\n",
            graded, skipped, failures);

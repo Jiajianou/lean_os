@@ -1,0 +1,29 @@
+# A program that rasters with //cc/paint, and that this machine runs.
+#
+# The target is ccpainttest rather than cctest because //v8/test/cctest is
+# already called that and two targets in one build cannot share an output
+# name - a collision GN reports rather than resolves.
+#
+# //cc/paint is the recorded form of a paint: it is what Blink produces and
+# what Skia consumes, with an rtree in between deciding which operations a
+# given tile needs. On a machine with a GPU the replay happens on the GPU.
+# There is none here, so what this grades is the software path - the one
+# Chromium keeps for every platform for the case where GPU compositing is off
+# - and the whole GPU stack is absent from the build rather than stubbed: no
+# Dawn, no SwiftShader, no ANGLE, no Vulkan. See tools/build-chromium.sh for
+# why those are args.gn values and not patches.
+#
+# It is //cc/paint rather than //cc, and that is a measurement rather than a
+# preference: //cc:cc reaches //components/viz/common, //gpu/config and
+# //services/network/public/cpp, and a -k 0 build of it fails in 546 places
+# of which 424 are ANGLE, SwiftShader and the Vulkan loader - a GPU stack
+# arriving through gpu_info_collector and through data_deps. //cc/paint's
+# graph is 1,425 targets with none of them in it. See M158's commit message.
+
+executable("ccpainttest") {
+  sources = [ "chromium_cc_paint_test.cc" ]
+  deps = [
+    "//base",
+    "//cc/paint",
+  ]
+}

@@ -1,0 +1,17 @@
+diff --git a/ui/gfx/BUILD.gn b/ui/gfx/BUILD.gn
+index 6b5120fe12..aea2029167 100644
+--- a/ui/gfx/BUILD.gn
++++ b/ui/gfx/BUILD.gn
+@@ -626,7 +626,11 @@ source_set("memory_buffer_sources") {
+     "//ui/gfx/geometry",
+   ]
+ 
+-  if (is_linux || is_chromeos) {
++  # dma-buf is Linux's kernel buffer-sharing interface and libdrm is the
++  # userspace half of Linux's DRM: dmabuf_uapi.h includes <linux/dma-buf.h>
++  # and client_native_pixmap_dmabuf.cc includes <xf86drm.h>. Which family the
++  # build gates a platform as does not decide whether either is there.
++  if ((is_linux || is_chromeos) && has_linux_kernel) {
+     sources += [
+       "linux/client_native_pixmap_dmabuf.cc",
+       "linux/client_native_pixmap_dmabuf.h",

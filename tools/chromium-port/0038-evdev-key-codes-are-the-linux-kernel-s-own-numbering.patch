@@ -1,0 +1,80 @@
+diff --git a/ui/events/keycodes/dom/keycode_converter.cc b/ui/events/keycodes/dom/keycode_converter.cc
+index c69dd14536..e4318d356d 100644
+--- a/ui/events/keycodes/dom/keycode_converter.cc
++++ b/ui/events/keycodes/dom/keycode_converter.cc
+@@ -15,7 +15,13 @@
+ #include "ui/events/keycodes/dom/dom_code.h"
+ #include "ui/events/keycodes/dom/dom_key.h"
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++// The evdev key codes are the Linux KERNEL's own numbering, and
++// <linux/input.h> is where they live. IS_LINUX says which family the build
++// gates this platform as; HAS_LINUX_KERNEL says whether that interface is
++// actually there. Every caller of the two evdev conversions below - ozone's
++// evdev platform, wayland, ash - is on the far side of the same line.
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <linux/input.h>
+ #endif
+ 
+@@ -67,7 +73,8 @@ struct DomKeyMapEntry {
+ #undef DOM_KEY_UNI
+ #undef DOM_KEY_MAP_DECLARATION_END
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+ // The offset between XKB Keycode and evdev code.
+ constexpr int kXkbKeycodeOffset = 8;
+@@ -105,7 +112,7 @@ uint32_t EvdevCodeToXkbKeycode(int evdev_code) {
+   return static_cast<uint32_t>(evdev_code + kXkbKeycodeOffset);
+ }
+ 
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#endif  // (IS_LINUX || IS_CHROMEOS) && HAS_LINUX_KERNEL
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+ 
+@@ -203,6 +210,10 @@ uint32_t KeycodeConverter::DomCodeToXkbKeycode(DomCode code) {
+   return static_cast<uint32_t>(DomCodeToNativeKeycode(code));
+ }
+ 
++#endif  // IS_LINUX || IS_CHROMEOS
++
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ // static
+ DomCode KeycodeConverter::EvdevCodeToDomCode(int evdev_code) {
+   // Currently XKB keycode is the native keycode.
+@@ -216,7 +227,7 @@ int KeycodeConverter::DomCodeToEvdevCode(DomCode code) {
+   // TODO(crbug.com/40151699): Replace with evdev.
+   return XkbKeycodeToEvdevCode(DomCodeToXkbKeycode(code));
+ }
+-#endif
++#endif  // (IS_LINUX || IS_CHROMEOS) && HAS_LINUX_KERNEL
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+ // static
+diff --git a/ui/events/keycodes/dom/keycode_converter.h b/ui/events/keycodes/dom/keycode_converter.h
+index b8f3df6133..be221e2244 100644
+--- a/ui/events/keycodes/dom/keycode_converter.h
++++ b/ui/events/keycodes/dom/keycode_converter.h
+@@ -72,12 +72,16 @@ class KeycodeConverter {
+   // Convert a DomCode into a XKB keycode.
+   static uint32_t DomCodeToXkbKeycode(DomCode code);
+ 
++#endif  // IS_LINUX || IS_CHROMEOS
++
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+   // Convert an evdev code into DomCode.
+   static DomCode EvdevCodeToDomCode(int evdev_code);
+ 
+   // Convert a DomCode into an evdev code.
+   static int DomCodeToEvdevCode(DomCode code);
+-#endif
++#endif  // (IS_LINUX || IS_CHROMEOS) && HAS_LINUX_KERNEL
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+   // If |key_code| is one of the keys (plus, minus, brackets, period, comma),

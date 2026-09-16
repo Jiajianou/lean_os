@@ -246,6 +246,8 @@ REQUIRED_MARKERS=(
   "chromiumv8: done"
   "[m157] Skia rasterises on this machine:"
   "chromiumskia: done"
+  "[m158] cc rasters on this machine:"
+  "chromiumcc: done"
   "mathltest: done"
   "[m125] lvgl rendered"
   "[m125] a third-party toolkit on this compositor:"

@@ -1,0 +1,50 @@
+diff --git a/third_party/webrtc/rtc_base/platform_thread_types.cc b/third_party/webrtc/rtc_base/platform_thread_types.cc
+index 20bf4af..92f4748 100644
+--- a/third_party/webrtc/rtc_base/platform_thread_types.cc
++++ b/third_party/webrtc/rtc_base/platform_thread_types.cc
+@@ -11,7 +11,12 @@
+ #include "rtc_base/platform_thread_types.h"
+ 
+ // IWYU pragma: begin_keep
+-#if defined(WEBRTC_LINUX)
++// WEBRTC_LINUX says which family the build gates this platform as. These four
++// headers are Linux's KERNEL - prctl(2), the system call numbers, and the
++// headers under linux/ and asm/ - which an out-of-tree POSIX platform gated as
++// Linux does not have. __linux__ is what the compiler says about that, and it
++// is the same distinction //base draws as BUILDFLAG(HAS_LINUX_KERNEL).
++#if defined(WEBRTC_LINUX) && defined(__linux__)
+ #include <linux/prctl.h>
+ #include <sys/prctl.h>
+ #include <sys/syscall.h>
+@@ -19,6 +24,8 @@
+ #if !defined(WEBRTC_ARCH_ARM) && !defined(WEBRTC_ARCH_ARM64)
+ #include <asm/unistd_64.h>
+ #endif
++#elif defined(WEBRTC_POSIX)
++#include <unistd.h>
+ #endif
+ 
+ #if defined(WEBRTC_WIN)
+@@ -50,8 +57,12 @@ PlatformThreadId CurrentThreadId() {
+   return gettid();
+ #elif defined(WEBRTC_FUCHSIA)
+   return zx_thread_self();
+-#elif defined(WEBRTC_LINUX)
++#elif defined(WEBRTC_LINUX) && defined(__linux__)
+   return syscall(__NR_gettid);
++#elif defined(WEBRTC_LINUX)
++  // Gated as Linux, without Linux's system call numbers. gettid(3) is the same
++  // answer asked of the C library rather than of the kernel directly.
++  return gettid();
+ #elif defined(__EMSCRIPTEN__)
+   return static_cast<PlatformThreadId>(pthread_self());
+ #else
+@@ -118,7 +129,7 @@ void SetCurrentThreadName(const char* name) {
+   } __except (EXCEPTION_EXECUTE_HANDLER) {  // NOLINT
+   }
+ #pragma warning(pop)
+-#elif defined(WEBRTC_LINUX) || defined(WEBRTC_ANDROID)
++#elif (defined(WEBRTC_LINUX) && defined(__linux__)) || defined(WEBRTC_ANDROID)
+   prctl(PR_SET_NAME, reinterpret_cast<unsigned long>(name));  // NOLINT
+ #elif defined(WEBRTC_MAC) || defined(WEBRTC_IOS)
+   pthread_setname_np(name);

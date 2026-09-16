@@ -1,0 +1,130 @@
+diff --git a/gpu/command_buffer/client/BUILD.gn b/gpu/command_buffer/client/BUILD.gn
+index fbc0393a98..3516c42335 100644
+--- a/gpu/command_buffer/client/BUILD.gn
++++ b/gpu/command_buffer/client/BUILD.gn
+@@ -96,11 +96,16 @@ source_set("client_sources") {
+     "//gpu/ipc/common",
+     "//gpu/ipc/common:surface_handle_type",
+     "//skia:buildflags",
+-    "//third_party/dawn/include/dawn:cpp_headers_gen",
+-    "//third_party/dawn/src/dawn/wire",
+     "//ui/gfx:memory_buffer",
+     "//ui/gfx/geometry",
++    "//ui/gl:buildflags",
+   ]
++  if (use_dawn) {
++    deps += [
++      "//third_party/dawn/include/dawn:cpp_headers_gen",
++      "//third_party/dawn/src/dawn/wire",
++    ]
++  }
+   if (use_ozone) {
+     deps += [ "//ui/ozone" ]
+   }
+diff --git a/gpu/command_buffer/client/client_shared_image.cc b/gpu/command_buffer/client/client_shared_image.cc
+index 303b547276..d7945f437d 100644
+--- a/gpu/command_buffer/client/client_shared_image.cc
++++ b/gpu/command_buffer/client/client_shared_image.cc
+@@ -35,7 +35,11 @@
+ #include "gpu/command_buffer/common/sync_token.h"
+ #include "gpu/config/gpu_finch_features.h"
+ #include "mojo/public/cpp/bindings/callback_helpers.h"
++#include "ui/gl/buildflags.h"
++
++#if BUILDFLAG(USE_DAWN)
+ #include "third_party/dawn/include/dawn/wire/client/webgpu_cpp.h"
++#endif
+ #include "third_party/perfetto/include/perfetto/tracing/track.h"
+ #include "ui/gfx/buffer_types.h"
+ #include "ui/gfx/buffer_usage_util.h"
+@@ -1142,6 +1146,7 @@ SyncToken ClientSharedImage::GenSyncTokenInternal(InterfaceBase* ib) {
+   return StoreSyncTokenInternal(sync_token);
+ }
+ 
++#if BUILDFLAG(USE_DAWN)
+ std::unique_ptr<WebGPUTextureScopedAccess>
+ ClientSharedImage::BeginWebGPUTextureAccess(
+     webgpu::WebGPUInterface* webgpu,
+@@ -1155,6 +1160,7 @@ ClientSharedImage::BeginWebGPUTextureAccess(
+   return base::WrapUnique(new WebGPUTextureScopedAccess(
+       webgpu, this, sync_token, device, desc, usage, mailbox_flags));
+ }
++#endif  // BUILDFLAG(USE_DAWN)
+ 
+ std::vector<SyncToken> ClientSharedImage::VerifyAndCollectSyncTokens() {
+   base::AutoLock auto_lock(lock_);
+@@ -1359,6 +1365,7 @@ SyncToken RasterScopedAccess::EndAccess(
+   return scoped_access->shared_image_->GenSyncTokenInternal(raster_interface);
+ }
+ 
++#if BUILDFLAG(USE_DAWN)
+ WebGPUTextureScopedAccess::WebGPUTextureScopedAccess(
+     webgpu::WebGPUInterface* webgpu,
+     ClientSharedImage* shared_image,
+@@ -1498,5 +1505,6 @@ SyncToken WebGPUBufferScopedAccess::EndAccess(
+ const wgpu::Buffer& WebGPUBufferScopedAccess::buffer() {
+   return *buffer_.get();
+ }
++#endif  // BUILDFLAG(USE_DAWN)
+ 
+ }  // namespace gpu
+diff --git a/gpu/command_buffer/client/client_shared_image.h b/gpu/command_buffer/client/client_shared_image.h
+index b262d56e45..40841c967f 100644
+--- a/gpu/command_buffer/client/client_shared_image.h
++++ b/gpu/command_buffer/client/client_shared_image.h
+@@ -29,6 +29,7 @@
+ #include "third_party/skia/include/gpu/ganesh/GrTypes.h"
+ #include "ui/gfx/color_space.h"
+ #include "ui/gfx/gpu_memory_buffer_handle.h"
++#include "ui/gl/buildflags.h"
+ 
+ namespace base {
+ class SingleThreadTaskRunner;
+@@ -53,6 +54,7 @@ struct ReturnedResource;
+ struct ReturnedResourceViz;
+ }  // namespace viz
+ 
++#if BUILDFLAG(USE_DAWN)
+ namespace wgpu::dawn::wire::client {
+ class Device;
+ class Texture;
+@@ -60,6 +62,7 @@ class Buffer;
+ struct TextureDescriptor;
+ struct BufferDescriptor;
+ }  // namespace wgpu::dawn::wire::client
++#endif  // BUILDFLAG(USE_DAWN)
+ 
+ namespace gpu {
+ 
+@@ -401,6 +404,7 @@ class GPU_COMMAND_BUFFER_CLIENT_EXPORT ClientSharedImage
+       const SyncToken& sync_token,
+       bool readonly);
+ 
++#if BUILDFLAG(USE_DAWN)
+   std::unique_ptr<WebGPUTextureScopedAccess> BeginWebGPUTextureAccess(
+       webgpu::WebGPUInterface* webgpu,
+       const SyncToken& sync_token,
+@@ -416,6 +420,7 @@ class GPU_COMMAND_BUFFER_CLIENT_EXPORT ClientSharedImage
+       const wgpu::dawn::wire::client::BufferDescriptor& desc,
+       uint64_t usage,
+       webgpu::MailboxFlags mailbox_flags);
++#endif  // BUILDFLAG(USE_DAWN)
+ 
+   // Pack the SharedImageExportResult.
+   SharedImageExportResult EndImport(const SyncToken& sync_token);
+@@ -710,6 +715,7 @@ class GPU_COMMAND_BUFFER_CLIENT_EXPORT RasterScopedAccess {
+   bool readonly_;
+ };
+ 
++#if BUILDFLAG(USE_DAWN)
+ class GPU_COMMAND_BUFFER_CLIENT_EXPORT WebGPUTextureScopedAccess {
+  public:
+   WebGPUTextureScopedAccess(const WebGPUTextureScopedAccess&) = delete;
+@@ -784,6 +790,7 @@ class GPU_COMMAND_BUFFER_CLIENT_EXPORT WebGPUBufferScopedAccess {
+   uint32_t buffer_id_ = 0;
+   uint32_t buffer_generation_ = 0;
+ };
++#endif  // BUILDFLAG(USE_DAWN)
+ 
+ }  // namespace gpu
+ 

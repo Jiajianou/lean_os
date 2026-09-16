@@ -221,11 +221,11 @@ enable_precompiled_headers = false
 # which this is not. target_sysroot is the other hook and it is the right one:
 # sysroot.gni applies it only when current_os == target_os && current_cpu ==
 # target_cpu, which is true for this toolchain and false for the mac HOST one -
-# so the host still gets mac_sdk_path. Setting the `sysroot` global directly
+# so the host still gets mac_sdk_path. Setting the \`sysroot\` global directly
 # would reach both, because it is one variable for the whole build.
 #
 # M154 left this empty and recorded it as harmless; M155 found what it costs.
-# Any gn command that loads the WHOLE tree - and V8's metagen runs `gn desc`
+# Any gn command that loads the WHOLE tree - and V8's metagen runs \`gn desc\`
 # during the build - evaluates //build/modules, which expands
 # "\${sysroot}/usr/include" and stops on the literal /usr/include of this Mac.
 use_sysroot = false
@@ -325,6 +325,80 @@ rtc_use_pipewire = false
 # verified-platforms list, and an out-of-tree platform not being on it is the
 # mechanism working rather than something to fix upstream.
 skia_use_dawn = false
+
+# The GPU stack, and why none of it is built.
+#
+# M157 turned off skia_use_dawn and wrote down why: a declare_args() default
+# that is a list of platforms reaches this OS because is_linux is true, which
+# says which family the build gates this platform as and nothing about
+# whether there is a GPU. These four are the same sentence three directories
+# further out, and the defaults say so in their own words:
+#
+#   ui/gl/features.gni     use_dawn = ... || (is_linux && !is_castos)
+#   ui/gl/features.gni     enable_swiftshader = (is_win || is_linux || ...)
+#   gpu/vulkan/features.gni  enable_vulkan = is_linux || is_chromeos || ...
+#
+# There is no GL here, no Vulkan, and no display a GPU process could talk to.
+# The answer is not a software GL implementation underneath a GPU path - it
+# is the path Chromium maintains for every platform for the case where GPU
+# compositing is off, and it is intact and reachable:
+#
+#   cc    ZeroCopyRasterBufferProvider(is_software=true)
+#         "Software compositor always uses BGRA 8888 format for tiles"
+#   viz   SoftwareRenderer + DisplayResourceProviderSoftware
+#         SoftwareOutputSurface -> SoftwareOutputDeviceOzone
+#   ui    ui::SurfaceOzoneCanvas, which is an SkCanvas the PLATFORM provides
+#
+# That last line is the seam this OS fills, and it is the same shape NetSurf's
+# display port was: one class handing back a canvas. BGRA_8888 premultiplied
+# is byte-for-byte this compositor's own word layout, which is the third time
+# that has paid - libnsfb in M113, Skia in M157, cc's tiles here.
+#
+# What it costs is WebGL and WebGPU, and that is a truthful unsupported rather
+# than a stub that returns a context and paints nothing - M65's rule. The
+# condition for revisiting SwiftShader is named rather than left as a mood:
+# a page this machine must render that requires WebGL, or real GPU hardware
+# with a driver. Neither is true, and SwiftShader would cost a SECOND runtime
+# code generator to port after V8 - it vendors llvm-10.0, llvm-16.0 and
+# subzero as Reactor's backends - to feed a compositor that is software
+# anyway.
+enable_vulkan = false
+enable_swiftshader = false
+enable_swiftshader_vulkan = false
+use_dawn = false
+
+# WebXR, and the reason it is here at all. //device/vr on is_linux deps on
+# //gpu/vulkan/init unconditionally, and that directory opens with
+# assert(enable_vulkan) - so turning Vulkan off makes a directory this build
+# never compiles stop the CONFIGURE. That is the hazard the paragraph above
+# use_sysroot warns about, met for real.
+#
+# The fix is not to patch the assert. Chromium's own default says why in its
+# own words:
+#
+#   # We enable VR on Linux even though VR features aren't usable because
+#   # the binary size impact is small and allows many VR tests to run on Linux
+#   enable_vr = enable_openxr || ... || (is_linux && !is_castos && ...)
+#
+# A feature switched on for bot coverage on a platform where it does not work,
+# reaching this OS because is_linux is true. There is no headset, no GPU and
+# no OpenXR runtime here.
+enable_vr = false
+enable_openxr = false
+
+# Crash keys, which are the annotations a crash REPORT carries. Behind them
+# is crashpad, whose Linux implementation is ptrace(2), PR_SET_DUMPABLE,
+# /proc/<pid>/task, rt_tgsigqueueinfo and glibc's <features.h> - Linux's
+# kernel again, and about twenty objects of it. There is no crash reporting
+# service on this machine for a report to reach, so an annotation system
+# with nothing behind it would be the same pretence M65 refused.
+#
+# Chromium already has the configuration for a platform in that position and
+# it is one declare_args() away: use_crash_key_stubs turns crash_key.cc into
+# crash_key_stubs.cc and drops the crashpad dependency entirely. Its default
+# is is_fuchsia, and use_crashpad_annotation's is "(is_linux && !is_castos)",
+# which is how this OS was reaching for crashpad's Linux half at all.
+use_crash_key_stubs = true
 ARGS
 
 PATH="$DEPOT:$DEPOT/.cipd_bin:$PATH"

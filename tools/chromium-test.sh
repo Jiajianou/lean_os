@@ -612,6 +612,84 @@ PROBE
     fi
   fi
 
+  # M158. //cc/paint, and the decision the whole milestone is: there is no GPU
+  # on this machine, so what is built is the software raster path Chromium
+  # maintains for every platform - and the GPU stack is ABSENT from the build
+  # rather than present and unused.
+  CCPROGRAM="$SRC/out/$OUT_NAME/ccpainttest"
+  if [ ! -x "$CCPROGRAM" ]; then
+    echo "chromium-test: //cc/paint has not been built - skipping" \
+         "(tools/build-chromium.sh lean_os)"
+  else
+    "${PREFIX}readelf" -h "$CCPROGRAM" | grep -q "EXEC (Executable file)"
+    check $? "a program linked from //cc/paint is an EXEC in this OS's image region ($("${PREFIX}readelf" -h "$CCPROGRAM" | awk '/Type:/{t=$2} /Entry point/{print t, $NF}'))"
+
+    # The layer itself: the recorded paint, the buffer it lives in, the rtree
+    # that culls it and the solid-colour analysis. Asked of the binary rather
+    # than of the build, for M157's reason - a //cc/paint that linked and
+    # replayed nothing would satisfy every check that only asks whether the
+    # build succeeded.
+    # -C, because these are C++ names: nm without it reports
+    # _ZN2cc15DisplayItemList..., in which the string "cc::" never appears.
+    # M157's Skia checks got away without it by naming identifiers that
+    # survive mangling.
+    CCRASTER=$("${PREFIX}nm" -C "$CCPROGRAM" |
+               grep -cE " [Tt] .*cc::(DisplayItemList|PaintOpBuffer|SolidColorAnalyzer)")
+    [ "$CCRASTER" -gt 10 ]
+    check $? "with cc's recorded paint and its rtree in it ($CCRASTER symbols)"
+
+    # And none of the GPU stack, which is what enable_vulkan, enable_swiftshader
+    # and use_dawn = false claim. Each of these would be a rendering back end
+    # with no device to talk to: SwiftShader would additionally be a SECOND
+    # run-time code generator to port after V8, since Reactor's backends are
+    # vendored copies of LLVM.
+    check_absent() {
+      FOUND=$("${PREFIX}nm" -C "$CCPROGRAM" | grep -cE "$2")
+      [ "$FOUND" = "0" ]
+      check $? "and no $1 in it, because this machine has no GPU to give it"
+    }
+    check_absent Dawn "dawn::|wgpu::"
+    check_absent SwiftShader "SwiftShader|sw::Reactor"
+    check_absent ANGLE "rx::|EGL_|eglInitialize"
+    check_absent Vulkan "vkCreate|VkPhysicalDevice|vkGetInstance"
+
+    # The same claim read from the configured build's own args.gn rather than
+    # copied here, which is M154's rule for this kind of check: a value this
+    # file asserted for itself would grade nothing.
+    ARGSFILE="$SRC/out/$OUT_NAME/args.gn"
+    OFF=0
+    for flag in enable_vulkan enable_swiftshader enable_swiftshader_vulkan \
+                use_dawn skia_use_dawn; do
+      grep -qE "^$flag = false\$" "$ARGSFILE" || OFF=1
+    done
+    [ "$OFF" = "0" ]
+    check $? "and the build's own args.gn turns off all five GPU back ends"
+
+    # The two headers M158 added to this libc, checked in the SYSROOT rather
+    # than in the tree. `make sysroot` begins with rm -rf and so is not run
+    # here; `make sysroot-headers` is what copies a new header across, and a
+    # header added to user_space/libc/include and never copied is invisible
+    # to every cross compile while looking perfectly present in git. That is
+    # the failure this grades. <sys/poll.h> is what WebRTC's socket server
+    # asks for and M_SQRT2 is what pffft asks for; both are in //cc's graph
+    # rather than //cc/paint's, so this is the only place they are graded on
+    # the Chromium side.
+    SYSPOLL="$ROOT/build/sysroot/usr/local/include/sys/poll.h"
+    [ -f "$SYSPOLL" ] && grep -q "poll.h" "$SYSPOLL"
+    check $? "this libc's <sys/poll.h> is in the sysroot a cross compile reads"
+    grep -q "M_SQRT2" "$ROOT/build/sysroot/usr/local/include/math.h"
+    check $? "and the XSI constants are in its <math.h>"
+
+    IMAGE="$ROOT/build/os-image.bin"
+    if [ ! -f "$IMAGE" ]; then
+      echo "chromium-test: no $IMAGE - run make, then this again"
+    else
+      make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
+      "$ROOT/build/leanfs-put" "$IMAGE" "$CCPROGRAM" /bin/chromiumcc > /dev/null
+      check $? "installed as /bin/chromiumcc - the [m158] boot self-test runs it"
+    fi
+  fi
+
   # M157. The libc port reaches Chromium's OWN vendored copy of the libc
   # crate, not just rust-src's - and they are the same 0.2.189, so a copy
   # that drifted would be a build that disagrees with itself about what this
