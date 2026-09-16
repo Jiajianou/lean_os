@@ -12,14 +12,18 @@ mkdir -p "$OUT"
 
 HOSTCC="${HOSTCC:-cc}"
 
+# `int` joined this list in M155, with ilogb and ilogbf: a return type the
+# grep did not name was a declaration this harness could not see, and so a
+# function it could not notice was ungraded.
+#
 # The long double family is graded by tools/math-long-double-test.sh and
 # /bin/mathltest instead, for a reason that is about this host rather than
 # about those functions: it is arm64, where `long double` IS `double`, so
 # the host libm this harness compares against has no answer to give. Their
 # declarations are filtered out here rather than left to match `^long `.
 NAMES=$(grep -v 'long double' "$HDR" \
-        | grep -oE '^(double|float|long long|long) [a-z0-9_]+\(' \
-        | sed 's/^long long //; s/^long //; s/^double //; s/^float //; s/($//; s/(//' | sort -u)
+        | grep -oE '^(double|float|long long|long|int) [a-z0-9_]+\(' \
+        | sed 's/^long long //; s/^long //; s/^double //; s/^float //; s/^int //; s/($//; s/(//' | sort -u)
 if [ -z "$NAMES" ]; then
   echo "math-test: no declarations found in $HDR - the grep needs updating" >&2
   exit 2

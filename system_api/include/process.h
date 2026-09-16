@@ -6,6 +6,25 @@
 extern "C" {
 #endif
 
+/* Where the main thread's stack is. This is a kernel/user contract rather
+   than a kernel detail: the kernel places the stack and grows it downwards
+   when it is touched, and nothing in the process can work that out for
+   itself - the initial stack pointer says where execution started, not how
+   far down the region reaches.
+
+   A program that has to know is not unusual. Anything that scans its own
+   stack conservatively needs the bounds: a garbage collector, a profiler, a
+   crash reporter. M155 added this because V8 is all three, and asks
+   pthread_getattr_np for the answer on whatever thread it is running on -
+   including the first one, which no thread library created and which
+   therefore appears in no thread library's records.
+
+   kernel/process/process.h derives USER_STACK_TOP and USER_STACK_MAX_BYTES
+   from these two, so the kernel and the C library cannot drift apart about
+   an address range they both have to agree on. */
+#define OS_MAIN_STACK_TOP       0x000000FC00000000ULL
+#define OS_MAIN_STACK_MAX_BYTES (64ULL * 1024 * 1024)
+
 #define TASK_INFO_NAME_MAX 24
 
 #define TASK_INFO_MAX 128

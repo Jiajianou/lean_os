@@ -1,0 +1,32 @@
+diff --git a/v8/src/heap/memory-allocator.cc b/v8/src/heap/memory-allocator.cc
+--- a/v8/src/heap/memory-allocator.cc
++++ b/v8/src/heap/memory-allocator.cc
+@@ -152,7 +152,11 @@
+ 
+   Address base = reservation.address();
+ 
+-#if V8_OS_LINUX
++// The advice is Linux's own - core(5) knows MADV_DONTDUMP and POSIX does
++// not - so a platform this build gates as Linux need not have it. Both
++// calls are best-effort already, and where the flag is missing the
++// best effort is none.
++#if V8_OS_LINUX && defined(MADV_DODUMP)
+   // The sandbox reservation is marked MADV_DONTDUMP so that its multi-TB
+   // virtual range doesn't force the kernel to walk the whole thing on crash.
+   // Re-mark committed heap chunks as dumpable so crash investigations still
+diff --git a/v8/src/sandbox/sandbox.cc b/v8/src/sandbox/sandbox.cc
+--- a/v8/src/sandbox/sandbox.cc
++++ b/v8/src/sandbox/sandbox.cc
+@@ -44,7 +44,12 @@
+ void ExcludeReservationFromCoreDump(Address base, size_t size) {
+ #if V8_OS_LINUX
+   // Best-effort: ignore failures (e.g. old kernels without MADV_DONTDUMP).
++#if defined(MADV_DONTDUMP)
+   madvise(reinterpret_cast<void*>(base), size, MADV_DONTDUMP);
++#else
++  (void)base;
++  (void)size;
++#endif
+ #endif
+ }
+ 

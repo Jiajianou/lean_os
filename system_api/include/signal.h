@@ -80,7 +80,27 @@ typedef struct {
     } si_value;
 } siginfo_t;
 
+/* Who sent the signal, for the codes that are about an origin rather than a
+   fault. POSIX names these five and says nothing about their values; the
+   convention every system settled on is that a POSITIVE si_code means the
+   kernel raised it from hardware and a non-positive one means somebody sent
+   it, which is what lets a fault handler tell a real trap from a signal that
+   merely arrived. The numbering below is that convention.
+
+   This kernel produces SI_USER and the fault codes further down and nothing
+   else, because it has no sigqueue, no POSIX timers delivering signals, no
+   asynchronous I/O and no message queues. The names are here because a
+   program that asks "was this a trap or was it sent" has to be able to write
+   the question, and the answer it gets here is a truthful no. M155 added
+   them: V8's trap handler is the program, and it decides whether a SIGSEGV
+   came from a JavaScript heap access by exactly that test. */
 #define SI_USER    0
+#define SI_QUEUE   (-1)
+#define SI_TIMER   (-2)
+#define SI_MESGQ   (-3)
+#define SI_ASYNCIO (-4)
+#define SI_SIGIO   (-5)
+#define SI_TKILL   (-6)
 
 /* What kind of fault. The kernel knows - it has the trap vector, the page
    fault's error code and the two floating point status words - and before

@@ -112,9 +112,10 @@ if [ ! -f "$BUILTINS_DIR/libclang_rt.builtins.a" ]; then
 fi
 
 # Asked of the compiler rather than spelled out, because the version directory
-# under lib/clang moves whenever the toolchain is rebuilt. This is both the
-# directory bindgen parses with (M154's patch 0025) and the one named in
-# default_toolchain_cflags below - and they have to be the SAME directory.
+# under lib/clang moves whenever the toolchain is rebuilt. This is the
+# directory every libclang-based tool in the build parses with - bindgen
+# (M154) and V8's metagen (M155) - and the one named in
+# default_toolchain_cflags below, and they all have to be the SAME directory.
 LEANOS_RESOURCE_DIR=$("${PREFIX}clang" -print-resource-dir)
 if [ ! -d "$LEANOS_RESOURCE_DIR/include" ]; then
   echo "build-chromium: ${PREFIX}clang has no resource directory" >&2
@@ -144,8 +145,16 @@ partition_alloc_has_linux_kernel = false
 enable_pkeys = false
 clang_base_path = "$CLANG_BASE"
 clang_version = "$CLANG_VER"
-bindgen_resource_dir = "$LEANOS_RESOURCE_DIR"
+libclang_resource_dir = "$LEANOS_RESOURCE_DIR"
 ozone_extra_path = "//lean_os/ozone_extra.gni"
+
+# The snapshot - V8's pre-built heap, the thing that makes starting an isolate
+# take a millisecond rather than a second - is linked into the binary rather
+# than loaded from a file beside it. Chromium's own builds put it in
+# snapshot_blob.bin because a browser ships a directory; a program on this
+# machine is one file the kernel maps, and /bin/chromiumv8 having to find a
+# second one would be a fact about this port rather than about V8.
+v8_use_external_startup_data = false
 
 # Ozone's platform backends, which are the one place a Linux GN
 # configuration reaches for a host library this machine has no idea about:
@@ -193,7 +202,19 @@ enable_precompiled_headers = false
 # use_ozone together make //ui/base/clipboard depend on //ui/base, which
 # depends on it - a dependency cycle that exists in no configuration
 # Chromium ships.
+# use_sysroot is Chromium's "download a Debian image and build against it",
+# which this is not. target_sysroot is the other hook and it is the right one:
+# sysroot.gni applies it only when current_os == target_os && current_cpu ==
+# target_cpu, which is true for this toolchain and false for the mac HOST one -
+# so the host still gets mac_sdk_path. Setting the `sysroot` global directly
+# would reach both, because it is one variable for the whole build.
+#
+# M154 left this empty and recorded it as harmless; M155 found what it costs.
+# Any gn command that loads the WHOLE tree - and V8's metagen runs `gn desc`
+# during the build - evaluates //build/modules, which expands
+# "\${sysroot}/usr/include" and stops on the literal /usr/include of this Mac.
 use_sysroot = false
+target_sysroot = "$SYSROOT"
 lean_os_target = "$LEANOS_TARGET_FLAG"
 
 # What this target IS, said in a place every tool can read.
@@ -211,7 +232,8 @@ lean_os_target = "$LEANOS_TARGET_FLAG"
 #                 has no default for the way x86_64-lean_os-clang does
 #   -D__lean_os__ the identity build_config.h branches on, which a clang that
 #                 has never heard of this triple cannot derive from it
-#   -idirafter    the resource directory of the clang doing the parsing
+#   -idirafter    the resource directory of the clang doing the parsing,
+#                 spelled JOINED rather than as two arguments - see below
 #
 # The last one is M153's prediction and it is right for the reason M153 gave -
 # libc++'s own stddef.h does #include_next <stddef.h> and, for a target this
@@ -229,6 +251,19 @@ lean_os_target = "$LEANOS_TARGET_FLAG"
 # twice is harmless; naming a second one is not, and both halves of this
 # milestone spent an hour each proving that from opposite ends.
 #
+# The joined spelling is M155's. Every flag Chromium puts in cflags is either
+# an option or a path relative to root_build_dir, so a token beginning with a
+# slash means one thing to a tool reading them: clang-cl, which spells its
+# options that way. V8's metagen decides exactly that -
+#
+#   cl_mode = any(f.startswith("/") for f in cflags)
+#
+# - and "-idirafter", "/Users/..." as two arguments made it re-parse V8 in
+# MSVC mode and fail with "no input files". Joined, the token starts with a
+# dash and the heuristic is right again. This is a real constraint rather
+# than one tool's quirk: anything downstream that splits cflags sees an
+# absolute path with no option attached to it.
+#
 # Everything here is already true for the real compile - x86_64-lean_os-clang
 # defines __lean_os__ itself, was configured with DEFAULT_SYSROOT, and has its
 # own resource directory ahead of this one - so this changes what bindgen
@@ -238,8 +273,7 @@ default_toolchain_cflags = [
   "--sysroot=$SYSROOT",
   "-D__lean_os__=1",
   "-D__lean_os=1",
-  "-idirafter",
-  "$LEANOS_RESOURCE_DIR/include",
+  "-idirafter$LEANOS_RESOURCE_DIR/include",
 ]
 use_custom_libcxx = true
 libcxx_provides_default_rune_table = true

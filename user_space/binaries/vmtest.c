@@ -12,6 +12,12 @@ static const unsigned char RET42[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};
 
 typedef int (*fn0)(void);
 
+/* On a page of its own, so that making that page read-only makes nothing
+   else read-only - the rest of this program's data has to keep working while
+   the test runs. */
+__attribute__((aligned(4096)))
+static volatile unsigned char protectable[4096] = {0x5A};
+
 __attribute__((noinline))
 static unsigned long deep(unsigned long want, unsigned long *lowest) {
     volatile unsigned char pad[4096];
@@ -100,6 +106,34 @@ static int ordinary(void) {
         return 6;
     }
     munmap(code, PAGE);
+
+    /* M155. mprotect on a page of this program's OWN IMAGE, which mmap never
+       made. POSIX applies mprotect to any mapped page and this kernel used to
+       apply it only inside the mmap region, so a program that wanted part of
+       its data segment read-only got a refusal. V8 is what found it: its
+       read-only heap lives there, and it treats a failure to protect as
+       fatal.
+
+       protectable[] is writable static data, so it is in the image, and the
+       page it sits on is the one asked about. The check is in three parts -
+       the call succeeds, reading still works, and writing afterwards faults -
+       and the third is the reason "image" is one of the fatal arguments
+       below rather than something this run could try. */
+    unsigned long page_of_data =
+        (unsigned long)protectable & ~(unsigned long)(PAGE - 1);
+    if (mprotect((void *)page_of_data, PAGE, PROT_READ) != 0) {
+        return 15;
+    }
+    if (protectable[0] != 0x5A) {
+        return 15;
+    }
+    if (mprotect((void *)page_of_data, PAGE, PROT_READ | PROT_WRITE) != 0) {
+        return 15;
+    }
+    protectable[0] = 0x5B;
+    if (protectable[0] != 0x5B) {
+        return 15;
+    }
 
     void *scratch = mmap(0, 8 * PAGE, PROT_READ | PROT_WRITE,
                          MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
@@ -239,6 +273,17 @@ int main(int argc, char **argv) {
         p[0] = 2;
         printf("vmtest: writing to an mprotect'ed read-only page was allowed\n");
         return 1;
+    }
+
+    if (argc > 1 && argv[1] && strcmp(argv[1], "image") == 0) {
+        unsigned long p = (unsigned long)protectable & ~(unsigned long)(PAGE - 1);
+        if (mprotect((void *)p, PAGE, PROT_READ) != 0) {
+            printf("vmtest: mprotect on this program's own image was refused\n");
+            return 15;
+        }
+        protectable[0] = 0x5C;
+        printf("vmtest: writing to an image page made read-only was allowed\n");
+        return 15;
     }
 
     if (argc > 1 && argv[1] && strcmp(argv[1], "guard") == 0) {

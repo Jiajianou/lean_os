@@ -81,3 +81,57 @@ tanhf	f	-10	10	401	1.2e-7	M151: tanh in double rounded once to float - one float
 nan	-	-	-	-	-	M151: returns a quiet NaN, and NaN != NaN makes every tolerance in this file meaningless - isnan(nan("")) is checked directly at the end of tests/math/main.c instead
 nanf	-	-	-	-	-	M151: same as nan, and checked in the same place
 ldexpf	s	-1e3	1e3	81	0	M142: exact, and not approximately - a double carries every float exponent, so scaling there and rounding once is the float answer including where it lands on a subnormal. The exponent sweep reaches past a float's range in both directions on purpose. //base/rand_util.cc asked for it
+
+# M155. The rest of C99 7.12 - the twelve double functions this
+# library had not had and a float variant for every function that
+# has one. V8 asked for truncf and nearbyintf; the others are what
+# a complete float family is.
+nearbyint	1	-1e9	1e9	401	0	M155: exact - rintl on a long double that holds the double exactly, rounded to nearest even
+rint	1	-1e9	1e9	401	0	M155: exact, and the same function as nearbyint here because this library raises no inexact flag to differ about
+lrint	i	-1e18	1e18	401	0	M155: exact, swept well inside 2^63 like lround's row
+llrint	i	-1e18	1e18	401	0	M155: exact
+remainder	2	-1e6	1e6	201	0	M155: exact - IEEE remainder is exact in both formats, so delegating to remainderl loses nothing
+remquo	-	-	-	-	-	M155: takes an int* - remquol is graded by /bin/mathltest and this is that, rounded once
+logb	1	1e-300	1e300	401	0	M155: exact - an exponent, not an approximation
+ilogb	i	1e-300	1e300	401	0	M155: exact
+scalbn	-	-	-	-	-	M155: takes an int exponent, like ldexp's row above
+scalbln	-	-	-	-	-	M155: takes a long exponent
+fdim	2	-1e6	1e6	201	0	M155: exact - a subtraction or a zero
+nexttoward	-	-	-	-	-	M155: its second argument is a long double, which this host does not have - nexttowardl is graded by /bin/mathltest
+acosf	f	-1	1	1201	1.2e-7	M155: acos in double rounded once to float - one float ulp, like the M100 set
+asinf	f	-1	1	1201	1.2e-7	M155: one float ulp
+acoshf	f	1	1e6	1601	1.2e-7	M155: one float ulp
+asinhf	f	-1e6	1e6	1601	1.2e-7	M155: one float ulp
+atanhf	f	-0.999	0.999	1601	1.2e-7	M155: one float ulp
+coshf	f	-80	80	1601	1.2e-7	M155: one float ulp, swept inside where a float can hold the answer
+sinhf	f	-80	80	1601	1.2e-7	M155: one float ulp
+exp2f	f	-120	120	1601	1.2e-7	M155: one float ulp, swept inside a float's exponent range
+expm1f	f	-30	30	1601	1.2e-7	M155: one float ulp
+logf	f	1e-8	1e8	1201	1.2e-7	M155: one float ulp
+log10f	f	1e-8	1e8	1201	1.2e-7	M155: one float ulp
+log1pf	f	-0.9	9	1601	1.2e-7	M155: one float ulp
+log2f	f	1e-8	1e8	1201	1.2e-7	M155: one float ulp
+logbf	f	1e-30	1e30	401	0	M155: exact - an exponent
+cbrtf	f	-1e6	1e6	1601	1.2e-7	M155: one float ulp
+erff	f	-6	6	1601	1.2e-7	M155: one float ulp
+erfcf	f	-6	6	1601	1.2e-7	M155: one float ulp
+nearbyintf	f	-1e9	1e9	401	0	M155: exact. V8's wasm-external-refs.cc is what asked for it
+rintf	f	-1e9	1e9	401	0	M155: exact
+truncf	f	-1e9	1e9	401	0	M155: exact. The first of these V8 asked for, and the one the //services/network probe named 354 times
+powf	F	0.1	8	61	1.2e-7	M155: one float ulp, on the same grid pow's row uses
+fmodf	F	-1e4	1e4	201	0	M155: exact - fmod is exact and rounding an exact double to float is one rounding of a value a float already holds
+remainderf	F	-1e4	1e4	201	0	M155: exact, for the same reason
+copysignf	F	-1e6	1e6	401	0	M155: exact - it moves a sign bit
+fdimf	F	-1e6	1e6	401	0	M155: exact
+fmaxf	F	-1e6	1e6	401	0	M155: exact
+fminf	F	-1e6	1e6	401	0	M155: exact
+fmaf	-	-	-	-	-	M155: three arguments, which this harness has no sweep for - fma has the same row above
+ilogbf	-	-	-	-	-	M155: returns an int from a float, a shape this harness has no kind for; ilogb's row grades the same computation
+lrintf	i	-1e9	1e9	401	0	M155: exact, on a float grid like lroundf's
+llrintf	i	-1e9	1e9	401	0	M155: exact
+scalbnf	s	-1e3	1e3	81	0	M155: exact, and the exponent sweep reaches past a float's range in both directions - ldexpf's row is the same shape
+scalblnf	-	-	-	-	-	M155: a long exponent; scalbnf above grades the same computation
+frexpf	-	-	-	-	-	M155: takes an int*, like frexp's row
+modff	-	-	-	-	-	M155: takes a float*, like modf's row
+remquof	-	-	-	-	-	M155: takes an int*, like remquo's row
+nexttowardf	-	-	-	-	-	M155: its second argument is a long double, which this host has not got

@@ -190,7 +190,7 @@ def read_resource_directory(args_gn):
     this reads the argument rather than re-deriving it.
     """
     text = open(args_gn).read()
-    named = re.search(r'^bindgen_resource_dir\s*=\s*"([^"]*)"', text, re.M)
+    named = re.search(r'^libclang_resource_dir\s*=\s*"([^"]*)"', text, re.M)
     if named and named.group(1):
         return named.group(1)
     base = re.search(r'^clang_base_path\s*=\s*"([^"]*)"', text, re.M)
@@ -253,10 +253,16 @@ def main():
           "and the resource directory bindgen parses with is named too")
     if resource_directory is None:
         return 1
-    check(any(flag == os.path.join(resource_directory, "include")
-              for flag in flags),
-          "and it is the same one -idirafter names, which is the whole "
-          "condition")
+    # Joined, not two arguments: a cflag beginning with a slash reads as a
+    # clang-cl option to anything downstream that parses this list. M155's
+    # V8 build is where that stopped being theoretical.
+    check(("-idirafter" + os.path.join(resource_directory, "include"))
+          in flags,
+          "and it is the same one -idirafter names, joined, which is the "
+          "whole condition")
+    check(not any(flag.startswith("/") for flag in flags),
+          "and no flag in the list begins with a slash, which reads as "
+          "clang-cl to a tool parsing them")
 
     work = tempfile.mkdtemp()
     try:

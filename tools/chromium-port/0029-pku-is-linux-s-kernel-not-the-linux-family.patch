@@ -1,0 +1,21 @@
+diff --git a/v8/src/base/build_config.h b/v8/src/base/build_config.h
+--- a/v8/src/base/build_config.h
++++ b/v8/src/base/build_config.h
+@@ -29,7 +29,16 @@
+ 
+ // PKU support (and by extension support for JIT code protections based on PKU)
+ // is currently only available on x64 Linux.
+-#if defined(V8_OS_LINUX) && defined(V8_HOST_ARCH_X64)
++//
++// "Linux" here means Linux's KERNEL interfaces rather than the family a build
++// gates a platform as: pkey_mprotect(2) and PROT_GROWSDOWN are both Linux's
++// own, and a platform can be Linux enough for every is_linux condition in a
++// build file without having either. <linux/mman.h> is the question asked
++// because it is where those interfaces are declared - every Linux toolchain
++// ships it, including the sysroot Chromium builds against, and a platform
++// that has not got it has not got them.
++#if defined(V8_OS_LINUX) && defined(V8_HOST_ARCH_X64) && \
++    __has_include(<linux/mman.h>)
+ #define V8_HAS_PKU_SUPPORT 1
+ #else
+ #define V8_HAS_PKU_SUPPORT 0

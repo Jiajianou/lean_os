@@ -529,6 +529,45 @@ PROBE
       check $? "installed as /bin/chromiumnet - the [m150] to [m152] boot self-tests run it"
     fi
   fi
+
+  # M155. V8. The first piece of Chromium here that writes machine code at run
+  # time rather than at build time, and the one Blink cannot be reached
+  # without.
+  V8PROGRAM="$SRC/out/$OUT_NAME/v8test"
+  if [ ! -x "$V8PROGRAM" ]; then
+    echo "chromium-test: V8 has not been built - skipping" \
+         "(tools/build-chromium.sh lean_os)"
+  else
+    "${PREFIX}readelf" -h "$V8PROGRAM" | grep -q "EXEC (Executable file)"
+    check $? "a program linked from V8 is an EXEC in this OS's image region ($("${PREFIX}readelf" -h "$V8PROGRAM" | awk '/Type:/{t=$2} /Entry point/{print t, $NF}'))"
+
+    # The snapshot is IN the binary rather than in a file beside it. V8 names
+    # its embedded blob with this symbol and loads from a file without it, so
+    # this is the difference between a program this machine runs and a program
+    # that looks for snapshot_blob.bin and exits.
+    EMBEDDED=$("${PREFIX}nm" "$V8PROGRAM" |
+               grep -cE " [TtDdRr] v8_Default_embedded_blob_(code_|data_)?" )
+    [ "$EMBEDDED" -ge 2 ]
+    check $? "with V8's startup snapshot linked into it ($EMBEDDED symbols)"
+
+    # TurboFan and the interpreter, asked of the binary rather than of the
+    # build: a V8 without its optimising compiler links and runs and is a
+    # different engine.
+    JIT=$("${PREFIX}nm" "$V8PROGRAM" |
+          grep -cE " [Tt] .*(TurboFan|Ignition|RegExpMacroAssembler)" )
+    [ "$JIT" -gt 20 ]
+    check $? "and TurboFan, Ignition and the regular expression assembler in it ($JIT symbols)"
+
+    # NOT installed onto the image, and that is the whole difference between
+    # what M155 finished and what it did not. V8 builds, links and starts on
+    # this machine and interprets JavaScript; it stops inside PartitionAlloc,
+    # which calls mprotect on sub-ranges of one big reservation often enough
+    # to exhaust this kernel's fixed 128-entry mmap region table. That is a
+    # kernel data structure question rather than a porting one - see the M155
+    # commit body - so there is no boot self-test running /bin/chromiumv8
+    # yet, and a program on the image that nothing runs would be 51 MB of
+    # pretending.
+  fi
 fi
 
 echo "chromium-test: $PASS passed, $FAIL failed"

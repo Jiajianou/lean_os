@@ -1,0 +1,36 @@
+diff --git a/v8/src/trap-handler/trap-handler-internal.h b/v8/src/trap-handler/trap-handler-internal.h
+--- a/v8/src/trap-handler/trap-handler-internal.h
++++ b/v8/src/trap-handler/trap-handler-internal.h
+@@ -48,7 +48,19 @@
+   // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=100641
+   static __thread bool is_active_;
+ #else
+-  static thread_local bool is_active_;
++  // constinit, and not for tidiness. Without it every translation unit that
++  // merely READS this variable emits a weak undefined reference to its
++  // "TLS init function", because a declaration with no initializer in sight
++  // cannot be known to be constant-initialized - and the defining translation
++  // unit emits no such function, because it IS. The reference then has to be
++  // resolved to absolute zero, and a PC-relative branch from the image to
++  // zero only fits in 32 bits if the image is near it. On Linux it always is.
++  // On a platform that loads programs at 512 GiB it is not, and the link
++  // fails with R_X86_64_PLT32 out of range against a function nobody calls.
++  //
++  // constinit says the thing that is already true, in the one place every
++  // reader can see it, and no init function is referenced at all.
++  static constinit thread_local bool is_active_;
+ #endif
+ };
+ 
+diff --git a/v8/src/trap-handler/handler-shared.cc b/v8/src/trap-handler/handler-shared.cc
+--- a/v8/src/trap-handler/handler-shared.cc
++++ b/v8/src/trap-handler/handler-shared.cc
+@@ -27,7 +27,7 @@
+ #if defined(V8_OS_AIX)
+ __thread bool TrapHandlerGuard::is_active_ = 0;
+ #else
+-thread_local bool TrapHandlerGuard::is_active_ = 0;
++constinit thread_local bool TrapHandlerGuard::is_active_ = 0;
+ #endif
+ 
+ size_t gNumCodeObjects = 0;

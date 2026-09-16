@@ -1,0 +1,26 @@
+diff --git a/v8/include/v8config.h b/v8/include/v8config.h
+--- a/v8/include/v8config.h
++++ b/v8/include/v8config.h
+@@ -126,6 +126,22 @@
+ # define V8_OS_LINUX 1
+ # define V8_OS_POSIX 1
+ # define V8_OS_STRING "linux"
++
++#elif defined(__lean_os__)
++// lean_os. The build gates this platform as Linux, because that is what makes
++// the is_linux conditions in v8/BUILD.gn pick the right sources, so the macros
++// the preprocessor derives have to say the same thing - otherwise GN and the
++// compiler disagree about which platform-*.cc this is. What stays lean_os is
++// the string, which V8 reports rather than branches on, and the target triple,
++// which is what the C library and libc++ branch on.
++# define V8_OS_LINUX 1
++# define V8_OS_POSIX 1
++# define V8_OS_STRING "lean_os"
++// This libc reports the main thread's stack from pthread_getattr_np. See
++// where this is used in platform-posix.cc: the test there is a list of libcs
++// known to, because the one known NOT to is musl and there is no macro for
++// musl - so everything unrecognised is assumed to be it.
++# define V8_LIBC_REPORTS_MAIN_THREAD_STACK 1
+ 
+ #elif defined(__sun)
+ # define V8_OS_POSIX 1

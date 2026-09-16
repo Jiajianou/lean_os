@@ -1,0 +1,58 @@
+diff --git a/v8/src/base/cpu/cpu.cc b/v8/src/base/cpu/cpu.cc
+--- a/v8/src/base/cpu/cpu.cc
++++ b/v8/src/base/cpu/cpu.cc
+@@ -11,10 +11,16 @@
+ #if V8_LIBC_MSVCRT
+ #include <intrin.h>  // __cpuid()
+ #endif
+-#if V8_OS_LINUX
++// V8_OS_LINUX is the FAMILY a build gates this platform as; whether the
++// header below is there is a question about the KERNEL, and the two are
++// not the same. Every use of what it declares is already guarded on a
++// macro that comes from it, so a platform without it takes the branch it
++// was always going to take - the include was the only thing that stopped
++// the file compiling.
++#if V8_OS_LINUX && __has_include(<linux/auxvec.h>)
+ #include <linux/auxvec.h>  // AT_HWCAP
+ #endif
+-#if V8_OS_LINUX
++#if V8_OS_LINUX && __has_include(<sys/auxv.h>)
+ #include <sys/auxv.h>  // getauxval()
+ #endif
+ #if V8_OS_QNX
+diff --git a/v8/src/base/cpu/cpu-x86.cc b/v8/src/base/cpu/cpu-x86.cc
+--- a/v8/src/base/cpu/cpu-x86.cc
++++ b/v8/src/base/cpu/cpu-x86.cc
+@@ -10,7 +10,13 @@
+ #if V8_LIBC_MSVCRT
+ #include <intrin.h>  // __cpuid()
+ #endif
+-#if V8_OS_LINUX
++// V8_OS_LINUX is the FAMILY a build gates this platform as; whether the
++// header below is there is a question about the KERNEL, and the two are
++// not the same. Every use of what it declares is already guarded on a
++// macro that comes from it, so a platform without it takes the branch it
++// was always going to take - the include was the only thing that stopped
++// the file compiling.
++#if V8_OS_LINUX && __has_include(<linux/auxvec.h>) && __has_include(<sys/auxv.h>)
+ #include <linux/auxvec.h>  // AT_HWCAP
+ #include <sys/auxv.h>      // getauxval()
+ #endif
+diff --git a/v8/src/base/platform/platform-posix.cc b/v8/src/base/platform/platform-posix.cc
+--- a/v8/src/base/platform/platform-posix.cc
++++ b/v8/src/base/platform/platform-posix.cc
+@@ -64,7 +64,13 @@
+ #include <malloc.h>
+ #endif
+ 
+-#if V8_OS_LINUX
++// V8_OS_LINUX is the FAMILY a build gates this platform as; whether the
++// header below is there is a question about the KERNEL, and the two are
++// not the same. Every use of what it declares is already guarded on a
++// macro that comes from it, so a platform without it takes the branch it
++// was always going to take - the include was the only thing that stopped
++// the file compiling.
++#if V8_OS_LINUX && __has_include(<sys/prctl.h>)
+ #include <sys/prctl.h>  // for prctl
+ #endif
+ 

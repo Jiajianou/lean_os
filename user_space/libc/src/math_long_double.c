@@ -1,6 +1,21 @@
+#include <fenv.h>
 #include <limits.h>
 #include <math.h>
 #include <stdint.h>
+
+/* The long double half of what <math.h>'s math_errhandling promises - see
+   the comment on it there, and the identical three in math.c. A NaN that
+   arrives as an argument is not an error and every caller below settles that
+   case first, which is why none of these is reached with one. */
+static long double domain_error_l(void) {
+    feraiseexcept(FE_INVALID);
+    return (long double)NAN;
+}
+
+static long double pole_error_l(int negative) {
+    feraiseexcept(FE_DIVBYZERO);
+    return negative ? -(long double)INFINITY : (long double)INFINITY;
+}
 
 #if __LDBL_MANT_DIG__ != 64
 #error "this file is the x87 80-bit extended library; long double is not it here"
@@ -137,7 +152,7 @@ long double sqrtl(long double x) {
         return x;
     }
     if (x < 0.0L) {
-        return (long double)NAN;
+        return domain_error_l();
     }
     return x87_sqrt(x);
 }
@@ -339,10 +354,10 @@ long double logl(long double x) {
         return x;
     }
     if (x < 0.0L) {
-        return (long double)NAN;
+        return domain_error_l();
     }
     if (x == 0.0L) {
-        return -(long double)INFINITY;
+        return pole_error_l(1);
     }
     if (isinf(x)) {
         return x;
@@ -355,10 +370,10 @@ long double log2l(long double x) {
         return x;
     }
     if (x < 0.0L) {
-        return (long double)NAN;
+        return domain_error_l();
     }
     if (x == 0.0L) {
-        return -(long double)INFINITY;
+        return pole_error_l(1);
     }
     if (isinf(x)) {
         return x;
@@ -371,10 +386,10 @@ long double log10l(long double x) {
         return x;
     }
     if (x < 0.0L) {
-        return (long double)NAN;
+        return domain_error_l();
     }
     if (x == 0.0L) {
-        return -(long double)INFINITY;
+        return pole_error_l(1);
     }
     if (isinf(x)) {
         return x;
@@ -387,10 +402,10 @@ long double log1pl(long double x) {
         return x;
     }
     if (x < -1.0L) {
-        return (long double)NAN;
+        return domain_error_l();
     }
     if (x == -1.0L) {
-        return -(long double)INFINITY;
+        return pole_error_l(1);
     }
     if (isinf(x)) {
         return x;
@@ -505,8 +520,11 @@ static int reduce_quadrant(long double x, long double *remainder) {
 }
 
 long double sinl(long double x) {
+    if (isnan(x)) {
+        return x;
+    }
     if (!isfinite(x) || fabsl(x) >= TRIG_MAX_ARGUMENT) {
-        return (long double)NAN;
+        return domain_error_l();
     }
     long double r;
     switch (reduce_quadrant(x, &r)) {
@@ -518,8 +536,11 @@ long double sinl(long double x) {
 }
 
 long double cosl(long double x) {
+    if (isnan(x)) {
+        return x;
+    }
     if (!isfinite(x) || fabsl(x) >= TRIG_MAX_ARGUMENT) {
-        return (long double)NAN;
+        return domain_error_l();
     }
     long double r;
     switch (reduce_quadrant(x, &r)) {
@@ -531,8 +552,11 @@ long double cosl(long double x) {
 }
 
 long double tanl(long double x) {
+    if (isnan(x)) {
+        return x;
+    }
     if (!isfinite(x) || fabsl(x) >= TRIG_MAX_ARGUMENT) {
-        return (long double)NAN;
+        return domain_error_l();
     }
     long double r;
     int quadrant = reduce_quadrant(x, &r);
@@ -562,7 +586,7 @@ long double asinl(long double x) {
         return x;
     }
     if (fabsl(x) > 1.0L) {
-        return (long double)NAN;
+        return domain_error_l();
     }
     return x87_atan2(x, x87_sqrt((1.0L - x) * (1.0L + x)));
 }
@@ -572,7 +596,7 @@ long double acosl(long double x) {
         return x;
     }
     if (fabsl(x) > 1.0L) {
-        return (long double)NAN;
+        return domain_error_l();
     }
     return x87_atan2(x87_sqrt((1.0L - x) * (1.0L + x)), x);
 }
@@ -640,7 +664,7 @@ long double acoshl(long double x) {
         return x;
     }
     if (x < 1.0L) {
-        return (long double)NAN;
+        return domain_error_l();
     }
     if (isinf(x)) {
         return x;
@@ -658,9 +682,10 @@ long double atanhl(long double x) {
     }
     long double a = fabsl(x);
     if (a > 1.0L) {
-        return (long double)NAN;
+        return domain_error_l();
     }
     if (a == 1.0L) {
+        feraiseexcept(FE_DIVBYZERO);
         return copysignl((long double)INFINITY, x);
     }
     return copysignl(0.5L * log1pl(2.0L * a / (1.0L - a)), x);
@@ -699,8 +724,11 @@ long double cbrtl(long double x) {
 }
 
 long double fmodl(long double x, long double y) {
-    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0L) {
+    if (isnan(x) || isnan(y)) {
         return (long double)NAN;
+    }
+    if (isinf(x) || y == 0.0L) {
+        return domain_error_l();
     }
     if (isinf(y) || x == 0.0L) {
         return x;
@@ -709,8 +737,11 @@ long double fmodl(long double x, long double y) {
 }
 
 long double remainderl(long double x, long double y) {
-    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0L) {
+    if (isnan(x) || isnan(y)) {
         return (long double)NAN;
+    }
+    if (isinf(x) || y == 0.0L) {
+        return domain_error_l();
     }
     if (isinf(y)) {
         return x;
@@ -731,9 +762,13 @@ static int quotient_low_bits(long double x, long double y) {
 }
 
 long double remquol(long double x, long double y, int *quotient) {
-    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0L) {
+    if (isnan(x) || isnan(y)) {
         *quotient = 0;
         return (long double)NAN;
+    }
+    if (isinf(x) || y == 0.0L) {
+        *quotient = 0;
+        return domain_error_l();
     }
     if (isinf(y)) {
         *quotient = 0;
@@ -890,6 +925,7 @@ long double powl(long double x, long double y) {
     }
     if (x == 0.0L) {
         if (y < 0.0L) {
+            feraiseexcept(FE_DIVBYZERO);
             return is_odd_integer(y) ? copysignl((long double)INFINITY, x)
                                      : (long double)INFINITY;
         }
@@ -914,7 +950,7 @@ long double powl(long double x, long double y) {
     }
     if (x < 0.0L) {
         if (!is_integer(y)) {
-            return (long double)NAN;
+            return domain_error_l();
         }
         long double r = pow_positive(-x, y);
         return is_odd_integer(y) ? -r : r;

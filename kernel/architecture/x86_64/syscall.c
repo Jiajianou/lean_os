@@ -2916,40 +2916,69 @@ static long sys_mprotect(uint64_t address, uint64_t length, uint64_t prot, uint6
     if (end <= address) {
         return -1;
     }
-    if (address < USER_MMAP_BASE || end > USER_MMAP_LIMIT) {
+    /* mprotect applies to any MAPPED page, not only to one mmap made. A
+       program's own image is mapped, and changing what may be done to part of
+       it is an ordinary thing to want: M155 found this because V8 makes its
+       read-only heap read-only, which is a page of its own data segment, and
+       got a refusal it reported as a fatal error.
+
+       The two regions are handled differently because only one of them has
+       bookkeeping to keep. An mmap region is described by an entry in
+       self->mmaps and the entry has to be split and updated so a later
+       munmap or mremap agrees with the page tables. The image has no such
+       description - the loader mapped it and nothing tracks it afterwards -
+       so the page table IS the record, and the only thing to check is that
+       every page in the range is really there.
+
+       The stack is deliberately not here. It grows when it is touched, which
+       means a page in it may not be mapped yet and refusing that would be
+       right for the wrong reason; the condition for adding it is a program
+       that asks. */
+    int in_mmap = address >= USER_MMAP_BASE && end <= USER_MMAP_LIMIT;
+    int in_image = address >= USER_IMAGE_BASE && end <= USER_IMAGE_LIMIT;
+    if (!in_mmap && !in_image) {
         return -1;
     }
     task_t *self = scheduler_vm_owner(scheduler_current());
     if (self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return -1;
     }
-    uint64_t covered = 0;
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
-        if (self->mmaps[i].pages == 0) {
-            break;
+    if (in_image) {
+        if (!virtual_memory_user_range_ok(self->pml4_phys, address,
+                                          (end - address) / PAGE_SIZE, 0)) {
+            return -1;
         }
-        uint64_t rstart = self->mmaps[i].base;
-        uint64_t rend = rstart + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
-        uint64_t lo = rstart > address ? rstart : address;
-        uint64_t hi = rend < end ? rend : end;
-        if (lo < hi) {
-            covered += hi - lo;
+    } else {
+        uint64_t covered = 0;
+        for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+            if (self->mmaps[i].pages == 0) {
+                break;
+            }
+            uint64_t rstart = self->mmaps[i].base;
+            uint64_t rend = rstart + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
+            uint64_t lo = rstart > address ? rstart : address;
+            uint64_t hi = rend < end ? rend : end;
+            if (lo < hi) {
+                covered += hi - lo;
+            }
+        }
+        if (covered != end - address) {
+            return -1;
+        }
+        if (mmap_split_for(self, address, end) != 0) {
+            return -1;
         }
     }
-    if (covered != end - address) {
-        return -1;
-    }
-    if (mmap_split_for(self, address, end) != 0) {
-        return -1;
-    }
-    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
-        if (self->mmaps[i].pages == 0) {
-            break;
-        }
-        uint64_t rstart = self->mmaps[i].base;
-        uint64_t rend = rstart + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
-        if (rstart >= address && rend <= end) {
-            self->mmaps[i].prot = (uint32_t)prot;
+    if (in_mmap) {
+        for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+            if (self->mmaps[i].pages == 0) {
+                break;
+            }
+            uint64_t rstart = self->mmaps[i].base;
+            uint64_t rend = rstart + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
+            if (rstart >= address && rend <= end) {
+                self->mmaps[i].prot = (uint32_t)prot;
+            }
         }
     }
     uint64_t flags = VIRTUAL_MEMORY_FLAG_USER;

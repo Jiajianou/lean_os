@@ -1,0 +1,95 @@
+diff --git a/v8/src/base/platform/platform-linux.cc b/v8/src/base/platform/platform-linux.cc
+--- a/v8/src/base/platform/platform-linux.cc
++++ b/v8/src/base/platform/platform-linux.cc
+@@ -12,7 +12,14 @@
+ #include <signal.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++// Nothing in this file calls prctl(2); the header is here for the sake of
++// platforms whose <sys/*.h> pull each other in. A Linux-family platform
++// without Linux's kernel interfaces has not got it, and on one that has, this
++// is what it was before. If a prctl() call is ever added below, the compile
++// fails on the call rather than silently doing something else.
++#if __has_include(<sys/prctl.h>)
+ #include <sys/prctl.h>
++#endif
+ #include <sys/resource.h>
+ #include <sys/syscall.h>
+ #include <sys/time.h>
+@@ -47,7 +54,20 @@
+ #include "src/base/platform/platform-posix.h"
+ #include "src/base/platform/platform.h"
+ 
+-#if !defined(MREMAP_DONTUNMAP)
++// mremap(2) and its MREMAP_* flags are Linux KERNEL interfaces rather than
++// POSIX ones, and a platform this build gates as Linux need not have them.
++// Where they are missing the two functions below answer "could not", which is
++// an answer both of their callers already handle: PageAllocator::SharedMemory
++// ::RemapTo returns an empty mapping and CodeRange falls back to copying the
++// embedded builtins rather than sharing them.
++//
++// MREMAP_FIXED is the one tested for rather than mremap itself, because a
++// declaration is what a header decides and a flag is what a kernel decides.
++#if defined(MREMAP_FIXED) && defined(MREMAP_MAYMOVE)
++#define V8_HAS_MREMAP 1
++#endif
++
++#if defined(V8_HAS_MREMAP) && !defined(MREMAP_DONTUNMAP)
+ // We define this to support building against versions that do not yet expose
+ // it. Instead, we check at runtime in KernelSupportsRemapDontUnmap.
+ #define MREMAP_DONTUNMAP 4
+@@ -84,6 +104,9 @@
+ void OS::AdjustSchedulingParams() {}
+ 
+ void* OS::RemapShared(void* old_address, void* new_address, size_t size) {
++#if !defined(V8_HAS_MREMAP)
++  return nullptr;
++#else
+   void* result =
+       mremap(old_address, 0, size, MREMAP_FIXED | MREMAP_MAYMOVE, new_address);
+ 
+@@ -92,6 +115,7 @@
+   }
+   DCHECK(result == new_address);
+   return result;
++#endif  // V8_HAS_MREMAP
+ }
+ 
+ std::optional<OS::MemoryRange> OS::GetFirstFreeMemoryRangeWithin(
+@@ -172,6 +196,12 @@
+   }
+ }
+ 
++// Only reachable where mremap is. It is guarded rather than merely unused
++// because its premise is a Linux one twice over: that uname(2) reports a
++// release string, and that the string is a kernel version number. It CHECKs
++// on both, so a platform where neither holds would crash inside a function
++// whose whole job is to answer "probably not".
++#if defined(V8_HAS_MREMAP)
+ bool KernelSupportsRemapDontUnmap() {
+   static bool supported = [] {
+     struct utsname buffer;
+@@ -189,6 +219,7 @@
+ 
+   return supported;
+ }
++#endif  // V8_HAS_MREMAP
+ }  // namespace
+ 
+ // static
+@@ -238,6 +269,7 @@
+ 
+   int protection = GetProtectionFromMemoryPermission(access);
+ 
++#if defined(V8_HAS_MREMAP)
+   if (KernelSupportsRemapDontUnmap()) {
+     void* result =
+         mremap(const_cast<void*>(address), size, size,
+@@ -253,6 +285,7 @@
+       return true;
+     }
+   }
++#endif  // V8_HAS_MREMAP
+ 
+   // Fallback to reading /proc/self/maps if mremap approach fails.
+   MemoryRegion enclosing_region = FindEnclosingMapping(address_addr, size);

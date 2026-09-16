@@ -1,0 +1,55 @@
+diff --git a/v8/src/base/platform/platform-posix.cc b/v8/src/base/platform/platform-posix.cc
+--- a/v8/src/base/platform/platform-posix.cc
++++ b/v8/src/base/platform/platform-posix.cc
+@@ -147,9 +147,12 @@
+   flags |= (page_type == PageType::kShared) ? MAP_SHARED : MAP_PRIVATE;
+   if (access == OS::MemoryPermission::kNoAccess ||
+       access == OS::MemoryPermission::kNoAccessWillJitLater) {
+-#if !V8_OS_AIX && !V8_OS_FREEBSD && !V8_OS_QNX
++// MAP_NORESERVE is advisory - it asks the kernel not to account for swap it
++// will probably never need - so a platform that has not got it gets the same
++// mapping and a different accounting decision, which is what the flag is for.
++#if !V8_OS_AIX && !V8_OS_FREEBSD && !V8_OS_QNX && defined(MAP_NORESERVE)
+     flags |= MAP_NORESERVE;
+-#endif  // !V8_OS_AIX && !V8_OS_FREEBSD && !V8_OS_QNX
++#endif  // !V8_OS_AIX && !V8_OS_FREEBSD && !V8_OS_QNX && MAP_NORESERVE
+ #if V8_OS_QNX
+     flags |= MAP_LAZY;
+ #endif  // V8_OS_QNX
+@@ -926,7 +929,16 @@
+ #if V8_OS_DARWIN || (V8_OS_ANDROID && defined(__APPLE__))
+   return static_cast<int>(pthread_mach_thread_np(pthread_self()));
+ #elif V8_OS_LINUX
++// __NR_gettid is a Linux SYSTEM CALL NUMBER, which is a different thing from
++// being in the Linux family: a platform this build gates as Linux can have a
++// thread id and no table of Linux's call numbers to ask for it by. gettid(2)
++// is the same answer under the name POSIX.1-2024 standardised, and the
++// V8_OS_ANDROID branch below already calls it.
++#if defined(__NR_gettid)
+   return static_cast<int>(syscall(__NR_gettid));
++#else
++  return static_cast<int>(gettid());
++#endif
+ #elif V8_OS_ANDROID
+   return static_cast<int>(gettid());
+ #elif V8_OS_AIX
+@@ -1510,9 +1522,18 @@
+ // mark at the time of the call. There's no macro to detect musl, so
+ // let the caller do a fallback in cases where the libc is not one that
+ // is known to work.
+-#if V8_OS_LINUX && !V8_LIBC_GLIBC && !V8_LIBC_BIONIC && !V8_LIBC_UCLIBC
++// ... or one that says it does. The three above are the libcs known to report
++// the main thread's stack; a platform outside the list is assumed to be musl
++// because there is no macro that identifies musl, and a platform that knows
++// better can say so rather than pay for a guess about a different library.
++#if V8_OS_LINUX && !V8_LIBC_GLIBC && !V8_LIBC_BIONIC && !V8_LIBC_UCLIBC && \
++    !defined(V8_LIBC_REPORTS_MAIN_THREAD_STACK)
++#if defined(__NR_gettid)
+   if (syscall(__NR_gettid) == getpid()) return nullptr;
++#else
++  if (gettid() == getpid()) return nullptr;
+ #endif
++#endif
+   pthread_attr_t attr;
+   int error = pthread_getattr_np(pthread_self(), &attr);
+   if (error) {

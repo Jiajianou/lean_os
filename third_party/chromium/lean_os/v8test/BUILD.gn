@@ -1,0 +1,27 @@
+# A program that embeds V8 and that this machine runs.
+#
+# V8 is the first piece of Chromium this port has built that generates
+# machine code at run time rather than at build time, so it is the first one
+# whose demands on this kernel are not only "map this program and start it":
+# it wants pages it can write and then execute, and it wants them while the
+# process is running.
+#
+# //v8:v8 is the engine, //v8:v8_libplatform the default platform
+# implementation an embedder is expected to supply a threading and task
+# story through, and //v8:v8_libbase what both are built on. The snapshot is
+# linked into this binary rather than loaded from a file beside it - see
+# v8_use_external_startup_data in tools/build-chromium.sh - because a
+# program on this machine is one file the kernel maps.
+#
+# //v8:external_config is NOT listed: depending on //v8 applies it, and V8's
+# own samples carry a comment saying a target cannot have both that and
+# :internal_config.
+
+executable("v8test") {
+  sources = [ "chromium_v8_test.cc" ]
+  deps = [
+    "//v8",
+    "//v8:v8_libbase",
+    "//v8:v8_libplatform",
+  ]
+}

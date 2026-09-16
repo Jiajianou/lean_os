@@ -3,13 +3,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* system_api's process.h, not this one - the angle form is what distinguishes
+   them, because a quoted include from this file would find this file. */
+#include <process.h>
+
 #include "scheduler/scheduler.h"
 
 #define PAGE_SIZE        4096ULL
 #define GIB              (1024ULL * 1024 * 1024)
-#define USER_STACK_TOP   0x000000FC00000000ULL
+/* One definition, in system_api/include/process.h, because a C library that
+   disagreed with the kernel about where the stack is would be wrong in a way
+   nothing reports. */
+#define USER_STACK_TOP   OS_MAIN_STACK_TOP
 #define USER_STACK_PAGES 16
-#define USER_STACK_MAX_BYTES (64ULL * 1024 * 1024)
+#define USER_STACK_MAX_BYTES OS_MAIN_STACK_MAX_BYTES
 #define USER_STACK_LIMIT (USER_STACK_TOP - USER_STACK_MAX_BYTES)
 #define USER_ARGUMENT_ADDRESS    USER_STACK_TOP
 #define USER_ARGUMENT_PAGES   32

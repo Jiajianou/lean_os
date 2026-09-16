@@ -1,0 +1,17 @@
+diff --git a/v8/BUILD.gn b/v8/BUILD.gn
+--- a/v8/BUILD.gn
++++ b/v8/BUILD.gn
+@@ -2485,7 +2485,12 @@
+ 
+   # The clang toolchain's resource dir contains builting headers
+   # include/{stddef.h,stdarg.h,...}.
+-  _metagen_clang_resource_dir = "$clang_base_path/lib/clang/$clang_version"
++  #
++  # libclang_resource_dir rather than clang_base_path's own, because metagen
++  # parses with libclang and those are two different questions when the
++  # target has a compiler of its own - see the comment on that argument in
++  # //build/config/clang/clang.gni.
++  _metagen_clang_resource_dir = libclang_resource_dir
+   _metagen_flags_target = ":v8_base_without_compiler"
+   _metagen_flags_target_ninja =
+       get_label_info(_metagen_flags_target, "target_out_dir") +

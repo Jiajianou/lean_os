@@ -5,6 +5,9 @@
 #include <sys/mman.h>
 #include <errno.h>
 
+#include <process.h>
+#include <stdint.h>
+
 #include "syscall_wrappers.h"
 
 typedef struct {
@@ -417,6 +420,29 @@ int pthread_getattr_np(pthread_t thread, pthread_attr_t *attribute) {
         }
     }
     pthread_mutex_unlock(&registry_lock);
+
+    /* Not in the registry, which for the thread a process starts with is not
+       a failure - nothing here created it, so nothing here recorded it. The
+       kernel did, and where it put the stack is part of the ABI rather than
+       something to be guessed from the stack pointer: OS_MAIN_STACK_TOP and
+       OS_MAIN_STACK_MAX_BYTES in system_api/include/process.h, which
+       kernel/process/process.h derives its own names from.
+
+       base is the LOWEST address and size the extent, which is what
+       pthread_attr_getstack means by them and what a caller adding the two
+       expects to be the top. The region is the whole one the kernel will
+       grow into rather than the part that is mapped now, because a caller
+       asking is asking what the thread may use.
+
+       M155: V8 asks this on whatever thread it is on, including the first,
+       and treats not knowing as fatal - Check failed: IsOnCentralStack(). */
+    if (thread == pthread_self()) {
+        attribute->stack_base =
+            (void *)(uintptr_t)(OS_MAIN_STACK_TOP - OS_MAIN_STACK_MAX_BYTES);
+        attribute->stack_size = (size_t)OS_MAIN_STACK_MAX_BYTES;
+        return 0;
+    }
+
     attribute->stack_base = 0;
     attribute->stack_size = 0;
     return ENOSYS;

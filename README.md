@@ -448,6 +448,37 @@ Several instruments, and none of them subsumes another:
   CHACHA20-POLY1305** and verifies the certificate against a trust anchor
   added through `CertVerifierWithUpdatableProc` - the interface a browser
   uses for enterprise roots, not a test hook.
+- **A JavaScript engine, most of the way.** **V8** builds for this machine out
+  of Chromium's own ninja - 51 MB, ET_EXEC, entry `0x80000b9600`, with the
+  startup snapshot linked into the file rather than sitting beside it,
+  because a program on this machine is one file the kernel maps. It starts
+  here: a platform, an isolate and a context on this kernel's threads, and it
+  **interprets JavaScript** - arithmetic, strings, arrays, JSON and a
+  recursive Fibonacci.
+
+  It does not finish. PartitionAlloc calls `mprotect` on sub-ranges of one
+  large reservation often enough to exhaust this kernel's fixed 128-entry
+  mmap region table, and a fixed table is the wrong shape for what a browser
+  does to an address space. That is the next piece of kernel work rather than
+  more porting, and until it is built there is no `/bin/chromiumv8` on the
+  image and no boot marker claiming one.
+
+  Nine of the ten patches it cost are the same sentence: **being in the Linux
+  family is not having Linux's kernel.** `mremap`, `prctl`, `__NR_gettid`,
+  `MAP_NORESERVE`, `MADV_DODUMP` and memory protection keys are Linux's own,
+  and V8 reaches for all of them behind `V8_OS_LINUX`. The tenth is about
+  this machine rather than about Linux: a **weak undefined TLS init function**
+  is branched to absolute zero, which fits in a 32-bit PC-relative field only
+  when the image is near zero - and this OS loads programs at 512 GiB, so a
+  function nobody calls broke the link.
+
+  **It found two holes in this libc too.** `math_errhandling` was missing, so
+  the one question a caller can ask about how errors are reported had no
+  answer; `<math.h>` says `MATH_ERREXCEPT` now and the error paths raise the
+  flags that makes true, graded against the host's libm. And C99's float
+  family was sixteen functions out of about forty - `truncf` was the one V8
+  named, and the other thirty-seven came with it.
+
 - **A libm for the format the hardware has.** `long double` on x86-64 is
   the x87's 80-bit extended type, and this libc has the C99 set for it -
   fifty-two functions, graded to the unit in the last place of a 64-bit

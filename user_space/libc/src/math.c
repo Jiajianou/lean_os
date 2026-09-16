@@ -1,5 +1,30 @@
+#include <fenv.h>
 #include <limits.h>
 #include <math.h>
+
+/* math_errhandling says MATH_ERREXCEPT, and these three are what make that
+   true - see the comment on it in <math.h>. Every arithmetic path raises on
+   its own because the hardware does it; these are for the errors this library
+   detects and returns from before any arithmetic runs.
+
+   A NaN that ARRIVES as an argument is not an error and must stay quiet, so
+   every caller below settles that case before it gets here. That distinction
+   is the whole difference between a library that reports errors and one that
+   reports arguments. */
+static double domain_error(void) {
+    feraiseexcept(FE_INVALID);
+    return NAN;
+}
+
+static double pole_error(int negative) {
+    feraiseexcept(FE_DIVBYZERO);
+    return negative ? -HUGE_VAL : HUGE_VAL;
+}
+
+static double overflow_error(int negative) {
+    feraiseexcept(FE_OVERFLOW | FE_INEXACT);
+    return negative ? -HUGE_VAL : HUGE_VAL;
+}
 
 double fabs(double x) {
     return x < 0.0 ? -x : x;
@@ -7,7 +32,7 @@ double fabs(double x) {
 
 double sqrt(double x) {
     if (x < 0.0) {
-        return NAN;
+        return domain_error();
     }
 #if defined(__x86_64__)
     double r;
@@ -37,8 +62,11 @@ double ceil(double x) {
 }
 
 double fmod(double x, double y) {
-    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0) {
+    if (isnan(x) || isnan(y)) {
         return NAN;
+    }
+    if (isinf(x) || y == 0.0) {
+        return domain_error();
     }
     if (isinf(y) || x == 0.0) {
         return x;
@@ -101,8 +129,11 @@ static int quadrant(double x, double *r) {
 }
 
 double sin(double x) {
+    if (isnan(x)) {
+        return x;
+    }
     if (!isfinite(x) || fabs(x) > TRIG_MAX_ARGUMENT) {
-        return NAN;
+        return domain_error();
     }
     double r;
     switch (quadrant(x, &r)) {
@@ -114,8 +145,11 @@ double sin(double x) {
 }
 
 double cos(double x) {
+    if (isnan(x)) {
+        return x;
+    }
     if (!isfinite(x) || fabs(x) > TRIG_MAX_ARGUMENT) {
-        return NAN;
+        return domain_error();
     }
     double r;
     switch (quadrant(x, &r)) {
@@ -127,12 +161,15 @@ double cos(double x) {
 }
 
 double tan(double x) {
+    if (isnan(x)) {
+        return x;
+    }
     if (!isfinite(x) || fabs(x) > TRIG_MAX_ARGUMENT) {
-        return NAN;
+        return domain_error();
     }
     double c = cos(x);
     if (c == 0.0) {
-        return HUGE_VAL;
+        return pole_error(0);
     }
     return sin(x) / c;
 }
@@ -191,7 +228,7 @@ double atan2(double y, double x) {
 
 double asin(double x) {
     if (x > 1.0 || x < -1.0) {
-        return NAN;
+        return domain_error();
     }
     if (x == 1.0) {
         return M_PI_2;
@@ -213,7 +250,7 @@ double exp(double x) {
         return x;
     }
     if (x > 709.0) {
-        return HUGE_VAL;
+        return overflow_error(0);
     }
     if (x < -745.0) {
         return 0.0;
@@ -247,10 +284,10 @@ double log(double x) {
         return x;
     }
     if (x < 0.0) {
-        return NAN;
+        return domain_error();
     }
     if (x == 0.0) {
-        return -HUGE_VAL;
+        return pole_error(1);
     }
     int k = 0;
     while (x > 1.4142135623730951) {
@@ -281,12 +318,12 @@ double pow(double x, double y) {
         return 1.0;
     }
     if (x == 0.0) {
-        return y > 0.0 ? 0.0 : HUGE_VAL;
+        return y > 0.0 ? 0.0 : pole_error(0);
     }
     if (x < 0.0) {
         double ry = (double)(long long)y;
         if (ry != y) {
-            return NAN;
+            return domain_error();
         }
         double mag = exp(y * log(-x));
         return ((long long)y & 1) ? -mag : mag;
@@ -481,10 +518,10 @@ double log1p(double x) {
         return x;
     }
     if (x < -1.0) {
-        return NAN;
+        return domain_error();
     }
     if (x == -1.0) {
-        return -HUGE_VAL;
+        return pole_error(1);
     }
     if (fabs(x) >= 0.5) {
         return log(1.0 + x);
@@ -519,7 +556,7 @@ double acosh(double x) {
         return x;
     }
     if (x < 1.0) {
-        return NAN;
+        return domain_error();
     }
     if (x > 1e8) {
         return log(x) + 0.69314718055994530942;
@@ -534,10 +571,10 @@ double atanh(double x) {
     }
     double ax = fabs(x);
     if (ax > 1.0) {
-        return NAN;
+        return domain_error();
     }
     if (ax == 1.0) {
-        return x > 0.0 ? HUGE_VAL : -HUGE_VAL;
+        return pole_error(x < 0.0);
     }
     double r = 0.5 * log1p(2.0 * ax / (1.0 - ax));
     return x < 0.0 ? -r : r;
@@ -642,7 +679,7 @@ double exp2(double x) {
         return x;
     }
     if (x > 1024.0) {
-        return HUGE_VAL;
+        return overflow_error(0);
     }
     if (x < -1075.0) {
         return 0.0;
@@ -790,4 +827,247 @@ float nextafterf(float x, float y) {
         v.u--;
     }
     return v.f;
+}
+
+/* M155. The rest of C99 7.12, which V8 asked for and this library had not
+   had: the twelve double functions below and, after them, a float variant for
+   every function that has one.
+
+   The double ones delegate to the long double family rather than being
+   written again, and that is exact rather than merely close: this target's
+   long double carries a 64-bit mantissa where a double carries 53, so every
+   one of these operations - a remainder, a rounding to integer, an exponent -
+   is computed without error and rounded once on the way out. Those
+   implementations are M142's, and /bin/mathltest already grades all of them
+   against MPFR on the machine.
+
+   lgamma and tgamma are not here, and are not in the long double family
+   either. That is the one gap in C99's set this library has, and it is a gap
+   rather than an oversight: nothing in this tree has asked for them, and a
+   Lanczos approximation written to fill a table is the kind of code M65's
+   rule is about. */
+double nearbyint(double x) {
+    return (double)nearbyintl((long double)x);
+}
+
+double rint(double x) {
+    return (double)rintl((long double)x);
+}
+
+long lrint(double x) {
+    return lrintl((long double)x);
+}
+
+long long llrint(double x) {
+    return llrintl((long double)x);
+}
+
+double remainder(double x, double y) {
+    return (double)remainderl((long double)x, (long double)y);
+}
+
+double remquo(double x, double y, int *quotient) {
+    return (double)remquol((long double)x, (long double)y, quotient);
+}
+
+double logb(double x) {
+    return (double)logbl((long double)x);
+}
+
+int ilogb(double x) {
+    return ilogbl((long double)x);
+}
+
+double scalbn(double x, int exponent) {
+    return (double)scalbnl((long double)x, exponent);
+}
+
+double scalbln(double x, long exponent) {
+    return (double)scalblnl((long double)x, exponent);
+}
+
+double fdim(double x, double y) {
+    return (double)fdiml((long double)x, (long double)y);
+}
+
+/* Not nexttowardl rounded down, which would step in the wrong space: the
+   answer has to be the next DOUBLE, and a long double y sitting between x and
+   it must still move x a whole double ulp. Converting y to double first would
+   lose exactly the cases this function exists for. */
+double nexttoward(double x, long double y) {
+    if (isnan(x)) {
+        return x;
+    }
+    if (isnan(y)) {
+        return (double)y;
+    }
+    if ((long double)x == y) {
+        return (double)y;
+    }
+    return nextafter(x, (long double)x < y ? HUGE_VAL : -HUGE_VAL);
+}
+
+/* The float family. Every one of these computes in double and rounds once,
+   which is what the sixteen that were already here do - a double carries
+   every float exactly and has 29 more mantissa bits to work in, so the only
+   error is the single rounding on the way back. */
+
+float acosf(float x) {
+    return (float)acos((double)x);
+}
+
+float asinf(float x) {
+    return (float)asin((double)x);
+}
+
+float acoshf(float x) {
+    return (float)acosh((double)x);
+}
+
+float asinhf(float x) {
+    return (float)asinh((double)x);
+}
+
+float atanhf(float x) {
+    return (float)atanh((double)x);
+}
+
+float coshf(float x) {
+    return (float)cosh((double)x);
+}
+
+float sinhf(float x) {
+    return (float)sinh((double)x);
+}
+
+float exp2f(float x) {
+    return (float)exp2((double)x);
+}
+
+float expm1f(float x) {
+    return (float)expm1((double)x);
+}
+
+float logf(float x) {
+    return (float)log((double)x);
+}
+
+float log10f(float x) {
+    return (float)log10((double)x);
+}
+
+float log1pf(float x) {
+    return (float)log1p((double)x);
+}
+
+float log2f(float x) {
+    return (float)log2((double)x);
+}
+
+float logbf(float x) {
+    return (float)logb((double)x);
+}
+
+float cbrtf(float x) {
+    return (float)cbrt((double)x);
+}
+
+float erff(float x) {
+    return (float)erf((double)x);
+}
+
+float erfcf(float x) {
+    return (float)erfc((double)x);
+}
+
+float nearbyintf(float x) {
+    return (float)nearbyint((double)x);
+}
+
+float rintf(float x) {
+    return (float)rint((double)x);
+}
+
+float truncf(float x) {
+    return (float)trunc((double)x);
+}
+
+float powf(float x, float y) {
+    return (float)pow((double)x, (double)y);
+}
+
+float fmodf(float x, float y) {
+    return (float)fmod((double)x, (double)y);
+}
+
+float remainderf(float x, float y) {
+    return (float)remainder((double)x, (double)y);
+}
+
+float copysignf(float x, float y) {
+    return (float)copysign((double)x, (double)y);
+}
+
+float fdimf(float x, float y) {
+    return (float)fdim((double)x, (double)y);
+}
+
+float fmaxf(float x, float y) {
+    return (float)fmax((double)x, (double)y);
+}
+
+float fminf(float x, float y) {
+    return (float)fmin((double)x, (double)y);
+}
+
+float fmaf(float x, float y, float z) {
+    return (float)fma((double)x, (double)y, (double)z);
+}
+
+int ilogbf(float x) {
+    return ilogb((double)x);
+}
+
+long lrintf(float x) {
+    return lrint((double)x);
+}
+
+long long llrintf(float x) {
+    return llrint((double)x);
+}
+
+float scalbnf(float x, int exponent) {
+    return (float)scalbn((double)x, exponent);
+}
+
+float scalblnf(float x, long exponent) {
+    return (float)scalbln((double)x, exponent);
+}
+
+float frexpf(float x, int *exponent) {
+    return (float)frexp((double)x, exponent);
+}
+
+float modff(float x, float *ipart) {
+    double whole;
+    double fraction = modf((double)x, &whole);
+    *ipart = (float)whole;
+    return (float)fraction;
+}
+
+float remquof(float x, float y, int *quotient) {
+    return (float)remquo((double)x, (double)y, quotient);
+}
+
+float nexttowardf(float x, long double y) {
+    if (isnan(x)) {
+        return x;
+    }
+    if (isnan(y)) {
+        return (float)y;
+    }
+    if ((long double)x == y) {
+        return (float)y;
+    }
+    return nextafterf(x, (long double)x < y ? HUGE_VALF : -HUGE_VALF);
 }

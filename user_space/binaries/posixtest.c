@@ -3,6 +3,8 @@
 #include <fcntl.h>
 #include <link.h>
 #include <malloc.h>
+#include <stdint.h>
+#include <process.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -263,23 +265,40 @@ static int a_thread_can_find_its_own_stack(void) {
         return 38;
     }
 
+    /* The MAIN thread, which this thread library did not create and therefore
+       has no record of. Until M155 that made it unanswerable and this check
+       tolerated a failure - which is why nothing noticed that the answer was
+       missing until V8 asked for it and called not knowing fatal.
+       Tolerating it was the bug: a program that scans its own stack has no
+       second way to find out where it is.
+
+       The bounds come from system_api/include/process.h, which the kernel
+       derives its own from, so this also says the two agree. */
     int local = 0;
     pthread_attr_t mine;
-    int found = pthread_getattr_np(pthread_self(), &mine);
+    if (pthread_getattr_np(pthread_self(), &mine) != 0) {
+        return 39;
+    }
     void *main_base = 0;
     size_t main_size = 0;
-    int described = pthread_attr_getstack(&mine, &main_base, &main_size);
-    if (found == 0) {
-        if (described != 0) {
-            return 39;
-        }
-        unsigned char *low = (unsigned char *)main_base;
-        if ((unsigned char *)&local < low ||
-            (unsigned char *)&local >= low + main_size) {
-            return 40;
-        }
-    } else if (described == 0) {
+    if (pthread_attr_getstack(&mine, &main_base, &main_size) != 0) {
+        return 40;
+    }
+    unsigned char *low = (unsigned char *)main_base;
+    if ((unsigned char *)&local < low ||
+        (unsigned char *)&local >= low + main_size) {
+        printf("[posixtest] a local at %p is outside the main stack "
+               "%p +%lu\n", (void *)&local, main_base,
+               (unsigned long)main_size);
         return 41;
+    }
+    if ((unsigned long long)(uintptr_t)low + main_size != OS_MAIN_STACK_TOP ||
+        main_size != OS_MAIN_STACK_MAX_BYTES) {
+        printf("[posixtest] the main stack is %p +%lu, the ABI says "
+               "%llx +%llu\n", main_base, (unsigned long)main_size,
+               (unsigned long long)OS_MAIN_STACK_TOP,
+               (unsigned long long)OS_MAIN_STACK_MAX_BYTES);
+        return 42;
     }
     return 0;
 }

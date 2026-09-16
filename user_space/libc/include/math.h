@@ -72,6 +72,29 @@ double pow(double x, double y);
 #define HUGE_VALF (__builtin_huge_valf())
 #define HUGE_VALL (__builtin_huge_vall())
 
+/* How this library reports a domain error, a pole error and an overflow.
+   C99 7.12 allows errno, the floating point exception flags, or both, and
+   requires the answer to be one of those three - which is why there is no
+   fourth spelling for "it does not say".
+
+   This one raises the flags and does not touch errno. That is a decision
+   rather than an omission: every function below is built out of x86-64
+   instructions whose results the hardware already records in the x87 status
+   word and in MXCSR, which <fenv.h> reads - so the flags are a fact about
+   what happened either way, and errno would be a second bookkeeping system
+   kept by hand beside one the machine keeps for free. The error paths that
+   return before any arithmetic runs - a negative argument to sqrt, a zero to
+   log - call feraiseexcept themselves, because on those the hardware never
+   got to see the problem.
+
+   M155 added these, and V8 is what asked for them: llvm-libc's own ieee754
+   reads math_errhandling to decide whether to report at all. They are graded
+   by tools/math-test.sh against the host's libm, which is a library nobody
+   here wrote answering the same questions. */
+#define MATH_ERRNO       1
+#define MATH_ERREXCEPT   2
+#define math_errhandling MATH_ERREXCEPT
+
 double frexp(double x, int *exp);
 double ldexp(double x, int exp);
 double modf(double x, double *ipart);
@@ -165,6 +188,61 @@ long double fdiml(long double x, long double y);
 long double fmaxl(long double x, long double y);
 long double fminl(long double x, long double y);
 long double nanl(const char *tag);
+
+/* M155. The rest of C99 7.12 - see the note at the top of math.c for why the
+   double ones delegate to the long double family and why lgamma and tgamma
+   are not among them. V8 is what asked: truncf and nearbyintf first, and then
+   the thirty-seven others a float family is. */
+double nearbyint(double x);
+double rint(double x);
+long lrint(double x);
+long long llrint(double x);
+double remainder(double x, double y);
+double remquo(double x, double y, int *quotient);
+double logb(double x);
+int ilogb(double x);
+double scalbn(double x, int exponent);
+double scalbln(double x, long exponent);
+double fdim(double x, double y);
+double nexttoward(double x, long double y);
+
+float acosf(float x);
+float asinf(float x);
+float acoshf(float x);
+float asinhf(float x);
+float atanhf(float x);
+float coshf(float x);
+float sinhf(float x);
+float exp2f(float x);
+float expm1f(float x);
+float logf(float x);
+float log10f(float x);
+float log1pf(float x);
+float log2f(float x);
+float logbf(float x);
+float cbrtf(float x);
+float erff(float x);
+float erfcf(float x);
+float nearbyintf(float x);
+float rintf(float x);
+float truncf(float x);
+float powf(float x, float y);
+float fmodf(float x, float y);
+float remainderf(float x, float y);
+float copysignf(float x, float y);
+float fdimf(float x, float y);
+float fmaxf(float x, float y);
+float fminf(float x, float y);
+float fmaf(float x, float y, float z);
+int ilogbf(float x);
+long lrintf(float x);
+long long llrintf(float x);
+float scalbnf(float x, int exponent);
+float scalblnf(float x, long exponent);
+float frexpf(float x, int *exponent);
+float modff(float x, float *ipart);
+float remquof(float x, float y, int *quotient);
+float nexttowardf(float x, long double y);
 
 #ifdef __cplusplus
 }

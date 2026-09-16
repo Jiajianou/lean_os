@@ -10322,14 +10322,16 @@ static void boot_selftests_system(void) {
             all_ok = 0;
         }
 
-        static const char *const M91_FATAL[] = {"nx", "wx", "guard", "stackfar"};
+        static const char *const M91_FATAL[] = {"nx", "wx", "image", "guard",
+                                                "stackfar"};
         static const char *const M91_WHY[] = {
             "executing a page that is not PROT_EXEC",
             "writing to a page mprotect made read-only",
+            "writing to a page of its OWN IMAGE mprotect made read-only",
             "touching a PROT_NONE guard mapping",
             "touching 32 MiB below the stack pointer",
         };
-        for (int m = 0; m < 4 && all_ok; m++) {
+        for (int m = 0; m < 5 && all_ok; m++) {
             size_t f_bytes = 0;
             uint8_t *f_img = read_program(PATH_BIN_DIRECTORY "vmtest", &f_bytes);
             if (!f_img) {
