@@ -567,6 +567,66 @@ PROBE
       check $? "installed as /bin/chromiumv8 - the [m156] boot self-test runs it"
     fi
   fi
+
+  # M157. Skia. What a browser paints with, and the other half of what Blink
+  # needs - V8 runs the scripts and this draws the result.
+  SKIAPROGRAM="$SRC/out/$OUT_NAME/skiatest"
+  if [ ! -x "$SKIAPROGRAM" ]; then
+    echo "chromium-test: Skia has not been built - skipping" \
+         "(tools/build-chromium.sh lean_os)"
+  else
+    "${PREFIX}readelf" -h "$SKIAPROGRAM" | grep -q "EXEC (Executable file)"
+    check $? "a program linked from Skia is an EXEC in this OS's image region ($("${PREFIX}readelf" -h "$SKIAPROGRAM" | awk '/Type:/{t=$2} /Entry point/{print t, $NF}'))"
+
+    # The software rasteriser, asked of the binary rather than of the build.
+    # skia_use_dawn is false here because this machine has no GPU at all, and
+    # a Skia that had been built without its CPU backend would link and draw
+    # nothing.
+    RASTER=$("${PREFIX}nm" "$SKIAPROGRAM" |
+             grep -cE " [Tt] .*(SkRasterPipeline|SkScan|SkBlitter)" )
+    [ "$RASTER" -gt 50 ]
+    check $? "with the software rasteriser in it ($RASTER symbols)"
+
+    # And no GPU backend, which is the claim skia_use_dawn = false makes. A
+    # Dawn that got linked in anyway would be a WebGPU implementation with no
+    # device to talk to, and this is what says it is not there.
+    DAWN=$("${PREFIX}nm" "$SKIAPROGRAM" | grep -cE " [Tt] .*(dawn::|wgpu)" )
+    [ "$DAWN" = "0" ]
+    check $? "and no Dawn in it, because this machine has no GPU to give it"
+
+    # The PNG codecs are Rust here - SK_CODEC_ENCODES_PNG_WITH_RUST - so the
+    # cxx bridge between Skia's C++ and the png crate has to be in the binary
+    # for check 8 of the program to mean anything.
+    RUSTPNG=$("${PREFIX}nm" "$SKIAPROGRAM" |
+              grep -cE "rust_png|SkPngRust" )
+    [ "$RUSTPNG" -gt 10 ]
+    check $? "and Chromium's Rust PNG codec, over the cxx bridge ($RUSTPNG symbols)"
+
+    IMAGE="$ROOT/build/os-image.bin"
+    if [ ! -f "$IMAGE" ]; then
+      echo "chromium-test: no $IMAGE - run make, then this again"
+    else
+      make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
+      "$ROOT/build/leanfs-put" "$IMAGE" "$SKIAPROGRAM" /bin/chromiumskia > /dev/null
+      check $? "installed as /bin/chromiumskia - the [m157] boot self-test runs it"
+    fi
+  fi
+
+  # M157. The libc port reaches Chromium's OWN vendored copy of the libc
+  # crate, not just rust-src's - and they are the same 0.2.189, so a copy
+  # that drifted would be a build that disagrees with itself about what this
+  # target's struct stat is. This grades that they are the same bytes.
+  CRATE="$SRC/third_party/rust/chromium_crates_io/vendor/libc-v0_2/src/unix/lean_os"
+  if [ -d "$CRATE" ]; then
+    SAME=0
+    for name in mod.rs constants.rs; do
+      cmp -s "$ROOT/tools/rust-port/libc/$name" "$CRATE/$name" 2>/dev/null ||
+        cmp -s "$ROOT/tools/rust-port/libc/lean_os/$name" "$CRATE/$name" ||
+        SAME=1
+    done
+    [ "$SAME" = "0" ]
+    check $? "Chromium's vendored libc crate carries the same lean_os module rust-src does"
+  fi
 fi
 
 echo "chromium-test: $PASS passed, $FAIL failed"

@@ -72,6 +72,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
                 $(UOBJ)/libc_statvfs.o $(UOBJ)/libc_utime.o $(UOBJ)/libc_pwd.o \
                 $(UOBJ)/libc_termios.o $(UOBJ)/libc_grp.o $(UOBJ)/libc_libgen.o \
                 $(UOBJ)/libc_fnmatch.o $(UOBJ)/libc_strings.o $(UOBJ)/libc_sysinfo.o \
+                $(UOBJ)/libc_libintl.o \
                 $(UOBJ)/libc_regex.o $(UOBJ)/libc_syslog.o \
                 $(UOBJ)/libc_socket.o $(UOBJ)/libc_netdb.o \
                 $(UOBJ)/libc_resolv.o $(UOBJ)/libc_ifaddrs.o $(UOBJ)/libc_uchar.o \
@@ -450,7 +451,7 @@ sysroot-libc: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ
 	@cp user_space/library/user.ld $(SYSROOT)/usr/lib/lean_os.ld
 	@# The empty archives `sysroot` makes, in case this rule is the first
 	@# thing run against a sysroot that predates one of them.
-	@for stub in libm libdl librt libpthread libresolv; do \
+	@for stub in libm libdl librt libpthread libresolv libuuid; do \
 	  if [ ! -f $(SYSROOT)/usr/lib/$$stub.a ]; then \
 	    $(AR) rcs $(SYSROOT)/usr/lib/$$stub.a 2>/dev/null || true; \
 	  fi; \
@@ -528,6 +529,19 @@ sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crt
 	@# glibc both answer -lresolv with a stub for the same reason.
 	@rm -f $(SYSROOT)/usr/lib/libresolv.a
 	@$(AR) rcs $(SYSROOT)/usr/lib/libresolv.a 2>/dev/null || true
+	@# M157: libuuid.a, empty, for the fifth time - and this one is empty
+	@# for a different reason than the four above, which is worth knowing.
+	@# The others are libraries glibc split out and this libc never did.
+	@# Chromium's third_party/fontconfig/BUILD.gn writes
+	@# `if (!is_win) { libs = ["uuid"] }`, which claims every platform that
+	@# is not Windows ships util-linux's libuuid - and fontconfig 2.18 as
+	@# Chromium builds it references NOT ONE uuid symbol. That was measured
+	@# rather than assumed: x86_64-lean_os-nm -u over all 58 fontconfig
+	@# objects reports no uuid_* at all. So the archive is empty because
+	@# nothing wants anything from it, and if that ever stops being true
+	@# the link fails naming the function, which is the honest failure.
+	@rm -f $(SYSROOT)/usr/lib/libuuid.a
+	@$(AR) rcs $(SYSROOT)/usr/lib/libuuid.a 2>/dev/null || true
 	@# M100: and the library stack, if it has been built.
 	@#
 	@# The `rm -rf` at the top of this rule is right and stays: a
@@ -566,7 +580,13 @@ TEST_BUILD  := $(BUILD)/tests
 TEST_CFLAGS := -std=c11 -g -O1 -Wall -Wextra -Werror -DLEANOS_HOST_TEST \
                -fno-omit-frame-pointer \
                -Itests -Itests/fakes -Ikernel -Isystem_api/include \
-               -Iuser_space/library $(LVGL_INCLUDES)
+               -Iuser_space/library $(LVGL_INCLUDES) \
+               -idirafter user_space/libc/include
+# -idirafter rather than -I, and the distinction is the whole point: this
+# libc's headers go AFTER the host's, so every standard name a host test
+# compiles against is still the host's own. It reaches only the names macOS
+# does not have at all - <libintl.h> is the first - which is what lets a
+# function be graded here without its header shadowing forty others.
 
 ifneq ($(TEST_SAN),0)
 TEST_CFLAGS += -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -600,6 +620,7 @@ TEST_USER_SRCS := user_space/library/symbol_table.c \
                   user_space/library/user_interface_font.c \
                   user_space/library/icons.c user_space/library/icon_draw.c \
                   user_space/libc/src/wchar.c user_space/libc/src/errno.c \
+                  user_space/libc/src/libintl.c \
                   user_space/libc/src/fnmatch.c user_space/libc/src/libgen.c \
                   user_space/libc/src/getopt.c user_space/libc/src/wallclock.c
 

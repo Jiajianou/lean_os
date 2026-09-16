@@ -337,9 +337,9 @@ Several instruments, and none of them subsumes another:
   bit, and the NVMe request splitter, **which is the one path QEMU cannot
   reach at all**: its namespace has 512-byte blocks, so a 4Kn drive's
   read-modify-write path is dead code here and would first execute on
-  somebody's real filesystem. 633 tests.
+  somebody's real filesystem. 645 tests.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
-  image and grade the serial log against 160 markers and 44 performance
+  image and grade the serial log against 162 markers and 44 performance
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It
@@ -487,6 +487,36 @@ Several instruments, and none of them subsumes another:
   flags that makes true, graded against the host's libm. And C99's float
   family was sixteen functions out of about forty - `truncf` was the one V8
   named, and the other thirty-seven came with it.
+
+- **And the library it paints with.** **Skia** builds for this machine out of
+  Chromium's own ninja - 1,177 objects - and `/bin/chromiumskia` is 5.4 MB of
+  ET_EXEC that draws: a cleared surface, a rectangle whose edges land exactly
+  where they were told, a blend that comes out at 0x80 rather than
+  approximately grey, an **anti-aliased circle with 142 partly-covered pixels
+  on its edge**, an even-odd path that leaves its hole, a clip that refuses,
+  and a matrix that puts a scaled rectangle where arithmetic says it goes.
+  Eleven checks, every one a **pixel value** the program works out for itself
+  - because a rasteriser that links and produces a blank bitmap passes every
+  test that only asks whether the calls returned.
+
+  It draws into 8-bit BGRA, premultiplied, which is byte-for-byte this
+  compositor's own word layout - the same coincidence that made NetSurf's
+  pixels zero-copy.
+
+  There is **no GPU backend in it**, and that is a decision rather than a gap:
+  this machine has no GL, no Vulkan and no display a GPU process could talk
+  to, and Skia's Dawn backend is enabled by default only on the platforms its
+  team has verified render to a screen. The check that it is absent is in the
+  test suite beside the checks that the software rasteriser is present.
+
+  The last check is not only Skia. The PNG encoder and decoder Chromium ships
+  are written in **Rust**, behind a cxx bridge, and 4,096 pixels come back
+  from a round trip through them the colour they went in as. That is the same
+  half of the build that Chromium's **fontations** font backend comes from -
+  and reaching it meant the crates.io `libc` crate had to learn this target
+  exists. It already knew: the standard library's fork vendors the same
+  version, so one port serves both checkouts and a test compares them byte
+  for byte.
 
 - **A libm for the format the hardware has.** `long double` on x86-64 is
   the x87's 80-bit extended type, and this libc has the C99 set for it -

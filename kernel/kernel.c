@@ -9004,6 +9004,103 @@ static void boot_selftests_system(void) {
         }
     }
 
+    {
+        os_stat_t cs;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/chromiumskia", (uint64_t)&cs, 0) != 0) {
+            kernel_log_puts("[m157] /bin/chromiumskia is not on this image - skipped. "
+                       "tools/build-chromium.sh lean_os links it out of Skia's "
+                       "own objects and tools/chromium-test.sh installs it.\n\n");
+        } else {
+            int cs_pipe[2];
+            if (do_syscall(SYS_pipe, (uint64_t)cs_pipe, 0, 0) != 0) {
+                panic("M157 self-test: could not make a pipe for the report");
+            }
+            do_syscall(SYS_dup2, (uint64_t)cs_pipe[1], 1, 0);
+            do_syscall(SYS_dup2, (uint64_t)cs_pipe[1], 2, 0);
+
+            size_t cs_bytes = 0;
+            uint8_t *cs_image = read_program(PATH_BIN_DIRECTORY "chromiumskia",
+                                             &cs_bytes);
+            if (!cs_image) {
+                panic("M157 self-test: /bin/chromiumskia could not be read");
+            }
+            const char *cs_argv[] = {PATH_BIN_DIRECTORY "chromiumskia", 0};
+            task_t *cst = process_spawnv("chromiumskia", cs_image, cs_bytes,
+                                         cs_argv);
+            kfree(cs_image);
+
+            static char cs_out[8192];
+            size_t cs_got = 0;
+            long cs_rc = -1;
+            /* Rasterising 4096 pixels eleven times over, plus a PNG round
+               trip through a Rust codec. Small beside what the engine above
+               does, but it is still somebody else's graphics library on an
+               emulated CPU, so the deadline is generous rather than tight. */
+            long cs_deadline = (long)pit_get_ticks() + 240 * PIT_HZ;
+            for (;;) {
+                long avail = do_syscall(SYS_pipe_poll, (uint64_t)cs_pipe[0], 0, 0);
+                if (avail > 0 && cs_got < sizeof(cs_out) - 1) {
+                    size_t room = sizeof(cs_out) - 1 - cs_got;
+                    long n = do_syscall(SYS_read, (uint64_t)cs_pipe[0],
+                                        (uint64_t)(cs_out + cs_got),
+                                        (uint64_t)((size_t)avail < room
+                                                   ? (size_t)avail : room));
+                    if (n > 0) {
+                        cs_got += (size_t)n;
+                    }
+                    continue;
+                }
+                long done = cst ? do_syscall(SYS_wait_nb, (uint64_t)cst->id, 0, 0)
+                                : -1;
+                if (done != -2) {
+                    cs_rc = done;
+                    long n;
+                    while ((n = do_syscall(SYS_pipe_poll, (uint64_t)cs_pipe[0], 0, 0)) > 0 &&
+                           cs_got < sizeof(cs_out) - 1) {
+                        size_t room = sizeof(cs_out) - 1 - cs_got;
+                        long r = do_syscall(SYS_read, (uint64_t)cs_pipe[0],
+                                            (uint64_t)(cs_out + cs_got),
+                                            (uint64_t)((size_t)n < room ? (size_t)n : room));
+                        if (r <= 0) {
+                            break;
+                        }
+                        cs_got += (size_t)r;
+                    }
+                    break;
+                }
+                if ((long)pit_get_ticks() > cs_deadline) {
+                    break;
+                }
+                do_syscall(SYS_yield, 0, 0, 0);
+            }
+            cs_out[cs_got] = '\0';
+            do_syscall(SYS_close, (uint64_t)cs_pipe[0], 0, 0);
+            do_syscall(SYS_close, (uint64_t)cs_pipe[1], 0, 0);
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[1]);
+            scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[2]);
+            scheduler_current()->descriptor_table->slots[2].type = FILE_DESCRIPTOR_STDOUT;
+
+            for (char *line = cs_out; *line;) {
+                char *end = line;
+                while (*end && *end != '\n') {
+                    end++;
+                }
+                char saved = *end;
+                *end = '\0';
+                kernel_log_puts(line);
+                kernel_log_putc('\n');
+                *end = saved;
+                line = saved ? end + 1 : end;
+            }
+            if (cs_rc != 0) {
+                panic("M157 self-test: Skia does not rasterise correctly on "
+                      "this machine - see the chromiumskia lines above");
+            }
+            kernel_log_putc('\n');
+        }
+    }
+
 
     {
         os_stat_t ct;

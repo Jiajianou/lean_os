@@ -1,0 +1,18 @@
+# A program that rasterises with Skia and that this machine runs.
+#
+# Skia is what a browser draws with, and it is the second half of what Blink
+# needs: V8 (M155, M156) runs the scripts and Skia paints the result. It
+# arrives here on the CPU - there is no GL, no Vulkan and no display a GPU
+# process could talk to on this machine, so skia_use_dawn is false in
+# tools/build-chromium.sh and what is graded below is the software
+# rasteriser, which is the one a browser falls back to everywhere anyway.
+#
+# //skia is the library. //skia:skcms is not listed and neither is
+# //third_party/fontconfig: depending on //skia brings both, and fontconfig
+# is what dragged Chromium's Rust font backend - and with it the crates.io
+# libc crate - into this build in the first place.
+
+executable("skiatest") {
+  sources = [ "chromium_skia_test.cc" ]
+  deps = [ "//skia" ]
+}

@@ -10,6 +10,7 @@ group("lean_os") {
     "//lean_os/basetest",
     "//lean_os/mojotest",
     "//lean_os/nettest",
+    "//lean_os/skiatest",
     "//lean_os/v8test",
   ]
 }

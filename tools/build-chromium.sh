@@ -103,6 +103,21 @@ else
   echo "build-chromium: no rust-src in the checkout - building without Rust"
 fi
 
+# Chromium vendors the libc crate a SECOND time, at the same 0.2.189, for its
+# own Rust targets rather than for std - and that is the copy //skia reaches,
+# through fontconfig's fontations font backend. Without this the crate builds
+# for an unknown unix: no struct stat, no O_*, no time_t, and the family-wide
+# `pub use unistd::*` in src/new/mod.rs resolves to nothing.
+#
+# It is the same port applied a second time rather than a patch carrying a
+# copy of it, because 948 lines duplicated is 948 lines that drift. M157.
+CHROMIUM_LIBC_CRATE="$SRC/third_party/rust/chromium_crates_io/vendor/libc-v0_2"
+if [ -d "$CHROMIUM_LIBC_CRATE/src/unix" ]; then
+  echo "build-chromium: applying the same libc port to Chromium's vendored copy"
+  python3 "$ROOT/tools/rust-port/apply.py" --libc "$CHROMIUM_LIBC_CRATE" \
+    "$SRC/third_party/rust/libc/v0_2/BUILD.gn" > /dev/null || exit 1
+fi
+
 BUILTINS_DIR="$CLANG_BASE/lib/clang/$CLANG_VER/lib/x86_64-unknown-linux-gnu"
 LIBGCC="$ROOT/build/toolchain/lib/gcc/x86_64-lean_os/14.2.0/libgcc.a"
 if [ ! -f "$BUILTINS_DIR/libclang_rt.builtins.a" ]; then
@@ -296,6 +311,20 @@ use_vaapi = false
 use_v4l2_codec = false
 enable_remoting = false
 rtc_use_pipewire = false
+
+# Skia's Graphite Dawn backend. Its declare_args() default is a list of
+# platforms with a comment saying it is enabled "where the team has verified
+# that at least basic rendering to the screen is working" - and it reaches
+# this OS only because is_linux is true here, which says which family the
+# build gates this platform as and nothing about whether there is a GPU. This
+# machine has no GL, no Vulkan and no display driver a GPU process could talk
+# to, so Dawn is the one answer that would be a pretence. Skia rasterises on
+# the CPU here.
+#
+# This is an args.gn value rather than a patch on purpose: the default is a
+# verified-platforms list, and an out-of-tree platform not being on it is the
+# mechanism working rather than something to fix upstream.
+skia_use_dawn = false
 ARGS
 
 PATH="$DEPOT:$DEPOT/.cipd_bin:$PATH"

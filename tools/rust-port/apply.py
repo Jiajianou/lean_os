@@ -89,24 +89,55 @@ STD_WORKSPACE_EDIT = """windows-sys = { path = 'windows-sys' }
 libc = { path = 'vendor/libc-0.2.189' }"""
 
 
-def apply(tree, report):
-    libc = os.path.join(tree, "vendor", "libc-0.2.189")
+# The libc port is its own function because there are TWO checkouts of this
+# crate on this machine at the same version, and they must not drift: rust-src
+# vendors libc-0.2.189 for std to compile against, and Chromium vendors the
+# same 0.2.189 under third_party/rust/chromium_crates_io for its own Rust
+# targets - which is how //skia reaches it, through fontconfig's fontations
+# font backend. M157 found the second one by building Skia. One port, applied
+# twice, rather than 948 lines copied.
 
-    report("libc  src/unix/mod.rs", edit(
+
+# Chromium's Rust rules refuse to compile a source the GN target does not
+# list, so a crate whose build file enumerates every file needs telling about
+# two new ones. That belongs here rather than in a Chromium patch: this is
+# where the module's file names are already written down, and a patch
+# carrying them would be a second place for them to be wrong. rust-src's
+# copy has no BUILD.gn, so the argument is optional.
+
+LIBC_SOURCES_ANCHOR = """    \"//third_party/rust/chromium_crates_io/vendor/libc-v0_2/src/unix/linux_like/android/b32/arm.rs\","""
+
+LIBC_SOURCES_EDIT = """    \"//third_party/rust/chromium_crates_io/vendor/libc-v0_2/src/unix/lean_os/constants.rs\",
+    \"//third_party/rust/chromium_crates_io/vendor/libc-v0_2/src/unix/lean_os/mod.rs\",
+    \"//third_party/rust/chromium_crates_io/vendor/libc-v0_2/src/unix/linux_like/android/b32/arm.rs\","""
+
+
+def apply_libc(libc, report, label="libc ", build_gn=None):
+    report("%s src/unix/mod.rs" % label, edit(
         os.path.join(libc, "src", "unix", "mod.rs"),
         LIBC_UNIX_ANCHOR, LIBC_UNIX_EDIT,
         "lean_os is a unix with a libc of its own"))
 
-    report("libc  src/new/mod.rs", edit(
+    report("%s src/new/mod.rs" % label, edit(
         os.path.join(libc, "src", "new", "mod.rs"),
         LIBC_NEW_ANCHOR, LIBC_NEW_EDIT,
         "lean_os's unistd constants are generated, not reexported"))
 
     for name in ("mod.rs", "constants.rs"):
-        report("libc  src/unix/lean_os/%s" % name, install(
+        report("%s src/unix/lean_os/%s" % (label, name), install(
             os.path.join(PORT, "libc", "lean_os", name),
             os.path.join(libc, "src", "unix", "lean_os", name),
             "the lean_os libc module"))
+
+    if build_gn:
+        report("%s BUILD.gn" % label, edit(
+            build_gn, LIBC_SOURCES_ANCHOR, LIBC_SOURCES_EDIT,
+            "a source Chromium's Rust rules have not been told about is a "
+            "source they refuse to compile"))
+
+
+def apply(tree, report):
+    apply_libc(os.path.join(tree, "vendor", "libc-0.2.189"), report)
 
     report("std   Cargo.toml", edit(
         os.path.join(tree, "Cargo.toml"),
@@ -359,10 +390,23 @@ pub fn current_exe() -> io::Result<PathBuf> {""",
 
 def main():
     if len(sys.argv) < 2:
-        raise SystemExit("usage: apply.py <rust-src library directory>")
-    tree = sys.argv[1]
-    if not os.path.isdir(os.path.join(tree, "std")):
-        raise SystemExit("apply.py: %s is not a rust-src library directory" % tree)
+        raise SystemExit(
+            "usage: apply.py <rust-src library directory>\n"
+            "       apply.py --libc <libc crate directory> [BUILD.gn]")
+
+    libc_only = sys.argv[1] == "--libc"
+    if libc_only:
+        if len(sys.argv) < 3:
+            raise SystemExit("apply.py: --libc needs a directory")
+        tree = sys.argv[2]
+        if not os.path.isdir(os.path.join(tree, "src", "unix")):
+            raise SystemExit(
+                "apply.py: %s is not a libc crate directory" % tree)
+    else:
+        tree = sys.argv[1]
+        if not os.path.isdir(os.path.join(tree, "std")):
+            raise SystemExit(
+                "apply.py: %s is not a rust-src library directory" % tree)
 
     width = 0
     lines = []
@@ -370,7 +414,11 @@ def main():
     def report(what, outcome):
         lines.append((what, outcome))
 
-    apply(tree, report)
+    if libc_only:
+        apply_libc(tree, report,
+                   build_gn=(sys.argv[3] if len(sys.argv) > 3 else None))
+    else:
+        apply(tree, report)
     width = max(len(what) for what, _ in lines)
     for what, outcome in lines:
         print("  %-*s  %s" % (width, what, outcome))
