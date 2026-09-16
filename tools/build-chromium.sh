@@ -367,6 +367,56 @@ enable_swiftshader = false
 enable_swiftshader_vulkan = false
 use_dawn = false
 
+# ANGLE's own two, which are not the same switches as Chromium's above and
+# which is why M158's four did not remove SwiftShader from the graph.
+#
+# angle_build_vulkan_system_info is "may ANGLE ask Vulkan which GPU is here",
+# and its default is angle_has_build - so it is on in every Chromium build,
+# on a machine with no Vulkan to ask. It is the ONLY reason SwiftShader is in
+# this build's dependency graph at all: angle_gpu_info_util deps on
+# angle_vulkan_icd, which DATA-deps on swiftshader_libvulkan, which is the
+# subzero JIT - a second run-time code generator to port after V8, to answer
+# a question about hardware this machine does not have.
+#
+# angle_enable_vulkan is ANGLE's Vulkan BACK END, whose default on this
+# platform is the same is_linux that M157 and M158 wrote down twice. It is
+# the second route to the same ICD, through libANGLE.
+#
+# Together they take SwiftShader, the Vulkan loader, the ICD, SPIRV-Tools,
+# Marl and Reactor out of the graph - 55 + 15 objects M158 measured and all
+# of subzero - and leave ANGLE's system-information reader, which is the
+# thing this build actually wants from ANGLE.
+angle_build_vulkan_system_info = false
+angle_enable_vulkan = false
+
+# And ANGLE's third, which is the one that survives the other two. The Vulkan
+# LOADER - not the ICD behind it - reaches this build through //ui/gl:gl as a
+# data dependency, guarded by `use_ozone && angle_shared_libvulkan &&
+# !is_chromeos` with a comment about run-time search paths. Nothing links it;
+# ninja builds it because building //ui/gl builds what //ui/gl says should
+# sit beside it. It is 15 of the 23 failures a -k 0 build of this target had,
+# and all 15 are its loader_platform.h not knowing this platform - a header
+# whose entire job is to name the operating system it is running on.
+#
+# There is no Vulkan on this machine for a loader to find a driver for.
+angle_shared_libvulkan = false
+
+# xkbcommon, which is the keyboard-layout library X11 and Wayland programs
+# use. Its declare_args() comment says what it is in two words - "Optional
+# system library" - and its default is the same shape as every other flag in
+# this block: use_ozone && (is_linux || is_chromeos), a platform-family list
+# reaching this OS because is_linux is true here.
+#
+# There is no such library on this machine and no checkout of one: DEPS has
+# no third_party/libxkbcommon at all, so what a build gets on Linux is the
+# distribution's. This OS's keyboard layout is its own (kernel/drivers,
+# M129's input suite), and ui/events' xkb translation would be a second
+# answer to a question that already has one.
+#
+# It is a flag rather than a patch for M157's reason: an optional system
+# library that is not there is exactly the case the flag exists for.
+use_xkbcommon = false
+
 # WebXR, and the reason it is here at all. //device/vr on is_linux deps on
 # //gpu/vulkan/init unconditionally, and that directory opens with
 # assert(enable_vulkan) - so turning Vulkan off makes a directory this build

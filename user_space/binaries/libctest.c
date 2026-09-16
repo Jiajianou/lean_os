@@ -748,6 +748,83 @@ int main(void) {
                 fail("mktemp returned a name that already existed");
             }
         }
+
+        /* mkstemps, which is mkstemp with a suffix the template keeps.
+           M159: ANGLE's system_utils_posix.cpp is the caller that asked for
+           it. What separates it from mkstemp is where the six X's are, so
+           the check is on the SUFFIX surviving and on the X's not: a
+           mkstemps that ignored the suffix length would replace the ".png"
+           and still hand back a working descriptor. */
+        {
+            static const char pattern[] = "/tmp/libctest-msXXXXXX.png";
+            char first[sizeof(pattern)];
+            char second[sizeof(pattern)];
+            strcpy(first, pattern);
+            strcpy(second, pattern);
+
+            int fd = mkstemps(first, 4);
+            if (fd < 0) {
+                fail("mkstemps did not create a file");
+            } else {
+                close(fd);
+                if (strcmp(first + strlen(first) - 4, ".png") != 0) {
+                    printf("libctest: mkstemps produced \"%s\"\n", first);
+                    fail("mkstemps overwrote the suffix it was told to keep");
+                }
+                if (strncmp(first, "/tmp/libctest-ms", 16) != 0) {
+                    fail("mkstemps overwrote the prefix");
+                }
+                int again = open(first, O_RDONLY);
+                if (again < 0) {
+                    fail("the file mkstemps says it created is not there");
+                } else {
+                    close(again);
+                }
+
+                /* A second call, with the first file still on the disk.
+                   This is the check that found a bug older than any Chromium
+                   work here: the retry loop could not retry. Every one of
+                   these four calls fills the template and, on the next
+                   attempt, VALIDATED it again - against six X's the previous
+                   attempt had already replaced with letters - so a collision
+                   produced EINVAL rather than a second name. Reaching it
+                   needs the same process, the same millisecond and the file
+                   already there, which is why a hundred and fifty milestones
+                   did not.
+
+                   The two names differing is also the only honest way to ask
+                   whether the X's were replaced at all: the alphabet they are
+                   drawn from CONTAINS 'X', so a name with an X in it is a
+                   perfectly good answer and "strchr(name, 'X') == 0" tests
+                   nothing. This test asserted that first and was right to
+                   fail on /tmp/libctest-ms7XUt80.png. */
+                int other = mkstemps(second, 4);
+                if (other < 0) {
+                    fail("mkstemps refused a second file");
+                } else {
+                    close(other);
+                    if (strcmp(first, second) == 0) {
+                        printf("libctest: mkstemps produced \"%s\" twice\n",
+                               first);
+                        fail("mkstemps handed out a name that already existed");
+                    }
+                    unlink(second);
+                }
+                unlink(first);
+            }
+
+            /* A template with no room for six X's before the suffix is not a
+               template, and saying so is the difference between a refusal
+               and a file with a name nobody asked for. */
+            char narrow[] = "/tmp/XXX.png";
+            if (mkstemps(narrow, 4) >= 0) {
+                fail("mkstemps accepted a template with only three X's");
+            }
+            char negative[] = "/tmp/libctest-msXXXXXX";
+            if (mkstemps(negative, -1) >= 0) {
+                fail("mkstemps accepted a negative suffix length");
+            }
+        }
     }
 
     {

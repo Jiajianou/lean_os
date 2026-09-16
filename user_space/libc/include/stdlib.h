@@ -68,6 +68,7 @@ char *setstate(char *state);
 #define EXIT_FAILURE 1
 
 int mkstemp(char *tmpl);
+int mkstemps(char *tmpl, int suffix_length);
 
 char *realpath(const char *path, char *resolved);
 char *mkdtemp(char *tmpl);

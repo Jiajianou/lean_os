@@ -248,6 +248,8 @@ REQUIRED_MARKERS=(
   "chromiumskia: done"
   "[m158] cc rasters on this machine:"
   "chromiumcc: done"
+  "[m159] Chromium's own GPU configuration, on this machine:"
+  "chromiumgpu: done"
   "mathltest: done"
   "[m125] lvgl rendered"
   "[m125] a third-party toolkit on this compositor:"

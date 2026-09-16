@@ -1,0 +1,28 @@
+# A program that asks //gpu/config what it makes of this machine, and that
+# this machine runs.
+#
+# //gpu/config is not a small target and it is not only about GPUs. It is the
+# gate to everything above //net in this port: //cc reaches it through
+# //components/viz/common, //media reaches it, //services/network's mojom
+# reaches it, and so does //third_party/blink/renderer/platform/wtf - Blink's
+# string library - through //third_party/blink/public/common:headers. Building
+# it drags //ui/base, //ui/ozone and //ui/gl in with it.
+#
+# What it does NOT drag in any more is the GPU stack. M158 turned off
+# Chromium's four switches; this milestone found ANGLE's own two, which are
+# the ones that were keeping SwiftShader - and subzero, a second run-time code
+# generator - in the graph. See tools/build-chromium.sh.
+#
+# The GPU information itself comes from ANGLE's gpu_info_util, unmodified:
+# with no libpci, no X11 and no Vulkan, angle::GetSystemInfo finds no devices
+# and returns false. That is the answer M158 left as an open question, and it
+# needed no invented source to reach.
+
+executable("gpuinfotest") {
+  sources = [ "chromium_gpu_info_test.cc" ]
+  deps = [
+    "//base",
+    "//gpu/config",
+    "//ui/gl",
+  ]
+}

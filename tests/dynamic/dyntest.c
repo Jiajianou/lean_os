@@ -40,11 +40,35 @@ int main(int argc, char **argv) {
     }
     printf("dyntest: a libc.so global read through the GOT\n");
 
+    /* RTLD_NOLOAD before anything has loaded it: the answer is "not here",
+       and that is an answer rather than a failure. M159 - ANGLE asks this to
+       find out whether a shared library is present without bringing it in,
+       and a dlopen that ignored the flag would LOAD it and report success,
+       which is the opposite of what was asked. */
+    if (dlopen("libdyn.so", RTLD_NOLOAD) != 0) {
+        printf("dyntest: FAIL RTLD_NOLOAD found a library nothing had loaded\n");
+        return 11;
+    }
+
     void *h = dlopen("libdyn.so", RTLD_NOW);
     if (!h) {
         printf("dyntest: FAIL dlopen: %s\n", dlerror());
         return 5;
     }
+
+    /* And after it is loaded, the same question finds the same object. */
+    void *already = dlopen("libdyn.so", RTLD_NOLOAD);
+    if (already != h) {
+        printf("dyntest: FAIL RTLD_NOLOAD returned %p for a library loaded "
+               "at %p\n", already, h);
+        return 12;
+    }
+    if (dlopen("libnosuchthing.so", RTLD_NOLOAD) != 0) {
+        printf("dyntest: FAIL RTLD_NOLOAD found a library that does not "
+               "exist\n");
+        return 13;
+    }
+    printf("dyntest: RTLD_NOLOAD answers before and after a load\n");
     int (*answer)(void) = (int (*)(void))dlsym(h, "dyn_answer");
     if (!answer) {
         printf("dyntest: FAIL dlsym: %s\n", dlerror());

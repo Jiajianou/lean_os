@@ -9198,6 +9198,105 @@ static void boot_selftests_system(void) {
         }
     }
 
+    {
+        os_stat_t gi;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/chromiumgpu", (uint64_t)&gi, 0) != 0) {
+            kernel_log_puts("[m159] /bin/chromiumgpu is not on this image - skipped. "
+                       "tools/build-chromium.sh lean_os links it out of "
+                       "//gpu/config's own objects and tools/chromium-test.sh "
+                       "installs it.\n\n");
+        } else {
+            int gi_pipe[2];
+            if (do_syscall(SYS_pipe, (uint64_t)gi_pipe, 0, 0) != 0) {
+                panic("M159 self-test: could not make a pipe for the report");
+            }
+            do_syscall(SYS_dup2, (uint64_t)gi_pipe[1], 1, 0);
+            do_syscall(SYS_dup2, (uint64_t)gi_pipe[1], 2, 0);
+
+            size_t gi_bytes = 0;
+            uint8_t *gi_image = read_program(PATH_BIN_DIRECTORY "chromiumgpu",
+                                             &gi_bytes);
+            if (!gi_image) {
+                panic("M159 self-test: /bin/chromiumgpu could not be read");
+            }
+            const char *gi_argv[] = {PATH_BIN_DIRECTORY "chromiumgpu", 0};
+            task_t *git = process_spawnv("chromiumgpu", gi_image, gi_bytes,
+                                         gi_argv);
+            kfree(gi_image);
+
+            static char gi_out[8192];
+            size_t gi_got = 0;
+            long gi_rc = -1;
+            /* This program draws nothing at all - it reads a rule list and
+               applies it - so the deadline is entirely the cost of starting a
+               program with //base, //ui/gl and PartitionAlloc in it on an
+               emulated CPU. Same ceiling as [m158] for that reason. */
+            long gi_deadline = (long)pit_get_ticks() + 240 * PIT_HZ;
+            for (;;) {
+                long avail = do_syscall(SYS_pipe_poll, (uint64_t)gi_pipe[0], 0, 0);
+                if (avail > 0 && gi_got < sizeof(gi_out) - 1) {
+                    size_t room = sizeof(gi_out) - 1 - gi_got;
+                    long n = do_syscall(SYS_read, (uint64_t)gi_pipe[0],
+                                        (uint64_t)(gi_out + gi_got),
+                                        (uint64_t)((size_t)avail < room
+                                                   ? (size_t)avail : room));
+                    if (n > 0) {
+                        gi_got += (size_t)n;
+                    }
+                    continue;
+                }
+                long done = git ? do_syscall(SYS_wait_nb, (uint64_t)git->id, 0, 0)
+                                : -1;
+                if (done != -2) {
+                    gi_rc = done;
+                    long n;
+                    while ((n = do_syscall(SYS_pipe_poll, (uint64_t)gi_pipe[0], 0, 0)) > 0 &&
+                           gi_got < sizeof(gi_out) - 1) {
+                        size_t room = sizeof(gi_out) - 1 - gi_got;
+                        long r = do_syscall(SYS_read, (uint64_t)gi_pipe[0],
+                                            (uint64_t)(gi_out + gi_got),
+                                            (uint64_t)((size_t)n < room ? (size_t)n : room));
+                        if (r <= 0) {
+                            break;
+                        }
+                        gi_got += (size_t)r;
+                    }
+                    break;
+                }
+                if ((long)pit_get_ticks() > gi_deadline) {
+                    break;
+                }
+                do_syscall(SYS_yield, 0, 0, 0);
+            }
+            gi_out[gi_got] = '\0';
+            do_syscall(SYS_close, (uint64_t)gi_pipe[0], 0, 0);
+            do_syscall(SYS_close, (uint64_t)gi_pipe[1], 0, 0);
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[1]);
+            scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[2]);
+            scheduler_current()->descriptor_table->slots[2].type = FILE_DESCRIPTOR_STDOUT;
+
+            for (char *line = gi_out; *line;) {
+                char *end = line;
+                while (*end && *end != '\n') {
+                    end++;
+                }
+                char saved = *end;
+                *end = '\0';
+                kernel_log_puts(line);
+                kernel_log_putc('\n');
+                *end = saved;
+                line = saved ? end + 1 : end;
+            }
+            if (gi_rc != 0) {
+                panic("M159 self-test: Chromium's GPU configuration does not "
+                      "agree about this machine - see the chromiumgpu lines "
+                      "above");
+            }
+            kernel_log_putc('\n');
+        }
+    }
+
 
     {
         os_stat_t ct;

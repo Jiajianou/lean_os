@@ -9,6 +9,7 @@ group("lean_os") {
   deps = [
     "//lean_os/basetest",
     "//lean_os/ccpainttest",
+    "//lean_os/gpuinfotest",
     "//lean_os/mojotest",
     "//lean_os/nettest",
     "//lean_os/skiatest",

@@ -760,6 +760,7 @@ u64 _dl_entry(u64 *arguments) {
 #define RTLD_NOW    0x0002
 #define RTLD_GLOBAL 0x0100
 #define RTLD_LOCAL  0x0000
+#define RTLD_NOLOAD 0x0004
 
 static const char *dl_error_message;
 
@@ -770,10 +771,24 @@ char *dlerror(void);
 
 __attribute__((visibility("default")))
 void *dlopen(const char *file, int flags) {
-    (void)flags;
     dl_error_message = 0;
     if (!file) {
         return &objects[0];
+    }
+    /* RTLD_NOLOAD asks whether a shared object is already here without
+       bringing it in, and the answer is a name in this list. It is the one
+       dlopen flag this loader can answer honestly - RTLD_LAZY and RTLD_NOW
+       are both "now" here, and RTLD_GLOBAL and RTLD_LOCAL would need a
+       per-object symbol scope this loader does not keep - so it is the one
+       that is not ignored. Returning zero here is not an error and sets no
+       message: "not loaded" is the answer, not a failure. */
+    if (flags & RTLD_NOLOAD) {
+        for (int i = 0; i < object_count; i++) {
+            if (objects[i].name && dl_streq(objects[i].name, file)) {
+                return &objects[i];
+            }
+        }
+        return 0;
     }
     if (object_count >= MAX_OBJECTS) {
         dl_error_message = "too many shared objects loaded";

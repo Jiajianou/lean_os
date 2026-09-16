@@ -177,6 +177,9 @@ static const entry_t table[] = {
     {SYS_sigaltstack,    CLASS_POINTER, 1, NULL},
     {SYS_mincore,        CLASS_POINTER, 3, NULL},
     {SYS_sockname,       CLASS_POINTER, 2, NULL},
+
+    {SYS_thread_setname, CLASS_POINTER, 1, NULL},
+    {SYS_thread_getname, CLASS_POINTER, 1, NULL},
 };
 #define N_TABLE ((int)(sizeof(table) / sizeof(table[0])))
 

@@ -1,0 +1,140 @@
+M158's patch 0037 drew this line through ui/gfx once and two files were on
+the other side of it. The sentence is M144's and it has not changed: being
+in the Linux family is not having Linux's kernel.
+
+  gpu_fence.cc            sync_wait(2) and sync_file_info(3), which are
+                          third_party/libsync over Linux's sync_file ioctls.
+                          The #else branch every one of these three blocks
+                          already has is NOTREACHED(), which is the right
+                          answer on a machine with no GPU to hand out a
+                          fence in the first place.
+
+  ui/gfx/BUILD.gn         and therefore the //third_party/libsync dependency
+  ui/gl/BUILD.gn          itself, whose sync.c includes <linux/sync_file.h>.
+                          Two directories depend on it and gating one left
+                          ninja building it for the other, which is worth
+                          saying: a dependency removed is only removed when
+                          the last edge to it is. ui/gl's own comment beside
+                          that block already excludes Fuchsia "due to a
+                          libsync dependency" - the same reason, one platform
+                          earlier. What the sources there implement is
+                          EGL_ANDROID_native_fence_sync, a fence a GPU driver
+                          hands out, so there is no second use for them here.
+
+  native_pixmap_handle.cc <drm_fourcc.h>, which is Linux's DRM format
+                          numbering - the kernel's uapi header, of which
+                          libdrm ships a copy. This one is narrower than the
+                          others on purpose: the only thing the file wants
+                          from that header is DRM_FORMAT_MOD_INVALID for a
+                          static_assert, and the plane file descriptors
+                          around it are ordinary descriptors. Widening the
+                          guard to the whole block would take the struct's
+                          own fields with it, and those are declared under
+                          the same condition in the HEADER - where the #else
+                          is "#error Unsupported OS".
+
+HAS_LINUX_KERNEL is M144's buildflag and IS_LINUX is Chromium's own. Neither
+this patch nor 0037 nor 0038 mentions any operating system by name.
+
+diff --git a/ui/gfx/BUILD.gn b/ui/gfx/BUILD.gn
+--- a/ui/gfx/BUILD.gn
++++ b/ui/gfx/BUILD.gn
+@@ -644,7 +644,11 @@
+     deps += [ "//build/config/linux/libdrm" ]
+   }
+ 
+-  if (is_linux || is_chromeos || is_android) {
++  # libsync is Android's wrapper over Linux's sync_file ioctls and its sync.c
++  # includes <linux/sync_file.h>. Same sentence as the block above: which
++  # family the build gates a platform as does not decide whether Linux's
++  # kernel interfaces are there.
++  if ((is_linux || is_chromeos || is_android) && has_linux_kernel) {
+     deps += [ "//third_party/libsync" ]
+   }
+ 
+diff --git a/ui/gfx/gpu_fence.cc b/ui/gfx/gpu_fence.cc
+index d4bdac3034..ecec4d2342 100644
+--- a/ui/gfx/gpu_fence.cc
++++ b/ui/gfx/gpu_fence.cc
+@@ -10,7 +10,12 @@
+ #include "build/build_config.h"
+ #include "build/chromeos_buildflags.h"
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++// sync_wait(2) and sync_file_info(3) are third_party/libsync over Linux's
++// sync_file ioctls, and a sync fence is a thing a GPU driver hands out. A
++// POSIX platform in the Linux family with neither is the case the #else
++// branches below are already written for.
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <sync/sync.h>
+ #endif
+ 
+@@ -43,7 +48,8 @@ void GpuFence::Wait() {
+     return;
+   }
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+   static const int kInfiniteSyncWaitTimeout = -1;
+   DCHECK_GE(fence_handle_.Peek(), 0);
+   if (sync_wait(fence_handle_.Peek(), kInfiniteSyncWaitTimeout) < 0) {
+@@ -58,7 +64,8 @@ void GpuFence::Wait() {
+ GpuFence::FenceStatus GpuFence::GetStatusChangeTime(int fd,
+                                                     base::TimeTicks* time) {
+   DCHECK_NE(fd, -1);
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ #if BUILDFLAG(IS_CHROMEOS_DEVICE)
+   auto info =
+       std::unique_ptr<sync_fence_info_data, void (*)(sync_fence_info_data*)>{
+diff --git a/ui/gfx/native_pixmap_handle.cc b/ui/gfx/native_pixmap_handle.cc
+index 283d48686a..3aa58635dc 100644
+--- a/ui/gfx/native_pixmap_handle.cc
++++ b/ui/gfx/native_pixmap_handle.cc
+@@ -12,7 +12,15 @@
+ #include "ui/gfx/geometry/size.h"
+ 
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++// <drm_fourcc.h> is Linux's own DRM format numbering - the kernel's uapi
++// header, which libdrm ships a copy of - and the only thing this file wants
++// from it is DRM_FORMAT_MOD_INVALID, in the static_assert below. Which family
++// the build gates a platform as does not decide whether that header is there;
++// the plane file descriptors around it are ordinary descriptors and stay
++// where they are.
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <drm_fourcc.h>
++#endif
+ #include <unistd.h>
+ 
+ #include "base/posix/eintr_wrapper.h"
+@@ -25,7 +33,8 @@
+ 
+ namespace gfx {
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ static_assert(NativePixmapHandle::kNoModifier == DRM_FORMAT_MOD_INVALID,
+               "gfx::NativePixmapHandle::kNoModifier should be an alias for"
+               "DRM_FORMAT_MOD_INVALID");
+diff --git a/ui/gl/BUILD.gn b/ui/gl/BUILD.gn
+--- a/ui/gl/BUILD.gn
++++ b/ui/gl/BUILD.gn
+@@ -431,7 +431,13 @@
+     ]
+   }
+ 
+-  if (is_android || is_chromeos || is_linux) {
++  # has_linux_kernel for the same reason the comment below already gives for
++  # Fuchsia: libsync is the dependency, and libsync is Linux's sync_file
++  # ioctls - its sync.c includes <linux/sync_file.h>. What the sources here
++  # implement is EGL_ANDROID_native_fence_sync, which is a fence a GPU driver
++  # hands out, so a platform without Linux's kernel interfaces has no second
++  # use for them either.
++  if ((is_android || is_chromeos || is_linux) && has_linux_kernel) {
+     # Windows doesn't support base::FileDescriptor.
+     # libsync isn't supported or needed on MacOSX.
+     # Fuchsia is excluded due to a libsync dependency and because it's

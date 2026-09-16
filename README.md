@@ -518,6 +518,63 @@ Several instruments, and none of them subsumes another:
   version, so one port serves both checkouts and a test compares them byte
   for byte.
 
+- **And Chromium's own answer to what GPU this machine has.** **//gpu/config**
+  builds for this machine and runs on it: the blocklist compiled from
+  `software_rendering_list.json`, the driver bug list compiled from
+  `gpu_driver_bug_list.json`, and the collector a browser calls at startup
+  before any GL context exists. It is not a small target and it is not only
+  about GPUs - it is the gate to **everything above //net**. //cc reaches it
+  through //components/viz/common, so does //media, so does
+  //services/network's mojom, and so does Blink's own string library.
+
+  The GPU information comes from **ANGLE's own system-information reader**,
+  unmodified. With no libpci, no X11 and no Vulkan compiled in,
+  `angle::GetSystemInfo` finds no devices and returns false - which is the
+  truth about this machine, reached through a path ANGLE already ships rather
+  than through a file written here. And ANGLE's **GL implementation** is in
+  no binary: libANGLE and the GLSL translator are built, because
+  `//ui/gl/init` names them, but nothing calls `gl::init::InitializeGLOneOff`,
+  so the linker takes nothing out of those archives.
+
+  `/bin/chromiumgpu` then asks Chromium what it concludes, and the answer
+  corrected this project on its first run. The **blocklist alone does not
+  disable WebGL here** - `software_rendering_list.json` is a list of hardware
+  known to be *broken*, and hardware that is not there matches none of it, so
+  the rule list says about this machine what it says about every machine it
+  does not recognise. "This GPU is blocklisted" and "there is no GPU" are
+  different questions; `ComputeGpuFeatureInfoWithNoGpu` answers the second,
+  and it turns all thirteen features off - WebGL among them - while leaving
+  the 2D canvas at `kGpuFeatureStatusSoftware`. Not "no drawing": drawing on
+  the CPU, which is the path //cc and //viz keep for exactly this case.
+  `GrContextType::kNone` is then the only Skia backend supported, which is
+  M157's and M158's decision arriving as **Chromium's** answer rather than as
+  this project's opinion.
+
+  Getting there cost one patch and two flags. The patch is that ANGLE's
+  platform detection is a list of ten operating systems with no generic POSIX
+  arm on the end; `__unix__` is that arm, and it subsumes most of the list.
+  The flags are ANGLE's **own** two Vulkan switches, which are not the same
+  as Chromium's four and which is why M158's four left SwiftShader in the
+  graph: `angle_build_vulkan_system_info` is on by default in every Chromium
+  build, and underneath it sit the Vulkan loader, the ICD, SPIRV-Tools, Marl
+  and Reactor - a second run-time code generator to port after V8, to answer
+  a question about hardware this machine does not have.
+
+  It also gave this kernel `pthread_setname_np`, and put the name where the
+  **scheduler** keeps one rather than in a field only the C library can see -
+  so a named thread is a thread `/bin/task_manager` can name back. A name
+  that does not fit is refused rather than truncated, which is Linux's rule
+  for the same call and the right one. `RTLD_NOLOAD` came with it, and the
+  loader *answers* it rather than accepting and ignoring it: the list of
+  loaded objects is the thing the question is about.
+
+  Two of its tests found bugs in code they were not aimed at. `mkstemps`
+  needed a suffix, and writing a test for it uncovered a retry loop that
+  could never retry - `mkstemp`, `mktemp` and `mkdtemp` all re-validated the
+  six `X`s on each attempt, against a template the attempt before had already
+  replaced. Reaching it takes the same process, the same millisecond and the
+  file already there, which is why a hundred and fifty milestones had not.
+
 - **A libm for the format the hardware has.** `long double` on x86-64 is
   the x87's 80-bit extended type, and this libc has the C99 set for it -
   fifty-two functions, graded to the unit in the last place of a 64-bit

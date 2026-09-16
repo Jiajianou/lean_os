@@ -106,6 +106,14 @@ long sys_sockname(int fd, os_sockaddr_t *out) {
     return do_syscall(SYS_sockname, (long)fd, (long)out, 0);
 }
 
+long sys_thread_setname(const char *name) {
+    return do_syscall(SYS_thread_setname, (long)name, 0, 0);
+}
+
+long sys_thread_getname(char *out, unsigned long length) {
+    return do_syscall(SYS_thread_getname, (long)out, (long)length, 0);
+}
+
 long sys_munmap(void *address, unsigned long length) {
     return do_syscall(SYS_munmap, (long)address, (long)length, 0);
 }

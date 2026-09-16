@@ -1,0 +1,32 @@
+ANGLE's platform detection is a list of operating systems with no generic
+POSIX arm on the end of it. __linux__ is checked, and after it a list that
+names FreeBSD, OpenBSD, NetBSD, DragonFly, Solaris, glibc, the Hurd, QNX,
+Fuchsia and Haiku - ten answers to the question "is this a POSIX system"
+that the system already answers itself.
+
+__unix__ is that answer. Every operating system in the list but Fuchsia
+defines it, so this subsumes most of the list rather than lengthening it,
+and it mentions no operating system at all - which is the point: an
+out-of-tree POSIX target is exactly the case a list of names cannot cover.
+
+What it costs is nothing on any platform ANGLE ships on, because every one
+of them is matched by an earlier arm of the same #if.
+
+Without it src/common/platform.h stops with "#error Unsupported platform."
+and takes the 281 objects behind it with it - angle_common, the GLSL
+translator, and angle_gpu_info_util, which is where this build gets its
+answer to "what GPU does this machine have".
+
+diff --git a/third_party/angle/src/common/platform.h b/third_party/angle/src/common/platform.h
+index cae59a1..a047c40 100644
+--- a/third_party/angle/src/common/platform.h
++++ b/third_party/angle/src/common/platform.h
+@@ -25,7 +25,7 @@
+ #    define ANGLE_PLATFORM_POSIX 1
+ #elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) ||              \
+     defined(__DragonFly__) || defined(__sun) || defined(__GLIBC__) || defined(__GNU__) || \
+-    defined(__QNX__) || defined(__Fuchsia__) || defined(__HAIKU__)
++    defined(__QNX__) || defined(__Fuchsia__) || defined(__HAIKU__) || defined(__unix__)
+ #    define ANGLE_PLATFORM_POSIX 1
+ #else
+ #    error Unsupported platform.

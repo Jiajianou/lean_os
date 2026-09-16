@@ -117,6 +117,8 @@ int pthread_attr_destroy(pthread_attr_t *attr);
 int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *out);
 int pthread_attr_getstack(const pthread_attr_t *attr, void **base, size_t *size);
 int pthread_getattr_np(pthread_t thread, pthread_attr_t *attr);
+int pthread_setname_np(pthread_t thread, const char *name);
+int pthread_getname_np(pthread_t thread, char *out, size_t length);
 
 int pthread_mutexattr_init(pthread_mutexattr_t *attr);
 int pthread_mutexattr_destroy(pthread_mutexattr_t *attr);

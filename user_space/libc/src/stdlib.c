@@ -262,41 +262,66 @@ void *bsearch(const void *key, const void *base, size_t count, size_t size,
     return (void *)0;
 }
 
-static int fill_template(char *template, unsigned int salt) {
+/* The six X's are checked ONCE and written many times, and that separation is
+   the whole of this. These four calls all retry on a name that is taken, and
+   until M159 the retry could not work: each attempt re-validated the template
+   before filling it, and the attempt before had already replaced the X's with
+   letters - so attempt 1 saw a template that was no longer one, returned
+   EINVAL, and the loop gave up on its second time round. Nothing noticed for
+   a hundred and fifty milestones because reaching attempt 1 needs a name
+   collision, which needs the same process in the same millisecond with the
+   file already there. mkstemps' own test produced exactly that.
+
+   suffix_length is mkstemps(3)'s: the number of characters AFTER the X's that
+   are part of the name rather than of the template. It returns the index one
+   past the last X, or zero for a string that is not a template - which is
+   never a valid answer, because six X's cannot end before position six. */
+static size_t template_span(const char *template, size_t suffix_length) {
     size_t n = 0;
     while (template[n]) {
         n++;
     }
-    if (n < 6) {
-        return -1;
+    if (n < suffix_length + 6) {
+        return 0;
     }
+    n -= suffix_length;
     for (size_t i = n - 6; i < n; i++) {
         if (template[i] != 'X') {
-            return -1;
+            return 0;
         }
     }
+    return n;
+}
+
+static void fill_template_span(char *template, size_t end, unsigned int salt) {
     static const char alphabet[] =
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    for (size_t i = n - 6; i < n; i++) {
+    for (size_t i = end - 6; i < end; i++) {
         template[i] = alphabet[salt % (sizeof(alphabet) - 1)];
         salt /= (sizeof(alphabet) - 1);
         salt += 7919;
     }
-    return 0;
 }
 
-int mkstemp(char *template) {
+static unsigned int template_salt(void) {
+    return (unsigned int)sys_getpid() * 2654435761u +
+           (unsigned int)sys_uptime_ms();
+}
+
+static int make_temporary_file(char *template, size_t suffix_length) {
     if (!template) {
         errno = EINVAL;
         return -1;
     }
-    unsigned int salt =
-        (unsigned int)sys_getpid() * 2654435761u + (unsigned int)sys_uptime_ms();
+    size_t end = template_span(template, suffix_length);
+    if (end == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    unsigned int salt = template_salt();
     for (int attempt = 0; attempt < 128; attempt++) {
-        if (fill_template(template, salt + (unsigned int)attempt * 104729u) != 0) {
-            errno = EINVAL;
-            return -1;
-        }
+        fill_template_span(template, end,
+                           salt + (unsigned int)attempt * 104729u);
         int fd = open(template, O_RDWR | O_CREAT | O_EXCL);
         if (fd >= 0) {
             return fd;
@@ -306,18 +331,37 @@ int mkstemp(char *template) {
     return -1;
 }
 
+int mkstemp(char *template) {
+    return make_temporary_file(template, 0);
+}
+
+/* mkstemps(3), which is mkstemp with a suffix the template keeps - so a
+   caller that needs the name to end in ".png" can have one. It is 4.4BSD's
+   and glibc carries it; ANGLE's system_utils_posix.cpp is the caller that
+   asked here (M159). A negative suffix_length is the one thing it can be
+   handed that means nothing. */
+int mkstemps(char *template, int suffix_length) {
+    if (suffix_length < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return make_temporary_file(template, (size_t)suffix_length);
+}
+
 char *mktemp(char *template) {
     if (!template) {
         errno = EINVAL;
         return (char *)0;
     }
-    unsigned int salt =
-        (unsigned int)sys_getpid() * 2654435761u + (unsigned int)sys_uptime_ms();
+    size_t end = template_span(template, 0);
+    if (end == 0) {
+        errno = EINVAL;
+        return (char *)0;
+    }
+    unsigned int salt = template_salt();
     for (int attempt = 0; attempt < 128; attempt++) {
-        if (fill_template(template, salt + (unsigned int)attempt * 104729u) != 0) {
-            errno = EINVAL;
-            return (char *)0;
-        }
+        fill_template_span(template, end,
+                           salt + (unsigned int)attempt * 104729u);
         if (access(template, F_OK) != 0) {
             return template;
         }
@@ -332,13 +376,15 @@ char *mkdtemp(char *template) {
         errno = EINVAL;
         return (char *)0;
     }
-    unsigned int salt =
-        (unsigned int)sys_getpid() * 2654435761u + (unsigned int)sys_uptime_ms();
+    size_t end = template_span(template, 0);
+    if (end == 0) {
+        errno = EINVAL;
+        return (char *)0;
+    }
+    unsigned int salt = template_salt();
     for (int attempt = 0; attempt < 128; attempt++) {
-        if (fill_template(template, salt + (unsigned int)attempt * 104729u) != 0) {
-            errno = EINVAL;
-            return (char *)0;
-        }
+        fill_template_span(template, end,
+                           salt + (unsigned int)attempt * 104729u);
         if (mkdir(template, 0700) == 0) {
             return template;
         }

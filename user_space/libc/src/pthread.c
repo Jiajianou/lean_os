@@ -460,6 +460,37 @@ pthread_t pthread_self(void) {
     return (pthread_t)sys_gettid();
 }
 
+/* A thread's name goes to the kernel rather than into a field here, because
+   the whole point of naming a thread is that something else can say which
+   thread it is looking at - the serial log and /bin/task_manager print
+   task_t.name, and a thread on this machine is a task. Both calls act on the
+   calling thread only: naming another thread is a write into a task this one
+   does not own, and no caller here has ever asked for it.
+
+   ERANGE rather than truncation is Linux's rule for the same call and it is
+   the right one: a program told it named a thread "CompositorTileWorker"
+   when the name it actually has is "CompositorTile" has been lied to about
+   its own machine. */
+int pthread_setname_np(pthread_t thread, const char *name) {
+    if (!name) {
+        return EINVAL;
+    }
+    if (thread != pthread_self()) {
+        return ENOSYS;
+    }
+    return sys_thread_setname(name) == 0 ? 0 : ERANGE;
+}
+
+int pthread_getname_np(pthread_t thread, char *out, size_t length) {
+    if (!out || length == 0) {
+        return EINVAL;
+    }
+    if (thread != pthread_self()) {
+        return ENOSYS;
+    }
+    return sys_thread_getname(out, (unsigned long)length) == 0 ? 0 : ERANGE;
+}
+
 int pthread_equal(pthread_t a, pthread_t b) {
     return a == b;
 }

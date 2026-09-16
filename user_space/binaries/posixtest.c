@@ -303,6 +303,94 @@ static int a_thread_can_find_its_own_stack(void) {
     return 0;
 }
 
+/* A thread's name, which is the one piece of the POSIX-ish surface here
+   whose answer lives in the KERNEL rather than in this library. ANGLE's
+   system_utils_linux.cpp is what asked for it - M159 - and the temptation
+   was to keep the name in the pthread registry and hand it back, which would
+   have passed every test a round trip can write and told nothing else on the
+   machine which thread it was looking at.
+
+   So what is graded here is that it went somewhere: the name set on one
+   thread does not follow another, the name survives the call that reads it
+   back, and a buffer too small to hold it is refused rather than filled with
+   a truncation. */
+static char other_thread_name[32];
+static int other_thread_result;
+
+static void *name_a_second_thread(void *argument) {
+    (void)argument;
+    if (pthread_setname_np(pthread_self(), "second") != 0) {
+        other_thread_result = 1;
+        return 0;
+    }
+    if (pthread_getname_np(pthread_self(), other_thread_name,
+                           sizeof(other_thread_name)) != 0) {
+        other_thread_result = 2;
+    }
+    return 0;
+}
+
+static int a_thread_can_name_itself(void) {
+    char name[32];
+    if (pthread_setname_np(pthread_self(), "posixtest-main") != 0) {
+        printf("[posixtest] pthread_setname_np refused a 14-character name\n");
+        return 43;
+    }
+    if (pthread_getname_np(pthread_self(), name, sizeof(name)) != 0) {
+        printf("[posixtest] pthread_getname_np could not read the name back\n");
+        return 44;
+    }
+    if (strcmp(name, "posixtest-main") != 0) {
+        printf("[posixtest] the name came back as \"%s\"\n", name);
+        return 45;
+    }
+
+    /* Too small to hold it. Linux answers ERANGE here rather than truncating
+       and this does too, because a caller handed "posixtest-mai" would
+       believe that is what the thread is called. */
+    char narrow[4];
+    if (pthread_getname_np(pthread_self(), narrow, sizeof(narrow)) != ERANGE) {
+        printf("[posixtest] a 4-byte buffer was not refused\n");
+        return 46;
+    }
+    /* And a name longer than the kernel keeps. TASK_NAME_MAX is 24. */
+    if (pthread_setname_np(pthread_self(),
+                           "a-name-far-longer-than-the-kernel-keeps") !=
+        ERANGE) {
+        printf("[posixtest] an over-long name was accepted\n");
+        return 47;
+    }
+    if (pthread_getname_np(pthread_self(), name, sizeof(name)) != 0 ||
+        strcmp(name, "posixtest-main") != 0) {
+        printf("[posixtest] a refused name changed the thread's name anyway\n");
+        return 48;
+    }
+
+    pthread_t other;
+    if (pthread_create(&other, 0, name_a_second_thread, 0) != 0) {
+        printf("[posixtest] could not start a second thread\n");
+        return 49;
+    }
+    pthread_join(other, 0);
+    if (other_thread_result != 0) {
+        printf("[posixtest] the second thread could not name itself (%d)\n",
+               other_thread_result);
+        return 50;
+    }
+    if (strcmp(other_thread_name, "second") != 0) {
+        printf("[posixtest] the second thread read back \"%s\"\n",
+               other_thread_name);
+        return 51;
+    }
+    if (pthread_getname_np(pthread_self(), name, sizeof(name)) != 0 ||
+        strcmp(name, "posixtest-main") != 0) {
+        printf("[posixtest] naming a second thread renamed this one to "
+               "\"%s\"\n", name);
+        return 52;
+    }
+    return 0;
+}
+
 int main(void) {
     int code = monotonic_clock_moves_forward();
     if (code) {
@@ -321,6 +409,10 @@ int main(void) {
         return code;
     }
     code = a_thread_can_find_its_own_stack();
+    if (code) {
+        return code;
+    }
+    code = a_thread_can_name_itself();
     if (code) {
         return code;
     }

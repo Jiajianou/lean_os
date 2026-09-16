@@ -601,6 +601,52 @@ static long sys_gettid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
     return scheduler_current()->id;
 }
 
+/* A thread's own name. pthread_setname_np(3) is the spelling every C++
+   runtime uses - ANGLE's system_utils_linux.cpp is the caller that made this
+   necessary - and the interesting question is where the name should live. A
+   name the C library remembers and hands back is a round trip that proves
+   nothing: the point of naming a thread is that something ELSE can say which
+   thread it is looking at. The scheduler has kept a name per task since the
+   beginning, it is what the serial log and /bin/task_manager print, and a
+   thread here IS a task, so that is where this puts it.
+
+   The length rule is Linux's rather than this kernel's: a name that does not
+   fit is refused rather than truncated, because a program that asks for
+   "CompositorTileWorker" and silently gets "CompositorTile" has been told
+   something false about its own machine. TASK_NAME_MAX is 24 against Linux's
+   16, so every name Linux accepts fits here. */
+static long sys_thread_setname(uint64_t name_pointer, uint64_t a2, uint64_t a3,
+                               uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    char name[TASK_NAME_MAX];
+    if (copy_string_from_user(name, name_pointer, sizeof(name)) != 0) {
+        return -1;
+    }
+    scheduler_set_task_name(scheduler_current(), name);
+    return 0;
+}
+
+static long sys_thread_getname(uint64_t out_pointer, uint64_t length,
+                               uint64_t a3, uint64_t a4, uint64_t a5,
+                               uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    if (length == 0) {
+        return -1;
+    }
+    char name[TASK_NAME_MAX];
+    k_memset(name, 0, sizeof(name));
+    const char *current = scheduler_current()->name;
+    uint64_t i = 0;
+    for (; current[i] && i < TASK_NAME_MAX - 1; i++) {
+        name[i] = current[i];
+    }
+    if (i + 1 > length) {
+        return -1;
+    }
+    uint64_t wanted = length < TASK_NAME_MAX ? length : TASK_NAME_MAX;
+    return copy_to_user(out_pointer, name, wanted) == 0 ? 0 : -1;
+}
+
 static long sys_thread_create(uint64_t entry, uint64_t arg, uint64_t stack_top,
                                uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
@@ -4933,6 +4979,8 @@ static const syscall_function_t syscall_table[SYSCALL_COUNT] = {
     [SYS_sockname] = sys_sockname,
     [SYS_munmap] = sys_munmap,
     [SYS_thread_create] = sys_thread_create,
+    [SYS_thread_setname] = sys_thread_setname,
+    [SYS_thread_getname] = sys_thread_getname,
     [SYS_thread_exit] = sys_thread_exit,
     [SYS_gettid] = sys_gettid,
     [SYS_getdents] = sys_getdents,

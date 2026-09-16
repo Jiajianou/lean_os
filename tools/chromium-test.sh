@@ -690,6 +690,107 @@ PROBE
     fi
   fi
 
+  # M159. //gpu/config, which is the gate to everything above //net: //cc
+  # reaches it through //components/viz/common, so does //media, so does
+  # //services/network's mojom, and so does Blink's own string library
+  # through //third_party/blink/public/common:headers. Nothing in this port
+  # gets past //net without it.
+  GPUPROGRAM="$SRC/out/$OUT_NAME/gpuinfotest"
+  if [ ! -x "$GPUPROGRAM" ]; then
+    echo "chromium-test: //gpu/config has not been built - skipping" \
+         "(tools/build-chromium.sh lean_os)"
+  else
+    "${PREFIX}readelf" -h "$GPUPROGRAM" | grep -q "EXEC (Executable file)"
+    check $? "a program linked from //gpu/config is an EXEC in this OS's image region ($("${PREFIX}readelf" -h "$GPUPROGRAM" | awk '/Type:/{t=$2} /Entry point/{print t, $NF}'))"
+
+    # The decision procedure itself, which is what this program runs: the
+    # blocklist built from software_rendering_list.json, the driver bug list
+    # built from gpu_driver_bug_list.json, and the collector. A //gpu/config
+    # that linked with an empty rule list would satisfy every check that only
+    # asks whether the call returned - M157's sentence, a fourth time.
+    GPUCONF=$("${PREFIX}nm" -C "$GPUPROGRAM" |
+              grep -cE " [Tt] .*gpu::(GpuBlocklist|GpuDriverBugList|GpuControlList|ComputeGpuFeatureInfo|CollectBasicGraphicsInfo)")
+    [ "$GPUCONF" -gt 5 ]
+    check $? "with Chromium's blocklist, driver bug list and collector in it ($GPUCONF symbols)"
+
+    # Where the GPU information comes from, which is the question M158 left
+    # open. ANGLE's own system-information reader, unmodified: with no
+    # libpci, no X11 and no Vulkan compiled in, angle::GetSystemInfo finds no
+    # devices and returns false.
+    ANGLEINFO=$("${PREFIX}nm" -C "$GPUPROGRAM" | grep -cE "angle::GetSystemInfo|angle::GetDualGPUInfo")
+    [ "$ANGLEINFO" -gt 0 ]
+    check $? "and ANGLE's system-information reader as the answer to what GPU this machine has ($ANGLEINFO symbols)"
+
+    # And still none of the rendering stack. These are the same four checks
+    # //cc/paint gets, asked of a program that links //gpu/config - which is
+    # where the GPU stack was arriving from in M158's measurement. ANGLE is
+    # the exception and has to be: gpu_info_util IS ANGLE. What must be
+    # absent is ANGLE's GL implementation, which is libGLESv2 and libANGLE,
+    # not its system-information reader.
+    # These patterns are NAMESPACES rather than words, and that is the whole
+    # point of them. `nm -C | grep SwiftShader` finds three symbols in this
+    # binary and none of them is SwiftShader: two are
+    # gl::kANGLEImplementationSwiftShaderName - a string in //ui/gl's table of
+    # implementation names - and the third is features::IsSwiftShaderAllowed,
+    # which is the predicate that answers no. A check written against the word
+    # would have failed on a build that is right.
+    check_gpu_absent() {
+      FOUND=$("${PREFIX}nm" -C "$GPUPROGRAM" | grep -cE "$2")
+      [ "$FOUND" = "0" ]
+      check $? "and no $1 in a program that links //gpu/config"
+    }
+    check_gpu_absent SwiftShader "sw::Reactor|rr::Nucleus|marl::|Ice::Cfg"
+    check_gpu_absent Vulkan "vkCreateInstance|VkPhysicalDevice|vkGetInstanceProcAddr"
+    check_gpu_absent Dawn "dawn::native|wgpu::"
+
+    # And ANGLE's GL IMPLEMENTATION, which is the distinction this milestone
+    # turns on. angle_gpu_info_util is ANGLE and it is here, deliberately -
+    # it is where the answer to "what GPU does this machine have" comes from.
+    # libANGLE, the GLSL translator and the EGL display are also BUILT,
+    # because //ui/gl/init names them when use_static_angle is true. They are
+    # in no binary: nothing here calls gl::init::InitializeGLOneOff, so the
+    # linker takes nothing out of those archives. That is a stronger claim
+    # than the flags make and it is the one worth grading, because it is
+    # about the program rather than about the build.
+    check_gpu_absent "ANGLE's GL implementation" \
+                     "egl::Display|sh::TCompiler|gl::Context::|rx::DisplayImpl"
+    NOINIT=$("${PREFIX}nm" -C "$GPUPROGRAM" | grep -cE "gl::init::")
+    [ "$NOINIT" = "0" ]
+    check $? "and nothing that would initialise a GL context (gl::init:: is absent)"
+
+    # The three ANGLE flags M159 found and the one optional system library,
+    # read out of the configured build's own args.gn rather than asserted
+    # here - M154's rule. M158 turned off Chromium's four and SwiftShader
+    # stayed in the graph, because ANGLE has its OWN switches for the same
+    # question and angle_build_vulkan_system_info's default is on in every
+    # Chromium build.
+    ARGSFILE="$SRC/out/$OUT_NAME/args.gn"
+    AOFF=0
+    for flag in angle_build_vulkan_system_info angle_enable_vulkan \
+                angle_shared_libvulkan use_xkbcommon; do
+      grep -qE "^$flag = false\$" "$ARGSFILE" || AOFF=1
+    done
+    [ "$AOFF" = "0" ]
+    check $? "and args.gn turns off ANGLE's own three Vulkan switches and xkbcommon"
+
+    # pthread_setname_np, in the sysroot rather than in the tree, for the
+    # reason M158 wrote down about <sys/poll.h>: a header added to
+    # user_space/libc/include and never copied across is invisible to every
+    # cross compile while looking perfectly present in git. ANGLE's
+    # system_utils_linux.cpp is the caller.
+    grep -q "pthread_setname_np" "$ROOT/build/sysroot/usr/local/include/pthread.h"
+    check $? "this libc's pthread_setname_np is in the sysroot a cross compile reads"
+
+    IMAGE="$ROOT/build/os-image.bin"
+    if [ ! -f "$IMAGE" ]; then
+      echo "chromium-test: no $IMAGE - run make, then this again"
+    else
+      make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
+      "$ROOT/build/leanfs-put" "$IMAGE" "$GPUPROGRAM" /bin/chromiumgpu > /dev/null
+      check $? "installed as /bin/chromiumgpu - the [m159] boot self-test runs it"
+    fi
+  fi
+
   # M157. The libc port reaches Chromium's OWN vendored copy of the libc
   # crate, not just rust-src's - and they are the same 0.2.189, so a copy
   # that drifted would be a build that disagrees with itself about what this

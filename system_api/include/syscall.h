@@ -244,7 +244,15 @@ typedef struct {
 #define SYS_mincore               130
 #define SYS_sockname              131
 
-#define SYSCALL_COUNT 132
+/* A thread's own name, which is what pthread_setname_np(3) sets. It goes
+   where the scheduler already keeps one - task_t.name, the field /bin/ps and
+   the task manager read - rather than into a field only the C library can
+   see, because a name nothing can read would be the pretence M65 refuses.
+   TASK_NAME_MAX is 24; Linux's own limit for the same call is 16. */
+#define SYS_thread_setname        132
+#define SYS_thread_getname        133
+
+#define SYSCALL_COUNT 134
 
 #ifdef __cplusplus
 }
