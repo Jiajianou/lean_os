@@ -155,6 +155,26 @@ int socket_bind(struct socket *s, uint16_t port) {
     return port;
 }
 
+uint16_t socket_local_port(const struct socket *s) {
+    if (!s || !s->in_use) {
+        return 0;
+    }
+    if (s->type == SOCK_STREAM && s->tcb) {
+        return tcp_local_port(s->tcb);
+    }
+    return s->port;
+}
+
+uint32_t socket_local_ip(const struct socket *s) {
+    if (s && s->in_use && s->type == SOCK_STREAM && s->tcb) {
+        uint32_t ip = tcp_local_ip(s->tcb);
+        if (ip) {
+            return ip;
+        }
+    }
+    return net_local_ip();
+}
+
 int socket_sendto(struct socket *s, uint32_t destination_ip, uint16_t destination_port,
                   const uint8_t *data, uint16_t length) {
     if (!s || !s->in_use || s->type != SOCK_DGRAM || length > UDP_MAX_PAYLOAD) {

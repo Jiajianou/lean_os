@@ -1,8 +1,6 @@
-diff --git a/mojo/public/cpp/platform/BUILD.gn b/mojo/public/cpp/platform/BUILD.gn
-index 0538b28741..8cf14b3aab 100644
 --- a/mojo/public/cpp/platform/BUILD.gn
 +++ b/mojo/public/cpp/platform/BUILD.gn
-@@ -56,7 +56,7 @@ component("platform") {
+@@ -56,7 +56,7 @@
        "platform_channel_server_posix.cc",
        "socket_utils_posix.cc",
      ]
@@ -11,14 +9,16 @@ index 0538b28741..8cf14b3aab 100644
    }
  
    if (is_fuchsia) {
-diff --git a/net/BUILD.gn b/net/BUILD.gn
-index 54a40951c0..170031856b 100644
 --- a/net/BUILD.gn
 +++ b/net/BUILD.gn
-@@ -136,6 +136,29 @@ source_set("net_features") {
-   ]
- }
- 
+@@ -132,6 +132,33 @@
+     ":disk_cache_buildflags",
+     "//base",
+     "//crypto:buildflags",
++    "//net/base:net_export_header",
++  ]
++}
++
 +# The sockaddr helpers, which need nothing from the network stack: a
 +# sockaddr_storage wrapper and the function that fills in a sockaddr_un.
 +# //mojo/public/cpp/platform needs exactly these to name a Unix-domain
@@ -27,10 +27,14 @@ index 54a40951c0..170031856b 100644
 +# it, and which drags in BoringSSL, ICU and SQLite behind it.
 +source_set("sockaddr_util") {
 +  sources = [
++    "base/sockaddr_storage.cc",
++    "base/sockaddr_storage.h",
 +  ]
 +
 +  if (is_posix || is_fuchsia) {
 +    sources += [
++      "base/sockaddr_util_posix.cc",
++      "base/sockaddr_util_posix.h",
 +    ]
 +  }
 +
@@ -38,14 +42,10 @@ index 54a40951c0..170031856b 100644
 +
 +  deps = [
 +    "//base",
-+    "//net/base:net_export_header",
-+  ]
-+}
-+
- component("net") {
-   sources = [
-     "base/address_family.cc",
-@@ -283,8 +306,6 @@ component("net") {
+     "//net/base:net_export_header",
+   ]
+ }
+@@ -283,8 +310,6 @@
      "base/scheme_host_port_matcher_rule.cc",
      "base/scheme_host_port_matcher_rule.h",
      "base/session_usage.h",
@@ -54,7 +54,7 @@ index 54a40951c0..170031856b 100644
      "base/switches.h",
      "base/sys_addrinfo.h",
      "base/task/task_runner.cc",
-@@ -1232,6 +1253,7 @@ component("net") {
+@@ -1232,6 +1257,7 @@
      ":disk_cache_buildflags",
      ":net_features",
      ":net_public_deps",
@@ -62,7 +62,7 @@ index 54a40951c0..170031856b 100644
      "//base",
      "//net/base:net_export_header",
      "//net/dns",
-@@ -1548,8 +1570,6 @@ component("net") {
+@@ -1548,8 +1574,6 @@
        "base/file_stream_context_posix.cc",
        "base/network_interfaces_posix.cc",
        "base/network_interfaces_posix.h",

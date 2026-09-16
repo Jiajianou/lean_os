@@ -3184,7 +3184,11 @@ static long sys_socket(uint64_t type, uint64_t domain, uint64_t a3, uint64_t a4,
         return -1;
     }
     if (!has_cap(CAP_NETWORK)) {
-        return -1;
+        /* Named, rather than the bare -1 every other failure here returns.
+           A program refused a socket and a program out of descriptors are
+           different problems, and until M151 both arrived at the caller as
+           EMFILE - which sent somebody looking at descriptor limits. */
+        return -OS_ERROR_ACCESS;
     }
     if (type != SOCK_DGRAM && type != SOCK_STREAM) {
         return -1;
@@ -3510,6 +3514,32 @@ static long sys_connstat(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uin
         return 0;
     }
     return tcp_state(tcb) == TCP_ESTABLISHED ? 1 : -1;
+}
+
+/* Which address a socket is on. getsockname(2) used to answer this out of
+   the machine's own network configuration with a port of zero, which is
+   right about the address and a lie about the port - and a program that
+   binds to port zero and then asks which port it got, as every server that
+   does not want a fixed one does, was told nothing. */
+static long sys_sockname(uint64_t fd, uint64_t out_pointer, uint64_t a3,
+                         uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    os_sockaddr_t out;
+    k_memset(&out, 0, sizeof(out));
+    struct unix_socket *u = unix_for_file_descriptor(fd);
+    if (u) {
+        /* A Unix-domain socket has a path rather than an address, and this
+           call has nowhere to put one. Zeros, which is what binding one to
+           nothing reports on every other system. */
+        return copy_to_user(out_pointer, &out, sizeof(out)) == 0 ? 0 : -1;
+    }
+    struct socket *s = socket_for_file_descriptor(fd);
+    if (!s) {
+        return -1;
+    }
+    out.ip = socket_local_ip(s);
+    out.port = socket_local_port(s);
+    return copy_to_user(out_pointer, &out, sizeof(out)) == 0 ? 0 : -1;
 }
 
 static long sys_accept(uint64_t fd, uint64_t from_pointer, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -4859,6 +4889,7 @@ static const syscall_function_t syscall_table[SYSCALL_COUNT] = {
     [SYS_mprotect] = sys_mprotect,
     [SYS_madvise] = sys_madvise,
     [SYS_mincore] = sys_mincore,
+    [SYS_sockname] = sys_sockname,
     [SYS_munmap] = sys_munmap,
     [SYS_thread_create] = sys_thread_create,
     [SYS_thread_exit] = sys_thread_exit,

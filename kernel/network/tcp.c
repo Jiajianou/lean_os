@@ -496,6 +496,7 @@ tcp_state_t tcp_state(const struct tcpcb *t) {
 }
 
 uint16_t tcp_local_port(const struct tcpcb *t) { return t ? t->local_port : 0; }
+uint32_t tcp_local_ip(const struct tcpcb *t) { return t ? t->local_ip : 0; }
 uint32_t tcp_remote_ip(const struct tcpcb *t) { return t ? t->remote_ip : 0; }
 uint16_t tcp_remote_port(const struct tcpcb *t) { return t ? t->remote_port : 0; }
 

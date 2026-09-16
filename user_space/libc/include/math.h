@@ -25,6 +25,7 @@ float sqrtf(float x);
 float atanf(float x);
 float roundf(float x);
 float expf(float x);
+float tanhf(float x);
 float nextafterf(float x, float y);
 float atan2f(float y, float x);
 float ldexpf(float x, int exponent);
@@ -86,6 +87,8 @@ double log2(double x);
 double sinh(double x);
 double cosh(double x);
 double tanh(double x);
+double nan(const char *tag);
+float nanf(const char *tag);
 double fmax(double a, double b);
 double fmin(double a, double b);
 

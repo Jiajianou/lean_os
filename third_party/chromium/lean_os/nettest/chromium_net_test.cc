@@ -11,13 +11,22 @@
 
 #include <resolv.h>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include "base/at_exit.h"
 #include "base/command_line.h"
 #include "base/files/file_util.h"
 #include "base/run_loop.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
+#include "base/memory/ref_counted.h"
+#include "base/message_loop/message_pump_type.h"
 #include "base/task/single_thread_task_executor.h"
+#include "base/task/thread_pool/thread_pool_instance.h"
 
 #include "net/base/host_port_pair.h"
 #include "net/base/ip_address.h"
@@ -27,13 +36,45 @@
 #include "net/http/http_util.h"
 #include "net/proxy_resolution/proxy_config.h"
 #include "net/proxy_resolution/proxy_config_with_annotation.h"
+#include "net/proxy_resolution/configured_proxy_resolution_service.h"
 #include "net/proxy_resolution/proxy_config_service.h"
+#include "net/base/address_list.h"
+#include "net/base/completion_once_callback.h"
+#include "net/base/io_buffer.h"
+#include "net/base/net_errors.h"
+#include "net/base/test_completion_callback.h"
+#include "net/log/net_log_source.h"
+#include "net/socket/stream_socket.h"
+#include "net/socket/tcp_client_socket.h"
+#include "net/socket/tcp_server_socket.h"
+#include "net/traffic_annotation/network_traffic_annotation.h"
+#include "net/url_request/url_request.h"
+#include "net/url_request/url_request_context.h"
+#include "net/url_request/url_request_context_builder.h"
 #include "url/gurl.h"
 
 namespace {
 
 int failures = 0;
 int checks = 0;
+
+// Every piece of //net that sends bytes wants one of these, so that a
+// reviewer can find out what a connection is for. This program's is the
+// truth about it.
+constexpr net::NetworkTrafficAnnotationTag kAnnotation =
+    net::DefineNetworkTrafficAnnotation("lean_os_nettest", R"(
+      semantics {
+        sender: "lean_os boot self-test"
+        description: "Fetches one page from a server in this same process."
+        trigger: "The [m151] boot self-test."
+        data: "Nothing."
+        destination: LOCAL
+      }
+      policy {
+        cookies_allowed: NO
+        setting: "Not settable - it is a self-test."
+        policy_exception_justification: "Not a user-visible request."
+      })");
 
 void Check(const char* what, bool ok) {
   ++checks;
@@ -216,6 +257,241 @@ bool HttpHeadersParse() {
   return saw_type && saw_length;
 }
 
+// A connection, which is the first thing here that is not parsing. Both
+// ends are Chromium's - TCPServerSocket and TCPClientSocket - and both run
+// on this kernel's TCP through a non-blocking connect(2) whose completion
+// arrives on base::MessagePumpEpoll. Loopback, so the check needs nothing
+// outside this machine.
+class Waiter {
+ public:
+  net::CompletionOnceCallback callback() {
+    return base::BindOnce(&Waiter::Done, base::Unretained(this));
+  }
+  int Wait(int immediate) {
+    if (immediate != net::ERR_IO_PENDING) {
+      return immediate;
+    }
+    loop_.Run();
+    return result_;
+  }
+
+ private:
+  void Done(int result) {
+    result_ = result;
+    loop_.Quit();
+  }
+  base::RunLoop loop_;
+  int result_ = net::ERR_UNEXPECTED;
+};
+
+bool SocketsConnectOverLoopback() {
+  net::TCPServerSocket server(nullptr, net::NetLogSource());
+  int listened = server.Listen(
+      net::IPEndPoint(net::IPAddress::IPv4Localhost(), 0), 4, std::nullopt);
+  if (listened != net::OK) {
+    std::printf("chromiumnet:   Listen: %s\n",
+                net::ErrorToShortString(listened).c_str());
+    return false;
+  }
+  net::IPEndPoint bound;
+  int named = server.GetLocalAddress(&bound);
+  if (named != net::OK || bound.port() == 0) {
+    std::printf("chromiumnet:   GetLocalAddress: %s port %u\n",
+                net::ErrorToShortString(named).c_str(), bound.port());
+    return false;
+  }
+  std::printf("chromiumnet:   listening on %s\n", bound.ToString().c_str());
+
+  std::unique_ptr<net::StreamSocket> accepted;
+  Waiter accept_waiter;
+  int accept_result = server.Accept(&accepted, accept_waiter.callback());
+
+  net::TCPClientSocket client(net::AddressList(bound), nullptr, nullptr,
+                              nullptr, net::NetLogSource(),
+                              net::handles::kInvalidNetworkHandle);
+  Waiter connect_waiter;
+  int connected = connect_waiter.Wait(client.Connect(connect_waiter.callback()));
+  if (connected != net::OK) {
+    std::printf("chromiumnet:   Connect: %s\n",
+                net::ErrorToShortString(connected).c_str());
+    return false;
+  }
+  int accepted_result = accept_waiter.Wait(accept_result);
+  if (accepted_result != net::OK || !accepted) {
+    std::printf("chromiumnet:   Accept: %s\n",
+                net::ErrorToShortString(accepted_result).c_str());
+    return false;
+  }
+
+  const char kUpstream[] = "a connection on this machine";
+  auto out = base::MakeRefCounted<net::StringIOBuffer>(std::string(kUpstream));
+  Waiter write_waiter;
+  int written = write_waiter.Wait(client.Write(
+      out.get(), out->size(), write_waiter.callback(),
+      kAnnotation));
+  if (written != out->size()) {
+    std::printf("chromiumnet:   Write: %d\n", written);
+    return false;
+  }
+
+  auto in = base::MakeRefCounted<net::IOBufferWithSize>(64);
+  Waiter read_waiter;
+  int read = read_waiter.Wait(
+      accepted->Read(in.get(), in->size(), read_waiter.callback()));
+  if (read != static_cast<int>(sizeof(kUpstream) - 1) ||
+      std::memcmp(in->data(), kUpstream, sizeof(kUpstream) - 1) != 0) {
+    std::printf("chromiumnet:   Read: %d\n", read);
+    return false;
+  }
+  return true;
+}
+
+// And the whole HTTP stack on top of it. The server is eleven lines of
+// POSIX in a thread of its own - deliberately, so that what is being
+// graded is entirely on Chromium's side: a URLRequest, the host resolver,
+// the socket pool, HttpNetworkTransaction and the response parser, all on
+// this kernel's sockets.
+struct TinyServer {
+  int listener = -1;
+  uint16_t port = 0;
+  pthread_t thread = 0;
+};
+
+const char kBody[] = "<html><body>served by this machine</body></html>";
+
+void* ServeOnce(void* argument) {
+  TinyServer* server = static_cast<TinyServer*>(argument);
+  int connection = accept(server->listener, nullptr, nullptr);
+  if (connection < 0) {
+    return nullptr;
+  }
+  char request[1024];
+  read(connection, request, sizeof(request));
+  char response[512];
+  int n = std::snprintf(response, sizeof(response),
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+                        "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
+                        sizeof(kBody) - 1, kBody);
+  write(connection, response, (size_t)n);
+  close(connection);
+  return nullptr;
+}
+
+bool StartTinyServer(TinyServer* server) {
+  server->listener = socket(AF_INET, SOCK_STREAM, 0);
+  if (server->listener < 0) {
+    return false;
+  }
+  struct sockaddr_in address;
+  std::memset(&address, 0, sizeof(address));
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  if (bind(server->listener, (struct sockaddr*)&address, sizeof(address)) != 0 ||
+      listen(server->listener, 4) != 0) {
+    return false;
+  }
+  socklen_t length = sizeof(address);
+  if (getsockname(server->listener, (struct sockaddr*)&address, &length) != 0) {
+    return false;
+  }
+  server->port = ntohs(address.sin_port);
+  return pthread_create(&server->thread, nullptr, ServeOnce, server) == 0;
+}
+
+class Collector : public net::URLRequest::Delegate {
+ public:
+  explicit Collector(base::RunLoop* loop) : loop_(loop) {}
+
+  void OnResponseStarted(net::URLRequest* request, int net_error) override {
+    if (net_error != net::OK) {
+      error_ = net_error;
+      loop_->Quit();
+      return;
+    }
+    status_ = request->GetResponseCode();
+    ReadMore(request);
+  }
+
+  void OnReadCompleted(net::URLRequest* request, int bytes_read) override {
+    if (bytes_read > 0) {
+      body_.append(buffer_->data(), static_cast<size_t>(bytes_read));
+      ReadMore(request);
+      return;
+    }
+    error_ = bytes_read;
+    loop_->Quit();
+  }
+
+  int status() const { return status_; }
+  int error() const { return error_; }
+  const std::string& body() const { return body_; }
+
+ private:
+  void ReadMore(net::URLRequest* request) {
+    for (;;) {
+      int read = request->Read(buffer_.get(), buffer_->size());
+      if (read == net::ERR_IO_PENDING) {
+        return;
+      }
+      if (read > 0) {
+        body_.append(buffer_->data(), static_cast<size_t>(read));
+        continue;
+      }
+      error_ = read;
+      loop_->Quit();
+      return;
+    }
+  }
+
+  raw_ptr<base::RunLoop> loop_;
+  scoped_refptr<net::IOBufferWithSize> buffer_ =
+      base::MakeRefCounted<net::IOBufferWithSize>(4096);
+  std::string body_;
+  int status_ = 0;
+  int error_ = net::OK;
+};
+
+bool HttpRequestIsAnswered() {
+  TinyServer server;
+  if (!StartTinyServer(&server)) {
+    return false;
+  }
+
+  net::URLRequestContextBuilder builder;
+  // Explicitly direct. Letting the builder make one for itself reaches
+  // ProxyConfigService::CreateSystemProxyConfigService, which on a platform
+  // with no system proxy settings to read returns a service the rest of
+  // ConfiguredProxyResolutionService's constructor is not expecting - and
+  // which faulted on a null pointer here before this line existed.
+  builder.set_proxy_resolution_service(
+      net::ConfiguredProxyResolutionService::CreateDirect());
+  std::unique_ptr<net::URLRequestContext> context = builder.Build();
+  if (!context) {
+    return false;
+  }
+
+  std::string url = "http://127.0.0.1:" + std::to_string(server.port) + "/";
+  std::printf("chromiumnet:   GET %s\n", url.c_str());
+
+  base::RunLoop loop;
+  Collector collector(&loop);
+  std::unique_ptr<net::URLRequest> request = context->CreateRequest(
+      GURL(url), net::DEFAULT_PRIORITY, &collector, kAnnotation,
+      net::handles::kInvalidNetworkHandle);
+  request->Start();
+  loop.Run();
+
+  pthread_join(server.thread, nullptr);
+  close(server.listener);
+
+  if (collector.error() != net::OK) {
+    std::printf("chromiumnet:   net error %d\n", collector.error());
+    return false;
+  }
+  return collector.status() == 200 && collector.body() == kBody;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -238,6 +514,17 @@ int main(int argc, char** argv) {
         ProxyConfigurationIsDirect());
   Check("net::HttpUtil parsed a response's headers", HttpHeadersParse());
 
+  // Everything above is parsing and configuration. These two open a
+  // connection, which needs this kernel's TCP, a non-blocking connect and
+  // the readiness M119 built.
+  base::SingleThreadTaskExecutor io_executor(base::MessagePumpType::IO);
+  base::ThreadPoolInstance::CreateAndStartWithDefaultParams("chromiumnet");
+
+  Check("net's own client and server sockets met over this kernel's loopback",
+        SocketsConnectOverLoopback());
+  Check("a net::URLRequest fetched a page and parsed the response",
+        HttpRequestIsAnswered());
+
   if (failures != 0) {
     std::printf("chromiumnet: FAILED - %d of %d checks\n", failures, checks);
     return 1;
@@ -248,6 +535,11 @@ int main(int argc, char** argv) {
       "getifaddrs, this machine's nameservers through res_ninit, and a "
       "proxy configuration that is honestly direct.\n",
       checks);
+  std::printf(
+      "[m151] Chromium's //net opens a connection here: a TCPServerSocket "
+      "and a TCPClientSocket met over this kernel's loopback, and a "
+      "net::URLRequest fetched a page through the host resolver, the socket "
+      "pool and HttpNetworkTransaction and parsed what came back.\n");
   std::printf("chromiumnet: done\n");
   return 0;
 }

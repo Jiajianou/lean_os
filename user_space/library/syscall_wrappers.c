@@ -102,6 +102,10 @@ long sys_mincore(void *address, unsigned long length, unsigned char *vector) {
     return do_syscall(SYS_mincore, (long)address, (long)length, (long)vector);
 }
 
+long sys_sockname(int fd, os_sockaddr_t *out) {
+    return do_syscall(SYS_sockname, (long)fd, (long)out, 0);
+}
+
 long sys_munmap(void *address, unsigned long length) {
     return do_syscall(SYS_munmap, (long)address, (long)length, 0);
 }

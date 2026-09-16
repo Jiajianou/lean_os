@@ -166,6 +166,38 @@ int main(void) {
         address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         check(lis >= 0 && bind(lis, (struct sockaddr *)&address, sizeof(address)) == 0 &&
               listen(lis, 1) == 0, "POSIX socket/bind/listen failed");
+        /* M151: which port a socket is on, asked of the socket rather than
+           of the machine. A listener bound to a port it named must report
+           that port back, and a socket bound to port zero must report the
+           one the kernel chose - which is the whole reason a server that
+           does not want a fixed port can tell its clients where it is. */
+        struct sockaddr_in named;
+        socklen_t named_length = sizeof(named);
+        memset(&named, 0, sizeof(named));
+        check(getsockname(lis, (struct sockaddr *)&named, &named_length) == 0 &&
+              ntohs(named.sin_port) == PORT + 1,
+              "getsockname did not report the port the listener bound");
+
+        int ephemeral = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in any;
+        memset(&any, 0, sizeof(any));
+        any.sin_family = AF_INET;
+        any.sin_port = 0;
+        any.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        check(ephemeral >= 0 &&
+              bind(ephemeral, (struct sockaddr *)&any, sizeof(any)) == 0,
+              "binding to port zero failed");
+        memset(&named, 0, sizeof(named));
+        named_length = sizeof(named);
+        check(getsockname(ephemeral, (struct sockaddr *)&named,
+                          &named_length) == 0 &&
+              ntohs(named.sin_port) != 0 &&
+              ntohs(named.sin_port) != PORT + 1,
+              "getsockname did not report the port a bind to zero was given");
+        printf("tcptest: posix: a bind to port 0 was given %u\n",
+               (unsigned)ntohs(named.sin_port));
+        close(ephemeral);
+
         int cli = socket(AF_INET, SOCK_STREAM, 0);
         check(cli >= 0 && connect(cli, (struct sockaddr *)&address, sizeof(address)) == 0,
               "POSIX connect failed");

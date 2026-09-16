@@ -98,7 +98,10 @@ int socket(int domain, int type, int protocol) {
     }
     long fd = sys_socket(t);
     if (fd < 0) {
-        errno = EMFILE;
+        /* The kernel names this one refusal, because it is the one a
+           program can do something about: the capability set it was
+           spawned with does not include CAP_NETWORK. */
+        errno = (fd == -OS_ERROR_ACCESS) ? EACCES : EMFILE;
         return -1;
     }
     return (int)fd;
@@ -451,13 +454,12 @@ ssize_t recvmsg(int fd, struct msghdr *message, int flags) {
 }
 
 int getsockname(int fd, struct sockaddr *address, socklen_t *length) {
-    (void)fd;
-    os_netconf_t nc;
-    if (sys_netconf(&nc) != 0) {
+    os_sockaddr_t local;
+    if (sys_sockname(fd, &local) != 0) {
         errno = ENOTSOCK;
         return -1;
     }
-    to_sockaddr(address, length, nc.ip, 0);
+    to_sockaddr(address, length, local.ip, local.port);
     return 0;
 }
 

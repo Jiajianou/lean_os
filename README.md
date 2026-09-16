@@ -422,6 +422,23 @@ Several instruments, and none of them subsumes another:
   rtnetlink, and //net's own fallbacks - a direct proxy configuration and
   the getifaddrs interface list - are what a POSIX platform without them is
   supposed to get.
+- **And it opens a connection.** A `net::TCPServerSocket` and a
+  `net::TCPClientSocket` meet over this kernel's loopback - a non-blocking
+  `connect(2)` whose completion arrives on Chromium's own
+  `MessagePumpEpoll` - and then a **`net::URLRequest` fetches a page**:
+  the host resolver, the socket pool, `HttpNetworkTransaction` and the
+  response parser, against a server that is eleven lines of POSIX in a
+  thread of its own, so that everything being graded is on Chromium's
+  side.
+
+  The first thing that stopped it was not the kernel but **the capability
+  model**: `/bin/chromiumnet` was spawned with `CAP_APP_DEFAULT`, and
+  `socket(2)` refused. It holds `CAP_NETWORK` now because it was given it
+  by name, which is the whole design working. The second was
+  `getsockname(2)`, which used to answer out of the machine's network
+  configuration with a port of zero - right about the address and a lie
+  about the port, and useless to anything that binds to port zero and then
+  needs to say where it is.
 - **A libm for the format the hardware has.** `long double` on x86-64 is
   the x87's 80-bit extended type, and this libc has the C99 set for it -
   fifty-two functions, graded to the unit in the last place of a 64-bit

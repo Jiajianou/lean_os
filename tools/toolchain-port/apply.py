@@ -163,6 +163,8 @@ def port_gcc(root, header_src):
         # twenty-three long double names below join it because
         # math_stubs_long_double.cc is the same file one size up, and this
         # libc now defines every name in it.
+        # M151: and tanhf, which Rust's standard library asked for.
+        "    $as_echo \"#define HAVE_TANHF 1\" >>confdefs.h\n"
         "    $as_echo \"#define HAVE_ATAN2F 1\" >>confdefs.h\n"
         "    $as_echo \"#define HAVE_LDEXPF 1\" >>confdefs.h\n"
         "    $as_echo \"#define HAVE_FABSL 1\" >>confdefs.h\n"

@@ -68,10 +68,12 @@ enum {
     P_EXE,
     P_PROFILE,
     P_SYSCALLS,
+    P_CPUINFO,
 };
 
 static uint32_t buffer_cap_for(int kind) {
-    return (kind == P_PROFILE || kind == P_SYSCALLS || kind == P_INTERRUPTS)
+    return (kind == P_PROFILE || kind == P_SYSCALLS || kind == P_INTERRUPTS ||
+            kind == P_CPUINFO)
                ? PROCESS_BUFFER_LARGE
                : PROCESS_BUFFER_SMALL;
 }
@@ -102,6 +104,9 @@ static int classify(const char *rel, int *out_pid) {
     }
     if (k_strcmp(p, "syscalls") == 0) {
         return P_SYSCALLS;
+    }
+    if (k_strcmp(p, "cpuinfo") == 0) {
+        return P_CPUINFO;
     }
 
     int pid = -1;
@@ -267,6 +272,22 @@ static void generate(process_file_t *f, int kind, int pid) {
         at = put_string(f->buffer, at, cap, "\n");
         break;
     }
+    /* One block per processor, in the shape every other system writes it:
+       a program that wants to know how many processors there are counts
+       the lines beginning "processor", and sysconf(_SC_NPROCESSORS_ONLN)
+       in this libc is one of them.
+       There is one field because there is one question. A vendor_id or a
+       model name here would be a field nobody on this machine reads, and
+       the moment something does read one it can be added along with the
+       reader. */
+    case P_CPUINFO: {
+        for (int c = 0; c < smp_cpu_count && c < MAX_CPUS; c++) {
+            at = put_string(f->buffer, at, cap, "processor\t: ");
+            at = put_dec(f->buffer, at, cap, (uint64_t)c);
+            at = put_string(f->buffer, at, cap, "\n\n");
+        }
+        break;
+    }
     case P_SYSCALLS: {
         at = put_string(f->buffer, at, cap, "# num calls cycles\n");
         for (int i = 0; i < SYSCALL_COUNT; i++) {
@@ -403,7 +424,8 @@ static int process_handle_stat(int handle, leanfs_stat_t *out) {
 
 static const char *const PID_FILES[] = {"status", "cmdline", "exe"};
 static const char *const ROOT_FILES[] = {"uptime", "meminfo", "mounts",
-                                         "interrupts", "profile", "syscalls"};
+                                         "interrupts", "profile", "syscalls",
+                                         "cpuinfo"};
 #define ROOT_FILE_COUNT ((uint32_t)(sizeof(ROOT_FILES) / sizeof(ROOT_FILES[0])))
 
 static int process_readdir(const char *rel, uint32_t *cookie, leanfs_directory_entry_t *out) {

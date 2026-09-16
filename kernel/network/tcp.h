@@ -54,6 +54,7 @@ int tcp_bytes_available(const struct tcpcb *tcb);
 int tcp_send_space(const struct tcpcb *tcb);
 tcp_state_t tcp_state(const struct tcpcb *tcb);
 uint16_t tcp_local_port(const struct tcpcb *tcb);
+uint32_t tcp_local_ip(const struct tcpcb *tcb);
 uint32_t tcp_remote_ip(const struct tcpcb *tcb);
 uint16_t tcp_remote_port(const struct tcpcb *tcb);
 

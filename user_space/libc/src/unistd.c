@@ -630,7 +630,35 @@ long sysconf(int name) {
     case _SC_CLK_TCK:
         return 100;
     case _SC_NPROCESSORS_ONLN:
-        return -1;
+    case _SC_NPROCESSORS_CONF: {
+        /* Counted out of /proc/cpuinfo, which is where every other system
+           writes the answer and therefore where a program that reads it
+           by hand looks. This used to return -1 - "this machine does not
+           say" - and Chromium's SysInfo::NumberOfProcessors reaches a
+           NOTREACHED on that, because -1 is the value a sandbox produces
+           and nothing else. */
+        int fd = open("/proc/cpuinfo", O_RDONLY);
+        if (fd < 0) {
+            return 1;
+        }
+        char text[1024];
+        long got = read(fd, text, sizeof(text) - 1);
+        close(fd);
+        if (got <= 0) {
+            return 1;
+        }
+        text[got] = '\0';
+        long count = 0;
+        for (const char *p = text; *p;) {
+            if (strncmp(p, "processor", 9) == 0 &&
+                (p == text || p[-1] == '\n')) {
+                count++;
+            }
+            const char *next = strchr(p, '\n');
+            p = next ? next + 1 : p + strlen(p);
+        }
+        return count > 0 ? count : 1;
+    }
     case _SC_PHYS_PAGES:
     case _SC_AVPHYS_PAGES: {
         os_meminfo_t mi;
@@ -765,8 +793,6 @@ long sysconf(int name) {
         return 32;
     case _SC_NGROUPS_MAX:
         return 1;
-    case _SC_NPROCESSORS_CONF:
-        return -1;
     case _SC_RE_DUP_MAX:
         return 255;
     case _SC_STREAM_MAX:

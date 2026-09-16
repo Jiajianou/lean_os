@@ -23,6 +23,9 @@ float lean_sinf(float), lean_cosf(float), lean_tanf(float);
 float lean_hypotf(float, float);
 float lean_sqrtf(float), lean_atanf(float), lean_roundf(float);
 float lean_expf(float);
+float lean_tanhf(float);
+double lean_nan(const char *);
+float lean_nanf(const char *);
 float lean_nextafterf(float, float);
 float lean_atan2f(float, float);
 float lean_ldexpf(float, int);
@@ -98,6 +101,7 @@ static const struct entry TABLE[] = {
     {.name = "copysign", .ours2 = lean_copysign, .theirs2 = copysign},
     {.name = "nextafter", .ours2 = lean_nextafter, .theirs2 = nextafter},
     {.name = "expf", .oursf = lean_expf, .theirsf = expf},
+    {.name = "tanhf", .oursf = lean_tanhf, .theirsf = tanhf},
     {.name = "nextafterf", .oursF = lean_nextafterf, .theirsF = nextafterf},
     {.name = "atan2f", .oursF = lean_atan2f, .theirsF = atan2f},
     {.name = "ldexpf", .oursfi = lean_ldexpf, .theirsfi = ldexpf},
@@ -382,6 +386,16 @@ int main(int argc, char **argv) {
         }
     }
     fclose(f);
+
+    /* The two functions no sweep can grade, because what they return is
+       not equal to itself. */
+    if (!isnan(lean_nan("")) || !isnan(lean_nanf(""))) {
+        printf("FAIL %-10s did not return a NaN\n", "nan");
+        failures++;
+    } else {
+        printf("ok   %-10s returns a quiet NaN (isnan, not a tolerance)\n",
+               "nan/nanf");
+    }
 
     printf("math-test: %d functions graded against the host's libm, "
            "%d not graded here, %d over their claimed tolerance\n",

@@ -31,6 +31,14 @@ void socket_unref(struct socket *s);
 
 int socket_bind(struct socket *s, uint16_t port);
 
+/* The port this socket is actually on, which for a bind to port zero is
+   the one the kernel chose rather than the zero that was asked for. */
+uint16_t socket_local_port(const struct socket *s);
+
+/* And which address, which for a connection over the loopback is the
+   loopback rather than this machine's own. */
+uint32_t socket_local_ip(const struct socket *s);
+
 int socket_sendto(struct socket *s, uint32_t destination_ip, uint16_t destination_port,
                   const uint8_t *data, uint16_t length);
 

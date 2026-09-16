@@ -72,6 +72,7 @@ extern "C" {
 
 #define OS_ERROR_NOENT 2
 #define OS_ERROR_FAULT 14
+#define OS_ERROR_ACCESS 13
 #define OS_ERROR_INTR  4
 #define OS_ERROR_AGAIN 5
 #define SYS_rmdir  43
@@ -241,8 +242,9 @@ typedef struct {
 #define SYS_unix_peer_credentials 128
 #define SYS_sigaltstack           129
 #define SYS_mincore               130
+#define SYS_sockname              131
 
-#define SYSCALL_COUNT 131
+#define SYSCALL_COUNT 132
 
 #ifdef __cplusplus
 }

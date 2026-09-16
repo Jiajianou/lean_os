@@ -77,4 +77,7 @@ llroundf	i	-1e9	1e9	401	0	M100: exact
 nextafterf	F	-10	10	61	0	M141: exact or it is not nextafterf. Deliberately NOT exp's treatment - a double step rounded back to float returns x unchanged, so this walks a float's own bits
 expf	f	-20	20	401	1.2e-7	M141: exp in double rounded once to float - one float ulp, like the rest of the M100 set. ICU asked for it, from lstmbe.cpp; adding it also needed HAVE_EXPF in tools/toolchain-port/apply.py, or libstdc++ defines it too
 atan2f	F	-10	10	121	1.2e-7	M142: atan2 in double rounded once to float - one float ulp, like the M100 set. ICU asked for it, from the same lstmbe.cpp that asked for expf and for the whole long double family; HAVE_ATAN2F went into tools/toolchain-port/apply.py with it
+tanhf	f	-10	10	401	1.2e-7	M151: tanh in double rounded once to float - one float ulp, like the rest of the M100 set. Rust's std asked for it
+nan	-	-	-	-	-	M151: returns a quiet NaN, and NaN != NaN makes every tolerance in this file meaningless - isnan(nan("")) is checked directly at the end of tests/math/main.c instead
+nanf	-	-	-	-	-	M151: same as nan, and checked in the same place
 ldexpf	s	-1e3	1e3	81	0	M142: exact, and not approximately - a double carries every float exponent, so scaling there and rounding once is the float answer including where it lands on a subnormal. The exponent sweep reaches past a float's range in both directions on purpose. //base/rand_util.cc asked for it

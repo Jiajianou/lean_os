@@ -232,6 +232,7 @@ REQUIRED_MARKERS=(
   "[m149] two processes on one mojo connection:"
   "chromiummojo: done"
   "[m150] Chromium's //url and //net run on this machine:"
+  "[m151] Chromium's //net opens a connection here:"
   "chromiumnet: done"
   "mathltest: done"
   "[m125] lvgl rendered"

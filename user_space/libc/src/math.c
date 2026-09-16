@@ -735,6 +735,23 @@ float roundf(float x) {
     return (float)round((double)x);
 }
 
+/* A quiet NaN, which C99 spells as a function taking a payload string
+   nothing here has a use for. The payload is ignored on purpose rather
+   than by omission: this machine's NaNs carry no diagnostic. */
+double nan(const char *tag) {
+    (void)tag;
+    return __builtin_nan("");
+}
+
+float nanf(const char *tag) {
+    (void)tag;
+    return __builtin_nanf("");
+}
+
+float tanhf(float x) {
+    return (float)tanh((double)x);
+}
+
 float expf(float x) {
     return (float)exp((double)x);
 }
