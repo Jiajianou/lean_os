@@ -1,0 +1,77 @@
+Three more files on the far side of M144's line, found by building the whole
+renderer rather than one library.
+
+  media/capture/BUILD.gn
+      video/linux is V4L2. v4l2_capture_delegate.h opens with
+      #include <linux/videodev2.h> - Linux's camera interface and its ioctl
+      numbering. //media/capture's own fallback is a device factory that
+      enumerates nothing, which on a machine with no camera is not a
+      fallback, it is the answer.
+
+  services/resource_coordinator/.../memory_instrumentation/BUILD.gn
+      os_metrics_linux.cc reads /proc/<pid>/smaps and calls
+      prctl(PR_SET_DUMPABLE). os_metrics.h has one implementation per
+      KERNEL already, which is the shape of the question.
+
+  third_party/webrtc/rtc_base/physical_socket_server.cc
+      <asm-generic/socket.h> behind WEBRTC_LINUX. What the file wants from
+      it is SO_* constants that <sys/socket.h> declares on any POSIX
+      system, so the include is the only thing gated - M158's patch 0036
+      drew this line through the same library for prctl and __NR_gettid,
+      and used __linux__ there for the same reason.
+
+The first two use has_linux_kernel, which is M144's buildflag; the third uses
+__linux__, because it is a preprocessor question inside a third-party library
+that has never heard of Chromium's buildflags. Neither names this OS.
+
+diff --git a/media/capture/BUILD.gn b/media/capture/BUILD.gn
+--- a/media/capture/BUILD.gn
++++ b/media/capture/BUILD.gn
+@@ -193,7 +193,14 @@
+     public_deps += [ "video/win" ]
+   }
+ 
+-  if (is_linux || is_chromeos) {
++  # video/linux is V4L2 - v4l2_capture_delegate.h opens with
++  # #include <linux/videodev2.h>, which is Linux's own camera interface and
++  # the ioctl numbering that goes with it. Which family the build gates a
++  # platform as does not decide whether that is there. M144's distinction,
++  # and //media/capture's own fallbacks are what a platform without it gets:
++  # a VideoCaptureDeviceFactory that enumerates no devices, which is the
++  # truth on a machine with no camera.
++  if ((is_linux || is_chromeos) && has_linux_kernel) {
+     deps += [ "video/linux" ]
+   }
+ 
+diff --git a/services/resource_coordinator/public/cpp/memory_instrumentation/BUILD.gn b/services/resource_coordinator/public/cpp/memory_instrumentation/BUILD.gn
+--- a/services/resource_coordinator/public/cpp/memory_instrumentation/BUILD.gn
++++ b/services/resource_coordinator/public/cpp/memory_instrumentation/BUILD.gn
+@@ -27,7 +27,10 @@
+     sources += [ "os_metrics_win.cc" ]
+   }
+ 
+-  if (is_android || is_linux || is_chromeos) {
++  # os_metrics_linux.cc reads /proc/<pid>/smaps and calls prctl(PR_SET_DUMPABLE)
++  # - Linux's kernel rather than the Linux family. os_metrics.h's other
++  # implementations are per-kernel for the same reason.
++  if ((is_android || is_linux || is_chromeos) && has_linux_kernel) {
+     sources += [ "os_metrics_linux.cc" ]
+   }
+ 
+diff --git a/third_party/webrtc/rtc_base/physical_socket_server.cc b/third_party/webrtc/rtc_base/physical_socket_server.cc
+--- a/third_party/webrtc/rtc_base/physical_socket_server.cc
++++ b/third_party/webrtc/rtc_base/physical_socket_server.cc
+@@ -64,7 +64,13 @@
+ #endif
+ 
+ #if defined(WEBRTC_LINUX)
++// <asm-generic/socket.h> is Linux's own socket option numbering, and what
++// this file wants from it is SO_* constants that <sys/socket.h> already
++// declares on any POSIX system. __linux__ is the question - M158's patch
++// 0036 drew the same line through this library for prctl and gettid.
++#if defined(__linux__)
+ #include <asm-generic/socket.h>
++#endif
+ #include <sys/epoll.h>
+ #endif
+ 

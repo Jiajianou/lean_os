@@ -1,0 +1,91 @@
+M158's patch 0035 found a WebGPU dependency that use_dawn did not gate. This
+is the same sentence one layer up, and the two of them are the two ends of
+one feature.
+
+gpu/command_buffer/client/client_shared_image.h declares
+
+  #if BUILDFLAG(USE_DAWN)
+  class GPU_COMMAND_BUFFER_CLIENT_EXPORT WebGPUTextureScopedAccess {
+
+- Chromium's own guard, not this fork's. blink/renderer/platform compiles
+sixteen graphics/gpu/{dawn,webgpu}_* files that use that class, and gates
+none of them, so a build with use_dawn = false stops on an incomplete type in
+three of them.
+
+blink/renderer/modules/webgpu already wraps its half in if (use_dawn). This
+puts the platform's half inside the same question, which is what makes the
+two agree.
+
+Nothing here is about this OS. A build with use_dawn = false on any platform
+hits it.
+
+diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
+--- a/third_party/blink/renderer/platform/BUILD.gn
++++ b/third_party/blink/renderer/platform/BUILD.gn
+@@ -1039,10 +1039,6 @@
+     "graphics/generated_image.h",
+     "graphics/gpu/canvas_utils.cc",
+     "graphics/gpu/canvas_utils.h",
+-    "graphics/gpu/dawn_command_serializers.cc",
+-    "graphics/gpu/dawn_command_serializers.h",
+-    "graphics/gpu/dawn_control_client_holder.cc",
+-    "graphics/gpu/dawn_control_client_holder.h",
+     "graphics/gpu/drawing_buffer.cc",
+     "graphics/gpu/drawing_buffer.h",
+     "graphics/gpu/extensions_3d_util.cc",
+@@ -1055,18 +1051,6 @@
+     "graphics/gpu/shared_gpu_context.h",
+     "graphics/gpu/webgl_image_conversion.cc",
+     "graphics/gpu/webgl_image_conversion.h",
+-    "graphics/gpu/webgpu_callback.h",
+-    "graphics/gpu/webgpu_cpp.h",
+-    "graphics/gpu/webgpu_mailbox_buffer.cc",
+-    "graphics/gpu/webgpu_mailbox_buffer.h",
+-    "graphics/gpu/webgpu_mailbox_texture.cc",
+-    "graphics/gpu/webgpu_mailbox_texture.h",
+-    "graphics/gpu/webgpu_shared_image_cache.cc",
+-    "graphics/gpu/webgpu_shared_image_cache.h",
+-    "graphics/gpu/webgpu_swap_buffer_provider.cc",
+-    "graphics/gpu/webgpu_swap_buffer_provider.h",
+-    "graphics/gpu/webgpu_texture_alpha_clearer.cc",
+-    "graphics/gpu/webgpu_texture_alpha_clearer.h",
+     "graphics/gpu/webgraphics_shared_image_interface_provider_impl.cc",
+     "graphics/gpu/webgraphics_shared_image_interface_provider_impl.h",
+     "graphics/gpu/xr_frame_transport.cc",
+@@ -1689,6 +1673,36 @@
+     "widget/widget_base_client.h",
+     "windows_keyboard_codes.h",
+   ]
++
++  # WebGPU, which needs Dawn. gpu/command_buffer/client/client_shared_image.h
++  # guards WebGPUTextureScopedAccess with BUILDFLAG(USE_DAWN) - Chromium's own
++  # gate, not this fork's - and these sources use that type without being
++  # guarded themselves, so with use_dawn = false the build stops on an
++  # incomplete type. M158's patch 0035 one layer up: the flag exists and does
++  # not gate the sources.
++  #
++  # //third_party/blink/renderer/modules/webgpu already has an if (use_dawn)
++  # around its half, so this makes the two ends of one feature agree.
++  if (use_dawn) {
++    sources += [
++      "graphics/gpu/dawn_command_serializers.cc",
++      "graphics/gpu/dawn_command_serializers.h",
++      "graphics/gpu/dawn_control_client_holder.cc",
++      "graphics/gpu/dawn_control_client_holder.h",
++      "graphics/gpu/webgpu_callback.h",
++      "graphics/gpu/webgpu_cpp.h",
++      "graphics/gpu/webgpu_mailbox_buffer.cc",
++      "graphics/gpu/webgpu_mailbox_buffer.h",
++      "graphics/gpu/webgpu_mailbox_texture.cc",
++      "graphics/gpu/webgpu_mailbox_texture.h",
++      "graphics/gpu/webgpu_shared_image_cache.cc",
++      "graphics/gpu/webgpu_shared_image_cache.h",
++      "graphics/gpu/webgpu_swap_buffer_provider.cc",
++      "graphics/gpu/webgpu_swap_buffer_provider.h",
++      "graphics/gpu/webgpu_texture_alpha_clearer.cc",
++      "graphics/gpu/webgpu_texture_alpha_clearer.h",
++    ]
++  }
+ 
+   sources -= blink_platform_avx_files
+ 

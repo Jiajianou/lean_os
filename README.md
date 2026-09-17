@@ -606,6 +606,39 @@ Several instruments, and none of them subsumes another:
   which is the thing M65 refuses. The condition for turning it back on is
   named rather than left as a mood: audio capture, or a camera.
 
+- **And the engine above it.** **Blink** builds for this machine - the whole
+  renderer, 57 MB of it - and `/bin/chromiumblink` runs on the machine out of
+  that archive. What it grades is not Blink's API surface but its
+  **invariants**, because a library that links and returns plausible values
+  passes every test that only asks whether the call returned:
+
+  - A Blink string is Latin-1 at one byte a character until it cannot be, and
+    then UTF-16 at two. That is the largest memory decision in the engine - a
+    page of English text costs half - and it is invisible to every caller.
+  - Two equal `AtomicString`s are the **same** `StringImpl`, which is what
+    lets every tag name, attribute name and id in a document be compared by
+    pointer; and a `HashMap` keyed on one finds an entry through a *different*
+    string with the same characters, which is every attribute lookup there is.
+  - UTF-8 in and out, with the string in the middle the sixteen-bit kind
+    because the text is not Latin-1 - the same decision as the first check,
+    arrived at from the outside.
+  - `blink::KURL` over the GURL M150 built.
+
+  **Painting is not graded here, and the source says why rather than leaving
+  it as an absence.** `blink::GraphicsContext` takes a `PaintController`,
+  whose constructor allocates through **Oilpan**, whose `cppgc::HeapBase`
+  needs a `cppgc::Platform`, which Blink builds from
+  `blink::Platform::Current()`. That is `BlinkInitializer` - a Platform
+  implementation, a main thread scheduler and a `v8::Platform` - which is the
+  renderer starting up rather than a library being linked. This milestone
+  found that out by faulting on the machine twice, and the second fault named
+  the function.
+
+  Blink's startup turns out to be three things an embedder must know and
+  nothing says at the call site: the partitions, then WTF, then Oilpan - in
+  that order, because `InitializeWtf` allocates without bringing the
+  partitions up, and `PaintController` collects.
+
 - **A libm for the format the hardware has.** `long double` on x86-64 is
   the x87's 80-bit extended type, and this libc has the C99 set for it -
   fifty-two functions, graded to the unit in the last place of a 64-bit

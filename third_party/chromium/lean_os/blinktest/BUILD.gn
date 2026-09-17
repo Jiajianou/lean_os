@@ -1,0 +1,34 @@
+# A program that links Blink's platform layer, and that this machine runs.
+#
+# //third_party/blink/renderer/platform is the foundation the DOM sits on:
+# WTF, KURL, the font and graphics primitives, and the scheduler. Its graph is
+# about 8,000 targets and - measured rather than assumed - it contains no
+# SwiftShader and no Dawn, and the only ANGLE in it is the system-information
+# reader M159 left there. It does not reintroduce the GPU stack.
+#
+# M160's //cc is what made it reachable: blink::GraphicsContext records into a
+# cc::PaintRecord, so the compositor has to be there before the engine that
+# feeds it can be.
+executable("blinktest") {
+  sources = [ "chromium_blink_test.cc" ]
+  # //third_party/blink/renderer/platform declares
+  # visibility = [ "//third_party/blink/*" ], which is Chromium saying that
+  # the unit an embedder links is the public one. So this links
+  # //third_party/blink/public:blink - the whole renderer, whose visibility is
+  # "*" - and includes the renderer's own headers to reach the invariants it
+  # grades. Blink's own tests for those live inside Blink and are testonly;
+  # this program is outside it and deliberately reaching in, the same way
+  # /bin/chromiumcc2 reaches cc::RecordingSource.
+  deps = [
+    "//base",
+    "//cc/paint",
+    "//third_party/blink/public:blink",
+
+    # WTF's string_impl.h opens with #include <hwy/highway.h> - Highway is
+    # Google's SIMD library and WTF scans strings with it. It is a private
+    # dep of //third_party/blink/renderer/platform/wtf, so its include
+    # directory does not travel with the public target, and a program outside
+    # Blink that includes a WTF header has to ask for it.
+    "//third_party/highway:libhwy",
+  ]
+}

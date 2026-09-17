@@ -1,0 +1,45 @@
+M159's patch 0039 said this about ANGLE and it is true of Dawn too: a
+platform detection that is a list of operating system names has no answer for
+an operating system that is not on it, and every file behind it is already
+written to need only the generic one.
+
+dawn/src/utils/platform.h checks _WIN32, __linux__, __APPLE__, __Fuchsia__
+and __EMSCRIPTEN__ and then stops with #error "Unsupported platform." What
+sits behind it does not care which of those it was:
+
+  SystemHandle.h   using Handle = int   under DAWN_PLATFORM_IS(POSIX)
+  DynamicLib.cpp   dlopen/dlsym/dlclose under DAWN_PLATFORM_IS(POSIX)
+  SystemUtils.cpp  getenv and /proc     under DAWN_PLATFORM_IS(POSIX)
+
+- and each of those three says so in its own words, with
+#error "Unsupported platform for DynamicLib" in the arm this reaches. Ten of
+the twenty-three failures a -k 0 build of //third_party/blink/public:blink
+had were that one missing arm.
+
+__unix__ is the arm. It names no operating system, and on every platform
+Dawn ships on it is unreachable, because each is matched by an earlier one.
+
+Dawn is in this build at all because Blink's WebGPU sources include its
+headers - not because anything here can use a GPU. use_dawn is false and
+dawn/native is not built; what compiles is dawn/common, which is a platform
+abstraction and a handful of utilities.
+
+diff --git a/third_party/dawn/src/utils/platform.h b/third_party/dawn/src/utils/platform.h
+--- a/third_party/dawn/src/utils/platform.h
++++ b/third_party/dawn/src/utils/platform.h
+@@ -95,6 +95,15 @@
+ #define DAWN_PLATFORM_IS_POSIX 1
+ #include <emscripten/emscripten.h>
+ 
++#elif defined(__unix__)
++// A POSIX system this list does not name. Everything in dawn/common that
++// branches on a platform branches on DAWN_PLATFORM_IS(POSIX) once the
++// Windows and Fuchsia cases are past - SystemHandle's `using Handle = int`,
++// DynamicLib's dlopen, SystemUtils' getenv and /proc - so the generic arm is
++// all any of them needs, and each of them says so itself with
++// #error "Unsupported platform for DynamicLib" rather than by assuming.
++#define DAWN_PLATFORM_IS_POSIX 1
++
+ #else
+ #error "Unsupported platform."
+ #endif

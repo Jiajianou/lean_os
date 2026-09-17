@@ -252,6 +252,8 @@ REQUIRED_MARKERS=(
   "chromiumgpu: done"
   "[m160] cc's layer path on this machine:"
   "chromiumcc2: done"
+  "[m161] Blink's platform layer on this machine:"
+  "chromiumblink: done"
   "mathltest: done"
   "[m125] lvgl rendered"
   "[m125] a third-party toolkit on this compositor:"

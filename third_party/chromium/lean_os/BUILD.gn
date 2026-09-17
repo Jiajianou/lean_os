@@ -8,6 +8,7 @@ group("lean_os") {
   testonly = false
   deps = [
     "//lean_os/basetest",
+    "//lean_os/blinktest",
     "//lean_os/ccpainttest",
     "//lean_os/cctest",
     "//lean_os/gpuinfotest",

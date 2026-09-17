@@ -1,0 +1,115 @@
+Two third-party libraries whose own source already knows this platform is not
+one of the ones they support, and whose BUILD.gn argues with them.
+
+cpuinfo is the sharper of the two. src/init.c ends its dispatch with
+
+    #else
+      cpuinfo_log_error("operating system is not supported in cpuinfo");
+    #endif
+
+and cpuinfo_initialize() then returns false - which is cpuinfo's designed
+answer for an operating system it has no back end for, present since long
+before this port existed. Its BUILD.gn compiles the Linux back end anyway,
+because GN asks is_linux; those sources need /sys/devices/system/cpu and
+glibc's CPU_SETSIZE, and struct cpuinfo_processor's linux_id member is behind
+#if defined(__linux__) in cpuinfo's own header - so the build compiles code
+that reads a field the preprocessor has already removed. Gating the back end
+on has_linux_kernel makes the two agree. Nothing is stubbed and no source is
+written: what is left is the path cpuinfo takes on any system it does not
+know.
+
+cpuinfo is in this build because Blink's //components/language_detection
+uses TensorFlow Lite, which uses XNNPACK and ruy, which ask cpuinfo what they
+are running on.
+
+Dawn's SystemUtils.cpp is the second, and it is M159's ANGLE sentence once
+more at one function's scale. It has two of these chains -
+
+    #else
+    #error "Implement GetExecutablePath for your platform."
+    #else
+    #error "Implement GetModulePath for your platform."
+
+- and a third above them choosing which headers to include. So patch 0043's
+generic POSIX arm is not enough on its own: a generic arm has to EXIST in
+each chain, and the include one has to be there or the other two compile
+without unistd.h.
+
+GetExecutablePath reads /proc/self/exe, which is what the Linux arm does -
+that interface is Linux's and other systems have copied it - and where there
+is no procfs the readlink fails and it returns {}, which is what the Fuchsia
+arm returns on purpose. GetModulePath is dladdr(3) and realpath(3), which are
+POSIX rather than any one system's, so the POSIX arm joins the three that
+already share that body.
+
+diff --git a/third_party/cpuinfo/BUILD.gn b/third_party/cpuinfo/BUILD.gn
+--- a/third_party/cpuinfo/BUILD.gn
++++ b/third_party/cpuinfo/BUILD.gn
+@@ -87,7 +87,18 @@
+ }
+ 
+ source_set("os_specific") {
+-  if (is_chromeos || is_linux || is_android) {
++  # cpuinfo's Linux back end reads /sys/devices/system/cpu and needs glibc's
++  # CPU_SETSIZE, and struct cpuinfo_processor's linux_id member is behind
++  # #if defined(__linux__) in cpuinfo's OWN header - so on a platform in the
++  # Linux family without Linux's kernel, GN compiles code that cpuinfo's
++  # preprocessor has already decided is not there.
++  #
++  # src/init.c settles it for itself and always has: with none of __linux__,
++  # __FreeBSD__, __MACH__ or _WIN32 it logs "operating system is not
++  # supported in cpuinfo" and cpuinfo_initialize() returns false. This makes
++  # the build agree with that instead of contradicting it, and needs no
++  # source that is not already here.
++  if ((is_chromeos || is_linux || is_android) && has_linux_kernel) {
+     sources = [
+       "src/src/linux/cpulist.c",
+       "src/src/linux/multiline.c",
+@@ -169,7 +180,7 @@
+ }
+ 
+ source_set("cpu_and_os_specific") {
+-  if ((is_linux || is_chromeos) &&
++  if ((is_linux || is_chromeos) && has_linux_kernel &&
+       (current_cpu == "x86" || current_cpu == "x64")) {
+     sources = [
+       "src/src/x86/linux/cpuinfo.c",
+diff --git a/third_party/dawn/src/dawn/common/SystemUtils.cpp b/third_party/dawn/src/dawn/common/SystemUtils.cpp
+--- a/third_party/dawn/src/dawn/common/SystemUtils.cpp
++++ b/third_party/dawn/src/dawn/common/SystemUtils.cpp
+@@ -36,7 +36,7 @@
+ #include "src/utils/windows_with_undefs.h"
+ 
+ #include <vector>
+-#elif DAWN_PLATFORM_IS(LINUX)
++#elif DAWN_PLATFORM_IS(LINUX) || DAWN_PLATFORM_IS(POSIX)
+ #include <dlfcn.h>
+ #include <limits.h>
+ #include <unistd.h>
+@@ -120,7 +120,13 @@
+ std::optional<std::string> GetExecutablePath() {
+     return GetHModulePath(nullptr);
+ }
+-#elif DAWN_PLATFORM_IS(LINUX)
++#elif DAWN_PLATFORM_IS(LINUX) || DAWN_PLATFORM_IS(POSIX)
++// The POSIX arm reaches the same code deliberately. /proc/self/exe is Linux's
++// interface and other systems have copied it; where it is absent the readlink
++// below fails and this returns {}, which is the answer the Fuchsia arm gives
++// on purpose. What a generic arm must not do is not exist, because the #else
++// of this chain is
++// #error "Implement GetExecutablePath for your platform."
+ std::optional<std::string> GetExecutablePath() {
+     std::array<char, PATH_MAX> path = {};
+     ssize_t result = readlink("/proc/self/exe", path.data(), PATH_MAX - 1);
+@@ -169,7 +175,10 @@
+     return exePath->substr(0, lastPathSepLoc + 1);
+ }
+ 
+-#if DAWN_PLATFORM_IS(LINUX) || DAWN_PLATFORM_IS(MACOS) || DAWN_PLATFORM_IS(IOS)
++// dladdr(3) and realpath(3), which is all this one needs and both of which
++// are POSIX rather than any one system's.
++#if DAWN_PLATFORM_IS(LINUX) || DAWN_PLATFORM_IS(MACOS) || DAWN_PLATFORM_IS(IOS) || \
++    DAWN_PLATFORM_IS(POSIX)
+ std::optional<std::string> GetModulePath() {
+     static int placeholderSymbol = 0;
+     Dl_info dlInfo;

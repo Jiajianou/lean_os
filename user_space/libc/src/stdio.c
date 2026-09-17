@@ -1124,3 +1124,34 @@ FILE *tmpfile(void) {
     sys_unlink(name);
     return f;
 }
+
+
+/* M161. The LFS64 names, which on a platform whose off_t is already 64 bits
+   are the calls they are named after. <stdio.h> says why they exist at all. */
+FILE *fopen64(const char *path, const char *mode) {
+    return fopen(path, mode);
+}
+
+FILE *freopen64(const char *path, const char *mode, FILE *f) {
+    return freopen(path, mode, f);
+}
+
+int fseeko64(FILE *f, off64_t offset, int whence) {
+    return fseeko(f, (off_t)offset, whence);
+}
+
+off64_t ftello64(FILE *f) {
+    return (off64_t)ftello(f);
+}
+
+int fgetpos64(FILE *f, fpos_t *position) {
+    return fgetpos(f, position);
+}
+
+int fsetpos64(FILE *f, const fpos_t *position) {
+    return fsetpos(f, position);
+}
+
+FILE *tmpfile64(void) {
+    return tmpfile();
+}

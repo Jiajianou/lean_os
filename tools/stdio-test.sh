@@ -256,7 +256,8 @@ for s in __assert_fail __fpending __lean_stdio_flush_all \
          getdelim getline perror printf putc putchar puts remove rename \
          rewind setbuf setvbuf snprintf sprintf stderr stdin stdout \
          tmpfile ungetc vdprintf vfprintf vprintf vsnprintf vsprintf \
-         asprintf vasprintf fgetwc ungetwc; do
+         asprintf vasprintf fgetwc ungetwc \
+         fopen64 freopen64 fseeko64 ftello64 fgetpos64 fsetpos64 tmpfile64; do
   RENAMES="$RENAMES -D$s=lean_$s"
 done
 

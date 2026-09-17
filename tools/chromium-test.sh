@@ -57,10 +57,21 @@ APPLIED=0
 DRIFTED=0
 PATCH_FILES=$(ls "$ROOT/$PATCHES"/*.patch 2>/dev/null)
 for f in $(sed -n 's|^--- a/||p' $PATCH_FILES | sort -u); do
-  # A path git does not track here belongs to one of the sub-repositories the
-  # checkout is assembled from, and those are left alone.
-  (cd "$SRC" && git ls-files --error-unmatch "$f" > /dev/null 2>&1) || continue
-  (cd "$SRC" && git checkout -- "$f")
+  if (cd "$SRC" && git ls-files --error-unmatch "$f" > /dev/null 2>&1); then
+    (cd "$SRC" && git checkout -- "$f")
+    continue
+  fi
+  # A path the top-level checkout does not track belongs to one of the
+  # sub-repositories it is assembled from, each with its own .git. M161:
+  # leaving those alone made this check report drift that was not there -
+  # a patch that had been applied and never reset does not apply again, and
+  # the harness called that "does not apply to the pinned revision". The
+  # same loop in tools/build-chromium.sh had the same bug.
+  d=$(dirname "$SRC/$f")
+  top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || continue
+  [ "$top" = "$SRC" ] && continue
+  rel=${f#${top#$SRC/}/}
+  (cd "$top" && git checkout -- "$rel" 2>/dev/null) || true
 done
 for p in $PATCH_FILES; do
   APPLIED=$((APPLIED + 1))
@@ -828,9 +839,13 @@ PROBE
     # is_p2p_enabled = false makes - asked of the binary.
     check_cc_absent "WebRTC, XNNPACK or tflite" "webrtc::|xnn_|tflite::"
 
+    # M160 checked is_p2p_enabled = false here. M161 removed that flag - see
+    # tools/build-chromium.sh for why - so what is graded now is the claim
+    # that survived it: WebNN's GPU back end is off, which is what keeps
+    # Dawn's native library and SwiftShader out of every binary above.
     ARGSFILE="$SRC/out/$OUT_NAME/args.gn"
-    grep -qE "^is_p2p_enabled = false\$" "$ARGSFILE"
-    check $? "and the build's own args.gn says why: is_p2p_enabled = false"
+    grep -qE "^webnn_use_litert = false\$" "$ARGSFILE"
+    check $? "and the build's own args.gn says why: webnn_use_litert = false"
 
     # The four calls //cc's graph asked this libc for, in the SYSROOT rather
     # than in the tree - M158's lesson about a header that is in git and
@@ -852,6 +867,73 @@ PROBE
       make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
       "$ROOT/build/leanfs-put" "$IMAGE" "$CC2PROGRAM" /bin/chromiumcc2 > /dev/null
       check $? "installed as /bin/chromiumcc2 - the [m160] boot self-test runs it"
+    fi
+  fi
+
+  # M161. Blink - the engine itself. //cc arriving in M160 is what made this
+  # reachable: blink::GraphicsContext records into a cc::PaintRecord, so the
+  # compositor has to exist before the thing that feeds it can.
+  BLINKPROGRAM="$SRC/out/$OUT_NAME/blinktest"
+  if [ ! -x "$BLINKPROGRAM" ]; then
+    echo "chromium-test: Blink has not been built - skipping" \
+         "(tools/build-chromium.sh lean_os)"
+  else
+    "${PREFIX}readelf" -h "$BLINKPROGRAM" | grep -q "EXEC (Executable file)"
+    check $? "a program linked from Blink is an EXEC in this OS's image region ($("${PREFIX}readelf" -h "$BLINKPROGRAM" | awk '/Type:/{t=$2} /Entry point/{print t, $NF}'))"
+
+    # WTF, which is the library every other part of the engine is written in.
+    # The counts are of what the LINKER took, not of what was built: this
+    # program uses strings, the atom table and a graphics context, so that is
+    # what is in it.
+    WTFSYMS=$("${PREFIX}nm" -C "$BLINKPROGRAM" |
+              grep -cE " [TtWw] .*blink::(StringImpl|AtomicString|StringBuilder|StringView)")
+    [ "$WTFSYMS" -gt 100 ]
+    check $? "with WTF's string machinery in it - StringImpl, AtomicString, StringBuilder ($WTFSYMS symbols)"
+
+    # And none of the four stacks. Blink is where WebGPU and WebGL live, so
+    # this is the strongest place to ask: the engine that would use Dawn is
+    # linked and Dawn's native library is not in it.
+    check_blink_absent() {
+      FOUND=$("${PREFIX}nm" -C "$BLINKPROGRAM" | grep -cE "$2")
+      [ "$FOUND" = "0" ]
+      check $? "and no $1 in a program that links Blink"
+    }
+    check_blink_absent SwiftShader "sw::Reactor|rr::Nucleus|marl::"
+    check_blink_absent "Dawn's native library" "dawn::native|wgpu::"
+    check_blink_absent "ANGLE's GL implementation" "egl::Display|sh::TCompiler|gl::init::"
+
+    ARGSFILE="$SRC/out/$OUT_NAME/args.gn"
+    NOFF=0
+    for flag in webnn_use_litert webnn_use_tflite use_pangocairo; do
+      grep -qE "^$flag = false\$" "$ARGSFILE" || NOFF=1
+    done
+    [ "$NOFF" = "0" ]
+    check $? "and args.gn turns off WebNN's two back ends and pangocairo"
+
+    # is_p2p_enabled is back ON since M161, and that is a claim worth
+    # grading rather than leaving in a comment: Chromium has no supported
+    # configuration of Blink without WebRTC.
+    grep -qE "^is_p2p_enabled = true\$" "$ARGSFILE" ||
+      ! grep -qE "^is_p2p_enabled" "$ARGSFILE"
+    check $? "and does NOT turn off is_p2p_enabled, because Blink's modules are not optional"
+
+    # The libc this milestone grew, in the SYSROOT rather than the tree.
+    LFSMISSING=0
+    for name in fopen64 fseeko64 ftello64 off64_t; do
+      grep -rq "$name" "$ROOT/build/sysroot/usr/local/include/" || LFSMISSING=1
+    done
+    [ "$LFSMISSING" = "0" ]
+    check $? "this libc's LFS64 names are in the sysroot a cross compile reads"
+    grep -q "SO_TIMESTAMP" "$ROOT/build/sysroot/usr/local/include/sys/socket.h"
+    check $? "and SO_TIMESTAMP and SCM_TIMESTAMP are in its <sys/socket.h>"
+
+    IMAGE="$ROOT/build/os-image.bin"
+    if [ ! -f "$IMAGE" ]; then
+      echo "chromium-test: no $IMAGE - run make, then this again"
+    else
+      make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
+      "$ROOT/build/leanfs-put" "$IMAGE" "$BLINKPROGRAM" /bin/chromiumblink > /dev/null
+      check $? "installed as /bin/chromiumblink - the [m161] boot self-test runs it"
     fi
   fi
 

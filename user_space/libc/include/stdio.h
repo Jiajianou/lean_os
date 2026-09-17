@@ -37,6 +37,7 @@ long ftell(FILE *f);
 int fseeko(FILE *f, off_t offset, int whence);
 off_t ftello(FILE *f);
 
+
 typedef struct {
     long __pos;
 } fpos_t;
@@ -45,6 +46,29 @@ int fgetpos(FILE *f, fpos_t *pos);
 int fsetpos(FILE *f, const fpos_t *pos);
 FILE *freopen(const char *path, const char *mode, FILE *f);
 FILE *tmpfile(void);
+/* M161. The LFS64 names.
+ *
+ * glibc grew these when off_t was 32 bits on the platforms it cared about
+ * and a program that wanted the 64-bit call had to ask for it by name. This
+ * libc's off_t is `long`, which on x86-64 is 64 bits, so there is no second
+ * call for them to name - fopen64 IS fopen, and so on down the list. Every C
+ * library born 64-bit resolves them the same way, and zlib's minizip is what
+ * asked here: it does
+ *
+ *   #define FOPEN_FUNC(filename, mode) fopen64(filename, mode)
+ *
+ * unconditionally, and without a declaration the implicit int return was
+ * being assigned to a FILE*.
+ *
+ * They are real functions rather than macros because that is what a caller
+ * taking their address expects, and minizip takes all three. */
+FILE *fopen64(const char *path, const char *mode);
+FILE *freopen64(const char *path, const char *mode, FILE *f);
+int fseeko64(FILE *f, off64_t offset, int whence);
+off64_t ftello64(FILE *f);
+int fgetpos64(FILE *f, fpos_t *position);
+int fsetpos64(FILE *f, const fpos_t *position);
+FILE *tmpfile64(void);
 int fflush(FILE *f);
 int feof(FILE *f);
 int ferror(FILE *f);

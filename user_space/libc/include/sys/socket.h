@@ -71,6 +71,22 @@ struct msghdr {
 #define SO_PEERCRED  17
 #define SO_PASSCRED  16
 
+/* M161. Three more of the numbers M150 started. SO_TIMESTAMP asks the kernel
+   to attach the time a datagram arrived as a control message, and
+   SCM_TIMESTAMP is what that message is labelled with. The numbers are
+   Linux's, which is the numbering every other constant in this header
+   already uses.
+
+   Defining them is not a claim that this kernel implements them: setsockopt
+   here refuses every option it does not know with ENOPROTOOPT, so a caller
+   that asks is told no. WebRTC's physical_socket_server.cc is what asked,
+   and it checks the result - a socket without arrival timestamps falls back
+   to reading the clock itself, which is what it does on every platform that
+   has not got them. What a program cannot do is ask a question that will not
+   compile. */
+#define SO_TIMESTAMP 29
+#define SCM_TIMESTAMP SO_TIMESTAMP
+
 /* The credentials of the process at the other end of a connected AF_UNIX
    socket. This machine has one principal, so uid and gid are always 0 and
    the pid is the only field carrying information - which is the field

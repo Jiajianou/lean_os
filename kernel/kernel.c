@@ -9394,6 +9394,103 @@ static void boot_selftests_system(void) {
         }
     }
 
+    {
+        os_stat_t bk;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/chromiumblink", (uint64_t)&bk, 0) != 0) {
+            kernel_log_puts("[m161] /bin/chromiumblink is not on this image - skipped. "
+                       "tools/build-chromium.sh lean_os links it out of Blink's "
+                       "own objects and tools/chromium-test.sh installs it.\n\n");
+        } else {
+            int bk_pipe[2];
+            if (do_syscall(SYS_pipe, (uint64_t)bk_pipe, 0, 0) != 0) {
+                panic("M161 self-test: could not make a pipe for the report");
+            }
+            do_syscall(SYS_dup2, (uint64_t)bk_pipe[1], 1, 0);
+            do_syscall(SYS_dup2, (uint64_t)bk_pipe[1], 2, 0);
+
+            size_t bk_bytes = 0;
+            uint8_t *bk_image = read_program(PATH_BIN_DIRECTORY "chromiumblink",
+                                             &bk_bytes);
+            if (!bk_image) {
+                panic("M161 self-test: /bin/chromiumblink could not be read");
+            }
+            const char *bk_argv[] = {PATH_BIN_DIRECTORY "chromiumblink", 0};
+            task_t *bkt = process_spawnv("chromiumblink", bk_image, bk_bytes,
+                                         bk_argv);
+            kfree(bk_image);
+
+            static char bk_out[8192];
+            size_t bk_got = 0;
+            long bk_rc = -1;
+            /* Fifty-seven megabytes to map and Blink's static initialisers to
+               run before main() is reached, which is what this deadline is
+               almost entirely made of. It is the largest program on this
+               machine by a factor of four. */
+            long bk_deadline = (long)pit_get_ticks() + 300 * PIT_HZ;
+            for (;;) {
+                long avail = do_syscall(SYS_pipe_poll, (uint64_t)bk_pipe[0], 0, 0);
+                if (avail > 0 && bk_got < sizeof(bk_out) - 1) {
+                    size_t room = sizeof(bk_out) - 1 - bk_got;
+                    long n = do_syscall(SYS_read, (uint64_t)bk_pipe[0],
+                                        (uint64_t)(bk_out + bk_got),
+                                        (uint64_t)((size_t)avail < room
+                                                   ? (size_t)avail : room));
+                    if (n > 0) {
+                        bk_got += (size_t)n;
+                    }
+                    continue;
+                }
+                long done = bkt ? do_syscall(SYS_wait_nb, (uint64_t)bkt->id, 0, 0)
+                                : -1;
+                if (done != -2) {
+                    bk_rc = done;
+                    long n;
+                    while ((n = do_syscall(SYS_pipe_poll, (uint64_t)bk_pipe[0], 0, 0)) > 0 &&
+                           bk_got < sizeof(bk_out) - 1) {
+                        size_t room = sizeof(bk_out) - 1 - bk_got;
+                        long r = do_syscall(SYS_read, (uint64_t)bk_pipe[0],
+                                            (uint64_t)(bk_out + bk_got),
+                                            (uint64_t)((size_t)n < room ? (size_t)n : room));
+                        if (r <= 0) {
+                            break;
+                        }
+                        bk_got += (size_t)r;
+                    }
+                    break;
+                }
+                if ((long)pit_get_ticks() > bk_deadline) {
+                    break;
+                }
+                do_syscall(SYS_yield, 0, 0, 0);
+            }
+            bk_out[bk_got] = '\0';
+            do_syscall(SYS_close, (uint64_t)bk_pipe[0], 0, 0);
+            do_syscall(SYS_close, (uint64_t)bk_pipe[1], 0, 0);
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[1]);
+            scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[2]);
+            scheduler_current()->descriptor_table->slots[2].type = FILE_DESCRIPTOR_STDOUT;
+
+            for (char *line = bk_out; *line;) {
+                char *end = line;
+                while (*end && *end != '\n') {
+                    end++;
+                }
+                char saved = *end;
+                *end = '\0';
+                kernel_log_puts(line);
+                kernel_log_putc('\n');
+                *end = saved;
+                line = saved ? end + 1 : end;
+            }
+            if (bk_rc != 0) {
+                panic("M161 self-test: Blink's platform layer is wrong on this "
+                      "machine - see the chromiumblink lines above");
+            }
+            kernel_log_putc('\n');
+        }
+    }
+
 
     {
         os_stat_t ct;

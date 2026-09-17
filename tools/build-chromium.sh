@@ -66,11 +66,27 @@ PATCH_FILES=$(ls "$ROOT"/tools/chromium-port/*.patch 2>/dev/null)
 if [ -n "$PATCH_FILES" ]; then
   TOUCHED=$(sed -n 's|^--- a/||p' $PATCH_FILES | sort -u)
   for f in $TOUCHED; do
-    # A path git does not track here belongs to one of the sub-repositories
-    # the checkout is assembled from - third_party/perfetto is one - and
-    # those are left as they are.
-    (cd "$SRC" && git ls-files --error-unmatch "$f" > /dev/null 2>&1) || continue
-    (cd "$SRC" && git checkout -- "$f") || exit 1
+    if (cd "$SRC" && git ls-files --error-unmatch "$f" > /dev/null 2>&1); then
+      (cd "$SRC" && git checkout -- "$f") || exit 1
+      continue
+    fi
+    # A path the top-level checkout does not track belongs to one of the
+    # sub-repositories it is assembled from - third_party/angle, dawn, webrtc,
+    # perfetto and a hundred others, each with its own .git. M161: leaving
+    # those alone was wrong, and wrong in a way that wastes an afternoon
+    # rather than failing loudly. The series is applied to a CLEAN tree every
+    # time precisely so that "is this patch already applied" needs no answer -
+    # and a sub-repository file that never got reset makes the question come
+    # back, as "does not apply to this checkout" on a patch that is perfectly
+    # good. It cost this milestone three builds before it was worth fixing.
+    #
+    # git -C finds the sub-repository from the file's own directory, so this
+    # needs no list of which ones there are.
+    d=$(dirname "$SRC/$f")
+    top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || continue
+    [ "$top" = "$SRC" ] && continue
+    rel=${f#${top#$SRC/}/}
+    (cd "$top" && git checkout -- "$rel" 2>/dev/null) || true
   done
 fi
 for patch in $PATCH_FILES; do
@@ -417,29 +433,89 @@ angle_shared_libvulkan = false
 # library that is not there is exactly the case the flag exists for.
 use_xkbcommon = false
 
-# WebRTC, and this is a decision about the MACHINE rather than about the
-# build. It is not off because it does not build: M160 measured that, and
-# 761 of WebRTC's 762 targets and all 579 of XNNPACK's compiled for this
-# target without a patch. It is off because WebRTC is real-time
-# COMMUNICATION - a peer connection carrying live audio and video from
-# capture devices - and this machine has no camera and no audio input. There
-# is an AC'97 output stream and nothing on the other side of it.
+# Pango and Cairo, which are the other optional system libraries an X11 or
+# Wayland desktop has and this machine has not. Same shape as use_xkbcommon
+# above and as every flag in this block:
 #
-# A WebRTC that negotiates a peer connection and has no media to put in it is
-# the thing M65 refused: a feature with nothing behind it. The condition for
-# turning it back on is the one M65's rule implies - audio capture and a
-# camera on this machine, or a driver for either.
+#   build/config/linux/pangocairo/pangocairo.gni
+#     use_pangocairo = is_linux && !is_castos
 #
-# is_p2p_enabled's own default is use_blink, which is "does this platform run
-# Blink" and says nothing about whether it has a microphone. Turning it off
-# takes WebRTC, XNNPACK, tflite and cpuinfo out of the graph - 1,392 targets
-# that the COMPOSITOR was reaching through //components/metrics/dwa, which is
-# a metrics library. That route is itself the evidence that the dependency is
-# incidental rather than meaningful.
+# What it compiles here is ui/base/ime/linux/composition_text_util_pango.cc,
+# which converts a Pango attribute list into Chromium's own composition
+# text - the underlines under the characters an input method has not
+# committed yet. There is no Pango on this machine and DEPS has no checkout
+# of one; this OS's input method, such as it is, is M85's line discipline.
+use_pangocairo = false
+
+# WebRTC. M160 turned this off and M161 turns it back on, and the reason is
+# worth keeping because it is a correction rather than a change of mind.
 #
-# What it costs is named rather than hidden: no getUserMedia, no
-# RTCPeerConnection. Everything else //cc, //media and Blink do is unaffected.
-is_p2p_enabled = false
+# M160's argument was that WebRTC is real-time COMMUNICATION - a peer
+# connection carrying live audio and video from capture devices - and that
+# this machine has no camera and no audio input, so building it would be
+# M65's "a feature with nothing behind it". Two things are wrong with that.
+#
+# The first is that it is not a pretence. A browser on a machine with no
+# camera does not claim to have one: getUserMedia fails with the error the
+# specification defines for exactly that case, which is what every real
+# browser does on a laptop with the lid shut on its webcam. And a data
+# channel needs no capture device at all - it is a peer connection carrying
+# bytes, over the TCP and UDP M66 built. The media half degrades honestly and
+# the rest works.
+#
+# The second is that the deferral was not available. Chromium has no
+# supported configuration of Blink without WebRTC:
+# //third_party/blink/renderer/modules lists mediastream, peerconnection,
+# webrtc and breakout_box unconditionally, and blink/renderer/platform/p2p
+# includes services/network/public/mojom/p2p.mojom-blink.h - which
+# is_p2p_enabled is what generates. Turning it off did not remove those
+# sources, it removed what they include, and a -k 0 build of //third_party/
+# blink/public:blink then failed in about forty places that were all one
+# missing header. A flag that removes a dependency without removing its
+# users is not a configuration; it is a broken build.
+#
+# What M160 got right stays and is below: webnn_use_litert, which really is
+# a GPU path on a machine with no GPU.
+
+# WebNN's LiteRT back end, which is the same sentence about the same machine.
+# WebNN is the Web Neural Network API and it has two back ends: TensorFlow
+# Lite, which is arithmetic on the CPU and works anywhere, and LiteRT, which
+# is Dawn - a GPU and NPU path. Both defaults are the platform list this port
+# has now met a dozen times:
+#
+#   services/webnn/features.gni
+#     webnn_use_litert = is_android || is_chromeos || is_linux || is_apple ...
+#
+# LiteRT is the ONLY thing left in Blink's dependency graph that brings Dawn's
+# native library back, and SwiftShader and the Vulkan loader with it as data
+# dependencies - the whole stack M158 and M159 removed, reappearing behind a
+# machine-learning flag. Turning it off takes all three out and leaves the
+# tflite back end, which needs no GPU and which M160's libm work is what made
+# compile at all.
+#
+# The condition for turning it on is the one M158 set for SwiftShader and has
+# not changed: real GPU hardware with a driver.
+webnn_use_litert = false
+
+# And WebNN's other back end, which is a different reason for the same
+# answer. TensorFlow Lite is arithmetic on the CPU and would run here - but
+# behind it are XNNPACK and ruy and behind those is cpuinfo, whose job is to
+# tell them how many cores and caches this machine has. cpuinfo has three
+# back ends - Linux's /sys/devices/system/cpu, FreeBSD's sysctl and Mach's
+# sysctlbyname - and there is no fourth that is not a source written here.
+# Its Linux one does not even compile for this target: struct
+# cpuinfo_processor's linux_id member is behind #if defined(__linux__) in
+# cpuinfo's own header while GN compiles the code that reads it, which is
+# M144's distinction inside a third-party library.
+#
+# So WebNN is not available on this machine, and that is Chromium's own
+# configuration for it rather than a hole: services/webnn builds with neither
+# back end and reports no contexts, which is what the API is supposed to do
+# where there is nothing to accelerate on.
+#
+# The condition for the CPU half is a cpuinfo back end for this platform -
+# either /sys/devices/system/cpu, or a fourth back end upstream would take.
+webnn_use_tflite = false
 
 # WebXR, and the reason it is here at all. //device/vr on is_linux deps on
 # //gpu/vulkan/init unconditionally, and that directory opens with

@@ -25,6 +25,10 @@ typedef char              *caddr_t;
 typedef unsigned long ino_t;
 typedef unsigned int  mode_t;
 typedef long          off_t;
+/* M161. off_t is already 64 bits here, so off64_t is not a wider type - it is
+   the same one under the name glibc gave it when off_t was not. See the note
+   above the LFS64 declarations in <stdio.h>. */
+typedef long          off64_t;
 typedef int           pid_t;
 typedef unsigned int  nlink_t;
 typedef unsigned long dev_t;
