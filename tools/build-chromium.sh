@@ -549,6 +549,42 @@ enable_openxr = false
 # is is_fuchsia, and use_crashpad_annotation's is "(is_linux && !is_castos)",
 # which is how this OS was reaching for crashpad's Linux half at all.
 use_crash_key_stubs = true
+
+# The vulnerability reward program's flags, and the only reason //sandbox is
+# anywhere near the display compositor.
+#
+# M162 measured //components/viz/service and found it 22 targets wider than
+# Blink's graph, of which nine are //sandbox - //sandbox/linux:seccomp_bpf
+# among them, on a machine that has no seccomp and whose answer to "what may
+# this process do" is a capability set assigned at spawn. That looked like
+# the second of CLAUDE.md's two remaining conditions arriving five rungs
+# early. It is not. `gn path --all` finds exactly ONE route:
+#
+#   //components/viz/service:service -> //components/vrp_flags:vrp_flags
+#     -> //sandbox/policy:policy -> //sandbox/linux:seccomp_bpf
+#
+# and //components/vrp_flags is not a security feature. Its own README says
+# what it is: "a target for controlled read and controlled write that can be
+# sent to a renderer when the --vrp-flags argument is provided" - a memory
+# read/write primitive built into the browser on purpose, so that reward
+# program researchers start an exploit from a known position rather than
+# from scratch. Its declare_args() default is the platform-family list this
+# port has now met a dozen times, (is_win || is_mac || is_linux) with a
+# 64-bit cpu, so it reached this OS the same way every other one did.
+#
+# Turning it off is not a build fix and would be right even if the sandbox
+# behind it compiled perfectly. A machine whose whole security story is a
+# capability set does not ship a browser with a deliberate read/write
+# primitive in it behind a command-line switch.
+#
+# What this does NOT do is answer the sandbox question, and the condition
+# for that is worth naming rather than leaving as a mood: it becomes real
+# when //content launches a renderer, because that is the first process on
+# this machine that will run somebody else's code and should hold strictly
+# less authority than the thing that spawned it. The mechanism for that is
+# already here - M65's capability set, assigned from the name a program was
+# spawned by and able only to shrink - and Chromium's own seccomp is not.
+enable_vrp_flags = false
 ARGS
 
 PATH="$DEPOT:$DEPOT/.cipd_bin:$PATH"

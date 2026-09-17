@@ -9491,6 +9491,100 @@ static void boot_selftests_system(void) {
         }
     }
 
+    {
+        os_stat_t vz;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/chromiumviz", (uint64_t)&vz, 0) != 0) {
+            kernel_log_puts("[m162] /bin/chromiumviz is not on this image - skipped. "
+                       "tools/build-chromium.sh lean_os links it out of the "
+                       "display compositor's own objects and "
+                       "tools/chromium-test.sh installs it.\n\n");
+        } else {
+            int vz_pipe[2];
+            if (do_syscall(SYS_pipe, (uint64_t)vz_pipe, 0, 0) != 0) {
+                panic("M162 self-test: could not make a pipe for the report");
+            }
+            do_syscall(SYS_dup2, (uint64_t)vz_pipe[1], 1, 0);
+            do_syscall(SYS_dup2, (uint64_t)vz_pipe[1], 2, 0);
+
+            size_t vz_bytes = 0;
+            uint8_t *vz_image = read_program(PATH_BIN_DIRECTORY "chromiumviz",
+                                             &vz_bytes);
+            if (!vz_image) {
+                panic("M162 self-test: /bin/chromiumviz could not be read");
+            }
+            const char *vz_argv[] = {PATH_BIN_DIRECTORY "chromiumviz", 0};
+            task_t *vzt = process_spawnv("chromiumviz", vz_image, vz_bytes,
+                                         vz_argv);
+            kfree(vz_image);
+
+            static char vz_out[8192];
+            size_t vz_got = 0;
+            long vz_rc = -1;
+            long vz_deadline = (long)pit_get_ticks() + 240 * PIT_HZ;
+            for (;;) {
+                long avail = do_syscall(SYS_pipe_poll, (uint64_t)vz_pipe[0], 0, 0);
+                if (avail > 0 && vz_got < sizeof(vz_out) - 1) {
+                    size_t room = sizeof(vz_out) - 1 - vz_got;
+                    long n = do_syscall(SYS_read, (uint64_t)vz_pipe[0],
+                                        (uint64_t)(vz_out + vz_got),
+                                        (uint64_t)((size_t)avail < room
+                                                   ? (size_t)avail : room));
+                    if (n > 0) {
+                        vz_got += (size_t)n;
+                    }
+                    continue;
+                }
+                long done = vzt ? do_syscall(SYS_wait_nb, (uint64_t)vzt->id, 0, 0)
+                                : -1;
+                if (done != -2) {
+                    vz_rc = done;
+                    long n;
+                    while ((n = do_syscall(SYS_pipe_poll, (uint64_t)vz_pipe[0], 0, 0)) > 0 &&
+                           vz_got < sizeof(vz_out) - 1) {
+                        size_t room = sizeof(vz_out) - 1 - vz_got;
+                        long r = do_syscall(SYS_read, (uint64_t)vz_pipe[0],
+                                            (uint64_t)(vz_out + vz_got),
+                                            (uint64_t)((size_t)n < room ? (size_t)n : room));
+                        if (r <= 0) {
+                            break;
+                        }
+                        vz_got += (size_t)r;
+                    }
+                    break;
+                }
+                if ((long)pit_get_ticks() > vz_deadline) {
+                    break;
+                }
+                do_syscall(SYS_yield, 0, 0, 0);
+            }
+            vz_out[vz_got] = '\0';
+            do_syscall(SYS_close, (uint64_t)vz_pipe[0], 0, 0);
+            do_syscall(SYS_close, (uint64_t)vz_pipe[1], 0, 0);
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[1]);
+            scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[2]);
+            scheduler_current()->descriptor_table->slots[2].type = FILE_DESCRIPTOR_STDOUT;
+
+            for (char *line = vz_out; *line;) {
+                char *end = line;
+                while (*end && *end != '\n') {
+                    end++;
+                }
+                char saved = *end;
+                *end = '\0';
+                kernel_log_puts(line);
+                kernel_log_putc('\n');
+                *end = saved;
+                line = saved ? end + 1 : end;
+            }
+            if (vz_rc != 0) {
+                panic("M162 self-test: the display compositor is wrong on this "
+                      "machine - see the chromiumviz lines above");
+            }
+            kernel_log_putc('\n');
+        }
+    }
+
 
     {
         os_stat_t ct;

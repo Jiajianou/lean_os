@@ -16,5 +16,6 @@ group("lean_os") {
     "//lean_os/nettest",
     "//lean_os/skiatest",
     "//lean_os/v8test",
+    "//lean_os/viztest",
   ]
 }

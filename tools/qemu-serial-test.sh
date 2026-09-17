@@ -254,6 +254,8 @@ REQUIRED_MARKERS=(
   "chromiumcc2: done"
   "[m161] Blink's platform layer on this machine:"
   "chromiumblink: done"
+  "[m162] the display compositor on this machine:"
+  "chromiumviz: done"
   "mathltest: done"
   "[m125] lvgl rendered"
   "[m125] a third-party toolkit on this compositor:"

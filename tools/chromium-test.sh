@@ -937,6 +937,61 @@ PROBE
     fi
   fi
 
+  # M162. The DISPLAY compositor - the one the browser runs, whose input is
+  # whole CompositorFrames submitted by other processes and whose output is
+  # the framebuffer. M161 set this target aside because it IS the GPU service
+  # and so wants the GL implementation compiled; what that did not say is
+  # that Blink already reaches all of it, which is why this rung is 22
+  # targets wide.
+  VIZPROGRAM="$SRC/out/$OUT_NAME/viztest"
+  if [ ! -x "$VIZPROGRAM" ]; then
+    echo "chromium-test: the display compositor has not been built - skipping" \
+         "(tools/build-chromium.sh lean_os)"
+  else
+    "${PREFIX}readelf" -h "$VIZPROGRAM" | grep -q "EXEC (Executable file)"
+    check $? "a program linked from the display compositor is an EXEC in this OS's image region ($("${PREFIX}readelf" -h "$VIZPROGRAM" | awk '/Type:/{t=$2} /Entry point/{print t, $NF}'))"
+
+    # What the LINKER took. The aggregator is the piece that makes this the
+    # display compositor rather than another rasteriser: it is what turns N
+    # surfaces from N processes into one frame.
+    VIZSYMS=$("${PREFIX}nm" -C "$VIZPROGRAM" |
+              grep -cE " [TtWw] .*viz::(SurfaceAggregator|SoftwareRenderer|Display|DisplayResourceProviderSoftware)::")
+    [ "$VIZSYMS" -gt 50 ]
+    check $? "with the aggregator and the software renderer in it ($VIZSYMS symbols)"
+
+    # And this is the strongest place in the whole port to ask the question
+    # M159 first asked, because this target IS //gpu/ipc/service: the GPU
+    # service is COMPILED and the GL implementation is in no binary. A check
+    # written against args.gn could not say this at all.
+    check_viz_absent() {
+      FOUND=$("${PREFIX}nm" -C "$VIZPROGRAM" | grep -cE "$2")
+      [ "$FOUND" = "0" ]
+      check $? "and no $1 in a program that links the GPU service"
+    }
+    check_viz_absent "ANGLE's GL implementation" "egl::Display|sh::TCompiler|gl::init::"
+    check_viz_absent SwiftShader "sw::Reactor|rr::Nucleus|marl::"
+    check_viz_absent "Dawn's native library" "dawn::native|wgpu::"
+
+    # //sandbox, which reached the display compositor through ONE edge -
+    # //components/vrp_flags, whose README describes it as a controlled read
+    # and write primitive handed to a renderer for reward-program
+    # researchers. It is off, so nothing of seccomp is here to be linked.
+    check_viz_absent "seccomp policy" "sandbox::policy::|sandbox::SandboxBPF"
+
+    ARGSFILE="$SRC/out/$OUT_NAME/args.gn"
+    grep -qE "^enable_vrp_flags = false\$" "$ARGSFILE"
+    check $? "and args.gn turns off the vulnerability reward program's read/write primitive"
+
+    IMAGE="$ROOT/build/os-image.bin"
+    if [ ! -f "$IMAGE" ]; then
+      echo "chromium-test: no $IMAGE - run make, then this again"
+    else
+      make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
+      "$ROOT/build/leanfs-put" "$IMAGE" "$VIZPROGRAM" /bin/chromiumviz > /dev/null
+      check $? "installed as /bin/chromiumviz - the [m162] boot self-test runs it"
+    fi
+  fi
+
   # M157. The libc port reaches Chromium's OWN vendored copy of the libc
   # crate, not just rust-src's - and they are the same 0.2.189, so a copy
   # that drifted would be a build that disagrees with itself about what this
