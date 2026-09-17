@@ -144,6 +144,20 @@ double cbrt(double x);
 double exp2(double x);
 double fma(double x, double y, double z);
 
+/* M160. The gap the note at the top of math.c used to describe, filled
+   because the condition it named was met: Eigen's SpecialFunctionsImpl.h
+   calls lgammaf, tflite includes it, and forty-seven translation units of
+   the //cc build stopped on it. signgam is POSIX's - the sign of the gamma
+   function that lgamma took the logarithm of the magnitude of, which is the
+   only way a caller can recover it. lgammal and tgammal are still absent and
+   their condition is still the one below: a program on this machine that
+   calls one. */
+extern int signgam;
+double tgamma(double x);
+double lgamma(double x);
+float tgammaf(float x);
+float lgammaf(float x);
+
 /* M142. long double on this target is the x87 80-bit extended format, which
    is a different type from double rather than a spelling of it, and
    user_space/libc/src/math_long_double.c is x87 instructions for that

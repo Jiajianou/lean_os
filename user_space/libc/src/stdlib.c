@@ -159,6 +159,22 @@ int rand(void) {
     return (int)((rand_state / 65536u) % 32768u);
 }
 
+/* rand_r(3), which is rand with its state in the caller's hand rather than in
+   this library's. That is the whole of the difference and it is the reason
+   POSIX has it: two threads calling rand() share one sequence and one
+   unsynchronised update of it. The generator is the same one rand() uses, so
+   a caller that seeds both the same way gets the same numbers.
+
+   libwebm asked (M160). */
+int rand_r(unsigned int *state) {
+    if (!state) {
+        errno = EINVAL;
+        return 0;
+    }
+    *state = *state * 1103515245u + 12345u;
+    return (int)((*state / 65536u) % 32768u);
+}
+
 void srand(unsigned int seed) {
     rand_state = seed;
 }

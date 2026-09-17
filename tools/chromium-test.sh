@@ -791,6 +791,70 @@ PROBE
     fi
   fi
 
+  # M160. //cc itself - the compositor, not just its recorded paint. The
+  # measurement that made this rung reachable is M159's: a -k 0 build of //cc
+  # failed in 546 places for M158 and in 68 for M160, of which 47 were one
+  # missing declaration in this libc.
+  CC2PROGRAM="$SRC/out/$OUT_NAME/cctest2"
+  if [ ! -x "$CC2PROGRAM" ]; then
+    echo "chromium-test: //cc has not been built - skipping" \
+         "(tools/build-chromium.sh lean_os)"
+  else
+    "${PREFIX}readelf" -h "$CC2PROGRAM" | grep -q "EXEC (Executable file)"
+    check $? "a program linked from //cc is an EXEC in this OS's image region ($("${PREFIX}readelf" -h "$CC2PROGRAM" | awk '/Type:/{t=$2} /Entry point/{print t, $NF}'))"
+
+    # The layer half, which is what separates this from M158's //cc/paint:
+    # a RecordingSource holds the invalidation, a RasterSource is the
+    # snapshot, and TilingData is the arithmetic under both.
+    CCLAYER=$("${PREFIX}nm" -C "$CC2PROGRAM" |
+              grep -cE " [TtWw] .*cc::(RecordingSource|RasterSource|TilingData)")
+    [ "$CCLAYER" -gt 20 ]
+    check $? "with cc's recording source, raster source and tiling data in it ($CCLAYER symbols)"
+
+    # And none of the four stacks M158, M159 and M160 took out of the graph.
+    # The patterns are namespaces rather than words for M159's reason.
+    check_cc_absent() {
+      FOUND=$("${PREFIX}nm" -C "$CC2PROGRAM" | grep -cE "$2")
+      [ "$FOUND" = "0" ]
+      check $? "and no $1 in a program that links //cc"
+    }
+    check_cc_absent SwiftShader "sw::Reactor|rr::Nucleus|marl::"
+    check_cc_absent Vulkan "vkCreateInstance|VkPhysicalDevice"
+    check_cc_absent Dawn "dawn::native|wgpu::"
+    check_cc_absent "ANGLE's GL implementation" "egl::Display|sh::TCompiler|gl::init::"
+
+    # WebRTC and what it brings. This one is not about a GPU: it is about a
+    # machine with no camera and no audio input, and it is the claim
+    # is_p2p_enabled = false makes - asked of the binary.
+    check_cc_absent "WebRTC, XNNPACK or tflite" "webrtc::|xnn_|tflite::"
+
+    ARGSFILE="$SRC/out/$OUT_NAME/args.gn"
+    grep -qE "^is_p2p_enabled = false\$" "$ARGSFILE"
+    check $? "and the build's own args.gn says why: is_p2p_enabled = false"
+
+    # The four calls //cc's graph asked this libc for, in the SYSROOT rather
+    # than in the tree - M158's lesson about a header that is in git and
+    # reaches no cross compile. lgammaf is the one that cost 47 of the 68
+    # failures, in Eigen, through tflite.
+    MISSING=0
+    for name in lgammaf tgammaf rand_r mlock; do
+      grep -rq "$name" "$ROOT/build/sysroot/usr/local/include/" || MISSING=1
+    done
+    [ "$MISSING" = "0" ]
+    check $? "this libc's lgammaf, tgammaf, rand_r and mlock are in the sysroot a cross compile reads"
+    grep -q "LOCK_EX" "$ROOT/build/sysroot/usr/local/include/sys/file.h"
+    check $? "and flock's operations are in its <sys/file.h>"
+
+    IMAGE="$ROOT/build/os-image.bin"
+    if [ ! -f "$IMAGE" ]; then
+      echo "chromium-test: no $IMAGE - run make, then this again"
+    else
+      make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
+      "$ROOT/build/leanfs-put" "$IMAGE" "$CC2PROGRAM" /bin/chromiumcc2 > /dev/null
+      check $? "installed as /bin/chromiumcc2 - the [m160] boot self-test runs it"
+    fi
+  fi
+
   # M157. The libc port reaches Chromium's OWN vendored copy of the libc
   # crate, not just rust-src's - and they are the same 0.2.189, so a copy
   # that drifted would be a build that disagrees with itself about what this

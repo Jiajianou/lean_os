@@ -3075,9 +3075,44 @@ static long sys_mincore(uint64_t address, uint64_t length, uint64_t vector,
     if (self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return -1;
     }
+
+    /* M160. "Not resident" and "not mapped" are different answers and this
+       call used to give the first one for both: it read the page table, and
+       a page inside a mapping that has never been touched is absent from the
+       page table for exactly the same reason a page nobody mapped is.
+       mincore(2)'s contract is that a range containing unmapped pages is an
+       error - ENOMEM - and that is the half a caller needs, because it is the
+       only way to ask "may I touch this" without finding out by faulting.
+       mlock is what asked: it has to bring pages in, and bringing in a page
+       that is not there kills the process.
+
+       So the mapping is looked up in the region table, which is what knows,
+       and the page table is asked only about residency. */
     for (uint64_t i = 0; i < pages; i++) {
+        uint64_t page = address + i * PAGE_SIZE;
+        int mapped = 0;
+        for (uint32_t r = 0; r < self->mmap_capacity; r++) {
+            if (self->mmaps[r].pages == 0) {
+                continue;
+            }
+            uint64_t rstart = self->mmaps[r].base;
+            uint64_t rend = rstart + (uint64_t)self->mmaps[r].pages * PAGE_SIZE;
+            if (page >= rstart && page < rend) {
+                mapped = 1;
+                break;
+            }
+        }
+        if (!mapped) {
+            /* The program's own image, its stack and its heap are mappings
+               this table does not hold, and they are as mapped as anything
+               else. The page table is the right authority for those: a page
+               that is present is mapped whatever the table says. */
+            if (!virtual_memory_user_range_ok(self->pml4_phys, page, 1, 0)) {
+                return -1;
+            }
+        }
         uint8_t resident = virtual_memory_user_range_ok(
-            self->pml4_phys, address + i * PAGE_SIZE, 1, 0) ? 1 : 0;
+            self->pml4_phys, page, 1, 0) ? 1 : 0;
         if (copy_to_user(vector + i, &resident, 1) != 0) {
             return -1;
         }

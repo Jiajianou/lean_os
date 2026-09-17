@@ -67,6 +67,7 @@ char *setstate(char *state);
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
 
+int rand_r(unsigned int *state);
 int mkstemp(char *tmpl);
 int mkstemps(char *tmpl, int suffix_length);
 

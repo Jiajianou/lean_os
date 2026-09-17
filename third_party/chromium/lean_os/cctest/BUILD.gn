@@ -1,0 +1,26 @@
+# A program that links //cc - the compositor itself - and that this machine
+# runs.
+#
+# M158 linked //cc/paint and said why it stopped there: //cc:cc reaches
+# //components/viz/common, //gpu/config and //services/network/public/cpp, and
+# a -k 0 build of it failed in 546 places of which 424 were ANGLE, SwiftShader
+# and the Vulkan loader arriving in a build that had turned the GPU stack off.
+# M159 took all of that out of the graph, which is what made this rung
+# reachable.
+#
+# The output name is cctest2 rather than cctest because //v8/test/cctest is
+# already cctest and two targets in one build cannot share an output name -
+# the same collision M158 hit and resolved by calling its program ccpainttest.
+executable("cctest") {
+  # v8/test/cctest already owns the output name "cctest" and two targets in
+  # one build cannot share one - the collision M158 hit and worked around by
+  # naming its program ccpainttest. The TARGET keeps the directory's name so
+  # //lean_os/cctest resolves without a colon; only the output moves.
+  output_name = "cctest2"
+  sources = [ "chromium_cc_test.cc" ]
+  deps = [
+    "//base",
+    "//cc",
+    "//cc/base",
+  ]
+}

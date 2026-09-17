@@ -250,6 +250,8 @@ REQUIRED_MARKERS=(
   "chromiumcc: done"
   "[m159] Chromium's own GPU configuration, on this machine:"
   "chromiumgpu: done"
+  "[m160] cc's layer path on this machine:"
+  "chromiumcc2: done"
   "mathltest: done"
   "[m125] lvgl rendered"
   "[m125] a third-party toolkit on this compositor:"

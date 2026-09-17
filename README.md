@@ -575,6 +575,37 @@ Several instruments, and none of them subsumes another:
   replaced. Reaching it takes the same process, the same millisecond and the
   file already there, which is why a hundred and fifty milestones had not.
 
+- **And the compositor above it.** **//cc** builds for this machine and runs
+  on it: `cc::RecordingSource` records a display list over
+  `cc::ContentLayerClient` - *the interface Blink implements* - holds the
+  invalidation, and hands out a `cc::RasterSource` that a raster worker
+  replays into tiles. `/bin/chromiumcc2` grades sixteen things on the
+  machine, and the sharpest are not pixels: **an update with nothing dirty
+  does not repaint**, and a dirty rectangle comes back as that rectangle
+  rather than as the whole layer. A compositor that repainted everything
+  every frame would produce identical pixels and an unusable browser, so no
+  amount of pixel checking can replace those two.
+
+  The rest are pixels, and are arithmetic the program works out for itself: a
+  layer replayed at identity with both rectangles' edges where they were
+  recorded, two 32x32 tiles in which the far rectangle lands at bitmap (8,8)
+  rather than at layer (40,40), a raster scale of two moving edges from 10..30
+  to 20..60, solid-colour analysis refusing and accepting, and `cc::TilingData`
+  putting a point in the right tile and overlapping tiles by one border texel.
+
+  A `-k 0` build of //cc failed in **546** places for M158 and in **68** for
+  M160, and the difference is what M159 removed. Of those 68, **47 were one
+  missing declaration**: Eigen's `SpecialFunctionsImpl.h` calls `lgammaf`, and
+  `lgamma` and `tgamma` had been the one documented gap in this libm's C99
+  set - left, since M99, until something asked. Something asked.
+
+  **WebRTC is off, and not because it failed to build**: 761 of its 762
+  targets and all 579 of XNNPACK's compiled for this target with no patch. It
+  is off because this machine has no camera and no audio input - a peer
+  connection with no media to put in it is a feature with nothing behind it,
+  which is the thing M65 refuses. The condition for turning it back on is
+  named rather than left as a mood: audio capture, or a camera.
+
 - **A libm for the format the hardware has.** `long double` on x86-64 is
   the x87's 80-bit extended type, and this libc has the C99 set for it -
   fifty-two functions, graded to the unit in the last place of a 64-bit

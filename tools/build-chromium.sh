@@ -391,8 +391,8 @@ angle_enable_vulkan = false
 
 # And ANGLE's third, which is the one that survives the other two. The Vulkan
 # LOADER - not the ICD behind it - reaches this build through //ui/gl:gl as a
-# data dependency, guarded by `use_ozone && angle_shared_libvulkan &&
-# !is_chromeos` with a comment about run-time search paths. Nothing links it;
+# data dependency, guarded by \`use_ozone && angle_shared_libvulkan &&
+# !is_chromeos\` with a comment about run-time search paths. Nothing links it;
 # ninja builds it because building //ui/gl builds what //ui/gl says should
 # sit beside it. It is 15 of the 23 failures a -k 0 build of this target had,
 # and all 15 are its loader_platform.h not knowing this platform - a header
@@ -416,6 +416,30 @@ angle_shared_libvulkan = false
 # It is a flag rather than a patch for M157's reason: an optional system
 # library that is not there is exactly the case the flag exists for.
 use_xkbcommon = false
+
+# WebRTC, and this is a decision about the MACHINE rather than about the
+# build. It is not off because it does not build: M160 measured that, and
+# 761 of WebRTC's 762 targets and all 579 of XNNPACK's compiled for this
+# target without a patch. It is off because WebRTC is real-time
+# COMMUNICATION - a peer connection carrying live audio and video from
+# capture devices - and this machine has no camera and no audio input. There
+# is an AC'97 output stream and nothing on the other side of it.
+#
+# A WebRTC that negotiates a peer connection and has no media to put in it is
+# the thing M65 refused: a feature with nothing behind it. The condition for
+# turning it back on is the one M65's rule implies - audio capture and a
+# camera on this machine, or a driver for either.
+#
+# is_p2p_enabled's own default is use_blink, which is "does this platform run
+# Blink" and says nothing about whether it has a microphone. Turning it off
+# takes WebRTC, XNNPACK, tflite and cpuinfo out of the graph - 1,392 targets
+# that the COMPOSITOR was reaching through //components/metrics/dwa, which is
+# a metrics library. That route is itself the evidence that the dependency is
+# incidental rather than meaningful.
+#
+# What it costs is named rather than hidden: no getUserMedia, no
+# RTCPeerConnection. Everything else //cc, //media and Blink do is unaffected.
+is_p2p_enabled = false
 
 # WebXR, and the reason it is here at all. //device/vr on is_linux deps on
 # //gpu/vulkan/init unconditionally, and that directory opens with

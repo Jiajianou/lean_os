@@ -1,0 +1,74 @@
+The wire format for something that is not there.
+
+M150 gated net::AddressTrackerLinux on has_linux_kernel: rtnetlink is a system
+call family rather than a platform family, and //net's own getifaddrs(3)
+fallback is what a POSIX platform without it is supposed to get. What that
+milestone did not reach is the MOJOM for the tracker's output - the traits
+that serialise net::AddressMapOwnerLinux::AddressMap across a process
+boundary, whose header opens with
+
+  #include <linux/rtnetlink.h>
+
+and which was 13 of the 68 failures a -k 0 build of //cc had. A platform
+without the tracker has no address map to send, so the traits and the mojom
+feature that enables the interface both belong on the far side of the same
+line.
+
+The feature is enabled in TWO places in the same file - once for
+mojom("url_loader_base") and once for mojom("mojom") - and gating one of them
+changes nothing, because the mojom parser is still handed
+--enable-feature use_network_interface_change_listener by the other and then
+stops on a struct whose definition that feature also gates. A feature is only
+off when the LAST site turning it on is. That cost this milestone a build,
+and it is the same shape as the libsync edge M159's patch 0040 found twice.
+
+Both mojom halves already carried a TODO saying is_linux is the wrong question
+there, for a different reason (lacros). This is the same observation from the
+other end.
+
+diff --git a/services/network/public/cpp/BUILD.gn b/services/network/public/cpp/BUILD.gn
+--- a/services/network/public/cpp/BUILD.gn
++++ b/services/network/public/cpp/BUILD.gn
+@@ -723,7 +723,12 @@
+     sources += [ "transferable_directory_fuchsia.cc" ]
+   }
+ 
+-  if (is_linux) {
++  # These are the wire format for what net::AddressTrackerLinux produces, and
++  # the header opens with #include <linux/rtnetlink.h>. M150 already gated the
++  # tracker itself on has_linux_kernel - rtnetlink is a system call family,
++  # not a platform family - so its mojom traits belong on the same side of
++  # that line. A platform without the tracker has nothing to send.
++  if (is_linux && has_linux_kernel) {
+     sources += [
+       "network_interface_change_listener_mojom_traits.cc",
+       "network_interface_change_listener_mojom_traits.h",
+diff --git a/services/network/public/mojom/BUILD.gn b/services/network/public/mojom/BUILD.gn
+--- a/services/network/public/mojom/BUILD.gn
++++ b/services/network/public/mojom/BUILD.gn
+@@ -659,7 +659,11 @@
+     enabled_features += [ "network_change_notifier_in_browser" ]
+   }
+ 
+-  if (is_linux) {
++  # has_linux_kernel for the reason the traits in ../cpp/BUILD.gn now carry:
++  # the interface this feature enables is rtnetlink's address map, and a
++  # platform without rtnetlink has no such map. Both places that enable it
++  # need it - a feature is only off when the LAST site turning it on is.
++  if (is_linux && has_linux_kernel) {
+     # TODO(crbug.com/40263697): Remove this once is_linux in the mojom IDL does
+     # not include lacros.
+     enabled_features += [ "use_network_interface_change_listener" ]
+@@ -2043,7 +2047,11 @@
+     }
+   }
+ 
+-  if (is_linux) {
++  # has_linux_kernel for the reason the traits in ../cpp/BUILD.gn now carry:
++  # the interface this feature enables is rtnetlink's address map, and a
++  # platform without rtnetlink has no such map. Both places that enable it
++  # need it - a feature is only off when the LAST site turning it on is.
++  if (is_linux && has_linux_kernel) {
+     # TODO(crbug.com/40263697): Remove this once is_linux in the mojom IDL does
+     # not include lacros.
+     enabled_features += [ "use_network_interface_change_listener" ]

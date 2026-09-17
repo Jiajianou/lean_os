@@ -841,11 +841,13 @@ float nextafterf(float x, float y) {
    implementations are M142's, and /bin/mathltest already grades all of them
    against MPFR on the machine.
 
-   lgamma and tgamma are not here, and are not in the long double family
-   either. That is the one gap in C99's set this library has, and it is a gap
-   rather than an oversight: nothing in this tree has asked for them, and a
-   Lanczos approximation written to fill a table is the kind of code M65's
-   rule is about. */
+   lgamma and tgamma used to be the one gap in C99's set here, left because
+   nothing in this tree had asked for them. M160: something did. Eigen's
+   SpecialFunctionsImpl.h calls lgammaf, tflite includes it, and the
+   //cc build stopped in forty-seven translation units on one missing
+   declaration. They are below, in double and float; lgammal and tgammal are
+   still absent, and their condition is the one math.h states - a program on
+   this machine that calls one - which lgammaf is not. */
 double nearbyint(double x) {
     return (double)nearbyintl((long double)x);
 }
@@ -942,6 +944,191 @@ float sinhf(float x) {
 
 float exp2f(float x) {
     return (float)exp2((double)x);
+}
+
+/* M160. The gamma function and its logarithm.
+ *
+ * Lanczos, g = 7 with nine coefficients, which is the approximation whose
+ * error over the right half plane is below one part in 10^15 - chosen over
+ * the six-coefficient set every textbook prints, which is good to ten digits
+ * and would have needed a tolerance in cases.tsv with an excuse beside it.
+ *
+ * Three things here are not the textbook version, and each was a failure
+ * against the host's libm before it was a decision.
+ *
+ * The left half plane is Euler's reflection, G(x)G(1-x) = pi/sin(pi x), and
+ * near a zero of lgamma - there is one between every pair of poles, where
+ * |G| passes through 1 - the two terms cancel to nothing. Graded relatively,
+ * a double evaluation was out by 6.7e-13 at x = -2.4559 on a value of
+ * 0.00165, which is 1.1e-15 ABSOLUTE and as good as a double can do. So the
+ * reflection is computed in long double and rounded once, which is M142's
+ * trick and buys the eleven extra mantissa bits the cancellation eats.
+ *
+ * The accuracy of the reflection is the accuracy of sin(pi x), and handing
+ * sin() the product pi*x is what loses it: for x = -20.3 the product is
+ * already rounded, and the sine of a rounded argument near a multiple of pi
+ * is wrong in its leading digits. The integer part is removed FIRST, where
+ * the subtraction is exact, and only the fraction is multiplied by pi - the
+ * same lesson M142 learned from the x87's fsin.
+ *
+ * And near zero neither the reflection nor Lanczos is right: G(x) = G(x+1)/x
+ * is, exactly, and it is what gives lgamma(DBL_TRUE_MIN) = 744.44 instead of
+ * an infinity out of a sine that underflowed.
+ */
+static const long double gamma_lanczos_g = 7.0L;
+
+static const long double gamma_lanczos[9] = {
+    0.99999999999980993L,
+    676.5203681218851L,
+    -1259.1392167224028L,
+    771.32342877765313L,
+    -176.61502916214059L,
+    12.507343278686905L,
+    -0.13857109526572012L,
+    9.9843695780195716e-6L,
+    1.5056327351493116e-7L,
+};
+
+/* sqrt(2*pi) and pi, to more digits than a double holds. */
+static const long double gamma_sqrt_two_pi = 2.50662827463100050242E0L;
+static const long double gamma_pi = 3.14159265358979323846L;
+
+static long double gamma_lanczos_sum(long double z) {
+    long double sum = gamma_lanczos[0];
+    for (int i = 1; i < 9; i++) {
+        sum += gamma_lanczos[i] / (z + (long double)i);
+    }
+    return sum;
+}
+
+/* sin(pi * x), with the integer part taken off before anything is multiplied
+   by pi. x - floorl(x) is exact, so the only rounding left is the one
+   multiplication and the sine itself. */
+static long double sin_pi_l(long double x) {
+    long double y = fabsl(x);
+    if (y >= 18446744073709551616.0L) {
+        /* Every value this large is an even integer. */
+        return x < 0.0L ? -0.0L : 0.0L;
+    }
+    long double whole = floorl(y);
+    long double fraction = y - whole;
+    long double s;
+    if (fraction == 0.0L) {
+        s = 0.0L;
+    } else if (fraction <= 0.25L) {
+        s = sinl(gamma_pi * fraction);
+    } else if (fraction < 0.75L) {
+        s = cosl(gamma_pi * (0.5L - fraction));
+    } else {
+        s = sinl(gamma_pi * (1.0L - fraction));
+    }
+    if (fmodl(whole, 2.0L) != 0.0L) {
+        s = -s;
+    }
+    return x < 0.0L ? -s : s;
+}
+
+/* log|G(x)| for x >= 0.5, which is the half Lanczos is written for. */
+static long double lgamma_right(long double x) {
+    long double z = x - 1.0L;
+    long double t = z + gamma_lanczos_g + 0.5L;
+    return logl(gamma_sqrt_two_pi) + (z + 0.5L) * logl(t) - t +
+           logl(gamma_lanczos_sum(z));
+}
+
+/* The largest x for which G(x) is finite in a double. G(171.7) overflows;
+   G(171.6) does not. */
+static const double gamma_overflow_at = 171.61447887182298;
+
+int signgam;
+
+double tgamma(double x) {
+    if (isnan(x)) {
+        return x;
+    }
+    if (isinf(x)) {
+        if (x > 0.0) {
+            return x;
+        }
+        return domain_error();
+    }
+    if (x == 0.0) {
+        /* A pole, and the sign of the zero decides which infinity. */
+        return pole_error(1.0 / x < 0.0);
+    }
+    if (x < 0.0 && x == floor(x)) {
+        return domain_error();
+    }
+    if (x > gamma_overflow_at) {
+        return overflow_error(0);
+    }
+
+    /* Near zero, G(x) = G(x+1)/x exactly, which is both more accurate than
+       anything else here and the only form that survives a subnormal. */
+    if (fabs(x) < 0.5) {
+        return tgamma(x + 1.0) / x;
+    }
+
+    if (x < 0.0) {
+        long double s = sin_pi_l((long double)x);
+        if (s == 0.0L) {
+            return overflow_error(0);
+        }
+        /* G(x) = pi / (sin(pi x) * G(1-x)), in long double so that the
+           product below does not round twice. */
+        long double magnitude = expl(lgamma_right(1.0L - (long double)x));
+        return (double)(gamma_pi / (s * magnitude));
+    }
+
+    long double z = (long double)x - 1.0L;
+    long double t = z + gamma_lanczos_g + 0.5L;
+    long double sum = gamma_lanczos_sum(z);
+    /* t^(z+0.5) overflows a double long before G does, and the x87's range
+       is wide enough that in long double it does not. */
+    long double value =
+        gamma_sqrt_two_pi * sum * powl(t, z + 0.5L) * expl(-t);
+    return (double)value;
+}
+
+double lgamma(double x) {
+    signgam = 1;
+    if (isnan(x)) {
+        return x;
+    }
+    if (isinf(x)) {
+        return INFINITY;
+    }
+    if (x == 0.0 || (x < 0.0 && x == floor(x))) {
+        return pole_error(0);
+    }
+
+    /* G(x) = G(x+1)/x near zero, for the reason tgamma gives. */
+    if (fabs(x) < 0.5) {
+        double result = lgamma(x + 1.0) - log(fabs(x));
+        signgam = x < 0.0 ? -1 : 1;
+        return result;
+    }
+
+    if (x < 0.0) {
+        long double s = sin_pi_l((long double)x);
+        signgam = s < 0.0L ? -1 : 1;
+        /* log(pi/|sin(pi x)|) - log|G(1-x)|, in long double and rounded once.
+           The two terms cancel to nothing at each zero of lgamma, and this is
+           the eleven bits that buys. */
+        long double value = logl(gamma_pi / fabsl(s)) -
+                            lgamma_right(1.0L - (long double)x);
+        return (double)value;
+    }
+
+    return (double)lgamma_right((long double)x);
+}
+
+float tgammaf(float x) {
+    return (float)tgamma((double)x);
+}
+
+float lgammaf(float x) {
+    return (float)lgamma((double)x);
 }
 
 float expm1f(float x) {

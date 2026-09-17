@@ -1,5 +1,7 @@
 #include <sys/mman.h>
 #include <errno.h>
+#include <stdint.h>
+#include <unistd.h>
 
 #include "syscall_wrappers.h"
 
@@ -27,7 +29,11 @@ int mincore(void *address, size_t length, unsigned char *vector) {
         return -1;
     }
     if (sys_mincore(address, length, vector) != 0) {
-        errno = EINVAL;
+        /* ENOMEM is what mincore(2) reports for a range containing unmapped
+           pages, and since M160 that is the case this kernel refuses - the
+           alignment and length errors are caught above, so what is left here
+           is a range that is not all mapped. */
+        errno = ENOMEM;
         return -1;
     }
     return 0;
@@ -77,4 +83,65 @@ int memfd_seals(int fd) {
         return -1;
     }
     return (int)r;
+}
+
+
+/* mlock(2) and munlock(2), and why succeeding here is the truthful answer
+ * rather than the convenient one.
+ *
+ * What mlock promises is that the pages in a range are resident and will stay
+ * resident. The second half this kernel keeps for nothing: there is no swap
+ * device, no page reclaim and no eviction path, so a page that is resident
+ * stays resident until the process unmaps it or exits. The first half is not
+ * free, because this kernel maps lazily - M91's address space faults a page
+ * in when it is first touched - so a range that has never been written has no
+ * pages behind it yet, and an mlock that returned 0 without doing anything
+ * would be promising residency for memory that is not there.
+ *
+ * So this touches every page in the range, which is exactly what makes the
+ * promise true, and validates the range with mincore first so that an
+ * unmapped argument is an error rather than a fault. mincore is the right
+ * instrument for that: it is the call that answers "is this range mapped, and
+ * which of it is resident", and it already refuses a range that is not.
+ *
+ * munlock then has nothing to undo, and says so by succeeding.
+ *
+ * tflite's xnnpack delegate is what asked (M160), and it treats a failure as
+ * "this buffer will not be locked" rather than as fatal - so a lie here would
+ * have cost nothing visible and been a lie anyway.
+ */
+static int mlock_range(const void *address, size_t length, int touch) {
+    if (length == 0) {
+        return 0;
+    }
+    uintptr_t start = (uintptr_t)address & ~(uintptr_t)(4096u - 1);
+    uintptr_t end = ((uintptr_t)address + length + 4096u - 1) &
+                    ~(uintptr_t)(4096u - 1);
+    size_t pages = (size_t)((end - start) / 4096u);
+
+    /* A page at a time, so that a range of any size needs no allocation for
+       the vector mincore fills in. */
+    for (size_t i = 0; i < pages; i++) {
+        unsigned char resident = 0;
+        if (mincore((void *)(start + i * 4096u), 4096u, &resident) != 0) {
+            errno = ENOMEM;
+            return -1;
+        }
+        if (touch) {
+            volatile const unsigned char *page =
+                (volatile const unsigned char *)(start + i * 4096u);
+            (void)*page;
+        }
+    }
+    return 0;
+}
+
+int mlock(const void *address, size_t length) {
+    return mlock_range(address, length, 1);
+}
+
+int munlock(const void *address, size_t length) {
+    /* Nothing was pinned that can be released, because nothing evicts. The
+       range is still checked, so an unmapped argument is still an error. */
+    return mlock_range(address, length, 0);
 }

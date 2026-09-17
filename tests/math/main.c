@@ -20,6 +20,7 @@ double lean_sinh(double), lean_cosh(double), lean_tanh(double);
 double lean_expm1(double), lean_log1p(double);
 double lean_asinh(double), lean_acosh(double), lean_atanh(double);
 double lean_erf(double), lean_erfc(double);
+double lean_tgamma(double), lean_lgamma(double);
 double lean_cbrt(double), lean_exp2(double);
 double lean_fma(double, double, double);
 double lean_pow(double, double), lean_atan2(double, double);
@@ -123,6 +124,7 @@ float lean_sinhf(float), lean_exp2f(float), lean_expm1f(float);
 float lean_logf(float), lean_log10f(float), lean_log1pf(float);
 float lean_log2f(float), lean_logbf(float), lean_cbrtf(float);
 float lean_erff(float), lean_erfcf(float), lean_nearbyintf(float);
+float lean_tgammaf(float), lean_lgammaf(float);
 float lean_rintf(float), lean_truncf(float);
 float lean_powf(float, float), lean_fmodf(float, float);
 float lean_remainderf(float, float), lean_copysignf(float, float);
@@ -185,6 +187,8 @@ static const struct entry TABLE[] = {
     {.name = "logbf", .oursf = lean_logbf, .theirsf = logbf},
     {.name = "cbrtf", .oursf = lean_cbrtf, .theirsf = cbrtf},
     {.name = "erff", .oursf = lean_erff, .theirsf = erff},
+    {.name = "tgammaf", .oursf = lean_tgammaf, .theirsf = tgammaf},
+    {.name = "lgammaf", .oursf = lean_lgammaf, .theirsf = lgammaf},
     {.name = "erfcf", .oursf = lean_erfcf, .theirsf = erfcf},
     {.name = "nearbyintf", .oursf = lean_nearbyintf, .theirsf = nearbyintf},
     {.name = "rintf", .oursf = lean_rintf, .theirsf = rintf},
@@ -234,6 +238,8 @@ static const struct entry TABLE[] = {
     {.name = "acosh", .ours1 = lean_acosh, .theirs1 = acosh},
     {.name = "atanh", .ours1 = lean_atanh, .theirs1 = atanh},
     {.name = "erf", .ours1 = lean_erf, .theirs1 = erf},
+    {.name = "tgamma", .ours1 = lean_tgamma, .theirs1 = tgamma},
+    {.name = "lgamma", .ours1 = lean_lgamma, .theirs1 = lgamma},
     {.name = "erfc", .ours1 = lean_erfc, .theirs1 = erfc},
     {.name = "pow", .ours2 = lean_pow, .theirs2 = pow},
     {.name = "atan2", .ours2 = lean_atan2, .theirs2 = atan2},

@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/random.h>
 #include <pwd.h>
@@ -823,6 +824,97 @@ int main(void) {
             char negative[] = "/tmp/libctest-msXXXXXX";
             if (mkstemps(negative, -1) >= 0) {
                 fail("mkstemps accepted a negative suffix length");
+            }
+        }
+    }
+
+    /* M160. The four calls //cc's graph asked this libc for, and the two of
+       them whose honest answer is "no" are graded on saying so rather than on
+       succeeding. */
+    {
+        unsigned int a = 12345;
+        unsigned int b = 12345;
+        int first = rand_r(&a);
+        int second = rand_r(&b);
+        if (first != second || a != b) {
+            fail("rand_r is not a function of the state it was handed");
+        }
+        int third = rand_r(&a);
+        if (third == first) {
+            fail("rand_r did not advance the state it was handed");
+        }
+        srand(12345);
+        if (rand() != first) {
+            fail("rand_r and rand are not the same generator");
+        }
+        if (rand_r((unsigned int *)0) != 0 || errno != EINVAL) {
+            fail("rand_r accepted a null state");
+        }
+
+        /* flock: there is no file locking in this kernel and an flock that
+           returned 0 would claim exclusive access to a file anybody can
+           open. M65's rule - a truthful failure, not a no-op. */
+        int fd = open("/tmp/libctest-flock", O_WRONLY | O_CREAT | O_TRUNC);
+        if (fd < 0) {
+            fail("could not make a file to not-lock");
+        } else {
+            if (flock(fd, LOCK_EX) != -1 || errno != ENOSYS) {
+                fail("flock claimed a lock this kernel cannot hold");
+            }
+            close(fd);
+            unlink("/tmp/libctest-flock");
+        }
+        if (flock(-1, LOCK_EX) != -1 || errno != EBADF) {
+            fail("flock did not refuse a bad descriptor as a bad descriptor");
+        }
+
+        /* mlock: the promise is residency, and this kernel keeps it. The
+           check is that it is kept for memory that has never been touched -
+           which is where an mlock that returned 0 and did nothing would be
+           lying - and that an unmapped range is refused. */
+        size_t span = 64 * 4096;
+        void *pages = mmap(0, span, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (pages == MAP_FAILED) {
+            fail("could not map pages to lock");
+        } else {
+            if (mlock(pages, span) != 0) {
+                fail("mlock refused a range this process had just mapped");
+            }
+            unsigned char resident[64];
+            if (mincore(pages, span, resident) != 0) {
+                fail("mincore refused a range mlock had just accepted");
+            } else {
+                int missing = 0;
+                for (int i = 0; i < 64; i++) {
+                    if (!(resident[i] & 1)) {
+                        missing++;
+                    }
+                }
+                if (missing != 0) {
+                    printf("libctest: %d of 64 pages are not resident after "
+                           "mlock\n", missing);
+                    fail("mlock returned 0 for pages that are not there");
+                }
+            }
+            if (munlock(pages, span) != 0) {
+                fail("munlock refused what mlock accepted");
+            }
+            munmap(pages, span);
+            /* And the distinction this found in the kernel (M160): mincore
+               used to answer "not resident" for a range nobody had mapped,
+               because it read the page table and an untouched page of a live
+               mapping is absent from it for the same reason. They are
+               different answers, and this is the one that matters - it is
+               how a caller asks "may I touch this" without finding out by
+               faulting. mlock is what needed it, and got a page fault
+               instead. */
+            unsigned char after[64];
+            if (mincore(pages, span, after) != -1 || errno != ENOMEM) {
+                fail("mincore answered for a range that had been unmapped");
+            }
+            if (mlock(pages, span) != -1 || errno != ENOMEM) {
+                fail("mlock accepted a range that had been unmapped");
             }
         }
     }

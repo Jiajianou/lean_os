@@ -135,3 +135,7 @@ frexpf	-	-	-	-	-	M155: takes an int*, like frexp's row
 modff	-	-	-	-	-	M155: takes a float*, like modf's row
 remquof	-	-	-	-	-	M155: takes an int*, like remquo's row
 nexttowardf	-	-	-	-	-	M155: its second argument is a long double, which this host has not got
+tgamma	1	-4.75	20	1601	1e-13	M160: Lanczos g=7, and the negative half is Euler's reflection - so this range grades both sides and the sin(pi x) reduction between them
+lgamma	1	-5.5	20	1601	1e-12	M160: 3.54e-15 away from lgamma's ZEROS - at x=1, x=2 and one between each pair of negative poles. There the reflection and the Lanczos term cancel two values near 1.15 down to 0.0017, and the worst is 6.71e-13 relative at x=-2.4559 on an ABSOLUTE error of 1.1e-15. No formula avoids it; only more mantissa does, and the long double this code computes in is 80-bit on the target and 64-bit on this arm64 host - M142 wrote that limitation down about this harness
+tgammaf	f	-4.75	20	1601	1.2e-7	M160: one float ulp - Eigen is what asked for the float pair
+lgammaf	f	-5.5	20	1601	1.2e-7	M160: one float ulp

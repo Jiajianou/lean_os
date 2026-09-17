@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <termios.h>
 #include <unistd.h>
@@ -1031,4 +1032,34 @@ int getentropy(void *buffer, size_t length) {
         return -1;
     }
     return sys_getrandom(buffer, length, 0) == (long)length ? 0 : -1;
+}
+
+
+/* flock(2), and a refusal rather than a no-op.
+ *
+ * There is no file locking in this kernel - no advisory lock table, nothing
+ * for a second process to block on - and an flock that returned 0 would tell
+ * its caller it holds exclusive access to a file that anybody can open. That
+ * is the shape M65 refused for chmod and the reasoning is the same: a machine
+ * with one answer reports one answer, and the answer here is no.
+ *
+ * Every caller in the ported software this has met checks the result.
+ * tflite's serialization.cc is the one that asked (M160): it logs "Could not
+ * flock" and reports a read error, which is the correct behaviour on a
+ * machine that cannot lock a file, and is what it would do on Linux if the
+ * filesystem did not support locking either.
+ *
+ * The condition for building it: a second process on this machine that has
+ * to coordinate with a first through a file rather than through a pipe, a
+ * socket or shared memory - all three of which are here and all three of
+ * which are better at it.
+ */
+int flock(int descriptor, int operation) {
+    (void)operation;
+    if (descriptor < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    errno = ENOSYS;
+    return -1;
 }
