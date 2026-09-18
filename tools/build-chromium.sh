@@ -585,6 +585,57 @@ use_crash_key_stubs = true
 # already here - M65's capability set, assigned from the name a program was
 # spawned by and able only to shrink - and Chromium's own seccomp is not.
 enable_vrp_flags = false
+
+# D-Bus, which is 32 of the 86 failures a -k 0 build of //content had and the
+# largest single class in it.
+#
+#   build/config/features.gni   use_dbus = is_linux || is_chromeos
+#
+# the same platform-family default this port has now met more times than it
+# has met anything else. What is behind it is libdbus - the Linux desktop's
+# message bus - and what Chromium uses it for is the desktop around a
+# browser rather than the browser: the XDG portals (file chooser, screen
+# capture), org.freedesktop.login1 for suspend and resume, systemd, the
+# MPRIS media controls, the power monitor, the geolocation and battery
+# services, and the shell's own file dialogs.
+#
+# There is no session bus on this machine and no system bus, and nothing to
+# start one - the services those names refer to are a desktop this OS has
+# written itself. Building the client half would be M65's rule broken in the
+# most literal way available: a bus connection that can never connect, wired
+# to a browser that would then ask it for a file chooser.
+#
+# The desktop integration this OS actually has is its own: the compositor,
+# the window manager and the shell are first-party by M125's rule, and a
+# file dialog here is /bin/file_manager rather than a portal.
+use_dbus = false
+
+# The on-device model service, and the fourth time this port has watched the
+# GPU stack come back through a machine-learning feature.
+#
+#   services/on_device_model/on_device_model.gni
+#     use_on_device_model_service = is_win || is_mac || is_linux || is_ios ||
+#                                   is_cbx
+#
+# M158 removed SwiftShader, the Vulkan loader and Dawn from //cc's graph;
+# M159 removed ANGLE's two routes to the same ICD; M161 found webnn_use_litert
+# bringing all of it back into Blink. This is the same shape once more:
+# //content/public/app -> //content/app -> //content/utility ->
+# //content/utility/on_device_model:on_device_model_sandbox_init ->
+# //third_party/dawn/src/dawn/native, which DATA-deps the Vulkan loader,
+# which data-deps SwiftShader and the validation layers. 83 of the 88
+# failures the first link of this program had were those three.
+#
+# It is a data dependency, so nothing would have linked it - and that is
+# precisely why it has to be turned off rather than tolerated: ninja builds
+# 54 objects of subzero, a second run-time code generator, so that they can
+# sit beside a binary that never opens them.
+#
+# The flag's own comment says what the reason is on every other platform that
+# leaves it out, and it is the reason here twice over: "Exclude it on other
+# platforms due to binary size." A large language model that runs on the GPU,
+# on a machine with no GPU and a 2 GiB image.
+use_on_device_model_service = false
 ARGS
 
 PATH="$DEPOT:$DEPOT/.cipd_bin:$PATH"

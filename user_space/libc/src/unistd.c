@@ -1063,3 +1063,31 @@ int flock(int descriptor, int operation) {
     errno = ENOSYS;
     return -1;
 }
+
+/*
+ * pause(2). Suspend the caller until a signal is delivered.
+ *
+ * POSIX is unusually specific about the return: pause() returns only when a
+ * signal was caught and the handler returned, and it then returns -1 with
+ * errno EINTR. There is no success value, so a pause() that returned 0
+ * because it had nothing to wait on would be a lie a caller cannot detect.
+ *
+ * SYS_waitfds is already exactly this primitive and needed nothing new. A
+ * negative timeout is an infinite deadline there, a count of zero is a wait
+ * on nothing, and its loop ends with
+ *
+ *     if (scheduler_signal_pending()) return -2;
+ *
+ * which is the condition pause() is defined in terms of. M160's sleep_ms
+ * reaches the same syscall with a finite timeout.
+ *
+ * Chromium's content/common/content_switches_internal.cc is what asked
+ * (M163): WaitForDebugger() installs a SIGUSR1 handler and pauses, which is
+ * how a developer attaches to a renderer before it runs anything.
+ */
+int pause(void) {
+    int descriptor = -1;
+    (void)sys_waitfds(&descriptor, 0, -1);
+    errno = EINTR;
+    return -1;
+}

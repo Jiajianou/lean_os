@@ -1,0 +1,818 @@
+seccomp, namespaces and the zygote are Linux's kernel.
+
+M144 drew the line between being in the Linux FAMILY and having Linux's own
+KERNEL, and //base, V8, //net and the display compositor have each met it
+since. //content meets it in the place the distinction was invented for: the
+sandbox.
+
+A -k 0 build of //content failed in 86 places, and about thirty of them were
+seccomp-bpf, the CLONE_NEW* namespaces, the setuid helper and the zygote.
+None of that is a property of the Linux family; all of it is prctl(2),
+seccomp(2), clone(2) and Linux's own system call numbers. Chromium already
+has the flags that ask:
+
+  use_seccomp_bpf          //sandbox/features.gni, was is_linux || ...
+  compile_credentials      //sandbox/linux/BUILD.gn, declare_args
+  compile_syscall_broker   //sandbox/linux/BUILD.gn, declare_args
+  compile_suid_client      //sandbox/linux/BUILD.gn, declare_args
+  use_zygote               //content/public/common/zygote/features.gni
+
+and content/public/common/zygote/zygote_handle.h opens with
+
+  #error "Can not use zygote without USE_ZYGOTE"
+
+which is Chromium saying that a platform answering no is a configuration it
+supports rather than an omission. The zygote is a fork server that clones
+with CLONE_NEWPID and CLONE_NEWUSER so that a renderer starts from an address
+space which has already paid for the shared libraries; what a platform
+without one gets is what --no-zygote gets on a platform with one, and M149
+already proved fork, exec and descriptor remapping work on this machine.
+
+THE PRE-SANDBOX HOOKS
+
+Five of them - the GPU process's, the audio service's, the speech
+recognition service's, the screen AI service's and the network service's -
+exist to open or dlopen what a service needs BEFORE seccomp-bpf forbids it.
+Where there is no door there is nothing to do first.
+
+AND TWO REFUSALS RATHER THAN RESULTS
+
+sandbox::policy::Sandbox::IsProcessSandboxed() answers false here, and
+RendererMainPlatformDelegate::EnableSandbox() returns false. Both are the
+truthful answer and neither is a placeholder.
+
+It is worth being exact about why this is not a gap. A process on this
+machine IS confined: it carries a capability set assigned from a manifest at
+spawn, and that set can only ever shrink. What is missing is not the
+mechanism but the decision - nothing has yet been asked to spawn a renderer
+with less authority than the browser - and a browser that answered yes on the
+strength of a set nobody reduced would be making a claim nothing can check.
+IsProcessSandboxed is what about:sandbox reports and what several DCHECKs
+believe. That is M65's rule.
+
+The condition for changing both is nameable: the launcher spawning a renderer
+with strictly less authority than itself, and these functions being able to
+ask what this process was given.
+
+inotify(7) comes with them, in content/browser/BUILD.gn: content already
+ships file_path_watcher_stub.cc for a platform without a file watcher, and
+this keeps it rather than replacing it with the inotify one.
+
+diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
+index fc72f43ec0..53468a510c 100644
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -2468,28 +2468,52 @@ source_set("browser") {
+   }
+ 
+   if (is_linux || is_chromeos) {
+-    sources -=
+-        [ "file_system_access/file_path_watcher/file_path_watcher_stub.cc" ]
++    # inotify(7) is Linux's own kernel rather than the Linux family - the same
++    # line //sandbox/features.gni now draws for seccomp-bpf - and content
++    # already ships the answer for a platform without a file watcher.
++    # file_path_watcher_stub.cc is in the unconditional list above and is what
++    # this block otherwise takes away; a platform with no inotify keeps it,
++    # and a File System Access watch there reports that it cannot watch rather
++    # than silently never firing.
++    if (has_linux_kernel) {
++      sources -=
++          [ "file_system_access/file_path_watcher/file_path_watcher_stub.cc" ]
++      sources += [
++        "file_system_access/file_path_watcher/file_path_watcher_inotify.cc",
++        "file_system_access/file_path_watcher/file_path_watcher_inotify.h",
++      ]
++    }
+ 
+     sources += [
+       "child_process_launcher_helper_linux.cc",
+       "child_thread_type_switcher_linux.cc",
+       "child_thread_type_switcher_linux.h",
+-      "file_system_access/file_path_watcher/file_path_watcher_inotify.cc",
+-      "file_system_access/file_path_watcher/file_path_watcher_inotify.h",
+       "font_access/font_enumeration_data_source_linux.cc",
+       "font_access/font_enumeration_data_source_linux.h",
+       "font_service.cc",
+       "font_service.h",
+       "memory/swap_metrics_driver_impl_linux.cc",
+       "memory/swap_metrics_driver_impl_linux.h",
+-      "sandbox_host_linux.cc",
+-      "sandbox_host_linux.h",
+-      "sandbox_ipc_linux.cc",
+-      "sandbox_ipc_linux.h",
+-      "zygote_host/zygote_host_impl_linux.cc",
+-      "zygote_host/zygote_host_impl_linux.h",
+     ]
++
++    # The zygote host and the sandbox IPC channel it speaks over. use_zygote
++    # is what content already asks everywhere else about these - and
++    # content/public/common/zygote/zygote_handle.h opens with
++    #
++    #   #error "Can not use zygote without USE_ZYGOTE"
++    #
++    # which is Chromium saying that this is the question, and that a platform
++    # answering no is a configuration it supports rather than an omission.
++    if (use_zygote) {
++      sources += [
++        "sandbox_host_linux.cc",
++        "sandbox_host_linux.h",
++        "sandbox_ipc_linux.cc",
++        "sandbox_ipc_linux.h",
++        "zygote_host/zygote_host_impl_linux.cc",
++        "zygote_host/zygote_host_impl_linux.h",
++      ]
++    }
+     if (use_linux_video_acceleration) {
+       sources += [
+         "media/video_encode_accelerator_provider_launcher.cc",
+diff --git a/content/browser/child_process_launcher_helper_linux.cc b/content/browser/child_process_launcher_helper_linux.cc
+index 9e746e11a5..8ecd0f1fee 100644
+--- a/content/browser/child_process_launcher_helper_linux.cc
++++ b/content/browser/child_process_launcher_helper_linux.cc
+@@ -11,10 +11,13 @@
+ #include "build/build_config.h"
+ #include "content/browser/child_process_launcher.h"
+ #include "content/browser/child_process_launcher_helper_posix.h"
+-#include "content/browser/sandbox_host_linux.h"
+ #include "content/browser/sandboxed_process_launcher_delegate.h"
++#include "content/public/common/zygote/zygote_buildflags.h"
++#if BUILDFLAG(USE_ZYGOTE)
++#include "content/browser/sandbox_host_linux.h"
+ #include "content/browser/zygote_host/zygote_host_impl_linux.h"
+ #include "content/common/zygote/zygote_communication_linux.h"
++#endif
+ #include "content/public/browser/child_process_launcher_utils.h"
+ #include "content/public/browser/content_browser_client.h"
+ #include "content/public/common/content_client.h"
+@@ -22,9 +25,11 @@
+ #include "content/public/common/content_features.h"
+ #include "content/public/common/content_switches.h"
+ #include "content/public/common/result_codes.h"
++#if BUILDFLAG(USE_ZYGOTE)
+ #include "content/public/common/zygote/sandbox_support_linux.h"
+ #include "content/public/common/zygote/zygote_handle.h"
+ #include "sandbox/policy/linux/sandbox_linux.h"
++#endif
+ 
+ namespace content {
+ namespace internal {
+@@ -49,29 +54,48 @@ ChildProcessLauncherHelper::GetFilesToMap() {
+ }
+ 
+ bool ChildProcessLauncherHelper::IsUsingLaunchOptions() {
++#if BUILDFLAG(USE_ZYGOTE)
+   return !GetZygoteForLaunch();
++#else
++  return true;
++#endif
+ }
+ 
+ bool ChildProcessLauncherHelper::BeforeLaunchOnLauncherThread(
+     PosixFileDescriptorInfo& files_to_register,
+     base::LaunchOptions* options) {
+   if (options) {
++#if BUILDFLAG(USE_ZYGOTE)
+     CHECK(!GetZygoteForLaunch(), base::NotFatalUntil::M159);
++#endif
+     // Convert FD mapping to FileHandleMappingVector
+     options->fds_to_remap = files_to_register.GetMappingWithIDAdjustment(
+         base::GlobalDescriptors::kBaseDescriptor);
+ 
++#if BUILDFLAG(USE_ZYGOTE)
++    // The SandboxHostLinux socket is how a renderer that cannot open files
++    // asks the browser for a font and for the time zone. It is part of the
++    // same mechanism as the zygote - sandbox_ipc_linux.cc answers on the
++    // other end - so a platform without one has no such channel to hand
++    // over, and a renderer there opens fonts through fontconfig itself.
+     if (GetProcessType() == switches::kRendererProcess) {
+       const int sandbox_fd = SandboxHostLinux::GetInstance()->GetChildSocket();
+       options->fds_to_remap.emplace_back(sandbox_fd, GetSandboxFD());
+     }
++#endif
+ 
+     options->environment = delegate_->GetEnvironment();
+   } else {
++#if BUILDFLAG(USE_ZYGOTE)
+     CHECK(GetZygoteForLaunch(), base::NotFatalUntil::M159);
+     // Environment variables could be supported in the future, but are not
+     // currently supported when launching with the zygote.
+     CHECK(delegate_->GetEnvironment().empty(), base::NotFatalUntil::M159);
++#else
++    // IsUsingLaunchOptions() is unconditionally true without a zygote, so
++    // there are always options and this arm is unreachable.
++    NOTREACHED();
++#endif
+   }
+ 
+   return true;
+@@ -85,6 +109,7 @@ ChildProcessLauncherHelper::LaunchProcessOnLauncherThread(
+     int* launch_result) {
+   *is_synchronous_launch = true;
+   Process process;
++#if BUILDFLAG(USE_ZYGOTE)
+   ZygoteCommunication* zygote_handle = GetZygoteForLaunch();
+   if (zygote_handle) {
+     // TODO(crbug.com/40448989): If chrome supported multiple zygotes they could
+@@ -109,10 +134,15 @@ ChildProcessLauncherHelper::LaunchProcessOnLauncherThread(
+     process.process = base::Process(handle);
+     process.zygote = zygote_handle;
+   } else {
++#endif  // BUILDFLAG(USE_ZYGOTE)
++    // Every child is launched this way when there is no zygote, which is what
++    // --no-zygote does on a platform that has one.
+     process.process = base::LaunchProcess(*command_line(), *options);
+     *launch_result = process.process.IsValid() ? LAUNCH_RESULT_SUCCESS
+                                                : LAUNCH_RESULT_FAILURE;
++#if BUILDFLAG(USE_ZYGOTE)
+   }
++#endif
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+   process_id_ = process.process.Pid();
+@@ -136,10 +166,13 @@ ChildProcessTerminationInfo ChildProcessLauncherHelper::GetTerminationInfo(
+     const ChildProcessLauncherHelper::Process& process,
+     bool known_dead) {
+   ChildProcessTerminationInfo info;
++#if BUILDFLAG(USE_ZYGOTE)
+   if (process.zygote) {
+     info.status = process.zygote->GetTerminationStatus(
+         process.process.Handle(), known_dead, &info.exit_code);
+-  } else if (known_dead) {
++  } else  // NOLINT(readability/braces)
++#endif
++      if (known_dead) {
+     info.status = base::GetKnownDeadTerminationStatus(process.process.Handle(),
+                                                       &info.exit_code);
+   } else {
+@@ -165,13 +198,15 @@ void ChildProcessLauncherHelper::ForceNormalProcessTerminationSync(
+   CHECK(CurrentlyOnProcessLauncherTaskRunner(), base::NotFatalUntil::M159);
+   process.process.Terminate(RESULT_CODE_NORMAL_EXIT, false);
+   // On POSIX, we must additionally reap the child.
++#if BUILDFLAG(USE_ZYGOTE)
+   if (process.zygote) {
+     // If the renderer was created via a zygote, we have to proxy the reaping
+     // through the zygote process.
+     process.zygote->EnsureProcessTerminated(process.process.Handle());
+-  } else {
+-    base::EnsureProcessTerminated(std::move(process.process));
++    return;
+   }
++#endif
++  base::EnsureProcessTerminated(std::move(process.process));
+ }
+ 
+ void ChildProcessLauncherHelper::SetProcessPriorityOnLauncherThread(
+@@ -183,11 +218,13 @@ void ChildProcessLauncherHelper::SetProcessPriorityOnLauncherThread(
+   }
+ }
+ 
++#if BUILDFLAG(USE_ZYGOTE)
+ ZygoteCommunication* ChildProcessLauncherHelper::GetZygoteForLaunch() {
+   return base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kNoZygote)
+              ? nullptr
+              : delegate_->GetZygote();
+ }
++#endif  // BUILDFLAG(USE_ZYGOTE)
+ 
+ base::File OpenFileToShare(const base::FilePath& path,
+                            base::MemoryMappedFile::Region* region) {
+diff --git a/content/common/BUILD.gn b/content/common/BUILD.gn
+index 986ccc4601..da02469b41 100644
+--- a/content/common/BUILD.gn
++++ b/content/common/BUILD.gn
+@@ -373,22 +373,33 @@ source_set("common") {
+   }
+ 
+   if (is_linux || is_chromeos) {
+-    sources += [
+-      "gpu_pre_sandbox_hook_linux.cc",
+-      "gpu_pre_sandbox_hook_linux.h",
+-    ]
+-    public_deps += [ "//sandbox/policy" ]
++    # fontconfig stays on this side of the line: font_list_fontconfig.cc is in
++    # the unconditional sources above and has nothing to do with the sandbox.
+     deps += [
+-      ":sandbox_support_linux",
+       "//media/gpu:buildflags",
+-      "//sandbox/linux:sandbox_services",
+-      "//sandbox/linux:seccomp_bpf",
+-      "//sandbox/policy:chromecast_sandbox_allowlist_buildflags",
+       "//third_party/fontconfig",
+     ]
+     if (use_v4l2_codec) {
+       deps += [ "//media/gpu/v4l2" ]
+     }
++
++    # The GPU process's pre-sandbox hook exists to open the files that process
++    # will need BEFORE seccomp-bpf closes the door on open(2). Where there is
++    # no door there is nothing to do first, so this asks has_linux_kernel -
++    # the same question //sandbox/features.gni now asks.
++    if (has_linux_kernel) {
++      sources += [
++        "gpu_pre_sandbox_hook_linux.cc",
++        "gpu_pre_sandbox_hook_linux.h",
++      ]
++      public_deps += [ "//sandbox/policy" ]
++      deps += [
++        ":sandbox_support_linux",
++        "//sandbox/linux:sandbox_services",
++        "//sandbox/linux:seccomp_bpf",
++        "//sandbox/policy:chromecast_sandbox_allowlist_buildflags",
++      ]
++    }
+   }
+ 
+   if (use_zygote) {
+diff --git a/content/public/common/zygote/features.gni b/content/public/common/zygote/features.gni
+index 5f8775d578..4233d3115f 100644
+--- a/content/public/common/zygote/features.gni
++++ b/content/public/common/zygote/features.gni
+@@ -2,4 +2,17 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
+-use_zygote = is_posix && !is_android && !is_apple
++# has_linux_kernel as well, for the reason //sandbox/features.gni now carries
++# for use_seccomp_bpf.
++#
++# The zygote is not a sandbox and it is not portable POSIX either: it is a
++# fork server that clone(2)s with CLONE_NEWPID and CLONE_NEWUSER, talks to
++# the SUID helper, and exists so that a renderer starts from an address space
++# that has already paid for the shared libraries and the ICU data. Both
++# halves of that are Linux's own kernel.
++#
++# What a platform without it gets is what Chromium itself gets from
++# --no-zygote: every child process launched directly, through the
++# fork/exec/descriptor-remapping path //base already has. It costs startup
++# time and nothing else.
++use_zygote = is_posix && !is_android && !is_apple && has_linux_kernel
+diff --git a/content/renderer/renderer_main_platform_delegate_linux.cc b/content/renderer/renderer_main_platform_delegate_linux.cc
+index d62e01f52e..c56d44c65e 100644
+--- a/content/renderer/renderer_main_platform_delegate_linux.cc
++++ b/content/renderer/renderer_main_platform_delegate_linux.cc
+@@ -10,10 +10,13 @@
+ #include "base/check_op.h"
+ #include "base/command_line.h"
+ #include "base/files/file_util.h"
++#include "build/build_config.h"
+ #include "content/public/common/content_features.h"
+ #include "content/public/common/content_switches.h"
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "sandbox/policy/sandbox.h"
+ #include "sandbox/policy/sandbox_type.h"
++#endif
+ 
+ namespace content {
+ 
+@@ -30,6 +33,21 @@ void RendererMainPlatformDelegate::PlatformUninitialize() {
+ }
+ 
+ bool RendererMainPlatformDelegate::EnableSandbox() {
++#if !BUILDFLAG(HAS_LINUX_KERNEL)
++  // Everything below this line is Linux's own kernel - the setuid helper, the
++  // namespaces and seccomp-bpf - and a platform in the Linux family without
++  // them cannot enter any of it. Reporting that it did would be worse than
++  // useless: about:sandbox would say this renderer is confined, and the
++  // CHECKs further down exist precisely because Chromium does not take that
++  // claim on trust.
++  //
++  // Returning false is the truthful answer while the process that launches a
++  // renderer is the one that decides what it may do, and has not been asked
++  // to decide anything yet. The condition for this becoming true is nameable:
++  // the launcher spawning a renderer with strictly less authority than itself
++  // and this function being able to ask what it was given.
++  return false;
++#else
+   // The setuid sandbox is started in the zygote process: zygote_main_linux.cc
+   // https://chromium.googlesource.com/chromium/src/+/main/docs/linux/suid_sandbox.md
+   //
+@@ -67,6 +85,7 @@ bool RendererMainPlatformDelegate::EnableSandbox() {
+ #endif  // __x86_64__
+ 
+   return true;
++#endif  // !BUILDFLAG(HAS_LINUX_KERNEL)
+ }
+ 
+ }  // namespace content
+diff --git a/content/utility/BUILD.gn b/content/utility/BUILD.gn
+index a8e77670fb..f99f1497b8 100644
+--- a/content/utility/BUILD.gn
++++ b/content/utility/BUILD.gn
+@@ -48,6 +48,7 @@ source_set("utility") {
+     "//content/public/utility:utility_sources",
+     "//content/services/devtools_media_encoding_service",
+     "//content/utility/on_device_model:on_device_model_sandbox_init",
++    "//ui/gl:buildflags",
+     "//content/utility/webnn:webnn_sandbox_init",
+     "//device/vr/buildflags",
+     "//media:media_buildflags",
+@@ -99,12 +100,19 @@ source_set("utility") {
+   }
+ 
+   if (is_linux || is_chromeos) {
+-    deps += [
+-      "//content/utility/speech:speech_recognition_sandbox_hook",
+-      "//media/gpu/sandbox",
+-      "//media/mojo/services",
+-      "//services/network:network_sandbox_hook",
+-    ]
++    deps += [ "//media/mojo/services" ]
++
++    # The three pre-sandbox hooks the utility process can install, on the far
++    # side of the same line //sandbox/features.gni now draws: each one exists
++    # to open or dlopen what a service needs BEFORE seccomp-bpf forbids it,
++    # and where there is no seccomp policy there is nothing to run ahead of.
++    if (has_linux_kernel) {
++      deps += [
++        "//content/utility/speech:speech_recognition_sandbox_hook",
++        "//media/gpu/sandbox",
++        "//services/network:network_sandbox_hook",
++      ]
++    }
+     if (use_linux_video_acceleration) {
+       deps += [
+         "//gpu/config",
+@@ -128,7 +136,7 @@ source_set("utility") {
+     deps += [ "//services/proxy_resolver:lib" ]
+   }
+ 
+-  if (enable_screen_ai_service && (is_linux || is_chromeos)) {
++  if (enable_screen_ai_service && has_linux_kernel) {
+     deps += [ "//services/screen_ai:screen_ai_sandbox_hook" ]
+   }
+ 
+diff --git a/content/utility/utility_main.cc b/content/utility/utility_main.cc
+index 399452e41d..0596792740 100644
+--- a/content/utility/utility_main.cc
++++ b/content/utility/utility_main.cc
+@@ -35,6 +35,7 @@
+ #include "content/public/common/main_function_params.h"
+ #include "content/public/utility/content_utility_client.h"
+ #include "content/utility/on_device_model/on_device_model_sandbox_init.h"
++#include "ui/gl/buildflags.h"
+ #include "content/utility/utility_thread_impl.h"
+ #include "printing/buildflags/buildflags.h"
+ #include "sandbox/policy/mojom/sandbox.mojom.h"
+@@ -44,7 +45,8 @@
+ #include "services/tracing/public/cpp/trace_startup.h"
+ #include "services/video_capture/public/mojom/video_capture_service.mojom.h"
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "base/file_descriptor_store.h"
+ #include "base/files/file_util.h"
+ #include "base/pickle.h"
+@@ -89,7 +91,8 @@
+ #include "services/screen_ai/sandbox/screen_ai_sandbox_hook_linux.h"  // nogncheck
+ #endif
+ 
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#endif  // (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) &&
++        // BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+ #include "chromeos/ash/services/ime/ime_sandbox_hook.h"
+@@ -122,7 +125,8 @@ sandbox::TargetServices* g_utility_target_services = nullptr;
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+ #if BUILDFLAG(ENABLE_ON_DEVICE_TRANSLATION) && \
+-    (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS))
++    ((BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++     BUILDFLAG(HAS_LINUX_KERNEL))
+ #include "components/on_device_translation/service/sandbox_hook.h"
+ #endif  // BUILDFLAG(ENABLE_ON_DEVICE_TRANSLATION) &&  (BUILDFLAG(IS_LINUX) ||
+         // BUILDFLAG(IS_CHROMEOS))
+@@ -131,7 +135,8 @@ namespace content {
+ 
+ namespace {
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ std::vector<std::string> GetNetworkContextsParentDirectories() {
+   base::MemoryMappedFile::Region region;
+   base::ScopedFD read_pipe_fd = base::FileDescriptorStore::GetInstance().TakeFD(
+@@ -176,7 +181,8 @@ bool ShouldUseAmdGpuPolicy(sandbox::mojom::Sandbox sandbox_type) {
+ #endif  // BUILDFLAG(USE_LINUX_VIDEO_ACCELERATION)
+   return false;
+ }
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#endif  // (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) &&
++        // BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+ #if BUILDFLAG(IS_WIN)
+ // Handle pre-lockdown sandbox hooks
+@@ -292,11 +298,14 @@ int UtilityMain(MainFunctionParams parameters) {
+     }
+   }
+ 
++#if BUILDFLAG(USE_DAWN)
+   if (utility_sub_type == on_device_model::mojom::OnDeviceModelService::Name_) {
+     CHECK(on_device_model::PreSandboxInit());
+   }
++#endif
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+ #if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER) && BUILDFLAG(USE_VAAPI)
+   // Regardless of the sandbox status, the VaapiWrapper needs to be initialized
+@@ -344,7 +353,8 @@ int UtilityMain(MainFunctionParams parameters) {
+           base::BindOnce(&speech::SpeechRecognitionPreSandboxHook);
+       break;
+ #if BUILDFLAG(ENABLE_ON_DEVICE_TRANSLATION) && \
+-    (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS))
++    ((BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++     BUILDFLAG(HAS_LINUX_KERNEL))
+     case sandbox::mojom::Sandbox::kOnDeviceTranslation:
+       pre_sandbox_hook = base::BindOnce(
+           &on_device_translation::OnDeviceTranslationSandboxHook);
+@@ -361,7 +371,8 @@ int UtilityMain(MainFunctionParams parameters) {
+ #else
+       NOTREACHED();
+ #endif
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+     case sandbox::mojom::Sandbox::kShapeDetection:
+       pre_sandbox_hook =
+           base::BindOnce(&shape_detection::ShapeDetectionPreSandboxHook);
+@@ -378,7 +389,8 @@ int UtilityMain(MainFunctionParams parameters) {
+           base::BindOnce(&media::HardwareVideoEncodingPreSandboxHook);
+       break;
+ #endif  // BUILDFLAG(USE_LINUX_VIDEO_ACCELERATION)
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#endif  // (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) &&
++        // BUILDFLAG(HAS_LINUX_KERNEL)
+ #if BUILDFLAG(IS_CHROMEOS)
+     case sandbox::mojom::Sandbox::kIme:
+       pre_sandbox_hook = base::BindOnce(&ash::ime::ImePreSandboxHook);
+diff --git a/content/zygote/BUILD.gn b/content/zygote/BUILD.gn
+index 6dea9054de..0cdbcbb057 100644
+--- a/content/zygote/BUILD.gn
++++ b/content/zygote/BUILD.gn
+@@ -4,7 +4,11 @@
+ 
+ import("//content/public/common/zygote/features.gni")
+ 
+-if (is_linux || is_chromeos) {
++# use_zygote rather than is_linux: this is the zygote PROCESS - the fork
++# server that clone(2)s with CLONE_NEWPID, waits on ppoll(2) and installs a
++# seccomp policy - and content already has the flag that says whether a
++# platform has one.
++if (use_zygote) {
+   source_set("zygote") {
+     sources = [
+       "zygote_linux.cc",
+diff --git a/sandbox/features.gni b/sandbox/features.gni
+index 8c5db2c6fa..0ce774fe12 100644
+--- a/sandbox/features.gni
++++ b/sandbox/features.gni
+@@ -6,7 +6,17 @@
+ # currently.
+ # Do not disable seccomp_bpf anywhere without talking to
+ # security@chromium.org!
+-use_seccomp_bpf = (is_linux || is_chromeos || is_android) &&
++# has_linux_kernel rather than is_linux, for the reason //base drew the same
++# line in M144 and PartitionAlloc draws it as PA_BUILDFLAG(HAS_LINUX_KERNEL).
++# seccomp-bpf is not a property of the Linux FAMILY; it is prctl(2)
++# PR_SET_SECCOMP and a BPF program evaluated by the Linux kernel's own system
++# call entry path. An out-of-tree POSIX platform may set is_linux so that the
++# thousands of is_linux conditions in this build gate the right things and
++# still have a system call surface of its own.
++#
++# The comment above is about DISABLING seccomp-bpf on a platform that has it,
++# which this does not do: where has_linux_kernel is true nothing changes.
++use_seccomp_bpf = (has_linux_kernel || is_android) &&
+                   (current_cpu == "x86" || current_cpu == "x64" ||
+                    current_cpu == "arm" || current_cpu == "arm64" ||
+                    current_cpu == "mipsel" || current_cpu == "mips64el")
+diff --git a/sandbox/linux/BUILD.gn b/sandbox/linux/BUILD.gn
+index 1fe96111ce..005e03f943 100644
+--- a/sandbox/linux/BUILD.gn
++++ b/sandbox/linux/BUILD.gn
+@@ -10,11 +10,24 @@ if (is_android) {
+ }
+ 
+ declare_args() {
+-  compile_suid_client = is_linux || is_chromeos
+-
+-  compile_credentials = is_linux || is_chromeos
+-
+-  compile_syscall_broker = is_linux || is_chromeos
++  # has_linux_kernel throughout, for the reason //sandbox/features.gni now
++  # carries for use_seccomp_bpf. Each of these three is a piece of Linux's own
++  # kernel rather than of the Linux family:
++  #
++  #   the setuid client   the SUID helper's protocol, which exists to enter a
++  #                       chroot and a PID namespace
++  #   credentials         CLONE_NEWUSER, CLONE_NEWPID, CLONE_NEWNET and
++  #                       /proc/self/{uid,gid}_map
++  #   the syscall broker  a policy for system calls named by their Linux
++  #                       numbers, whose clients are seccomp-bpf policies
++  #
++  # A platform with is_linux true and no Linux kernel has none of them, and
++  # nothing changes where has_linux_kernel is true.
++  compile_suid_client = has_linux_kernel
++
++  compile_credentials = has_linux_kernel
++
++  compile_syscall_broker = has_linux_kernel
+ 
+   # On Android, use plain GTest.
+   use_base_test_suite = is_linux || is_chromeos
+@@ -303,22 +316,33 @@ if (is_linux || is_chromeos) {
+ 
+ component("sandbox_services") {
+   sources = [
+-    "services/init_process_reaper.cc",
+-    "services/init_process_reaper.h",
+     "services/proc_util.cc",
+     "services/proc_util.h",
+     "services/resource_limits.cc",
+     "services/resource_limits.h",
+-    "services/scoped_process.cc",
+-    "services/scoped_process.h",
+-    "services/syscall_wrappers.cc",
+-    "services/syscall_wrappers.h",
+     "services/thread_helpers.cc",
+     "services/thread_helpers.h",
+-    "services/yama.cc",
+-    "services/yama.h",
+   ]
+ 
++  # The other half of this target reaches past libc into the Linux kernel and
++  # so asks has_linux_kernel rather than is_linux, the same question the three
++  # declare_args above and use_seccomp_bpf now ask: init_process_reaper and
++  # scoped_process are waitid(2) with P_PID and WEXITED, syscall_wrappers is
++  # clone(2) with the CLONE_NEW* namespace flags called through syscall(2) by
++  # number, and yama is prctl(PR_SET_PTRACER) against a Linux security module.
++  if (has_linux_kernel) {
++    sources += [
++      "services/init_process_reaper.cc",
++      "services/init_process_reaper.h",
++      "services/scoped_process.cc",
++      "services/scoped_process.h",
++      "services/syscall_wrappers.cc",
++      "services/syscall_wrappers.h",
++      "services/yama.cc",
++      "services/yama.h",
++    ]
++  }
++
+   defines = [ "SANDBOX_IMPLEMENTATION" ]
+ 
+   public_deps = [ "//sandbox:sandbox_export" ]
+@@ -366,7 +390,11 @@ component("sandbox_services") {
+     ]
+   }
+ 
+-  if (!is_android) {
++  # libc_interceptor is prctl(2) and a Unix socket the broker answers
++  # localtime(3) over, for a process whose seccomp policy has closed
++  # /etc/localtime. has_linux_kernel for the reason the rest of this file
++  # now carries.
++  if (!is_android && has_linux_kernel) {
+     sources += [
+       "services/libc_interceptor.cc",
+       "services/libc_interceptor.h",
+diff --git a/sandbox/policy/BUILD.gn b/sandbox/policy/BUILD.gn
+index 6abd7aea6d..94bf92ce32 100644
+--- a/sandbox/policy/BUILD.gn
++++ b/sandbox/policy/BUILD.gn
+@@ -46,7 +46,13 @@ component("policy") {
+       "//third_party/jni_zero",
+     ]
+   }
+-  if (is_linux || is_chromeos) {
++  # has_linux_kernel rather than is_linux, the same question
++  # //sandbox/features.gni and //sandbox/linux/BUILD.gn now ask. Everything in
++  # this list is a seccomp-bpf policy, a landlock ruleset or the SandboxLinux
++  # singleton that installs them - prctl(2), seccomp(2), the CLONE_NEW*
++  # namespaces and Linux's own system call numbers. A platform with is_linux
++  # true and no Linux kernel has none of them to install.
++  if (has_linux_kernel) {
+     sources += [
+       "linux/bpf_audio_policy_linux.cc",
+       "linux/bpf_audio_policy_linux.h",
+diff --git a/sandbox/policy/sandbox.cc b/sandbox/policy/sandbox.cc
+index 1ba20dade5..950f5bfc16 100644
+--- a/sandbox/policy/sandbox.cc
++++ b/sandbox/policy/sandbox.cc
+@@ -18,9 +18,11 @@
+ #include "third_party/jni_zero/common_apis.h"
+ #endif  // BUILDFLAG(IS_ANDROID)
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)) || \
++    BUILDFLAG(IS_CHROMEOS)
+ #include "sandbox/policy/linux/sandbox_linux.h"
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#endif  // (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)) ||
++        // BUILDFLAG(IS_CHROMEOS)
+ 
+ #if BUILDFLAG(IS_MAC)
+ #include "sandbox/mac/seatbelt.h"
+@@ -38,14 +40,16 @@
+ namespace sandbox {
+ namespace policy {
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)) || \
++    BUILDFLAG(IS_CHROMEOS)
+ bool Sandbox::Initialize(sandbox::mojom::Sandbox sandbox_type,
+                          SandboxLinux::PreSandboxHook hook,
+                          const SandboxLinux::Options& options) {
+   return SandboxLinux::GetInstance()->InitializeSandbox(
+       sandbox_type, std::move(hook), options);
+ }
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#endif  // (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)) ||
++        // BUILDFLAG(IS_CHROMEOS)
+ 
+ #if BUILDFLAG(IS_WIN)
+ bool Sandbox::Initialize(sandbox::mojom::Sandbox sandbox_type,
+@@ -108,6 +112,19 @@ bool Sandbox::IsProcessSandboxed() {
+   // launching controls the sandbox and there are no ambient capabilities, so
+   // basically everything but the browser is considered sandboxed.
+   return !is_browser;
++#elif BUILDFLAG(IS_LINUX) && !BUILDFLAG(HAS_LINUX_KERNEL)
++  // A platform in the Linux family with none of Linux's own kernel has no
++  // SandboxLinux to ask: the setuid helper, the namespaces and seccomp-bpf
++  // are all on the far side of that line, and its layer-1 and layer-2 status
++  // bits are the flags for exactly those three.
++  //
++  // false is the truthful answer, not a placeholder. This function is what
++  // about:sandbox reports and what several DCHECKs believe, so a platform
++  // that answered yes because its processes are confined by SOME other means
++  // would be making a claim nothing here can check. The condition for
++  // changing it is a way to ask this process what authority it was given at
++  // spawn, and something that reduced it.
++  return false;
+ #elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+   int status = SandboxLinux::GetInstance()->GetStatus();
+   constexpr int kLayer1Flags = SandboxLinux::Status::kSUID |
+diff --git a/sandbox/policy/sandbox.h b/sandbox/policy/sandbox.h
+index abac51e79b..bc53543c12 100644
+--- a/sandbox/policy/sandbox.h
++++ b/sandbox/policy/sandbox.h
+@@ -8,7 +8,8 @@
+ #include "build/build_config.h"
+ #include "sandbox/policy/export.h"
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)) || \
++    BUILDFLAG(IS_CHROMEOS)
+ #include "sandbox/policy/linux/sandbox_linux.h"
+ #endif
+ 
+@@ -32,11 +33,13 @@ namespace policy {
+ 
+ class SANDBOX_POLICY_EXPORT Sandbox {
+  public:
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)) || \
++    BUILDFLAG(IS_CHROMEOS)
+   static bool Initialize(sandbox::mojom::Sandbox sandbox_type,
+                          SandboxLinux::PreSandboxHook hook,
+                          const SandboxLinux::Options& options);
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#endif  // (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)) ||
++        // BUILDFLAG(IS_CHROMEOS)
+ 
+ #if BUILDFLAG(IS_WIN)
+   static bool Initialize(sandbox::mojom::Sandbox sandbox_type,
+diff --git a/services/audio/BUILD.gn b/services/audio/BUILD.gn
+index 3f466a73f1..8e8e34c6a1 100644
+--- a/services/audio/BUILD.gn
++++ b/services/audio/BUILD.gn
+@@ -87,7 +87,10 @@ source_set("audio") {
+     "//services/audio/public/mojom",
+   ]
+ 
+-  if (is_linux || is_chromeos) {
++  # The audio service's pre-sandbox hook, for the reason content/common's now
++  # carries: it opens ALSA's and PulseAudio's libraries before seccomp-bpf
++  # forbids it, and there is neither a seccomp policy nor either library here.
++  if (has_linux_kernel) {
+     sources += [
+       "audio_sandbox_hook_linux.cc",
+       "audio_sandbox_hook_linux.h",
+diff --git a/services/screen_ai/BUILD.gn b/services/screen_ai/BUILD.gn
+index 88d41c463c..8123814e02 100644
+--- a/services/screen_ai/BUILD.gn
++++ b/services/screen_ai/BUILD.gn
+@@ -73,7 +73,10 @@ if (is_chromeos) {
+   }
+ }
+ 
+-if (is_linux || is_chromeos) {
++# A pre-sandbox hook, for the reason content/common's and services/audio's
++# now carry: it exists to dlopen the screen AI library before seccomp-bpf
++# forbids it, and there is no seccomp policy here to run ahead of.
++if (has_linux_kernel) {
+   source_set("screen_ai_sandbox_hook") {
+     sources = [
+       "sandbox/screen_ai_sandbox_hook_linux.cc",

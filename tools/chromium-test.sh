@@ -992,6 +992,62 @@ PROBE
     fi
   fi
 
+  # M163. //content builds for this machine - the browser and renderer
+  # processes, and the first rung in this port that is not a library. A -k 0
+  # build of it failed in 86 places out of 36,010 steps and every one
+  # resolved to a seam Chromium's own build already had.
+  #
+  # This grades the OBJECTS rather than a program: linking //content into an
+  # executable is M164, because what remains there is a link surface -
+  # Blink's WebGPU, a cert verifier vtable entry, GpuPreSandboxHook and
+  # dlopen - rather than anything about whether //content compiles.
+  CONTENTOBJ="$SRC/out/$OUT_NAME/obj/content/browser/browser"
+  if [ ! -d "$CONTENTOBJ" ]; then
+    echo "chromium-test: //content has not been built - skipping" \
+         "(tools/build-chromium.sh content)"
+  else
+    NOBJ=$(find "$CONTENTOBJ" -name '*.o' | wc -l | tr -d ' ')
+    [ "$NOBJ" -gt 500 ]
+    check $? "//content's browser process compiles for this machine ($NOBJ objects)"
+
+    SAMPLE=$(find "$CONTENTOBJ" -name 'browser_main_loop.o' | head -1)
+    [ -n "$SAMPLE" ] && "${PREFIX}readelf" -h "$SAMPLE" | grep -q "Advanced Micro Devices X86-64"
+    check $? "and they are x86-64 ELF for this target, not the host's"
+
+    # The zygote and the seccomp policies produce no OBJECTS, which is a
+    # stronger statement than a flag. It has to be the .o rather than the
+    # directory: a directory keeps its .ninja and its .o.d after gn drops the
+    # target, so asking about the directory asks about the output tree's
+    # history rather than about this configuration.
+    for absent in obj/content/zygote/zygote/zygote_linux.o \
+                  obj/sandbox/linux/seccomp_bpf/sandbox_bpf.o \
+                  obj/content/browser/browser/zygote_host_impl_linux.o; do
+      [ ! -e "$SRC/out/$OUT_NAME/$absent" ]
+      check $? "and $absent was not built"
+    done
+
+    ARGSFILE="$SRC/out/$OUT_NAME/args.gn"
+    NOFF=0
+    for flag in use_dbus use_on_device_model_service; do
+      grep -qE "^$flag = false\$" "$ARGSFILE" || NOFF=1
+    done
+    [ "$NOFF" = "0" ]
+    check $? "and args.gn turns off the Linux message bus and the on-device model service"
+
+    # pause(2), which content/common's WaitForDebugger asked this libc for.
+    # In the SYSROOT rather than the tree, because that is what a cross
+    # compile reads.
+    grep -q "int pause(void);" "$ROOT/build/sysroot/usr/local/include/unistd.h"
+    check $? "this libc's pause(2) is declared in the sysroot a cross compile reads"
+    # grep -c rather than grep -q: this script runs under `set -o pipefail`,
+    # and grep -q exits on the first match, so nm upstream dies of SIGPIPE and
+    # the pipeline reports 141 - a check that fails because it succeeded.
+    PAUSEDEF=$("${PREFIX}nm" "$ROOT/build/sysroot/usr/lib/libc.a" 2>/dev/null |
+               grep -c "T pause")
+    [ "$PAUSEDEF" -ge 1 ]
+    check $? "and defined in the libc.a beside it"
+  fi
+
   # M157. The libc port reaches Chromium's OWN vendored copy of the libc
   # crate, not just rust-src's - and they are the same 0.2.189, so a copy
   # that drifted would be a build that disagrees with itself about what this

@@ -1,0 +1,225 @@
+Dawn arrives as a data dependency, and brings the GPU stack with it.
+
+The fourth time this port has watched SwiftShader come back, and the first
+time it was invisible to the check that found the other three.
+
+M158 turned off enable_vulkan, enable_swiftshader, enable_swiftshader_vulkan
+and use_dawn. M159 found ANGLE's own two switches were not Chromium's and
+that angle_shared_libvulkan was a third. M161 found webnn_use_litert bringing
+all of it back into Blink. Each time `gn path` named the edge.
+
+This time it did not: `gn path` reported no path at all, because the edge is
+
+  //third_party/dawn/src/dawn/native:sources --[data]--> vulkan-loader
+
+and a data dependency is not a path. Nothing links the Vulkan loader; ninja
+builds it, and the validation layers, and 54 objects of SwiftShader's subzero
+JIT, so that they can sit beside a binary that never opens them. 83 of the 88
+failures the first link of a program against //content had were those three
+libraries. --with-data is what makes the edge visible.
+
+Four targets reach Dawn's native library without asking use_dawn, which has
+been false in this build since M158:
+
+  //content/utility/on_device_model:on_device_model_sandbox_init
+  //services/on_device_model:on_device_model_service
+  //services/on_device_model/ml:ml_no_internal
+  and the source file behind the first of them
+
+Chromium's own source already carves out one Linux platform that does not
+use Dawn here - !(is_linux && enable_cast_receiver) - so this is that same
+observation asked as the flag that already exists for it, BUILDFLAG(USE_DAWN)
+out of //ui/gl:buildflags.
+
+The other half of that file is a seccomp pre-sandbox hook: it collects GPU
+information and fills in sandbox::policy::SandboxLinux::Options before a
+policy is installed. has_linux_kernel, for the reason patch 0047 carries.
+
+diff --git a/content/utility/on_device_model/BUILD.gn b/content/utility/on_device_model/BUILD.gn
+index 717631385e..7b7ade8c64 100644
+--- a/content/utility/on_device_model/BUILD.gn
++++ b/content/utility/on_device_model/BUILD.gn
+@@ -3,6 +3,7 @@
+ # found in the LICENSE file.
+ 
+ import("//services/on_device_model/on_device_model.gni")
++import("//ui/gl/features.gni")
+ 
+ source_set("on_device_model_sandbox_init") {
+   sources = [
+@@ -18,18 +19,35 @@ source_set("on_device_model_sandbox_init") {
+   if (enable_ml_internal) {
+     deps += [ "//services/on_device_model/ml" ]
+   }
+-  if (is_linux || is_chromeos) {
++  # What this target does on Linux is collect GPU information and hand
++  # sandbox::policy::SandboxLinux::Options to a seccomp policy before it is
++  # installed. has_linux_kernel, for the reason the rest of this port draws
++  # the same line.
++  if (has_linux_kernel) {
+     deps += [
+       "//content/common",
+       "//gpu/config",
+       "//sandbox/policy",
+     ]
+   }
+-  if (!is_fuchsia) {
++
++  # And use_dawn, which this target never asked. Dawn's native library
++  # DATA-deps the Vulkan loader, which data-deps SwiftShader and the
++  # validation layers - so a build with use_dawn already false still compiled
++  # 54 objects of subzero, a run-time code generator, so that they could sit
++  # beside a binary that never opens them. Nothing links any of it, which is
++  # why gn path finds no path without --with-data and why this survived three
++  # earlier milestones of removing the GPU stack.
++  #
++  # The source file already carves out one Linux platform that does not use
++  # Dawn - !(is_linux && enable_cast_receiver) - so this is that same
++  # observation asked as the flag Chromium already has for it.
++  if (!is_fuchsia && use_dawn) {
+     deps += [
+       "//third_party/dawn/include/dawn:cpp_headers",
+       "//third_party/dawn/src/dawn:proc",
+       "//third_party/dawn/src/dawn/native",
+     ]
+   }
++  public_deps = [ "//ui/gl:buildflags" ]
+ }
+diff --git a/content/utility/on_device_model/on_device_model_sandbox_init.cc b/content/utility/on_device_model/on_device_model_sandbox_init.cc
+index 649e8ce42a..a4f2f3d1f5 100644
+--- a/content/utility/on_device_model/on_device_model_sandbox_init.cc
++++ b/content/utility/on_device_model/on_device_model_sandbox_init.cc
+@@ -18,7 +18,8 @@
+ #include "services/on_device_model/ml/gpu_blocklist.h"  // nogncheck
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <errno.h>
+ 
+ #include "content/common/gpu_pre_sandbox_hook_linux.h"
+@@ -26,7 +27,9 @@
+ #include "sandbox/policy/linux/sandbox_linux.h"
+ #endif
+ 
+-#if !BUILDFLAG(IS_FUCHSIA) && \
++#include "ui/gl/buildflags.h"
++
++#if !BUILDFLAG(IS_FUCHSIA) && BUILDFLAG(USE_DAWN) && \
+     !(BUILDFLAG(IS_LINUX) && BUILDFLAG(ENABLE_CAST_RECEIVER))
+ #include "base/feature_list.h"
+ #include "third_party/dawn/include/dawn/dawn_proc.h"          // nogncheck
+@@ -38,7 +41,8 @@ namespace on_device_model {
+ 
+ namespace {
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ constexpr uint32_t kVendorIdAMD = 0x1002;
+ constexpr uint32_t kVendorIdIntel = 0x8086;
+ constexpr uint32_t kVendorIdNVIDIA = 0x10DE;
+@@ -66,13 +70,14 @@ void UpdateSandboxOptionsForGpu(
+ }
+ #endif
+ 
+-#if !BUILDFLAG(IS_FUCHSIA) && \
++#if !BUILDFLAG(IS_FUCHSIA) && BUILDFLAG(USE_DAWN) && \
+     !(BUILDFLAG(IS_LINUX) && BUILDFLAG(ENABLE_CAST_RECEIVER))
+ // If this feature is enabled, a WebGPU device is created for each valid
+ // adapter. This makes sure any relevant drivers or other libs are loaded before
+ // enabling the sandbox.
+ BASE_FEATURE(kOnDeviceModelWarmDrivers,
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_WIN)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_WIN)
+              base::FEATURE_ENABLED_BY_DEFAULT
+ #else
+              base::FEATURE_DISABLED_BY_DEFAULT
+@@ -81,7 +86,7 @@ BASE_FEATURE(kOnDeviceModelWarmDrivers,
+ #endif
+ 
+ bool ShouldWarmDrivers() {
+-#if BUILDFLAG(IS_FUCHSIA) || \
++#if BUILDFLAG(IS_FUCHSIA) || !BUILDFLAG(USE_DAWN) || \
+     (BUILDFLAG(IS_LINUX) && BUILDFLAG(ENABLE_CAST_RECEIVER))
+   return false;
+ #else
+@@ -121,7 +126,7 @@ bool PreSandboxInit() {
+     // Warm any relevant drivers before attempting to bring up the sandbox. For
+     // good measure we initialize a device instance for any adapter with an
+     // appropriate backend on top of any integrated or discrete GPU.
+-#if !BUILDFLAG(IS_FUCHSIA) && \
++#if !BUILDFLAG(IS_FUCHSIA) && BUILDFLAG(USE_DAWN) && \
+     !(BUILDFLAG(IS_LINUX) && BUILDFLAG(ENABLE_CAST_RECEIVER))
+     dawnProcSetProcs(&dawn::native::GetProcs());
+     auto instance = std::make_unique<dawn::native::Instance>();
+@@ -154,7 +159,8 @@ bool PreSandboxInit() {
+   return true;
+ }
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ void AddSandboxLinuxOptions(sandbox::policy::SandboxLinux::Options& options) {
+   // Make sure any necessary vendor-specific options are set.
+   gpu::GPUInfo info;
+diff --git a/services/on_device_model/BUILD.gn b/services/on_device_model/BUILD.gn
+index 54911d971b..e6e4605a80 100644
+--- a/services/on_device_model/BUILD.gn
++++ b/services/on_device_model/BUILD.gn
+@@ -7,6 +7,7 @@ import("//build/config/features.gni")
+ import("//components/optimization_guide/features.gni")
+ import("//services/on_device_model/on_device_model.gni")
+ import("//third_party/dawn/scripts/dawn_features.gni")
++import("//ui/gl/features.gni")
+ 
+ component("backend_interfaces") {
+   sources = [
+@@ -72,7 +73,13 @@ if (use_blink || (is_ios && build_with_internal_optimization_guide)) {
+     if (is_android) {
+       deps += [ "//services/on_device_model/android" ]
+     }
+-    if (!is_fuchsia && !(is_linux && enable_cast_receiver)) {
++    # use_dawn, which this condition never asked. Chromium already carves out
++    # one Linux platform that does not use Dawn here - a cast receiver - and
++    # a platform with use_dawn false is in the same position for the same
++    # reason. Dawn's native library DATA-deps the Vulkan loader, which
++    # data-deps SwiftShader, so leaving it in costs 83 objects of a GPU stack
++    # that nothing links.
++    if (!is_fuchsia && use_dawn && !(is_linux && enable_cast_receiver)) {
+       deps += [
+         "//third_party/dawn/include/dawn:cpp_headers",
+         "//third_party/dawn/src/dawn:proc",
+diff --git a/services/on_device_model/ml/BUILD.gn b/services/on_device_model/ml/BUILD.gn
+index b8b1ddd664..9a02abd4c0 100644
+--- a/services/on_device_model/ml/BUILD.gn
++++ b/services/on_device_model/ml/BUILD.gn
+@@ -2,6 +2,7 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
++import("//ui/gl/features.gni")
+ import("//build/config/features.gni")
+ import("//components/optimization_guide/features.gni")
+ import("//services/on_device_model/on_device_model.gni")
+@@ -70,10 +71,16 @@ if (use_blink || (is_ios && build_with_internal_optimization_guide)) {
+       "//services/on_device_model/safety:safety_util",
+       "//third_party/abseil-cpp:absl",
+       "//third_party/angle:includes",
+-      "//third_party/dawn/src/dawn:proc",
+-      "//third_party/dawn/src/dawn/native",
+     ]
+ 
++    # use_dawn, for the reason services/on_device_model/BUILD.gn now carries.
++    if (use_dawn) {
++      deps += [
++        "//third_party/dawn/src/dawn:proc",
++        "//third_party/dawn/src/dawn/native",
++      ]
++    }
++
+     if (enable_constraints) {
+       defines += [ "ENABLE_ON_DEVICE_CONSTRAINTS" ]
+       deps += [ "//third_party/rust/llguidance/v1:lib" ]

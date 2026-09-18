@@ -1,0 +1,203 @@
+The wire format's users, not just the wire format.
+
+M160's patch 0041 gated the MOJOM for net::AddressTrackerLinux's output on
+has_linux_kernel - rtnetlink is a system call family rather than a platform
+family - and said in its own message that a feature is only off when the last
+site turning it on is. It found two sites. There were seven.
+
+The five that were left are the C++ that USES the generated types:
+network::NetworkChangeManager implements mojom::NetworkInterfaceChangeListener
+and holds a receiver for it, NetworkService reads
+params->initial_address_map, and content/browser's two network service files
+include net/base/address_tracker_linux.h, whose first line is
+#include <linux/rtnetlink.h>.
+
+The seventh is in //net itself and is the sharpest of them:
+NetworkChangeNotifierPassive declares GetAddressMapOwnerInternal() as an
+override under plain IS_LINUX, while M150 had already widened the base
+class's declaration to (IS_LINUX || IS_CHROMEOS) && HAS_LINUX_KERNEL. A
+derived class overriding a method that is not there is a compile error in a
+file nothing about this port had touched.
+
+18 of the 86.
+
+diff --git a/content/browser/network_service_client.cc b/content/browser/network_service_client.cc
+index aadec37eb4..ee604af812 100644
+--- a/content/browser/network_service_client.cc
++++ b/content/browser/network_service_client.cc
+@@ -50,14 +50,14 @@
+ #include "base/task/current_thread.h"
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "net/base/address_map_linux.h"
+ #include "net/base/address_tracker_linux.h"
+ #endif
+ 
+ namespace content {
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ namespace {
+ 
+ // Takes care of passing updates to AddressTrackerLinux's AddressMap and set of
+@@ -224,7 +224,7 @@ void NetworkServiceClient::OnNetworkServiceInitialized(
+     DCHECK(!net::NetworkChangeNotifier::CreateIfNeeded());
+     service->GetNetworkChangeManager(
+         network_change_manager_.BindNewPipeAndPassReceiver());
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+     // Keep the tracking AddressTrackerLinux in sync with the caching version in
+     // the network service, which cannot use AddressTrackerLinux in the sandbox.
+     mojo::PendingAssociatedRemote<
+@@ -243,7 +243,7 @@ void NetworkServiceClient::OnNetworkServiceInitialized(
+             base::BindRepeating(&NetworkInterfaceChangeHelper::
+                                     SendAddressTrackerDiffsToNetworkService,
+                                 std::move(diff_callback_helper)));
+-#endif  // BUILDFLAG(IS_LINUX)
++#endif  // BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+     net::NetworkChangeNotifier::AddConnectionTypeObserver(this);
+     net::NetworkChangeNotifier::AddMaxBandwidthObserver(this);
+     net::NetworkChangeNotifier::AddIPAddressObserver(this);
+diff --git a/content/browser/network_service_instance_impl.cc b/content/browser/network_service_instance_impl.cc
+index 8573060689..5d81dc84c0 100644
+--- a/content/browser/network_service_instance_impl.cc
++++ b/content/browser/network_service_instance_impl.cc
+@@ -103,7 +103,7 @@
+ #include "services/network/public/mojom/system_dns_resolution.mojom-forward.h"
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "net/base/address_map_linux.h"
+ #include "net/base/address_tracker_linux.h"
+ #include "services/network/public/mojom/network_interface_change_listener.mojom.h"
+@@ -389,7 +389,7 @@ network::mojom::NetworkServiceParamsPtr CreateNetworkServiceParams() {
+   network_service_params->first_party_sets_enabled =
+       GetContentClient()->browser()->IsFirstPartySetsEnabled();
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+   if (IsOutOfProcessNetworkService()) {
+     auto [address_map, online_links] =
+         net::NetworkChangeNotifier::GetAddressMapOwner()
+@@ -399,7 +399,7 @@ network::mojom::NetworkServiceParamsPtr CreateNetworkServiceParams() {
+         network::mojom::InitialAddressMap::New(std::move(address_map),
+                                                std::move(online_links));
+   }
+-#endif  // BUILDFLAG(IS_LINUX)
++#endif  // BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+   // On ChromeOS, the network service is always out of process (unless
+diff --git a/net/base/network_change_notifier_passive.cc b/net/base/network_change_notifier_passive.cc
+index a5d54954ef..83337895b1 100644
+--- a/net/base/network_change_notifier_passive.cc
++++ b/net/base/network_change_notifier_passive.cc
+@@ -97,7 +97,7 @@ void NetworkChangeNotifierPassive::GetCurrentMaxBandwidthAndConnectionType(
+   *max_bandwidth_mbps = max_bandwidth_mbps_;
+ }
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ AddressMapOwnerLinux*
+ NetworkChangeNotifierPassive::GetAddressMapOwnerInternal() {
+   return &address_map_cache_;
+diff --git a/net/base/network_change_notifier_passive.h b/net/base/network_change_notifier_passive.h
+index 190a2f4128..185f5d73ac 100644
+--- a/net/base/network_change_notifier_passive.h
++++ b/net/base/network_change_notifier_passive.h
+@@ -52,7 +52,7 @@ class NET_EXPORT NetworkChangeNotifierPassive : public NetworkChangeNotifier {
+   void GetCurrentMaxBandwidthAndConnectionType(
+       double* max_bandwidth_mbps,
+       ConnectionType* connection_type) const override;
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+   AddressMapOwnerLinux* GetAddressMapOwnerInternal() override;
+ #endif
+ 
+diff --git a/services/network/network_change_manager.cc b/services/network/network_change_manager.cc
+index 30c144a994..958f535e70 100644
+--- a/services/network/network_change_manager.cc
++++ b/services/network/network_change_manager.cc
+@@ -83,7 +83,7 @@ void NetworkChangeManager::OnNetworkChanged(
+ }
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ void NetworkChangeManager::BindNetworkInterfaceChangeListener(
+     mojo::PendingAssociatedReceiver<mojom::NetworkInterfaceChangeListener>
+         listener_receiver) {
+@@ -105,7 +105,7 @@ void NetworkChangeManager::OnNetworkInterfacesChanged(
+   notifier->GetAddressMapOwner()->GetAddressMapCacheLinux()->ApplyDiffs(
+       change_params->address_map, change_params->online_links);
+ }
+-#endif  // BUILDFLAG(IS_LINUX)
++#endif  // BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+ size_t NetworkChangeManager::GetNumClientsForTesting() const {
+   return clients_.size();
+diff --git a/services/network/network_change_manager.h b/services/network/network_change_manager.h
+index a970036206..691340c150 100644
+--- a/services/network/network_change_manager.h
++++ b/services/network/network_change_manager.h
+@@ -17,7 +17,7 @@
+ #include "net/base/network_change_notifier.h"
+ #include "services/network/public/mojom/network_change_manager.mojom.h"
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "services/network/public/mojom/network_interface_change_listener.mojom.h"
+ #endif
+ 
+@@ -30,7 +30,7 @@ namespace network {
+ class COMPONENT_EXPORT(NETWORK_SERVICE) NetworkChangeManager
+     : public mojom::NetworkChangeManager,
+       public net::NetworkChangeNotifier::NetworkChangeObserver
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+     ,
+       public mojom::NetworkInterfaceChangeListener
+ #endif
+@@ -65,7 +65,7 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) NetworkChangeManager
+       mojom::ConnectionSubtype new_connection_subtype) override;
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+   void BindNetworkInterfaceChangeListener(
+       mojo::PendingAssociatedReceiver<mojom::NetworkInterfaceChangeListener>)
+       override;
+@@ -87,7 +87,7 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) NetworkChangeManager
+ 
+   std::unique_ptr<net::NetworkChangeNotifier> network_change_notifier_;
+   mojo::ReceiverSet<mojom::NetworkChangeManager> receivers_;
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+   mojo::AssociatedReceiver<mojom::NetworkInterfaceChangeListener>
+       interface_change_listener_receiver_{this};
+ #endif
+diff --git a/services/network/network_service.cc b/services/network/network_service.cc
+index d0d5f5f31c..4b06a7ea81 100644
+--- a/services/network/network_service.cc
++++ b/services/network/network_service.cc
+@@ -453,7 +453,7 @@ void NetworkService::Initialize(mojom::NetworkServiceParamsPtr params,
+               params->initial_connection_subtype),
+           mock_network_change_notifier);
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+   if (params->initial_address_map) {
+     // The NetworkChangeNotifierPassive should only be included if it's
+     // necessary to instantiate an AddressMapCacheLinux rather than an
+@@ -468,7 +468,7 @@ void NetworkService::Initialize(mojom::NetworkServiceParamsPtr params,
+         ->SetCachedInfo(std::move(params->initial_address_map->address_map),
+                         std::move(params->initial_address_map->online_links));
+   }
+-#endif  // BUILDFLAG(IS_LINUX)
++#endif  // BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+   network_change_manager_ = std::make_unique<NetworkChangeManager>(
+       std::move(network_change_notifier));

@@ -1,0 +1,48 @@
+usbfs is Linux's kernel too.
+
+/dev/bus/usb, its ioctls and the descriptor layouts in <linux/usb/ch9.h>.
+UsbDeviceLinux exists to hand out a UsbDeviceHandleUsbfs, so the two belong
+on the same side of the line the rest of this series draws.
+
+use_udev is already false in this build, so UsbServiceLinux is not compiled
+either and UsbService::Create has no backend to return - which is the truth
+about a machine whose USB is xHCI and HID inside its own kernel rather than a
+filesystem a browser opens.
+
+diff --git a/services/device/usb/BUILD.gn b/services/device/usb/BUILD.gn
+index 72e7a1cc72..ec2c703379 100644
+--- a/services/device/usb/BUILD.gn
++++ b/services/device/usb/BUILD.gn
+@@ -114,7 +114,14 @@ static_library("usb") {
+     deps += [ "//third_party/libusb" ]
+   }
+ 
+-  if (is_linux || is_chromeos) {
++  # usbfs is Linux's own kernel: /dev/bus/usb, its ioctls, and the descriptor
++  # layouts in <linux/usb/ch9.h>. UsbDeviceLinux exists to hand out a
++  # UsbDeviceHandleUsbfs, so the two belong on the same side of the line the
++  # rest of this port now draws with has_linux_kernel. use_udev is already
++  # false in this build, so UsbServiceLinux is not compiled either and
++  # UsbService::Create has no backend to return - which is the truth about a
++  # machine whose USB is xHCI and HID inside its own kernel.
++  if (has_linux_kernel) {
+     sources += [
+       "usb_device_linux.cc",
+       "usb_device_linux.h",
+@@ -131,14 +138,14 @@ static_library("usb") {
+     deps += [ "//device/udev_linux" ]
+   }
+ 
+-  if (is_android || is_chromeos || is_linux) {
++  if (is_android || has_linux_kernel) {
+     sources += [
+       "usb_device_handle_usbfs.cc",
+       "usb_device_handle_usbfs.h",
+     ]
+   }
+ 
+-  if (is_android || is_linux) {
++  if (is_android || has_linux_kernel) {
+     sources += [
+       "usb_interface_detach_allowlist.cc",
+       "usb_interface_detach_allowlist.h",

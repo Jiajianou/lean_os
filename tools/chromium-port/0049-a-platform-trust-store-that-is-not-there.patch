@@ -1,0 +1,96 @@
+A platform trust store that is not there.
+
+net/cert/internal/system_trust_store.h declares
+CreateSslSystemTrustStoreChromeRoot under
+
+  CHROME_ROOT_STORE_SUPPORTED &&
+  (USE_NSS_SERVER_CERTS || IS_MAC || IS_WIN || IS_ANDROID)
+
+which is the list of platforms whose system trust store this build knows how
+to read. services/cert_verifier calls it in an #else whose condition is only
+!IS_CHROMEOS, so it assumes that list is "every platform" - one platform too
+many. A POSIX platform with no NSS has no system store to merge the Chrome
+Root Store with, and use_nss_server_certs is already false in this build.
+
+Asking the same question the declaration asks is what makes the two agree,
+and the Chrome-only store is the right answer there rather than a fallback:
+it is the same set of anchors the browser would end up trusting anyway, minus
+a machine-local store that does not exist. This machine's extra anchors
+arrive as a package instead, which is how M113's ca-certificates reached
+NetSurf.
+
+The second half is GetPlatformRootStoreInfo, which reports the user-added
+certificates of that same absent store.
+
+diff --git a/services/cert_verifier/cert_verifier_creation.cc b/services/cert_verifier/cert_verifier_creation.cc
+index c28eba8e0e..767076c1c6 100644
+--- a/services/cert_verifier/cert_verifier_creation.cc
++++ b/services/cert_verifier/cert_verifier_creation.cc
+@@ -7,6 +7,7 @@
+ #include "base/memory/scoped_refptr.h"
+ #include "base/types/optional_util.h"
+ #include "build/build_config.h"
++#include "crypto/crypto_buildflags.h"
+ #include "components/network_time/time_tracker/time_tracker.h"
+ #include "net/base/features.h"
+ #include "net/cert/cert_verify_proc.h"
+@@ -129,7 +130,24 @@ class CertVerifyProcFactoryImpl : public net::CertVerifyProcFactory {
+                                                 root_store_mtc_metadata);
+ 
+     std::unique_ptr<net::SystemTrustStore> trust_store;
+-#if BUILDFLAG(IS_CHROMEOS)
++// CreateSslSystemTrustStoreChromeRoot is declared in
++// net/cert/internal/system_trust_store.h under
++//
++//   USE_NSS_SERVER_CERTS || IS_MAC || IS_WIN || IS_ANDROID
++//
++// which is the list of platforms whose system trust store this build knows
++// how to read. This #else covered everything that is not ChromeOS and so
++// assumed that list is "every platform", which is one platform too many: a
++// POSIX platform with no NSS has no system store to merge the Chrome Root
++// Store with. Asking the same question the declaration asks is what makes
++// the two agree.
++//
++// The Chrome-only store is the right answer there rather than a fallback.
++// It is the same set of anchors the browser would end up trusting anyway,
++// minus a machine-local store that does not exist.
++#if BUILDFLAG(IS_CHROMEOS) ||                                            \
++    !(BUILDFLAG(USE_NSS_SERVER_CERTS) || BUILDFLAG(IS_MAC) ||            \
++      BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID))
+     trust_store = net::CreateChromeOnlySystemTrustStore(std::move(chrome_root));
+ #else
+     if (instance_params.include_system_trust_store) {
+diff --git a/services/cert_verifier/cert_verifier_service_factory.cc b/services/cert_verifier/cert_verifier_service_factory.cc
+index 26e6bf32bb..af31c88d7c 100644
+--- a/services/cert_verifier/cert_verifier_service_factory.cc
++++ b/services/cert_verifier/cert_verifier_service_factory.cc
+@@ -20,6 +20,7 @@
+ #include "base/task/thread_pool.h"
+ #include "base/types/optional_util.h"
+ #include "build/build_config.h"
++#include "crypto/crypto_buildflags.h"
+ #include "crypto/hash.h"
+ #include "mojo/public/cpp/bindings/callback_helpers.h"
+ #include "mojo/public/cpp/bindings/pending_receiver.h"
+@@ -170,7 +171,9 @@ bool IsAnchorTrustedOnThisChromeVersion(
+   return false;
+ }
+ 
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if !BUILDFLAG(IS_CHROMEOS) &&                                       \
++    (BUILDFLAG(USE_NSS_SERVER_CERTS) || BUILDFLAG(IS_MAC) ||          \
++     BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID))
+ mojom::PlatformRootStoreInfoPtr GetPlatformRootStoreInfoOnBackgroundThread() {
+   mojom::PlatformRootStoreInfoPtr info_ptr =
+       mojom::PlatformRootStoreInfo::New();
+@@ -536,7 +539,9 @@ void CertVerifierServiceFactoryImpl::GetChromeRootStoreInfo(
+   std::move(callback).Run(std::move(info_ptr));
+ }
+ 
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if !BUILDFLAG(IS_CHROMEOS) &&                                       \
++    (BUILDFLAG(USE_NSS_SERVER_CERTS) || BUILDFLAG(IS_MAC) ||          \
++     BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID))
+ // TODO(crbug.com/40928765): look into adding a test here. Possible ways to do
+ // this:
+ //  * add a SetSystemTrustStoreForTesting() call, have code use that if its set.

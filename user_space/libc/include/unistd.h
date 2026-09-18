@@ -260,6 +260,7 @@ long fpathconf(int fd, int name);
 int getpagesize(void);
 
 unsigned int sleep(unsigned int seconds);
+int pause(void);
 int usleep(unsigned int usec);
 
 unsigned int alarm(unsigned int seconds);
