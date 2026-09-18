@@ -1,0 +1,245 @@
+The callers. A gate on a definition is half a seam.
+
+Six milestones of this port have gated a Linux-kernel implementation out of
+the build and left every place that NAMES it behind. A -k 0 build cannot see
+that, because a compile succeeds against a declaration - it only appears when
+something links, and //content is the first thing here big enough to.
+
+  M148  gated mojo's ChannelLinux on has_linux_kernel
+        mojo/core/embedder/embedder.cc still called
+        ChannelLinux::SetSharedMemParameters
+
+  M159  gated gl_fence_android_native_fence_sync.cc on has_linux_kernel,
+        because it is libsync
+        ui/gl/gl_fence.cc still #defined
+        USE_GL_FENCE_ANDROID_NATIVE_FENCE_SYNC from the platform family, and
+        that #define is what decides whether the three GLFence functions call
+        into the file that is no longer there
+
+  M161  gated os_metrics_linux.cc - /proc/<pid>/smaps and
+        prctl(PR_SET_DUMPABLE)
+        two callers of OSMetrics::FillOSMemoryDump remained, and every
+        implementation of it is per-KERNEL rather than per-family, so a
+        platform in a family whose kernel is its own matched none of them.
+        os_metrics.cc gets the arm for that case: false, which is what
+        os_metrics_fuchsia.cc already returns when it has nothing to report,
+        and which makes client_process_impl.cc log the failure it is written
+        to log. Filling the struct with zeroes instead would put a process
+        using no memory into about:memory.
+
+  M161  gated media/capture's video/linux, which is V4L2
+        create_video_capture_device_factory.cc still named
+        VideoCaptureDeviceFactoryLinux. Chromium's own #else for a platform
+        with no capture backend is NOTIMPLEMENTED() and a null factory, which
+        is the truth about a machine with no camera - and getUserMedia then
+        fails with the error the specification defines, which is M161's own
+        argument for why this is not a pretence.
+
+  M163  gated the five seccomp pre-sandbox hooks and SandboxLinux
+        content/gpu/gpu_main.cc still called
+        SandboxLinux::InitializeSandbox with GpuPreSandboxHook, and
+        content/utility/services.cc still called
+        sandbox::InitLibcLocaltimeFunctions - which exists to resolve
+        localtime before a seccomp policy closes /etc/localtime.
+
+None of these is a new decision. Each is the question an earlier milestone
+already answered, asked in the one more place that names the answer.
+
+diff --git a/content/gpu/gpu_main.cc b/content/gpu/gpu_main.cc
+index 2a9e21226f..4e67b1236a 100644
+--- a/content/gpu/gpu_main.cc
++++ b/content/gpu/gpu_main.cc
+@@ -116,7 +116,8 @@
+ #include "services/webnn/public/cpp/webnn_sandbox_init.h"
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "content/child/sandboxed_process_thread_type_handler.h"
+ #include "content/common/gpu_pre_sandbox_hook_linux.h"
+ #include "sandbox/policy/linux/sandbox_linux.h"
+@@ -137,7 +138,8 @@ namespace content {
+ 
+ namespace {
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ bool StartSandboxLinux(gpu::GpuWatchdogThread*,
+                        const gpu::GPUInfo*,
+                        const gpu::GpuPreferences&);
+@@ -207,7 +209,8 @@ class ContentSandboxHelper : public gpu::GpuSandboxHelper {
+                                 const gpu::GPUInfo* gpu_info,
+                                 const gpu::GpuPreferences& gpu_prefs) override {
+     TRACE_EVENT("gpu,startup", "gpu_main::EnsureSandboxInitialized");
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+     return StartSandboxLinux(watchdog_thread, gpu_info, gpu_prefs);
+ #elif BUILDFLAG(IS_WIN)
+     return StartSandboxWindows(sandbox_info_);
+@@ -323,7 +326,8 @@ int GpuMain(MainFunctionParams parameters) {
+           std::make_unique<base::SingleThreadTaskExecutor>(
+               gpu_preferences.message_pump_type, /*is_main_thread=*/true);
+     }
+-#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#elif (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ #error "Unsupported Linux platform."
+ #elif BUILDFLAG(IS_MAC)
+     // Cross-process CoreAnimation requires a CFRunLoop to function at all, and
+@@ -350,7 +354,8 @@ int GpuMain(MainFunctionParams parameters) {
+   base::MessagePumpWakeupCounter::InitializeForCurrentThread("GpuMain");
+   base::LockMetricsRecorder::EnableRecordingOnCurrentThread("CrGpuMain");
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+   // Thread type delegate of the process should be registered before
+   // thread type change below for the main thread and for thread pool in
+   // ChildProcess constructor.
+@@ -502,7 +507,8 @@ int GpuMain(MainFunctionParams parameters) {
+ 
+ namespace {
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ bool StartSandboxLinux(gpu::GpuWatchdogThread* watchdog_thread,
+                        const gpu::GPUInfo* gpu_info,
+                        const gpu::GpuPreferences& gpu_prefs) {
+diff --git a/content/utility/services.cc b/content/utility/services.cc
+index 95dda216ab..cf359bcd68 100644
+--- a/content/utility/services.cc
++++ b/content/utility/services.cc
+@@ -235,7 +235,8 @@ auto RunAudio(mojo::PendingReceiver<audio::mojom::AudioService> receiver) {
+       << "task_policy_set TASK_QOS_POLICY";
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+   auto* command_line = base::CommandLine::ForCurrentProcess();
+   if (sandbox::policy::SandboxTypeFromCommandLine(*command_line) ==
+       sandbox::mojom::Sandbox::kNoSandbox) {
+diff --git a/media/capture/video/create_video_capture_device_factory.cc b/media/capture/video/create_video_capture_device_factory.cc
+index ed8a138630..4fecccd664 100644
+--- a/media/capture/video/create_video_capture_device_factory.cc
++++ b/media/capture/video/create_video_capture_device_factory.cc
+@@ -64,7 +64,7 @@ std::unique_ptr<VideoCaptureDeviceFactory>
+ CreatePlatformSpecificVideoCaptureDeviceFactory(
+     scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner,
+     gpu::GpuDriverBugWorkarounds* gpu_workarounds) {
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+   return std::make_unique<VideoCaptureDeviceFactoryLinux>(ui_task_runner);
+ #elif BUILDFLAG(IS_CHROMEOS)
+   if (base::SysInfo::IsRunningOnChromeOS())
+diff --git a/mojo/core/embedder/embedder.cc b/mojo/core/embedder/embedder.cc
+index cfaa689b7d..a6da03e06b 100644
+--- a/mojo/core/embedder/embedder.cc
++++ b/mojo/core/embedder/embedder.cc
+@@ -25,10 +25,11 @@
+ #include "mojo/core/ipcz_driver/transport.h"
+ #include "mojo/public/c/system/thunks.h"
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if ((BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++     BUILDFLAG(HAS_LINUX_KERNEL)) ||                        \
++    BUILDFLAG(IS_ANDROID)
+ #include "mojo/core/channel_linux.h"
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) ||
+-        // BUILDFLAG(IS_ANDROID)
++#endif  // ((IS_LINUX || IS_CHROMEOS) && HAS_LINUX_KERNEL) || IS_ANDROID
+ 
+ namespace mojo::core {
+ 
+@@ -43,7 +44,9 @@ void InitFeatures() {
+   CHECK(base::FeatureList::GetInstance());
+ 
+ #if BUILDFLAG(IS_POSIX) && !BUILDFLAG(MOJO_USE_APPLE_CHANNEL)
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if ((BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++     BUILDFLAG(HAS_LINUX_KERNEL)) ||                        \
++    BUILDFLAG(IS_ANDROID)
+   bool shared_mem_enabled = base::FeatureList::IsEnabled(kMojoUseEventFd);
+   int num_pages = kMojoUseEventFdPages.Get();
+   if (num_pages < 0) {
+@@ -54,8 +57,7 @@ void InitFeatures() {
+ 
+   ChannelLinux::SetSharedMemParameters(shared_mem_enabled,
+                                        static_cast<unsigned int>(num_pages));
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) ||
+-        // BUILDFLAG(IS_ANDROID)
++#endif  // ((IS_LINUX || IS_CHROMEOS) && HAS_LINUX_KERNEL) || IS_ANDROID
+ #endif  // BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_MAC)
+ 
+   g_enable_memv2 = base::FeatureList::IsEnabled(kMojoIpczMemV2);
+diff --git a/services/resource_coordinator/public/cpp/memory_instrumentation/os_metrics.cc b/services/resource_coordinator/public/cpp/memory_instrumentation/os_metrics.cc
+index 0e7ab661dd..cce88e35f4 100644
+--- a/services/resource_coordinator/public/cpp/memory_instrumentation/os_metrics.cc
++++ b/services/resource_coordinator/public/cpp/memory_instrumentation/os_metrics.cc
+@@ -8,6 +8,42 @@
+ 
+ namespace memory_instrumentation {
+ 
++// Every implementation of the two static methods below is per-KERNEL rather
++// than per-platform-family: os_metrics_linux.cc is /proc/<pid>/smaps and
++// prctl(PR_SET_DUMPABLE), os_metrics_win.cc is PSAPI, os_metrics_mac.cc is
++// mach_vm_region, os_metrics_fuchsia.cc is zx_object_get_info. A platform in
++// one of those families whose kernel is its own matches none of them, and
++// this is the arm it gets.
++//
++// false is what FillOSMemoryDump already means when it has nothing to report
++// - os_metrics_fuchsia.cc returns it whenever GetMemoryInfo fails - and the
++// caller in client_process_impl.cc logs "OS memory dump failed" and reports
++// the failure outcome. An implementation that filled the struct with zeroes
++// instead would put a process using no memory into about:memory.
++//
++// The condition for a real one is a way to ask this kernel what a process's
++// resident set is from OUTSIDE that process, which is what every backend
++// above does and what /proc here does not answer yet.
++#if !BUILDFLAG(IS_WIN) && !BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_FUCHSIA) && \
++    !((BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX) ||                      \
++       BUILDFLAG(IS_CHROMEOS)) &&                                           \
++      BUILDFLAG(HAS_LINUX_KERNEL))
++
++// static
++bool OSMetrics::FillOSMemoryDump(base::ProcessHandle handle,
++                                 const MemDumpFlagSet& flags,
++                                 mojom::RawOSMemDump* dump) {
++  return false;
++}
++
++// static
++std::vector<mojom::VmRegionPtr> OSMetrics::GetProcessMemoryMaps(
++    base::ProcessHandle) {
++  return std::vector<mojom::VmRegionPtr>();
++}
++
++#endif
++
+ // static
+ bool OSMetrics::FillProcessMemoryMaps(base::ProcessHandle handle,
+                                       mojom::MemoryMapOption mmap_option,
+diff --git a/ui/gl/gl_fence.cc b/ui/gl/gl_fence.cc
+index e2c60bd165..35df7618f9 100644
+--- a/ui/gl/gl_fence.cc
++++ b/ui/gl/gl_fence.cc
+@@ -18,7 +18,14 @@
+ #include "ui/gl/gl_surface_egl.h"
+ #include "ui/gl/gl_version_info.h"
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)
++// has_linux_kernel as well, which is the condition ui/gl/BUILD.gn already
++// puts on gl_fence_android_native_fence_sync.cc itself: it is libsync and
++// EGL_ANDROID_native_fence_sync, and a platform without the first compiles
++// neither. This #define is what decides whether the three functions below
++// call into that file, so the two have to ask the same question.
++#if (BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS) ||     \
++     BUILDFLAG(IS_LINUX)) &&                                \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ #define USE_GL_FENCE_ANDROID_NATIVE_FENCE_SYNC
+ #include "ui/gl/gl_fence_android_native_fence_sync.h"
+ #endif

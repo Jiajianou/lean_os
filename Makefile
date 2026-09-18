@@ -387,6 +387,18 @@ all: $(LIBC_A)
 
 $(NETSURF_BIN): $(LIBC_A)
 
+# libdl.a - dlopen and its three companions for a STATICALLY linked program,
+# which has no dynamic loader behind it to answer them. Deliberately its own
+# archive: a definition in libc.a or libc.so would be bound ahead of the
+# loader's real ones and take dynamic loading away from the programs that
+# have it. Its source lives outside user_space/libc/src for the same reason -
+# that directory is a wildcard into libc.so.
+LIBDL_A := $(BUILD)/libdl.a
+
+$(LIBDL_A): user_space/libc/libdl/dlfcn_static.c | $(UOBJ)
+	$(CC) $(USER_CFLAGS) $< -o $(UOBJ)/libdl_dlfcn_static.o
+	$(AR) rcs $@ $(UOBJ)/libdl_dlfcn_static.o
+
 LIBC_SO := $(BUILD)/libc.so
 LIBC_SO_SRCS := $(wildcard user_space/libc/src/*.c) \
                 user_space/library/syscall_wrappers.c user_space/library/string_utilities.c \
@@ -437,12 +449,13 @@ sysroot-headers:
 # directory `sysroot` deletes. pthread_atfork was the one that made this
 # necessary.
 .PHONY: sysroot-libc
-sysroot-libc: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
+sysroot-libc: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(LIBDL_A) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
 	@if [ ! -d $(SYSROOT)/usr/lib ]; then \
 	  echo "sysroot-libc: no sysroot yet - run 'make sysroot'"; exit 1; fi
 	@cp $(LIBC_A) $(SYSROOT)/usr/lib/libc.a
 	@cp $(LIBC_SO) $(SYSROOT)/usr/lib/libc.so
 	@cp $(LD_SO) $(SYSROOT)/usr/lib/ld-lean.so
+	@cp $(LIBDL_A) $(SYSROOT)/usr/lib/libdl.a
 	@cp $(UOBJ)/crt0.o $(SYSROOT)/usr/lib/crt1.o
 	@nasm -f elf64 -o $(UOBJ)/crt0-pie.o user_space/library/crt0-pie.asm
 	@cp $(UOBJ)/crt0-pie.o $(SYSROOT)/usr/lib/Scrt1.o
@@ -451,14 +464,14 @@ sysroot-libc: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ
 	@cp user_space/library/user.ld $(SYSROOT)/usr/lib/lean_os.ld
 	@# The empty archives `sysroot` makes, in case this rule is the first
 	@# thing run against a sysroot that predates one of them.
-	@for stub in libm libdl librt libpthread libresolv libuuid; do \
+	@for stub in libm librt libpthread libresolv libuuid; do \
 	  if [ ! -f $(SYSROOT)/usr/lib/$$stub.a ]; then \
 	    $(AR) rcs $(SYSROOT)/usr/lib/$$stub.a 2>/dev/null || true; \
 	  fi; \
 	done
 	@echo "sysroot-libc: $(SYSROOT) libraries refreshed from the tree"
 
-sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
+sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(LIBDL_A) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
 	@rm -rf $(SYSROOT)
 	@mkdir -p $(SYSROOT)/usr/local/include $(SYSROOT)/usr/include $(SYSROOT)/usr/lib
 	@cp -R user_space/libc/include/. $(SYSROOT)/usr/local/include/
@@ -499,17 +512,22 @@ sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crt
 	@# have to rediscover.
 	@rm -f $(SYSROOT)/usr/lib/libm.a
 	@$(AR) rcs $(SYSROOT)/usr/lib/libm.a 2>/dev/null || true
-	@# M99: libdl.a, empty, and for exactly the argument libm.a makes
-	@# above. dlopen, dlsym, dlclose and dlerror are in the dynamic
+	@# M99 made libdl.a empty for exactly the argument libm.a makes
+	@# above: dlopen, dlsym, dlclose and dlerror are in the dynamic
 	@# linker - they have to be, because the loader is the only thing
 	@# that knows what is loaded - and LIB_SPEC puts it on the line of
-	@# every -pie link. But `-ldl` is what a configure script from the
-	@# last thirty years writes down when it wants them, and glibc
-	@# answers that today with an empty stub for the same reason: the
-	@# truthful shape is "there is nothing in libdl that is not already
-	@# reachable", not "no such library".
-	@rm -f $(SYSROOT)/usr/lib/libdl.a
-	@$(AR) rcs $(SYSROOT)/usr/lib/libdl.a 2>/dev/null || true
+	@# every -pie link, so there was nothing in libdl that was not
+	@# already reachable.
+	@#
+	@# M164: that is true of a DYNAMICALLY linked program and of no
+	@# other kind. A static one has no loader behind it, so the four
+	@# were reachable from nowhere and an empty archive answered `-ldl`
+	@# with a link error naming four functions this system does have.
+	@# $(LIBDL_A) is the four that truthfully refuse; they are not in
+	@# libc.a because a definition there would be bound at link time
+	@# and outrank the loader's real ones. See
+	@# user_space/libc/libdl/dlfcn_static.c.
+	@cp $(LIBDL_A) $(SYSROOT)/usr/lib/libdl.a
 	@# M138: librt.a and libpthread.a, empty, and for the third time the
 	@# argument libm.a makes above. Rust's standard library writes
 	@# #[link(name = "rt")] and #[link(name = "pthread")] for every unix,

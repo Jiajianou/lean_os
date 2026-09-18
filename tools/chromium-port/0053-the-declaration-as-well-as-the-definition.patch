@@ -1,0 +1,63 @@
+The declaration as well as the definition.
+
+M163's patch 0049 gated the platform trust store's implementation on the
+condition net/cert/internal/system_trust_store.h already carries, and left
+two halves of the same statement behind: the override declaration in
+cert_verifier_service_factory.h, and the mojom feature that puts the method
+in the interface at all.
+
+An override of a method that is not there is a compile error; an interface
+method with no override is a pure virtual nobody implements. The mojom side
+is the root of both - is_platform_root_store_info_supported was enabled for
+every platform that is not ChromeOS, which is one platform too many for the
+same reason the implementation was.
+
+diff --git a/services/cert_verifier/cert_verifier_service_factory.h b/services/cert_verifier/cert_verifier_service_factory.h
+index 98fcb48fb3..f02c2ab5a0 100644
+--- a/services/cert_verifier/cert_verifier_service_factory.h
++++ b/services/cert_verifier/cert_verifier_service_factory.h
+@@ -6,6 +6,8 @@
+ #define SERVICES_CERT_VERIFIER_CERT_VERIFIER_SERVICE_FACTORY_H_
+ 
+ #include "base/memory/raw_ptr.h"
++#include "build/build_config.h"
++#include "crypto/crypto_buildflags.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/time/time.h"
+@@ -80,7 +82,9 @@ class CertVerifierServiceFactoryImpl
+   // version of Chrome.
+   void GetChromeRootStoreInfo(GetChromeRootStoreInfoCallback callback) override;
+ 
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if !BUILDFLAG(IS_CHROMEOS) &&                                            \
++    (BUILDFLAG(USE_NSS_SERVER_CERTS) || BUILDFLAG(IS_MAC) ||              \
++     BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID))
+   void GetPlatformRootStoreInfo(
+       GetPlatformRootStoreInfoCallback callback) override;
+ #endif
+diff --git a/services/cert_verifier/public/mojom/BUILD.gn b/services/cert_verifier/public/mojom/BUILD.gn
+index 8ddc8a699d..02b80069ac 100644
+--- a/services/cert_verifier/public/mojom/BUILD.gn
++++ b/services/cert_verifier/public/mojom/BUILD.gn
+@@ -24,7 +24,19 @@ mojom("mojom") {
+   }
+   if (chrome_root_store_supported) {
+     enabled_features += [ "is_chrome_root_store_supported" ]
+-    if (!is_chromeos) {
++
++    # What this interface method returns is the user-added certificates of the
++    # PLATFORM's trust store, and net/cert/internal/system_trust_store.h only
++    # knows how to read one where
++    #
++    #   USE_NSS_SERVER_CERTS || IS_MAC || IS_WIN || IS_ANDROID
++    #
++    # so !is_chromeos is one platform too many - the same observation the
++    # implementation side of this already carries. Leaving the method in the
++    # interface while its implementation is gated out leaves a pure virtual
++    # nobody overrides.
++    if (!is_chromeos &&
++        (use_nss_server_certs || is_mac || is_win || is_android)) {
+       enabled_features += [ "is_platform_root_store_info_supported" ]
+     }
+   }

@@ -1046,6 +1046,32 @@ PROBE
                grep -c "T pause")
     [ "$PAUSEDEF" -ge 1 ]
     check $? "and defined in the libc.a beside it"
+
+    # M164. Two more the LINK asked for rather than the compile.
+    #
+    # strtoimax and strtoumax had been DECLARED in this libc's <inttypes.h>
+    # since it was written and never defined, which a compile cannot notice.
+    IMAXDEF=$("${PREFIX}nm" "$ROOT/build/sysroot/usr/lib/libc.a" 2>/dev/null |
+              grep -cE "T strtoi?u?max")
+    [ "$IMAXDEF" -ge 2 ]
+    check $? "this libc defines the two <inttypes.h> declared and did not ($IMAXDEF of 2)"
+
+    # And libdl.a, which was an empty archive. dlopen and its three
+    # companions live in the dynamic loader, so a STATICALLY linked program
+    # had nothing to resolve them against - and -ldl is already on the link
+    # line that asks.
+    DLDEF=$("${PREFIX}nm" "$ROOT/build/sysroot/usr/lib/libdl.a" 2>/dev/null |
+            grep -cE "T dl(open|sym|close|error)")
+    [ "$DLDEF" = "4" ]
+    check $? "and libdl.a answers the four a static program cannot get from the loader ($DLDEF of 4)"
+
+    # The four must NOT be in libc.a as well: a dynamically linked program
+    # resolves them from ld-lean.so at run time, and a definition in libc.a
+    # would be bound at link time and silently win.
+    DLINLIBC=$("${PREFIX}nm" "$ROOT/build/sysroot/usr/lib/libc.a" 2>/dev/null |
+               grep -cE "T dl(open|sym|close|error)")
+    [ "$DLINLIBC" = "0" ]
+    check $? "and they are NOT in libc.a, where they would outrank the loader's"
   fi
 
   # M157. The libc port reaches Chromium's OWN vendored copy of the libc

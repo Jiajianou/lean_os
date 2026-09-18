@@ -1,3 +1,4 @@
+#include <inttypes.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -239,6 +240,19 @@ long long strtoll(const char *s, char **end, int base) {
     int neg = 0;
     unsigned long long v = strtoull_common(s, end, base, &neg);
     return neg ? -(long long)v : (long long)v;
+}
+
+/* <inttypes.h> has declared these two since it was written; nothing had
+   asked for a definition until Chromium's //base did (M164). intmax_t is
+   long here and strtoll's result is long long, which on LP64 are the same
+   64 bits - so these are the same parse with the type C99 names for it,
+   not a second implementation of it. */
+intmax_t strtoimax(const char *s, char **end, int base) {
+    return (intmax_t)strtoll(s, end, base);
+}
+
+uintmax_t strtoumax(const char *s, char **end, int base) {
+    return (uintmax_t)strtoull(s, end, base);
 }
 
 void qsort(void *base, size_t count, size_t size, int (*cmp)(const void *, const void *)) {
