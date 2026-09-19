@@ -13,6 +13,14 @@
 #include "process.h"
 #include "window_manager.h"
 
+#ifdef __cplusplus
+/* These are C. capabilities.h beside it has said so since it was written;
+   this header had not, and nothing had asked - every program linking it was
+   C until a C++ one called sys_dropcaps and the link, not the compile, said
+   the name was wrong. */
+extern "C" {
+#endif
+
 long sys_raw(long num, long a1, long a2, long a3);
 
 long sys_write(int fd, const void *buffer, size_t length);
@@ -212,3 +220,7 @@ long sys_shutdown(int mode);
 long sys_close(int fd);
 
 long sys_shared_memory_free(long id, void *vaddr);
+
+#ifdef __cplusplus
+}
+#endif

@@ -90,6 +90,7 @@ static const cap_grant_t CAP_GRANTS[] = {
     {"httpsget",      CAP_APP_DEFAULT | CAP_NETWORK},
     {"netsurf",       CAP_APP_DEFAULT | CAP_NETWORK},
     {"chromiumnet",   CAP_APP_DEFAULT | CAP_NETWORK},
+    {"chromiumcontent", CAP_APP_DEFAULT | CAP_NETWORK},
     {"audiograb",     CAP_APP_DEFAULT | CAP_AUDIO},
     {"text_editor",   CAP_APP_DEFAULT | CAP_CLIPBOARD},
     {"badptr",        CAP_ALL},

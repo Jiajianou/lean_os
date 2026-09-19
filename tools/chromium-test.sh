@@ -1155,6 +1155,22 @@ PROBE
     content_has "ANGLE's GL implementation, which the GPU process initialises" \
                 "gl::init::" 10
 
+    # M166. The sandbox this platform has, and the one function that enters
+    # it. Asked of the BINARY rather than of the patch, because //sandbox/policy
+    # reaches this program through a dependency content/renderer declares only
+    # for this platform - on Linux it arrives through use_seccomp_bpf, which is
+    # false here, so before M166 sandbox::policy::Sandbox was in no binary at
+    # all and a caller of it would have linked against nothing.
+    content_has "the capability sandbox a renderer enters" \
+                "sandbox::policy::Sandbox::EnterCapabilitySandbox" 1
+    content_has "and the function that answers whether it is in it" \
+                "sandbox::policy::Sandbox::IsProcessSandboxed" 1
+
+    # And still none of Linux's own, which is what M166 did NOT do: entering a
+    # capability sandbox is not seccomp arriving by another name.
+    content_absent "seccomp-bpf policy" "sandbox::bpf_dsl::|SandboxBPF"
+    content_absent "a namespace sandbox" "sandbox::NamespaceSandbox"
+
     rm -rf "$SYMWORK"
 
     ARGSFILE="$SRC/out/$OUT_NAME/args.gn"
@@ -1189,6 +1205,20 @@ PROBE
     # one with a subsystem behind it rather than a definition: a thread_local
     # with a non-trivial destructor needs a per-thread list run at thread exit,
     # and this library had no such hook at all.
+    # M166. The browser is granted something the renderer must give up, and
+    # it is granted BY NAME - a program with no manifest entry gets
+    # CAP_APP_DEFAULT, and a renderer dropping to nothing from that would be
+    # a smaller claim than the one [m166] prints.
+    grep -qE '\{"chromiumcontent", *CAP_APP_DEFAULT \| CAP_NETWORK\}' \
+         "$ROOT/system_api/include/capabilities.h"
+    check $? "the browser process is granted CAP_NETWORK by name, so a renderer has something to lose"
+
+    # The two calls the patch makes are C, and the header now says so. Without
+    # this the renderer compiles and the LINK fails on a mangled name - which
+    # is how M166 found it.
+    grep -q 'extern "C"' "$ROOT/user_space/library/syscall_wrappers.h"
+    check $? "syscall_wrappers.h declares its calls as C, which a C++ caller needs"
+
     TADEF=$("${PREFIX}nm" "$ROOT/build/sysroot/usr/lib/libc.a" 2>/dev/null |
             grep -c "T __cxa_thread_atexit")
     [ "$TADEF" = "1" ]

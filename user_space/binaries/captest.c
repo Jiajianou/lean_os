@@ -1,3 +1,4 @@
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -10,6 +11,20 @@
 #include "window_manager.h"
 
 static int failures;
+
+static volatile uint32_t capabilities_a_thread_saw;
+
+static void *capability_reader(void *unused) {
+    (void)unused;
+    capabilities_a_thread_saw = (uint32_t)sys_getcaps();
+    return 0;
+}
+
+static void *capability_dropper(void *unused) {
+    (void)unused;
+    sys_dropcaps(0);
+    return 0;
+}
 
 static void check(int ok, const char *what) {
     if (!ok) {
@@ -75,6 +90,38 @@ int main(int argc, char **argv) {
     check(sys_readfile(path, back, sizeof(back)) == 4, "the file did not read back");
     check(memcmp(back, "kept", 4) == 0, "the file read back wrong");
     check(sys_unlink(path) == 0, "an ordinary program could not delete its own file");
+
+    /* A capability set belongs to the PROCESS. Until M166 it belonged to the
+       task: a thread got its own copy at spawn, every check read the copy
+       belonging to whichever thread was asking, and a thread that gave
+       something up gave it up for nobody but itself. Both halves are graded
+       here, because either one alone would pass on the broken kernel - the
+       reader passes because the copy starts equal, and the dropper is the
+       one that could not have. */
+    check((uint32_t)sys_getcaps() == CAP_APP_DEFAULT,
+          "this program no longer holds what it started with");
+
+    capabilities_a_thread_saw = (uint32_t)-1;
+    pthread_t reader;
+    if (pthread_create(&reader, 0, capability_reader, 0) != 0) {
+        check(0, "could not spawn a thread to read the capability set");
+    } else {
+        pthread_join(reader, 0);
+        check(capabilities_a_thread_saw == CAP_APP_DEFAULT,
+              "a thread saw a different capability set from the process it is in");
+    }
+
+    pthread_t dropper;
+    if (pthread_create(&dropper, 0, capability_dropper, 0) != 0) {
+        check(0, "could not spawn a thread to drop the capability set");
+    } else {
+        pthread_join(dropper, 0);
+        check((uint32_t)sys_getcaps() == 0,
+              "a thread dropped every capability and the process still holds some");
+        check(sys_writefile("/tmp/captest3.txt", "no", 2) < 0,
+              "a thread dropped CAP_FS_WRITE and the thread that spawned it could "
+              "still write a file");
+    }
 
     long after = sys_dropcaps(0);
     check(after == 0, "sys_dropcaps(0) did not clear every capability");

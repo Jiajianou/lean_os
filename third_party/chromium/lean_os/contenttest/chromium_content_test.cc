@@ -39,11 +39,17 @@
 // has no browser to talk to, and this milestone is about the dispatch rather
 // than about the renderer.
 
+#include <sys/socket.h>
+#include <syscall_wrappers.h>
+#include <unistd.h>
+
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <string>
+#include <thread>
 #include <variant>
 
 #include "base/at_exit.h"
@@ -60,6 +66,7 @@
 #include "content/public/common/content_client.h"
 #include "content/public/common/content_switches.h"
 #include "content/public/common/main_function_params.h"
+#include "sandbox/policy/sandbox.h"
 #include "url/url_util.h"
 
 namespace {
@@ -165,6 +172,37 @@ class LeanOsMainDelegate : public content::ContentMainDelegate {
 constexpr int kChildSawRenderer = 41;
 constexpr int kChildSawSomethingElse = 42;
 
+// M166. The renderer's half of the sandbox, reported the same way: each of
+// these is a distinct exit code so that a child which got the process type
+// right and the authority wrong cannot be read as a pass.
+constexpr int kChildSandboxRefused = 43;
+constexpr int kChildStillHoldsCapabilities = 44;
+constexpr int kChildNotReportedSandboxed = 45;
+constexpr int kChildOpenedASocket = 46;
+constexpr int kChildThreadOpenedASocket = 47;
+constexpr int kChildThreadFailed = 48;
+
+// A renderer holds nothing, so anything it is still allowed to do has to be
+// checked from INSIDE it. socket(2) is the one worth checking: it is what a
+// renderer must never have - M118's note says the renderer is the one program
+// on this machine that must hold no CAP_NETWORK - and this platform refuses it
+// by capability rather than by policy, so the refusal is the kernel's.
+bool ASocketCanBeOpened() {
+  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (fd >= 0) {
+    ::close(fd);
+    return true;
+  }
+  return false;
+}
+
+std::atomic<int> thread_socket_result{-1};
+
+void TryASocketOnAnotherThread() {
+  thread_socket_result.store(ASocketCanBeOpened() ? 1 : 0,
+                             std::memory_order_release);
+}
+
 int RunContent(int argc, const char** argv) {
   content::ContentMainParams params(nullptr);
   LeanOsMainDelegate delegate;
@@ -201,11 +239,49 @@ int main(int argc, const char** argv) {
     if (RunContent(argc, argv) != 0) {
       return kChildSawSomethingElse;
     }
-    return (std::strcmp(dispatched_process_type,
-                        switches::kRendererProcess) == 0 &&
-            dispatched_as_child && !dispatched_as_browser)
-               ? kChildSawRenderer
-               : kChildSawSomethingElse;
+    if (std::strcmp(dispatched_process_type, switches::kRendererProcess) != 0 ||
+        !dispatched_as_child || dispatched_as_browser) {
+      return kChildSawSomethingElse;
+    }
+
+    // This is what RendererMainPlatformDelegate::EnableSandbox() calls on this
+    // platform, and calling it here rather than through RendererMain is
+    // deliberate: this program declines to run the renderer's actual main -
+    // a renderer with no mojo invitation from the browser has nothing to do -
+    // so what is graded is the sandbox entry and what it costs the process,
+    // not the delegate's call site.
+    if (!sandbox::policy::Sandbox::EnterCapabilitySandbox()) {
+      return kChildSandboxRefused;
+    }
+    if (sys_getcaps() != 0) {
+      return kChildStillHoldsCapabilities;
+    }
+    if (!sandbox::policy::Sandbox::IsProcessSandboxed()) {
+      return kChildNotReportedSandboxed;
+    }
+
+    // The behavioural half. A set that reads back empty is a number; a socket
+    // the kernel refuses is the boundary.
+    if (ASocketCanBeOpened()) {
+      return kChildOpenedASocket;
+    }
+
+    // And from a thread, because the process is what was confined. //content
+    // has already started this process's thread pool by now, so a capability
+    // set that belonged to the calling task would leave every one of those
+    // threads holding what the browser was given.
+    thread_socket_result.store(-1, std::memory_order_release);
+    std::thread other(TryASocketOnAnotherThread);
+    other.join();
+    const int from_thread = thread_socket_result.load(std::memory_order_acquire);
+    if (from_thread < 0) {
+      return kChildThreadFailed;
+    }
+    if (from_thread != 0) {
+      return kChildThreadOpenedASocket;
+    }
+
+    return kChildSawRenderer;
   }
 
   std::printf("chromiumcontent: starting\n");
@@ -291,6 +367,28 @@ int main(int argc, const char** argv) {
   Check(child_finished && child_exit == kChildSawRenderer,
         "//content dispatched THAT process as a renderer, not as a browser");
 
+  // M166: the browser's half of the same question. "Strictly less" needs two
+  // measurements and the child's exit code carried only one of them - a pair
+  // of equally powerless processes would have satisfied every check above.
+  const int sandbox_checks_start = checks;
+  const uint32_t browser_capabilities = (uint32_t)sys_getcaps();
+  Check(browser_capabilities != 0,
+        "the browser process still holds the authority it was given");
+  Check((browser_capabilities & CAP_NETWORK) != 0,
+        "the browser process holds CAP_NETWORK, which is what the renderer "
+        "must not");
+  Check(!sandbox::policy::Sandbox::IsProcessSandboxed(),
+        "and //content does not report the browser as sandboxed");
+  Check(ASocketCanBeOpened(),
+        "a socket this machine refused the renderer opens here");
+
+  // The renderer's side of the pair was measured in the child and arrives as
+  // its exit code: it entered the sandbox, held nothing afterwards, was
+  // reported sandboxed, and was refused a socket on its main thread AND on
+  // another one. Anything else it could have returned is a different number.
+  Check(child_finished && child_exit == kChildSawRenderer,
+        "the renderer it spawned holds strictly less than that - nothing");
+
   if (failures) {
     std::printf("chromiumcontent: FAILED - %d of %d checks\n", failures,
                 checks);
@@ -302,7 +400,16 @@ int main(int argc, const char** argv) {
       "order //content documents, and the FeatureList, thread pool, "
       "ContentClient and locked scheme registry its startup is responsible "
       "for.\n",
-      checks);
+      sandbox_checks_start);
+  std::printf(
+      "[m166] a renderer with strictly less authority: %d checks. The browser "
+      "keeps the capability set it was spawned with, CAP_NETWORK included, "
+      "and opens a socket; the renderer it spawned gives the whole of its own "
+      "up through the hook //content already calls for this, holds nothing "
+      "afterwards, is what sandbox::policy::Sandbox::IsProcessSandboxed() now "
+      "answers yes about, and is refused a socket by the kernel on its main "
+      "thread and on another one - because the set belongs to the process.\n",
+      checks - sandbox_checks_start);
   std::printf("chromiumcontent: done\n");
   return 0;
 }

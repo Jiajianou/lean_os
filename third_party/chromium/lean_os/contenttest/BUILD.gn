@@ -18,6 +18,15 @@ executable("contenttest") {
     "//content/public/app",
     "//content/public/browser",
     "//content/public/common",
+
+    # M166: the sandbox this platform has. The renderer child calls
+    # Sandbox::EnterCapabilitySandbox() - the same function
+    # RendererMainPlatformDelegate::EnableSandbox() calls - and then asks
+    # Sandbox::IsProcessSandboxed() what it now is. Named here rather than
+    # inherited from //content, because a dependency a program relies on and
+    # does not declare is one that disappears the day its supplier stops
+    # needing it.
+    "//sandbox/policy",
     "//url",
   ]
 }

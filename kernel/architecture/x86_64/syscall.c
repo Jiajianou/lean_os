@@ -218,7 +218,13 @@ static int copy_path_from_user(char *out, uint64_t source) {
 static uint32_t cap_denials_logged[MAX_TASKS];
 
 static int has_cap(uint32_t cap) {
-    task_t *self = scheduler_current();
+    /* The set belongs to the PROCESS, not to the thread asking. M146 drew
+       this line for descriptors and M165 drew it for mappings; capabilities
+       were the third thing still answering per task, and a process that
+       reduced its authority on one thread kept all of it on every other -
+       which is a claim rather than a boundary. A renderer dropping what it
+       may do is exactly the caller that would have found that out. */
+    task_t *self = scheduler_vm_owner(scheduler_current());
     if (self->caps & cap) {
         return 1;
     }
@@ -3246,12 +3252,15 @@ static long sys_time(uint64_t out_pointer, uint64_t a2, uint64_t a3, uint64_t a4
 
 static long sys_getcaps(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-    return (long)scheduler_current()->caps;
+    return (long)scheduler_vm_owner(scheduler_current())->caps;
 }
 
 static long sys_dropcaps(uint64_t keep, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-    task_t *self = scheduler_current();
+    /* Narrows the process, so a thread that gives something up gives it up
+       for the thread that spawned it too. Without that, "this process may no
+       longer open a socket" would be false the moment it had two threads. */
+    task_t *self = scheduler_vm_owner(scheduler_current());
     self->caps &= (uint32_t)keep;
     return (long)self->caps;
 }

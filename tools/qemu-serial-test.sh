@@ -257,6 +257,7 @@ REQUIRED_MARKERS=(
   "[m162] the display compositor on this machine:"
   "chromiumviz: done"
   "[m165] //content on this machine:"
+  "[m166] a renderer with strictly less authority:"
   "chromiumcontent: done"
   "mathltest: done"
   "[m125] lvgl rendered"

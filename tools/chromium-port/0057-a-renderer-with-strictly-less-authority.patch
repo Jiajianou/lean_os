@@ -1,0 +1,203 @@
+A renderer with strictly less authority, which is the sandbox this
+platform has.
+
+Patch 0047 turned two functions into refusals and wrote down, in both of
+them, exactly what would have to become true before they could answer
+anything else:
+
+    The condition for changing both is nameable: the launcher spawning a
+    renderer with strictly less authority than itself, and these functions
+    being able to ask what this process was given.
+
+M165 built the launcher half - /bin/chromiumcontent spawns a second process
+and //content dispatches it as a renderer - and this is the rest of it.
+
+WHAT THE SANDBOX IS HERE
+
+There is no seccomp-bpf and there are no namespaces. What there is is a
+capability set the kernel assigns from a manifest at spawn, which can only
+ever shrink, and which since M166 belongs to the PROCESS rather than to the
+thread that asks. A process holding none of it cannot map the screen, read
+the clipboard, list processes, open a socket, write a file or power the
+machine off; the kernel refuses each of those by name.
+
+So entering the sandbox is giving the whole set up, and being in it is
+holding nothing. Sandbox::EnterCapabilitySandbox() is the first and
+Sandbox::IsProcessSandboxed() reads back the second - which is why the
+implementation returns what sys_dropcaps() reports rather than true: the
+answer is the measurement, and a caller that wants to check rather than
+trust can call sys_getcaps() itself.
+
+WHY THE RENDERER AND NOT THE LAUNCHER
+
+RendererMainPlatformDelegate::EnableSandbox() is where Chromium puts this on
+every platform with a sandbox of its own, and the reason is the same here:
+RendererMain calls it before the message loop runs and therefore before
+anything at all has arrived over the pipe from the browser. Everything a
+renderer does with somebody else's bytes is on the far side of that call.
+The process about to run that code is the one that closes the door.
+
+A renderer needs nothing from the set. The pipe it talks to the browser over
+is a descriptor it was handed, and this platform's Unix-domain sockets,
+shared memory and futexes were built to need no capability - M118 says so in
+the commit that built them, and gives this as the reason.
+
+//content/renderer NOW DEPENDS ON //sandbox/policy
+
+On Linux that dependency is reached through use_seccomp_bpf, which is false
+here, so //sandbox/policy was in no binary and sandbox::policy::Sandbox was
+in no binary either. A declaration is not a definition: without the dep the
+renderer compiles and the program does not link, which is M164's sentence
+arriving a third time. Adding it drags nothing - the sandbox's Linux half is
+already behind has_linux_kernel from patch 0047, and the target builds for
+this platform with no further change.
+
+diff --git a/sandbox/policy/sandbox.h b/sandbox/policy/sandbox.h
+--- a/sandbox/policy/sandbox.h
++++ b/sandbox/policy/sandbox.h
+@@ -59,6 +59,22 @@
+   // Except if the process is the browser, if the process is running with the
+   // --no-sandbox flag, this unconditionally returns true.
+   static bool IsProcessSandboxed();
++
++#if BUILDFLAG(IS_LINUX) && !BUILDFLAG(HAS_LINUX_KERNEL)
++  // Put this process into the only sandbox this platform has, and answer
++  // whether it is in it. There is no seccomp-bpf and there are no namespaces
++  // here; what there is is a capability set the kernel assigned from a
++  // manifest at spawn and which can only ever shrink, so entering the sandbox
++  // means giving the whole of it up. A renderer needs none of it: the pipe it
++  // talks to the browser over is a descriptor it was handed, and this
++  // platform's Unix-domain sockets, shared memory and futexes need no
++  // capability by design.
++  //
++  // Called by the renderer itself rather than by its launcher, which is where
++  // a platform with seccomp calls the equivalent - the process that is about
++  // to run somebody else's code is the one that closes the door behind it.
++  static bool EnterCapabilitySandbox();
++#endif
+ };
+ 
+ }  // namespace policy
+diff --git a/sandbox/policy/sandbox.cc b/sandbox/policy/sandbox.cc
+--- a/sandbox/policy/sandbox.cc
++++ b/sandbox/policy/sandbox.cc
+@@ -18,6 +18,12 @@
+ #include "third_party/jni_zero/common_apis.h"
+ #endif  // BUILDFLAG(IS_ANDROID)
+ 
++#if BUILDFLAG(IS_LINUX) && !BUILDFLAG(HAS_LINUX_KERNEL)
++// This platform's own two calls. Both are in the runtime every program here
++// links, and the header is in its sysroot.
++#include <syscall_wrappers.h>
++#endif
++
+ #if (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)) || \
+     BUILDFLAG(IS_CHROMEOS)
+ #include "sandbox/policy/linux/sandbox_linux.h"
+@@ -82,6 +88,15 @@
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+ // static
++#if BUILDFLAG(IS_LINUX) && !BUILDFLAG(HAS_LINUX_KERNEL)
++bool Sandbox::EnterCapabilitySandbox() {
++  // Keep nothing. sys_dropcaps() returns what is left, and what is left is
++  // what IsProcessSandboxed() will read back - so the answer here is the
++  // measurement rather than the intention.
++  return sys_dropcaps(0) == 0;
++}
++#endif
++
+ bool Sandbox::IsProcessSandboxed() {
+   auto* command_line = base::CommandLine::ForCurrentProcess();
+   bool is_browser = !command_line->HasSwitch(switches::kProcessType);
+@@ -118,13 +133,19 @@
+   // are all on the far side of that line, and its layer-1 and layer-2 status
+   // bits are the flags for exactly those three.
+   //
+-  // false is the truthful answer, not a placeholder. This function is what
+-  // about:sandbox reports and what several DCHECKs believe, so a platform
+-  // that answered yes because its processes are confined by SOME other means
+-  // would be making a claim nothing here can check. The condition for
+-  // changing it is a way to ask this process what authority it was given at
+-  // spawn, and something that reduced it.
+-  return false;
++  // What it has instead is a capability set the kernel assigned at spawn,
++  // which can only ever shrink and which belongs to the process rather than
++  // to the thread asking. A process holding none of it cannot map the screen,
++  // read the clipboard, list processes, open a socket, write a file or power
++  // the machine off - the kernel refuses each by name - so an empty set is
++  // this platform's answer to the question this function asks, and it is a
++  // state the caller can verify rather than a claim about what was intended.
++  //
++  // This returned false until M166, and the comment here said what would have
++  // to become true first: a way to ask this process what authority it was
++  // given, and something that reduced it. EnterCapabilitySandbox() is the
++  // second and sys_getcaps() is the first.
++  return sys_getcaps() == 0;
+ #elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+   int status = SandboxLinux::GetInstance()->GetStatus();
+   constexpr int kLayer1Flags = SandboxLinux::Status::kSUID |
+diff --git a/content/renderer/renderer_main_platform_delegate_linux.cc b/content/renderer/renderer_main_platform_delegate_linux.cc
+--- a/content/renderer/renderer_main_platform_delegate_linux.cc
++++ b/content/renderer/renderer_main_platform_delegate_linux.cc
+@@ -13,8 +13,8 @@
+ #include "build/build_config.h"
+ #include "content/public/common/content_features.h"
+ #include "content/public/common/content_switches.h"
+-#if BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "sandbox/policy/sandbox.h"
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "sandbox/policy/sandbox_type.h"
+ #endif
+ 
+@@ -36,17 +36,21 @@
+ #if !BUILDFLAG(HAS_LINUX_KERNEL)
+   // Everything below this line is Linux's own kernel - the setuid helper, the
+   // namespaces and seccomp-bpf - and a platform in the Linux family without
+-  // them cannot enter any of it. Reporting that it did would be worse than
+-  // useless: about:sandbox would say this renderer is confined, and the
+-  // CHECKs further down exist precisely because Chromium does not take that
+-  // claim on trust.
++  // them cannot enter any of it.
+   //
+-  // Returning false is the truthful answer while the process that launches a
+-  // renderer is the one that decides what it may do, and has not been asked
+-  // to decide anything yet. The condition for this becoming true is nameable:
+-  // the launcher spawning a renderer with strictly less authority than itself
+-  // and this function being able to ask what it was given.
+-  return false;
++  // What it enters instead is the sandbox it does have. The capability set
++  // this process was given at spawn can only ever shrink, so a renderer gives
++  // the whole of it up here and holds nothing afterwards: no socket, no file
++  // to write, no screen, no clipboard, no process list. The browser that
++  // launched it keeps what it was given, which is what makes this strictly
++  // less authority rather than a pair of equal processes.
++  //
++  // This is the last point at which the renderer can do it. RendererMain
++  // calls EnableSandbox() before the message loop runs and therefore before
++  // anything arrives over the pipe from the browser - and everything a
++  // renderer does afterwards is on the far side of that, which is the whole
++  // reason the door closes here rather than in the launcher.
++  return sandbox::policy::Sandbox::EnterCapabilitySandbox();
+ #else
+   // The setuid sandbox is started in the zygote process: zygote_main_linux.cc
+   // https://chromium.googlesource.com/chromium/src/+/main/docs/linux/suid_sandbox.md
+diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
+--- a/content/renderer/BUILD.gn
++++ b/content/renderer/BUILD.gn
+@@ -400,6 +400,15 @@
+     deps += [ "//sandbox:sandbox_buildflags" ]
+   }
+ 
++  if (is_linux && !has_linux_kernel) {
++    # RendererMainPlatformDelegate::EnableSandbox() calls
++    # sandbox::policy::Sandbox::EnterCapabilitySandbox() on this platform, and
++    # a declaration is not a definition: without this the renderer compiles
++    # and the program does not link. The Android arm above reaches the same
++    # target through use_seccomp_bpf for the same reason.
++    deps += [ "//sandbox/policy" ]
++  }
++
+   if (is_chromeos) {
+     deps += [
+       "//chromeos:chromeos_export",
