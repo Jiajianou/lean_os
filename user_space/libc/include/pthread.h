@@ -179,6 +179,11 @@ typedef int pthread_key_t;
 
 #define PTHREAD_KEYS_MAX 32
 
+/* POSIX's own minimum, and the number glibc uses. A destructor is allowed to
+   set the key again, so the sweep runs this many times before giving up
+   rather than for ever. */
+#define PTHREAD_DESTRUCTOR_ITERATIONS 4
+
 int pthread_key_create(pthread_key_t *key, void (*destructor)(void *));
 int pthread_key_delete(pthread_key_t key);
 void *pthread_getspecific(pthread_key_t key);

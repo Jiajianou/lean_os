@@ -87,6 +87,11 @@ isr_ipi_schedule:
     push qword 0xF0
     jmp lapic_common_stub
 
+isr_ipi_tlb_shootdown:
+    push qword 0
+    push qword 0xF1
+    jmp lapic_common_stub
+
 isr_lapic_spurious:
     push qword 0
     push qword 0xFF
@@ -188,6 +193,10 @@ syscall_stub_address:
 global isr_ipi_schedule_address
 isr_ipi_schedule_address:
     dq isr_ipi_schedule
+
+global isr_ipi_tlb_shootdown_address
+isr_ipi_tlb_shootdown_address:
+    dq isr_ipi_tlb_shootdown
 
 global isr_lapic_spurious_address
 isr_lapic_spurious_address:

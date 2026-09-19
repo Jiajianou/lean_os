@@ -100,6 +100,7 @@ void setprogname(const char *name) {
 
 extern void *__lean_tls_setup(void);
 extern void __lean_stack_protector_init(void);
+extern void __lean_run_thread_destructors(void);
 
 int __lean_start(int argc, char **argv, char **envp,
                  int (*mainfn)(int, char **, char **)) {
@@ -122,6 +123,7 @@ int __lean_start(int argc, char **argv, char **envp,
         }
     }
     int rc = mainfn(argc, argv, envp);
+    __lean_run_thread_destructors();
     __lean_run_exit_handlers();
     __lean_stdio_flush_all();
     return rc;

@@ -56,3 +56,9 @@ int virtual_memory_cow_break(uint64_t pml4_phys, uint64_t virt);
 
 uint64_t virtual_memory_create_address_space(void);
 void virtual_memory_switch_address_space(uint64_t pml4_phys);
+
+/* Reload CR3 with what is already in it, which discards every non-global
+   translation this core has cached. A core that has just been told another
+   core changed the page tables under it calls this; there is nothing cheaper
+   here, because invlpg needs the addresses and a shootdown carries none. */
+void virtual_memory_flush_local_tlb(void);

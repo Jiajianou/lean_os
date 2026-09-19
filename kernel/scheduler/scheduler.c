@@ -1570,7 +1570,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
        because kmalloc with interrupts off and a spinlock held is a different
        promise from the one this allocator makes. The parent is the caller, so
        its table cannot change size underneath this. */
-    task_t *forking = scheduler_current();
+    task_t *forking = scheduler_vm_owner(scheduler_current());
     uint32_t child_capacity = forking ? forking->mmap_capacity : 0;
     mmap_region_t *child_regions = 0;
     if (child_capacity) {
@@ -1609,6 +1609,15 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     task_t *t = &tasks[slot];
     task_t *parent = current_task[smp_current_cpu()];
 
+    /* Two different parents. The thread that called fork is what the child's
+       registers, floating point state and thread pointer come from, because
+       the child resumes where the caller was. Everything that describes the
+       ADDRESS SPACE - the mappings, the break, where the next shared segment
+       would go - belongs to whichever task owns it, and a thread's own copies
+       of those are empty. Reading them off the caller gave a child forked
+       from a thread no mappings and a break of zero. */
+    task_t *space = scheduler_vm_owner(parent);
+
     t->id = PID_MAKE(slot, t->generation);
     t->entry = NULL;
     t->arg = NULL;
@@ -1638,8 +1647,8 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->child_max_rss_pages = 0;
 
     for (int i = 0; i < PATH_MAX_LENGTH; i++) {
-        t->cwd[i] = parent->cwd[i];
-        if (!parent->cwd[i]) {
+        t->cwd[i] = space->cwd[i];
+        if (!space->cwd[i]) {
             break;
         }
     }
@@ -1669,7 +1678,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->mmaps = child_regions;
     t->mmap_capacity = child_capacity;
     for (uint32_t i = 0; i < child_capacity; i++) {
-        t->mmaps[i] = parent->mmaps[i];
+        t->mmaps[i] = space->mmaps[i];
     }
     scheduler_regions_retain_memfds(t);
 
@@ -1684,9 +1693,9 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
 
     t->fs_base = parent->fs_base;
 
-    t->heap_brk = parent->heap_brk;
-    t->heap_mapped_end = parent->heap_mapped_end;
-    t->shared_memory_next_vaddr = parent->shared_memory_next_vaddr;
+    t->heap_brk = space->heap_brk;
+    t->heap_mapped_end = space->heap_mapped_end;
+    t->shared_memory_next_vaddr = space->shared_memory_next_vaddr;
     set_task_name(t, parent->name);
 
     isr_regs_t *child_frame =

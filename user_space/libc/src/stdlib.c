@@ -18,8 +18,14 @@
 
 extern void __lean_run_exit_handlers(void);
 extern void __lean_stdio_flush_all(void);
+extern void __lean_run_thread_destructors(void);
 
+/* The main thread's thread_locals are destroyed before the static ones, which
+   is what [basic.start.term] says and is not an ordering this library gets to
+   choose: a static destructor is allowed to read a thread_local, and one
+   destroyed first would be read after its lifetime ended. */
 void exit(int status) {
+    __lean_run_thread_destructors();
     __lean_run_exit_handlers();
     __lean_stdio_flush_all();
     sys_exit(status);

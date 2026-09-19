@@ -3683,6 +3683,53 @@ static void boot_selftests_system(void) {
                    "self-test passed (7/7 checks).\n\n");
     }
 
+    if (boot_forksmp_enabled()) {
+        /* The [m83] threaded-fork modes on their own, on whatever core count
+           this machine was booted with. They are in the battery too, but the
+           battery boots one core and a shootdown between cores is not a thing
+           one core can be wrong about - so this is the only place the
+           interesting half of M165's fork work is actually graded. */
+        kernel_log_puts("[forksmp] cores: 0x");
+        kernel_log_put_hex32((uint32_t)smp_cpu_count);
+        kernel_log_puts("\n");
+
+        int forksmp_ok = 1;
+        static const char *const forksmp_modes[] = {"threads", "threadfork"};
+        for (unsigned m = 0; m < 2; m++) {
+            size_t fs_bytes = 0;
+            uint8_t *fs_img = read_program(PATH_BIN_DIRECTORY "forktest", &fs_bytes);
+            if (!fs_img) {
+                panic("forksmp: /bin/forktest is not on this disk");
+            }
+            const char *fs_argv[] = {PATH_BIN_DIRECTORY "forktest",
+                                     forksmp_modes[m], 0};
+            task_t *fs = process_spawnv("forktest", fs_img, fs_bytes, fs_argv);
+            long fs_rc = fs ? do_syscall(SYS_wait, (uint64_t)fs->id, 0, 0) : -1;
+            kfree(fs_img);
+            kernel_log_puts("[forksmp] ");
+            kernel_log_puts(forksmp_modes[m]);
+            kernel_log_puts(" exited ");
+            kernel_log_put_dec((uint32_t)(fs_rc < 0 ? 99 : fs_rc));
+            kernel_log_puts("\n");
+            if (fs_rc != 0) {
+                forksmp_ok = 0;
+            }
+            for (int i = 0; i < scheduler_task_count(); i++) {
+                task_t *stale = scheduler_task_by_slot(i);
+                if (stale && stale->state == TASK_TERMINATED) {
+                    selftest_reap(stale);
+                }
+            }
+        }
+        if (!forksmp_ok) {
+            panic("forksmp: fork out of a process with sibling threads is wrong on this machine");
+        }
+        kernel_log_puts("[forksmp] fork out of a process with three sibling "
+                   "threads still writing, on every core this machine has - "
+                   "self-test passed.\n");
+        power_shutdown(POWER_OFF);
+    }
+
     {
         size_t hello_size_bytes = 0;
         uint8_t *hello_image = read_program(PATH_BIN_DIRECTORY "hello", &hello_size_bytes);
@@ -9585,6 +9632,102 @@ static void boot_selftests_system(void) {
         }
     }
 
+    {
+        os_stat_t cn;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/chromiumcontent", (uint64_t)&cn, 0) != 0) {
+            kernel_log_puts("[m165] /bin/chromiumcontent is not on this image - skipped. "
+                       "tools/build-chromium.sh lean_os links it out of "
+                       "//content's own objects and tools/chromium-test.sh "
+                       "installs it.\n\n");
+        } else {
+            int cn_pipe[2];
+            if (do_syscall(SYS_pipe, (uint64_t)cn_pipe, 0, 0) != 0) {
+                panic("M165 self-test: could not make a pipe for the report");
+            }
+            do_syscall(SYS_dup2, (uint64_t)cn_pipe[1], 1, 0);
+            do_syscall(SYS_dup2, (uint64_t)cn_pipe[1], 2, 0);
+
+            size_t cn_bytes = 0;
+            uint8_t *cn_image = read_program(PATH_BIN_DIRECTORY "chromiumcontent",
+                                             &cn_bytes);
+            if (!cn_image) {
+                panic("M165 self-test: /bin/chromiumcontent could not be read");
+            }
+            const char *cn_argv[] = {PATH_BIN_DIRECTORY "chromiumcontent", 0};
+            task_t *cnt = process_spawnv("chromiumcontent", cn_image, cn_bytes,
+                                         cn_argv);
+            kfree(cn_image);
+
+            static char cn_out[8192];
+            size_t cn_got = 0;
+            long cn_rc = -1;
+            /* This program spawns a SECOND copy of itself and waits for it, so
+               its deadline is two startups of //content rather than one. */
+            long cn_deadline = (long)pit_get_ticks() + 300 * PIT_HZ;
+            for (;;) {
+                long avail = do_syscall(SYS_pipe_poll, (uint64_t)cn_pipe[0], 0, 0);
+                if (avail > 0 && cn_got < sizeof(cn_out) - 1) {
+                    size_t room = sizeof(cn_out) - 1 - cn_got;
+                    long n = do_syscall(SYS_read, (uint64_t)cn_pipe[0],
+                                        (uint64_t)(cn_out + cn_got),
+                                        (uint64_t)((size_t)avail < room
+                                                   ? (size_t)avail : room));
+                    if (n > 0) {
+                        cn_got += (size_t)n;
+                    }
+                    continue;
+                }
+                long done = cnt ? do_syscall(SYS_wait_nb, (uint64_t)cnt->id, 0, 0)
+                                : -1;
+                if (done != -2) {
+                    cn_rc = done;
+                    long n;
+                    while ((n = do_syscall(SYS_pipe_poll, (uint64_t)cn_pipe[0], 0, 0)) > 0 &&
+                           cn_got < sizeof(cn_out) - 1) {
+                        size_t room = sizeof(cn_out) - 1 - cn_got;
+                        long r = do_syscall(SYS_read, (uint64_t)cn_pipe[0],
+                                            (uint64_t)(cn_out + cn_got),
+                                            (uint64_t)((size_t)n < room ? (size_t)n : room));
+                        if (r <= 0) {
+                            break;
+                        }
+                        cn_got += (size_t)r;
+                    }
+                    break;
+                }
+                if ((long)pit_get_ticks() > cn_deadline) {
+                    break;
+                }
+                do_syscall(SYS_yield, 0, 0, 0);
+            }
+            cn_out[cn_got] = '\0';
+            do_syscall(SYS_close, (uint64_t)cn_pipe[0], 0, 0);
+            do_syscall(SYS_close, (uint64_t)cn_pipe[1], 0, 0);
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[1]);
+            scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
+            file_descriptor_release(&scheduler_current()->descriptor_table->slots[2]);
+            scheduler_current()->descriptor_table->slots[2].type = FILE_DESCRIPTOR_STDOUT;
+
+            for (char *line = cn_out; *line;) {
+                char *end = line;
+                while (*end && *end != '\n') {
+                    end++;
+                }
+                char saved = *end;
+                *end = '\0';
+                kernel_log_puts(line);
+                kernel_log_putc('\n');
+                *end = saved;
+                line = saved ? end + 1 : end;
+            }
+            if (cn_rc != 0) {
+                panic("M165 self-test: //content is wrong on this machine - "
+                      "see the chromiumcontent lines above");
+            }
+            kernel_log_putc('\n');
+        }
+    }
+
 
     {
         os_stat_t ct;
@@ -11173,6 +11316,50 @@ static void boot_selftests_system(void) {
             }
         }
 
+        /* M83 refused fork from a process with more than one thread and said
+           what it would take: a shootdown, because clearing a writable bit
+           invalidates only the calling core's TLB. M165 built that, so the
+           two modes below are what it bought - and they are run here rather
+           than in a milestone of their own because this is where fork is
+           graded. */
+        if (all_ok) {
+            static const char *const threaded_modes[] = {"threads", "threadfork"};
+            for (unsigned m = 0; all_ok && m < 2; m++) {
+                uint64_t before = physical_memory_free_frame_count();
+                size_t th_bytes = 0;
+                uint8_t *th_img = read_program(PATH_BIN_DIRECTORY "forktest", &th_bytes);
+                if (!th_img) {
+                    panic("M83 self-test: /bin/forktest vanished mid-test");
+                }
+                const char *th_argv[] = {PATH_BIN_DIRECTORY "forktest",
+                                         threaded_modes[m], 0};
+                task_t *th = process_spawnv("forktest", th_img, th_bytes, th_argv);
+                long th_rc = th ? do_syscall(SYS_wait, (uint64_t)th->id, 0, 0) : -1;
+                kfree(th_img);
+                if (th_rc != 0) {
+                    kernel_log_puts("[m83] forktest ");
+                    kernel_log_puts(threaded_modes[m]);
+                    kernel_log_puts(" exited ");
+                    kernel_log_put_dec((uint32_t)(th_rc < 0 ? 99 : th_rc));
+                    kernel_log_puts(" - see user_space/binaries/forktest.c for what "
+                               "each code means\n");
+                    all_ok = 0;
+                }
+                for (int i = 0; i < scheduler_task_count(); i++) {
+                    task_t *stale = scheduler_task_by_slot(i);
+                    if (stale && stale->state == TASK_TERMINATED) {
+                        selftest_reap(stale);
+                    }
+                }
+                if (all_ok && physical_memory_free_frame_count() != before) {
+                    kernel_log_puts("[m83] the ");
+                    kernel_log_puts(threaded_modes[m]);
+                    kernel_log_puts(" round did not give every frame back\n");
+                    all_ok = 0;
+                }
+            }
+        }
+
         if (!all_ok) {
             panic("M83 self-test: this kernel cannot make two processes out of one");
         }
@@ -11183,8 +11370,12 @@ static void boot_selftests_system(void) {
                    "returning every task slot and every frame, and an 8 MiB process "
                    "forked for 0x");
         kernel_log_put_hex64(cow_spend);
-        kernel_log_puts(" frames rather than the 0x1000 a copy would have cost - "
-                   "self-test passed (");
+        kernel_log_puts(" frames rather than the 0x1000 a copy would have cost, "
+                   "and a fork out of a process with three sibling threads still "
+                   "writing - the child one thread, its thousand pages carrying "
+                   "not one write from after the call, and a fork called by a "
+                   "thread that is not the first one inheriting the mappings the "
+                   "address space owns - self-test passed (");
         kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
         kernel_log_puts(" ms).\n\n");
     }
@@ -11501,6 +11692,42 @@ static void boot_selftests_system(void) {
             int64_t n = virtual_file_system_read(PATH_PROCESS_DIRECTORY "self/exe", buffer, sizeof(buffer) - 1);
             if (n <= 0 || buffer[0] != '/') {
                 kernel_log_puts("[m87] /proc/self/exe did not read back a path\n");
+                all_ok = 0;
+            }
+        }
+
+        /* M165. The same entry through readlink(2), which is the call a
+           program asking where it is actually makes - Chromium's
+           base::PathService reaches a NOTREACHED without it, and this
+           filesystem answered only read(2) until then. The two must agree:
+           a link whose target is not the file's own contents would be two
+           different answers to one question. */
+        if (all_ok) {
+            char link[256];
+            k_memset(link, 0, sizeof(link));
+            int64_t n = virtual_file_system_readlink(PATH_PROCESS_DIRECTORY "self/exe",
+                                                     link, sizeof(link));
+            if (n <= 0 || link[0] != '/') {
+                kernel_log_puts("[m87] /proc/self/exe is not a readable symbolic link\n");
+                all_ok = 0;
+            } else if (k_strcmp(link, buffer) != 0) {
+                kernel_log_puts("[m87] /proc/self/exe reads as '");
+                kernel_log_puts(buffer);
+                kernel_log_puts("' and links to '");
+                kernel_log_puts(link);
+                kernel_log_puts("'\n");
+                all_ok = 0;
+            }
+        }
+
+        /* And a procfs entry that is NOT a link still refuses, so the new
+           operation did not make every synthetic file look like one. */
+        if (all_ok) {
+            char link[64];
+            if (virtual_file_system_readlink(PATH_PROCESS_DIRECTORY "uptime",
+                                             link, sizeof(link)) >= 0) {
+                kernel_log_puts("[m87] /proc/uptime answered readlink - every "
+                           "procfs file now looks like a symbolic link\n");
                 all_ok = 0;
             }
         }

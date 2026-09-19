@@ -1,4 +1,6 @@
+#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
@@ -47,9 +49,300 @@ static int cow_mode(void) {
     return rc == 0 ? 0 : 8;
 }
 
+
+/* Fork from a process that has other threads running, which this kernel
+   refused until M165. The codes here are 20 and up so that nothing already
+   printed against a code below 20 changes meaning.
+
+   What makes this worth booting rather than reasoning about is the last
+   check. A sibling thread writing in a tight loop on another core holds a
+   writable translation for every page it touches. fork clears the writable
+   bit in the page table, but a page table is not a TLB, so without a
+   shootdown the sibling keeps writing into the frame the child was just
+   promised is its own - and the child reads a value from after the fork. One
+   page would almost never catch it; a thousand, checked immediately, does. */
+
+#define THREAD_PAGES  512UL
+#define SIBLINGS      3
+#define THREAD_ROUNDS 8
+#define HOT_WRITES    4096UL
+#define BEFORE_FORK   0x41
+#define AFTER_FORK    0x42
+#define CHILD_WROTE   0x43
+
+static volatile char *shared_pages;
+static volatile int siblings_should_stop;
+static volatile unsigned long sibling_laps[SIBLINGS];
+static volatile int sibling_write_value = BEFORE_FORK;
+
+static void *sibling_main(void *argument) {
+    unsigned long which = (unsigned long)argument;
+    while (!siblings_should_stop) {
+        /* A page of this sibling's own, written over and over with whatever
+           the value is RIGHT NOW rather than with what it was at the top of
+           the lap. That is what makes the window catchable: the parent can
+           change the value after fork has returned and this thread is
+           writing the new one a handful of instructions later, with no lap
+           boundary in between to wait for. */
+        for (unsigned long spin = 0; spin < HOT_WRITES; spin++) {
+            shared_pages[which * PAGE] = (char)sibling_write_value;
+        }
+        char value = (char)sibling_write_value;
+        for (unsigned long i = SIBLINGS; i < THREAD_PAGES; i++) {
+            shared_pages[i * PAGE] = value;
+        }
+        sibling_laps[which]++;
+    }
+    return 0;
+}
+
+/* Hand the siblings a new value and do not come back until every page holds
+   it. A sibling reads the value once at the top of a lap, so a lap already
+   under way finishes writing the old one: two full laps each is what makes
+   "every page was written with the new value last" true rather than likely. */
+static int siblings_settle_on(int value) {
+    sibling_write_value = value;
+    unsigned long target[SIBLINGS];
+    for (int i = 0; i < SIBLINGS; i++) {
+        target[i] = sibling_laps[i] + 2;
+    }
+    for (int spin = 0; spin < 2000000; spin++) {
+        int settled = 1;
+        for (int i = 0; i < SIBLINGS; i++) {
+            if (sibling_laps[i] < target[i]) {
+                settled = 0;
+            }
+        }
+        if (settled) {
+            return 0;
+        }
+        sys_yield();
+    }
+    return -1;
+}
+
+static int threads_mode(void) {
+    shared_pages = (volatile char *)mmap(0, THREAD_PAGES * PAGE,
+                                         PROT_READ | PROT_WRITE,
+                                         MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (shared_pages == (volatile char *)MAP_FAILED) {
+        return 20;
+    }
+    for (unsigned long i = 0; i < THREAD_PAGES; i++) {
+        shared_pages[i * PAGE] = BEFORE_FORK;
+    }
+
+    pthread_t siblings[SIBLINGS];
+    for (int i = 0; i < SIBLINGS; i++) {
+        if (pthread_create(&siblings[i], 0, sibling_main,
+                           (void *)(unsigned long)i) != 0) {
+            return 21;
+        }
+    }
+
+    /* Every sibling has to be round its loop, or "there were other threads"
+       is a claim about pthread_create rather than about this process. */
+    if (siblings_settle_on(BEFORE_FORK) != 0) {
+        return 22;
+    }
+
+    /* Rounds, because one fork is one sample of a race. A sibling whose core
+       happened to reload CR3 between the page table change and the child's
+       read would make a kernel with no shootdown look right exactly once. */
+    for (int round = 0; round < THREAD_ROUNDS; round++) {
+        if (siblings_settle_on(BEFORE_FORK) != 0) {
+            return 22;
+        }
+
+        pid_t kid = fork();
+        if (kid < 0) {
+            return 23;
+        }
+
+        if (kid == 0) {
+            /* The child is one thread: the one that called fork. Nothing else
+               in here runs, so every lap counter stands still across a stretch
+               in which the parent's are climbing. */
+            unsigned long laps_at_entry[SIBLINGS];
+            for (int i = 0; i < SIBLINGS; i++) {
+                laps_at_entry[i] = sibling_laps[i];
+            }
+
+            /* Read before yielding to anything. The parent's siblings are
+               writing AFTER_FORK into what is now the parent's own copy, and
+               not one of those writes may be visible here. */
+            int from_after_the_fork = 0;
+            for (unsigned long i = 0; i < THREAD_PAGES; i++) {
+                if (shared_pages[i * PAGE] != BEFORE_FORK) {
+                    from_after_the_fork++;
+                }
+            }
+            if (from_after_the_fork) {
+                printf("forktest: round %d: %d of %lu pages carried a write "
+                       "from after the fork - a sibling was still writing "
+                       "through a translation nobody discarded\n", round,
+                       from_after_the_fork, THREAD_PAGES);
+                sys_exit(24);
+            }
+
+            for (int i = 0; i < 100; i++) {
+                sys_yield();
+            }
+            for (int i = 0; i < SIBLINGS; i++) {
+                if (sibling_laps[i] != laps_at_entry[i]) {
+                    printf("forktest: round %d: sibling %d ran in the child - "
+                           "fork gave the child more than the calling "
+                           "thread\n", round, i);
+                    sys_exit(25);
+                }
+            }
+
+            /* Writing here breaks copy-on-write rather than reaching the
+               parent, over every page rather than one. */
+            for (unsigned long i = 0; i < THREAD_PAGES; i++) {
+                shared_pages[i * PAGE] = CHILD_WROTE;
+            }
+            for (unsigned long i = 0; i < THREAD_PAGES; i++) {
+                if (shared_pages[i * PAGE] != CHILD_WROTE) {
+                    sys_exit(26);
+                }
+            }
+            sys_exit(0);
+        }
+
+        /* Before anything else, and deliberately without settling: the child
+           is reading its pages on another core at this moment, and the whole
+           question is whether a sibling's writes can still reach them. The
+           siblings pick this up within a write or two. */
+        sibling_write_value = AFTER_FORK;
+
+        /* The siblings keep writing and what they write changes; if one of
+           them died - on a copy-on-write fault two took at once, which a
+           single-threaded fork could not reach - its laps stop and settling
+           never finishes. */
+        unsigned long laps_before[SIBLINGS];
+        for (int i = 0; i < SIBLINGS; i++) {
+            laps_before[i] = sibling_laps[i];
+        }
+        if (siblings_settle_on(AFTER_FORK) != 0) {
+            printf("forktest: round %d: a sibling stopped running across the "
+                   "fork\n", round);
+            return 27;
+        }
+
+        long child_rc = sys_wait(kid);
+        if (child_rc != 0) {
+            return (int)child_rc;
+        }
+
+        for (int i = 0; i < SIBLINGS; i++) {
+            if (sibling_laps[i] <= laps_before[i]) {
+                printf("forktest: round %d: sibling %d never ran again\n",
+                       round, i);
+                return 27;
+            }
+        }
+
+        /* The parent's pages are the parent's: the child wrote over every one
+           of them and none of that may be here. */
+        for (unsigned long i = 0; i < THREAD_PAGES; i++) {
+            if (shared_pages[i * PAGE] != AFTER_FORK) {
+                printf("forktest: round %d: page %lu is 0x%02x rather than "
+                       "what this process last wrote - the child's writes "
+                       "reached the parent\n", round, i,
+                       (unsigned)(unsigned char)shared_pages[i * PAGE]);
+                return 28;
+            }
+        }
+    }
+
+    siblings_should_stop = 1;
+    for (int i = 0; i < SIBLINGS; i++) {
+        pthread_join(siblings[i], 0);
+    }
+    munmap((void *)shared_pages, THREAD_PAGES * PAGE);
+    return 0;
+}
+
+
+/* fork called by a thread that is not the one the process started on. The
+   mappings, the break and the working directory belong to the address space
+   rather than to the caller, and a thread's own copies of them are empty - so
+   a child built from the caller's had no mappings at all. */
+
+static volatile int thread_fork_result;
+
+static void *forking_thread_main(void *argument) {
+    (void)argument;
+    volatile char *arena = (volatile char *)mmap(0, 4 * PAGE,
+                                                 PROT_READ | PROT_WRITE,
+                                                 MAP_ANONYMOUS | MAP_PRIVATE,
+                                                 -1, 0);
+    if (arena == (volatile char *)MAP_FAILED) {
+        thread_fork_result = 30;
+        return 0;
+    }
+    arena[0] = 'T';
+    arena[3 * PAGE] = 'T';
+
+    pid_t kid = fork();
+    if (kid < 0) {
+        thread_fork_result = 31;
+        return 0;
+    }
+    if (kid == 0) {
+        /* Touching the far end proves the whole region came across rather
+           than one page the fault handler would have filled anyway. */
+        if (arena[0] != 'T' || arena[3 * PAGE] != 'T') {
+            sys_exit(32);
+        }
+        arena[0] = 'U';
+        void *more = mmap(0, PAGE, PROT_READ | PROT_WRITE,
+                          MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        if (more == MAP_FAILED) {
+            sys_exit(33);
+        }
+        char *heap = (char *)malloc(64 * 1024);
+        if (!heap) {
+            sys_exit(34);
+        }
+        heap[0] = 'h';
+        heap[64 * 1024 - 1] = 'h';
+        sys_exit(0);
+    }
+
+    long rc = sys_wait(kid);
+    if (rc != 0) {
+        thread_fork_result = (int)rc;
+        return 0;
+    }
+    if (arena[0] != 'T') {
+        thread_fork_result = 35;
+        return 0;
+    }
+    munmap((void *)arena, 4 * PAGE);
+    thread_fork_result = 0;
+    return 0;
+}
+
+static int thread_fork_mode(void) {
+    pthread_t forker;
+    if (pthread_create(&forker, 0, forking_thread_main, 0) != 0) {
+        return 29;
+    }
+    pthread_join(forker, 0);
+    return thread_fork_result;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && argv[1] && strcmp(argv[1], "cow") == 0) {
         return cow_mode();
+    }
+    if (argc > 1 && argv[1] && strcmp(argv[1], "threads") == 0) {
+        return threads_mode();
+    }
+    if (argc > 1 && argv[1] && strcmp(argv[1], "threadfork") == 0) {
+        return thread_fork_mode();
     }
 
     before_fork = 0x5A5A;

@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "architecture/x86_64/cpu.h"
+#include "architecture/x86_64/symmetric_multiprocessing.h"
 #include "architecture/x86_64/timestamp_counter.h"
 #include "drivers/ac97.h"
 #include "drivers/dispi.h"
@@ -4514,16 +4515,32 @@ static long sys_fork(isr_regs_t *regs) {
         return -1;
     }
 
-    if (scheduler_count_sharing_address_space(parent->pml4_phys) > 1) {
-        return -1;
-    }
+    /* M83 refused this from a process with more than one thread and named the
+       condition: clearing a writable bit invalidates only this core's TLB, so
+       a sibling on another core would keep writing to a page the child was
+       promised is private. M165 is what asked - //content's launcher forks
+       from a browser process that has already started its thread pool, which
+       is what every multi-process program does - and the answer is the
+       shootdown M83 said it needed rather than a weaker fork.
 
-    scheduler_release_shared_range(parent, USER_MMAP_BASE, USER_MMAP_LIMIT);
+       The mappings belong to the address space rather than to the thread that
+       happens to be calling, so the shared range released here is the owner's.
+       A thread's own mmap table is empty and releasing it would free nothing
+       while fork went on to duplicate the framebuffer. */
+    task_t *vm_owner = scheduler_vm_owner(parent);
+    scheduler_release_shared_range(vm_owner, USER_MMAP_BASE, USER_MMAP_LIMIT);
+    smp_tlb_shootdown();
 
     uint64_t child_pml4 = process_fork_address_space(parent->pml4_phys);
     if (child_pml4 == 0) {
         return -1;
     }
+
+    /* Every writable page the parent still has is copy-on-write now. Until
+       each sibling has discarded what it cached, one of them can still write
+       through the old translation - so the child is not handed out until they
+       have. */
+    smp_tlb_shootdown();
 
     task_t *child = task_fork(child_pml4, regs);
     if (!child) {
@@ -4531,9 +4548,9 @@ static long sys_fork(isr_regs_t *regs) {
         return -1;
     }
 
-    task_t *owner = scheduler_vm_owner(parent);
-    if (owner->env_block && owner->env_length && owner->env_count) {
-        if (scheduler_set_env(child, owner->env_block, owner->env_length, owner->env_count) != 0) {
+    if (vm_owner->env_block && vm_owner->env_length && vm_owner->env_count) {
+        if (scheduler_set_env(child, vm_owner->env_block, vm_owner->env_length,
+                              vm_owner->env_count) != 0) {
             scheduler_raise_signal(child, SIGKILL);
             return -1;
         }

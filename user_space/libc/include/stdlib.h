@@ -32,6 +32,7 @@ int system(const char *command);
 
 int atexit(void (*fn)(void));
 int __cxa_atexit(void (*fn)(void *), void *arg, void *dso);
+int __cxa_thread_atexit(void (*fn)(void *), void *arg, void *dso);
 void __cxa_finalize(void *dso);
 extern void *__dso_handle;
 

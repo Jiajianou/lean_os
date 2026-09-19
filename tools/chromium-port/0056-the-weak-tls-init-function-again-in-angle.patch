@@ -1,0 +1,118 @@
+The weak TLS init function again, in ANGLE this time.
+
+M155's patch 0033 found this in V8 and CLAUDE.md records it as the sharpest
+thing that milestone found. It is the same bug, in a different library,
+reached for the first time because M165 is the first program here that links
+ANGLE's GL entry points.
+
+  ld.lld: error: relocation R_X86_64_PLT32 out of range: -549852782059 is not
+  in [-2147483648, 2147483647]; references 'thread-local initialization
+  routine for gl::gCurrentValidContext'
+
+-549852782059 is very close to -512 GiB, which is where this OS loads
+programs, and the target is therefore at zero.
+
+Context.h declares
+
+  extern thread_local Context *gCurrentValidContext;
+
+and Context.cpp defines it as nullptr. A declaration with no initializer in
+sight cannot be known to be constant-initialized, so every translation unit
+that READS the variable emits a reference to its TLS init function - and the
+defining translation unit emits no such function, because the variable IS
+constant-initialized. The reference resolves to absolute zero, which a
+PC-relative branch reaches only from an image near zero. On Linux it always
+is.
+
+What made this one loud where V8's was a single symbol is where the readers
+are: GetValidGlobalContext() is ANGLE_INLINE in global_state.h and every GL
+entry point in entry_points_gles_*_autogen.cpp calls it, so the failure
+arrives as hundreds of identical errors from generated files.
+
+egl::gCurrentThread in global_state.h has exactly the same shape - extern
+thread_local in a header, = nullptr in the source, read through an inline
+function in that header - and is fixed here rather than left to be found by
+the next link.
+
+constinit says what was already true, in the one place every reader can see
+it, and no init function is referenced at all. It is also what upstream would
+want: the variables are nullptr-initialized and the keyword documents it.
+
+diff --git a/third_party/angle/src/libANGLE/Context.cpp b/third_party/angle/src/libANGLE/Context.cpp
+index 554cd5b..0be6e1e 100644
+--- a/third_party/angle/src/libANGLE/Context.cpp
++++ b/third_party/angle/src/libANGLE/Context.cpp
+@@ -659,7 +659,7 @@ void SetCurrentValidContextTLS(Context *context)
+     gCurrentValidContext = context;
+ }
+ #else
+-thread_local Context *gCurrentValidContext = nullptr;
++constinit thread_local Context *gCurrentValidContext = nullptr;
+ #endif
+ 
+ // Handle setting the current context in TLS on different platforms
+diff --git a/third_party/angle/src/libANGLE/Context.h b/third_party/angle/src/libANGLE/Context.h
+index 01ff2d7..ebf8cc6 100644
+--- a/third_party/angle/src/libANGLE/Context.h
++++ b/third_party/angle/src/libANGLE/Context.h
+@@ -1207,7 +1207,20 @@ class [[nodiscard]] ScopedContextRef
+ extern Context *GetCurrentValidContextTLS();
+ extern void SetCurrentValidContextTLS(Context *context);
+ #else
+-extern thread_local Context *gCurrentValidContext;
++// constinit, and not for tidiness. Every translation unit that merely READS
++// this variable emits a reference to its "TLS init function", because a
++// declaration with no initializer in sight cannot be known to be
++// constant-initialized - and the defining translation unit emits no such
++// function, because it IS. The reference is then resolved to absolute zero,
++// and a PC-relative branch from the image to zero only fits in 32 bits if the
++// image is near it. On Linux it always is. On a platform that loads programs
++// at 512 GiB it is not, and the link fails with R_X86_64_PLT32 out of range
++// against a function nobody calls - here, from every GL entry point in
++// entry_points_gles_*_autogen.cpp at once.
++//
++// constinit says the thing that is already true, in the one place every reader
++// can see it.
++extern constinit thread_local Context *gCurrentValidContext;
+ #endif
+ 
+ extern void SetCurrentValidContext(Context *context);
+diff --git a/third_party/angle/src/libGLESv2/global_state.cpp b/third_party/angle/src/libGLESv2/global_state.cpp
+index a6644a4..91f323d 100644
+--- a/third_party/angle/src/libGLESv2/global_state.cpp
++++ b/third_party/angle/src/libGLESv2/global_state.cpp
+@@ -123,7 +123,7 @@ void SetCurrentThreadTLS(Thread *thread)
+     gCurrentThread = thread;
+ }
+ #else
+-thread_local Thread *gCurrentThread = nullptr;
++constinit thread_local Thread *gCurrentThread = nullptr;
+ #endif
+ 
+ gl::Context *GetGlobalLastContext()
+diff --git a/third_party/angle/src/libGLESv2/global_state.h b/third_party/angle/src/libGLESv2/global_state.h
+index 7810ce4..c2538b0 100644
+--- a/third_party/angle/src/libGLESv2/global_state.h
++++ b/third_party/angle/src/libGLESv2/global_state.h
+@@ -36,7 +36,20 @@ class Thread;
+ extern Thread *GetCurrentThreadTLS();
+ extern void SetCurrentThreadTLS(Thread *thread);
+ #else
+-extern thread_local Thread *gCurrentThread;
++// constinit, and not for tidiness. Every translation unit that merely READS
++// this variable emits a reference to its "TLS init function", because a
++// declaration with no initializer in sight cannot be known to be
++// constant-initialized - and the defining translation unit emits no such
++// function, because it IS. The reference is then resolved to absolute zero,
++// and a PC-relative branch from the image to zero only fits in 32 bits if the
++// image is near it. On Linux it always is. On a platform that loads programs
++// at 512 GiB it is not, and the link fails with R_X86_64_PLT32 out of range
++// against a function nobody calls - here, from every GL entry point in
++// entry_points_gles_*_autogen.cpp at once.
++//
++// constinit says the thing that is already true, in the one place every reader
++// can see it.
++extern constinit thread_local Thread *gCurrentThread;
+ #endif
+ 
+ gl::Context *GetGlobalLastContext();

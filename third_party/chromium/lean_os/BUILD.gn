@@ -10,6 +10,7 @@ group("lean_os") {
     "//lean_os/basetest",
     "//lean_os/blinktest",
     "//lean_os/ccpainttest",
+    "//lean_os/contenttest",
     "//lean_os/cctest",
     "//lean_os/gpuinfotest",
     "//lean_os/mojotest",

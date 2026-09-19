@@ -370,8 +370,12 @@ uint32_t virtual_file_system_nlink(const char *path) {
 
 int64_t virtual_file_system_readlink(const char *path, char *buffer, size_t maxlen) {
     const char *rel;
-    if (virtual_file_system_resolve_mount(path, &rel) >= 0) {
-        return -1;
+    int m = virtual_file_system_resolve_mount(path, &rel);
+    if (m >= 0) {
+        if (!mounts[m].ops->readlink) {
+            return -1;
+        }
+        return mounts[m].ops->readlink(rel, buffer, maxlen);
     }
     uint64_t f = spin_lock_irqsave(&fs_lock);
     int64_t r = leanfs_readlink(path, buffer, maxlen);

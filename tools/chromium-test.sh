@@ -670,11 +670,25 @@ PROBE
     ARGSFILE="$SRC/out/$OUT_NAME/args.gn"
     OFF=0
     for flag in enable_vulkan enable_swiftshader enable_swiftshader_vulkan \
-                use_dawn skia_use_dawn; do
+                skia_use_dawn; do
       grep -qE "^$flag = false\$" "$ARGSFILE" || OFF=1
     done
     [ "$OFF" = "0" ]
-    check $? "and the build's own args.gn turns off all five GPU back ends"
+    check $? "and the build's own args.gn turns off four of the five GPU back ends"
+
+    # use_dawn is the FIFTH and it is true since M165, which is a reversal of
+    # M158's position on this one flag and is recorded as one rather than
+    # quietly dropped from the list. Blink has no configuration without WebGPU
+    # - modules/webgpu is unconditional in its module list - and the first
+    # link of a program against //content failed on nothing else. What keeps
+    # the GPU stack out is now Dawn's own six flags instead, which this file
+    # checks where it checks the binary they produce.
+    #
+    # The claim this check used to make is still true and is made in a
+    # stronger place: no binary in this port contains Dawn except
+    # /bin/chromiumcontent, and that one contains only its null backend.
+    grep -qE "^use_dawn = true\$" "$ARGSFILE"
+    check $? "and use_dawn is TRUE, which M165 reversed and Blink requires"
 
     # The two headers M158 added to this libc, checked in the SYSROOT rather
     # than in the tree. `make sysroot` begins with rm -rf and so is not run
@@ -1072,6 +1086,122 @@ PROBE
                grep -cE "T dl(open|sym|close|error)")
     [ "$DLINLIBC" = "0" ]
     check $? "and they are NOT in libc.a, where they would outrank the loader's"
+  fi
+
+  # M165. //content LINKS, which is a different claim from M163's "compiles"
+  # and is what found everything in this milestone.
+  CONTENTPROGRAM="$SRC/out/$OUT_NAME/contenttest"
+  if [ ! -f "$CONTENTPROGRAM" ]; then
+    echo "chromium-test: //content has not been linked - skipping" \
+         "(tools/build-chromium.sh lean_os)"
+  else
+    "${PREFIX}readelf" -h "$CONTENTPROGRAM" | grep -q "EXEC (Executable file)"
+    check $? "//content links into a program for this machine"
+
+    NOINTERP=$("${PREFIX}readelf" -l "$CONTENTPROGRAM" 2>/dev/null |
+               grep -cE "^  INTERP")
+    [ "$NOINTERP" = "0" ]
+    check $? "and it is static - no interpreter, like every program on this image"
+
+    # 767,000 symbols, so the table is written once and every check below
+    # greps that rather than running nm fourteen times over a 318 MB binary.
+    SYMWORK=$(mktemp -d)
+    TMPSYMS="$SYMWORK/contenttest.sym"
+    "${PREFIX}nm" -C "$CONTENTPROGRAM" > "$TMPSYMS" 2>/dev/null
+    content_has() {
+      FOUND=$(grep -cE " [TtWwDdBbVv] .*($2)" "$TMPSYMS")
+      [ "$FOUND" -ge "$3" ]
+      check $? "and $1 is in it ($FOUND symbols)"
+    }
+    content_absent() {
+      FOUND=$(grep -cE " [TtWwDdBbVv] .*($2)" "$TMPSYMS")
+      [ "$FOUND" = "0" ]
+      check $? "and no $1 in it"
+    }
+
+    # The browser really is here rather than a library that links.
+    content_has "//content's own process dispatch" "content::ContentMainRunnerImpl" 5
+    content_has "the render process host" "content::RenderProcessHostImpl" 100
+    content_has "the render frame host" "content::RenderFrameHostImpl" 500
+    content_has "Blink's document" "blink::Document::" 100
+    content_has "V8" "v8::Isolate" 100
+
+    # WEBGPU. use_dawn is true since M165 - Blink has no configuration without
+    # it - so Dawn IS in this binary, and the question is WHICH Dawn. The null
+    # backend is the honest one on a machine with no adapter: requestAdapter()
+    # answers null, which is what the specification says to do.
+    content_has "Dawn's null backend" "dawn::native::null::" 50
+    for backend in vulkan opengl d3d metal; do
+      content_absent "Dawn's $backend backend" "dawn::native::${backend}"
+    done
+
+    # And the three that must still be absent, by NAMESPACE rather than by
+    # word - M159's rule. Dawn's five flags are what keep them out.
+    content_absent SwiftShader "sw::Reactor|rr::Nucleus|marl::"
+    content_absent "the Vulkan loader" "vk::|VulkanLoader|vulkan_loader"
+    content_absent "seccomp policy" "sandbox::policy::SandboxLinux|sandbox::SandboxBPF"
+
+    # ANGLE's GL IS in this binary, and that is a change from M159 rather than
+    # a regression. M159 measured /bin/chromiumgpu and found no gl::init::,
+    # because nothing in it called gl::init::InitializeGLOneOff. //content
+    # CONTAINS THE GPU PROCESS, and a GPU process initialises GL on its first
+    # line - so this is the first program in the port where the answer is
+    # different, and the check asserts the new answer rather than the old one.
+    #
+    # It is not a claim that this machine has GL. The initialisation has
+    # nothing to succeed with - no SwiftShader, no Vulkan loader, no display -
+    # and what Chromium does then is ComputeGpuFeatureInfoWithNoGpu(), which
+    # M159 graded and which leaves the 2D canvas on the CPU.
+    content_has "ANGLE's GL implementation, which the GPU process initialises" \
+                "gl::init::" 10
+
+    rm -rf "$SYMWORK"
+
+    ARGSFILE="$SRC/out/$OUT_NAME/args.gn"
+    NOFF=0
+    for flag in dawn_enable_vulkan dawn_enable_vulkan_loader \
+                dawn_enable_vulkan_validation_layers dawn_use_swiftshader \
+                dawn_enable_opengles dawn_enable_desktop_gl; do
+      grep -qE "^$flag = false\$" "$ARGSFILE" || NOFF=1
+    done
+    [ "$NOFF" = "0" ]
+    check $? "and args.gn turns off all six of Dawn's own back-end flags"
+    grep -qE "^use_dawn = true\$" "$ARGSFILE"
+    check $? "with use_dawn TRUE, because Blink has no configuration without it"
+
+    IMAGE="$ROOT/build/os-image.bin"
+    if [ ! -f "$IMAGE" ]; then
+      echo "chromium-test: no $IMAGE - run make, then this again"
+    else
+      # Stripped, unlike the smaller programs this port installs. 318 MB
+      # becomes 205 MB, and the kernel reads the whole file into its own heap
+      # before it copies the image into the process - so the symbol table
+      # would be paid for twice, to answer questions only the host asks.
+      STRIPPED="$ROOT/build/chromiumcontent.stripped"
+      cp "$CONTENTPROGRAM" "$STRIPPED"
+      "${PREFIX}strip" "$STRIPPED"
+      make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
+      "$ROOT/build/leanfs-put" "$IMAGE" "$STRIPPED" /bin/chromiumcontent > /dev/null
+      check $? "installed as /bin/chromiumcontent - the [m165] boot self-test runs it"
+    fi
+
+    # M165. __cxa_thread_atexit, which is the last of M164's list and the only
+    # one with a subsystem behind it rather than a definition: a thread_local
+    # with a non-trivial destructor needs a per-thread list run at thread exit,
+    # and this library had no such hook at all.
+    TADEF=$("${PREFIX}nm" "$ROOT/build/sysroot/usr/lib/libc.a" 2>/dev/null |
+            grep -c "T __cxa_thread_atexit")
+    [ "$TADEF" = "1" ]
+    check $? "this libc defines __cxa_thread_atexit, which a thread_local with a destructor needs"
+
+    # The hook has to be REACHED, not merely present. exit() calls it for the
+    # main thread and pthread.c calls it on both of a thread's ways out, so a
+    # definition nothing referenced would pass the check above and destroy
+    # nothing. What is asked is the caller rather than the callee.
+    TAUSE=$("${PREFIX}nm" "$ROOT/build/sysroot/usr/lib/libc.a" 2>/dev/null |
+            grep -c "U __lean_run_thread_destructors")
+    [ "$TAUSE" -ge 2 ]
+    check $? "and exit(2) and the thread exit paths both reach it ($TAUSE callers)"
   fi
 
   # M157. The libc port reaches Chromium's OWN vendored copy of the libc

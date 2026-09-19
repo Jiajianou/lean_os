@@ -476,6 +476,38 @@ static int process_readdir(const char *rel, uint32_t *cookie, leanfs_directory_e
     return 0;
 }
 
+/* readlink(2) for the one kind of entry here that is a symbolic link.
+   /proc/<pid>/exe names the program a task is running, and every system with
+   a /proc makes it a link rather than a file - so a program that wants its
+   own path calls readlink, which this filesystem had no way to answer.
+   //content's base::PathService does exactly that on its first line.
+
+   The path is generated the same way P_EXE generates it, through the same
+   parse, so the two cannot disagree about what a task's program is called. */
+static int64_t process_readlink(const char *rel, char *buffer, size_t maxlen) {
+    int pid = 0;
+    int kind = classify(rel, &pid);
+    if (kind != P_EXE || !buffer || maxlen == 0) {
+        return -1;
+    }
+    task_t *t = scheduler_task_by_id(pid);
+    if (!t) {
+        return -1;
+    }
+    /* The same literal P_EXE generates above, so the file and the link
+       cannot disagree about what a task is running. */
+    const char *prefix = "/bin/";
+    size_t at = 0;
+    for (const char *p = prefix; *p && at + 1 < maxlen; p++) {
+        buffer[at++] = *p;
+    }
+    for (const char *p = t->name; *p && at + 1 < maxlen; p++) {
+        buffer[at++] = *p;
+    }
+    buffer[at] = '\0';
+    return (int64_t)at;
+}
+
 static const virtual_file_system_ops_t PROCFS_OPS = {
     .stat = process_stat,
     .is_directory = process_is_directory,
@@ -486,6 +518,7 @@ static const virtual_file_system_ops_t PROCFS_OPS = {
     .size = process_size,
     .handle_stat = process_handle_stat,
     .readdir = process_readdir,
+    .readlink = process_readlink,
     .close = process_close,
 };
 

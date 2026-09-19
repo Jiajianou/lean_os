@@ -43,6 +43,7 @@ static uint16_t be16(const uint8_t *p) {
 static int selftest_cached = -1;
 static int ioapic_cached = -1;
 static int bootstrap_cached = -1;
+static int forksmp_cached = -1;
 static int pybuild_cached = -1;
 static int pytest_cached = -1;
 
@@ -50,6 +51,7 @@ void fwcfg_init(void) {
     selftest_cached = -1;
     ioapic_cached = -1;
     bootstrap_cached = -1;
+    forksmp_cached = -1;
     pybuild_cached = -1;
     pytest_cached = -1;
 
@@ -142,6 +144,17 @@ int boot_bootstrap_enabled(void) {
     int n = fwcfg_read_file("opt/leanos/bootstrap", buffer, sizeof(buffer) - 1);
     bootstrap_cached = (n == 1 && buffer[0] == '1') ? 1 : 0;
     return bootstrap_cached;
+}
+
+int boot_forksmp_enabled(void) {
+    if (forksmp_cached >= 0) {
+        return forksmp_cached;
+    }
+    char buffer[8];
+    k_memset(buffer, 0, sizeof(buffer));
+    int n = fwcfg_read_file("opt/leanos/forksmp", buffer, sizeof(buffer) - 1);
+    forksmp_cached = (n == 1 && buffer[0] == '1') ? 1 : 0;
+    return forksmp_cached;
 }
 
 int boot_pytest_enabled(void) {

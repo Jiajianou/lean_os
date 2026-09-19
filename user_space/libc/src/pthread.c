@@ -21,6 +21,7 @@ typedef struct {
 } thread_block_t;
 
 extern void *__lean_tls_setup(void);
+extern void __lean_run_thread_destructors(void);
 
 #define MAX_THREADS 32
 
@@ -498,6 +499,7 @@ int pthread_equal(pthread_t a, pthread_t b) {
 static void thread_trampoline(thread_block_t *tb) {
     tb->tls = __lean_tls_setup();
     void *r = tb->start(tb->arg);
+    __lean_run_thread_destructors();
     tb->retval = r;
     tb->finished = 1;
     sys_thread_exit(0);
@@ -723,6 +725,7 @@ int pthread_join(pthread_t thread, void **retval) {
 
 static struct {
     int in_use;
+    void (*destructor)(void *);
 } tss_keys[PTHREAD_KEYS_MAX];
 
 static struct {
@@ -733,8 +736,12 @@ static struct {
 
 static pthread_mutex_t tss_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* The destructor was accepted and discarded until M165, which is the kind of
+   gap nothing finds: a thread-specific value whose destructor never runs
+   looks exactly like a program that had nothing to free. Chromium's
+   base::ThreadLocalStorage is built entirely out of this call and its
+   OnThreadExit is where a renderer gives its per-thread state back. */
 int pthread_key_create(pthread_key_t *key, void (*destructor)(void *)) {
-    (void)destructor;
     if (!key) {
         return 22;
     }
@@ -742,6 +749,7 @@ int pthread_key_create(pthread_key_t *key, void (*destructor)(void *)) {
     for (int i = 0; i < PTHREAD_KEYS_MAX; i++) {
         if (!tss_keys[i].in_use) {
             tss_keys[i].in_use = 1;
+            tss_keys[i].destructor = destructor;
             for (int r = 0; r < MAX_THREADS + 1; r++) {
                 tss_rows[r].value[i] = 0;
             }
@@ -760,6 +768,7 @@ int pthread_key_delete(pthread_key_t key) {
     }
     pthread_mutex_lock(&tss_lock);
     tss_keys[key].in_use = 0;
+    tss_keys[key].destructor = 0;
     pthread_mutex_unlock(&tss_lock);
     return 0;
 }
@@ -813,7 +822,57 @@ int pthread_setspecific(pthread_key_t key, const void *value) {
     return 0;
 }
 
+/* POSIX's sweep, and the lock is dropped across every destructor call on
+   purpose: a destructor is allowed to call pthread_setspecific - that is how
+   a key is legitimately re-established, and it is why the sweep repeats -
+   so holding tss_lock while calling one would deadlock on this library's own
+   non-recursive mutex. The value is cleared BEFORE the call, so a destructor
+   that does nothing leaves the key empty and the sweep terminates. */
+void __lean_run_key_destructors(void) {
+    for (int round = 0; round < PTHREAD_DESTRUCTOR_ITERATIONS; round++) {
+        int any = 0;
+        for (int key = 0; key < PTHREAD_KEYS_MAX; key++) {
+            pthread_mutex_lock(&tss_lock);
+            int r = tss_row_for_self(0);
+            void (*destructor)(void *) = 0;
+            void *value = 0;
+            if (r >= 0 && tss_keys[key].in_use && tss_rows[r].value[key]) {
+                destructor = tss_keys[key].destructor;
+                value = (void *)tss_rows[r].value[key];
+                tss_rows[r].value[key] = 0;
+            }
+            pthread_mutex_unlock(&tss_lock);
+            if (destructor && value) {
+                destructor(value);
+                any = 1;
+            }
+        }
+        if (!any) {
+            return;
+        }
+    }
+}
+
+/* A row was claimed by the first pthread_setspecific a thread made and never
+   given back, so a program that created and joined thirty-three threads ran
+   out of rows and every setspecific after that failed with ENOMEM. The table
+   is one row per LIVE thread now rather than one per thread that has ever
+   existed. */
+void __lean_release_thread_storage(void) {
+    pthread_mutex_lock(&tss_lock);
+    int r = tss_row_for_self(0);
+    if (r >= 0) {
+        for (int key = 0; key < PTHREAD_KEYS_MAX; key++) {
+            tss_rows[r].value[key] = 0;
+        }
+        tss_rows[r].used = 0;
+        tss_rows[r].tid = 0;
+    }
+    pthread_mutex_unlock(&tss_lock);
+}
+
 void pthread_exit(void *retval) {
+    __lean_run_thread_destructors();
     pthread_t self = pthread_self();
     pthread_mutex_lock(&registry_lock);
     for (int i = 0; i < MAX_THREADS; i++) {

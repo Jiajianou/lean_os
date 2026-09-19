@@ -67,7 +67,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
                 $(UOBJ)/libc_env.o $(UOBJ)/libc_unistd.o \
                 $(UOBJ)/libc_signal.o \
                 $(UOBJ)/libc_dirent.o $(UOBJ)/libc_stat.o $(UOBJ)/libc_mman.o \
-                $(UOBJ)/libc_pthread.o $(UOBJ)/libc_semaphore.o $(UOBJ)/libc_dlfcn.o $(UOBJ)/libc_nl_types.o $(UOBJ)/libc_locale_functions.o $(UOBJ)/libc_fenv.o $(UOBJ)/libc_strtold.o $(UOBJ)/libc_timer.o $(UOBJ)/libc_stack_protector.o $(UOBJ)/libc_decimal_powers.o $(UOBJ)/libc_sendfile.o $(UOBJ)/libc_errno.o $(UOBJ)/libc_wchar.o $(UOBJ)/libc_locale.o \
+                $(UOBJ)/libc_pthread.o $(UOBJ)/libc_thread_exit.o $(UOBJ)/libc_semaphore.o $(UOBJ)/libc_dlfcn.o $(UOBJ)/libc_nl_types.o $(UOBJ)/libc_locale_functions.o $(UOBJ)/libc_fenv.o $(UOBJ)/libc_strtold.o $(UOBJ)/libc_timer.o $(UOBJ)/libc_stack_protector.o $(UOBJ)/libc_decimal_powers.o $(UOBJ)/libc_sendfile.o $(UOBJ)/libc_errno.o $(UOBJ)/libc_wchar.o $(UOBJ)/libc_locale.o \
                 $(UOBJ)/libc_poll.o $(UOBJ)/libc_resource.o \
                 $(UOBJ)/libc_statvfs.o $(UOBJ)/libc_utime.o $(UOBJ)/libc_pwd.o \
                 $(UOBJ)/libc_termios.o $(UOBJ)/libc_grp.o $(UOBJ)/libc_libgen.o \
@@ -237,14 +237,24 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 	[ -n "$$end" ] || { echo "kernel.bin: __kernel_end not found in $(KERNEL_ELF)" >&2; exit 1; }; \
 	echo $$(( ( (0x$$end - 0x100000) + 4095 ) / 4096 )) > $(KERNEL_PAGES_FILE)
 
-FS_START_LBA     := 8192
+# Where the filesystem starts, which is also where the boot image must stop.
+# 8192 until M165, when kernel.c's self-test battery grew the boot image to
+# 8336 sectors and the check below caught it - doing exactly what it was
+# written to do, and naming the two places that have to move together.
+#
+# The three expressions under it used to repeat the number rather than name
+# it, so moving it meant finding all four. They name it now.
+#
+# It must stay a multiple of LEANFS_SECTORS_PER_BLOCK; tests/test_leanfs_format.c
+# has a _Static_assert that says so.
+FS_START_LBA     := 16384
 FS_INODE_BLOCKS  := 4096
 FS_BITMAP_BLOCKS := 16
 FS_DATA_BLOCKS   := 524288
 FS_TOTAL_SECTORS := $(shell echo $$(( (1 + $(FS_INODE_BLOCKS) + $(FS_BITMAP_BLOCKS) + $(FS_DATA_BLOCKS)) * 8 )))
-IMAGE_SECTORS    := $(shell echo $$(( 8192 + (1 + 4096 + 16 + 524288) * 8 + 2048 )))
+IMAGE_SECTORS    := $(shell echo $$(( $(FS_START_LBA) + $(FS_TOTAL_SECTORS) + 2048 )))
 
-ESP_START_LBA    := $(shell echo $$(( 8192 + (1 + 4096 + 16 + 524288) * 8 )))
+ESP_START_LBA    := $(shell echo $$(( $(FS_START_LBA) + $(FS_TOTAL_SECTORS) )))
 ESP_SECTOR_COUNT := 1024
 
 $(IMAGE): $(MBR_BIN) $(KERNEL_BIN) $(UEFI_BOOT_EFI)
@@ -272,8 +282,14 @@ $(IMAGE): $(MBR_BIN) $(KERNEL_BIN) $(UEFI_BOOT_EFI)
 run:
 	@./tools/run-qemu.sh
 
+# -MMD, because this tool reads the on-disk format out of the kernel's own
+# headers and the rule used to name only the .c. A change to leanfs.h or
+# leanfs_format.h then left a stale tool writing at the old place, which is
+# what M165 hit when it moved FS_START_LBA: the tool refused rather than
+# corrupting anything - its magic check is written for exactly this - but the
+# build should not have handed it a reason to.
 $(LEANFS_PUT): tools/leanfs-put.c | $(BUILD)
-	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -o $@ $<
+	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -MMD -MP -MF $(BUILD)/leanfs-put.d -o $@ $<
 
 leanfs-put: $(LEANFS_PUT)
 
@@ -765,6 +781,7 @@ print-%:
 	@echo $($*)
 
 -include $(shell find $(KOBJ) $(UOBJ) $(TEST_BUILD) -name '*.d' 2>/dev/null)
+-include $(BUILD)/leanfs-put.d
 
 clean:
 	rm -rf $(filter-out $(BUILD)/ovmf,$(wildcard $(BUILD)/*))

@@ -96,6 +96,112 @@ static void *sse_alignment_probe(void *arg) {
     return (void *)0xC;
 }
 
+
+/* M165. Two destructor kinds, one hook.
+
+   A C++ thread_local with a non-trivial destructor makes the compiler emit
+   the __cxa_thread_atexit call this makes by hand; calling it directly is
+   what is being graded, because this program is C and the ABI function is
+   the thing the port needed. Nine registrations, so the eighth crosses out
+   of the thread's inline storage and onto the heap and BOTH paths run. */
+#define THREAD_DESTRUCTORS 9
+
+extern int __cxa_thread_atexit(void (*fn)(void *), void *arg, void *dso);
+
+static int destructor_order[2][THREAD_DESTRUCTORS];
+static int destructor_count[2];
+static int destructor_thread_of[2];
+
+static void record_destructor(void *arg) {
+    long packed = (long)arg;
+    int which = (int)(packed >> 8);
+    int index = (int)(packed & 0xff);
+    if (which < 0 || which > 1) {
+        return;
+    }
+    int n = destructor_count[which];
+    if (n < THREAD_DESTRUCTORS) {
+        destructor_order[which][n] = index;
+    }
+    destructor_count[which] = n + 1;
+    destructor_thread_of[which] = (int)sys_gettid();
+}
+
+static void *destructor_worker(void *arg) {
+    long which = (long)arg;
+    for (int i = 0; i < THREAD_DESTRUCTORS; i++) {
+        if (__cxa_thread_atexit(record_destructor,
+                                (void *)((which << 8) | (long)i), 0) != 0) {
+            return (void *)1;
+        }
+    }
+    /* Not one of them has run yet, and that is half the check: a destructor
+       that ran at registration would pass every test that only counts. */
+    if (destructor_count[which] != 0) {
+        return (void *)2;
+    }
+    return (void *)0;
+}
+
+/* pthread_key_create's destructor, which this library accepted and discarded
+   until M165. POSIX says the value is cleared before the destructor is
+   called and the destructor is handed the OLD value, so a destructor that
+   reads the key back must see nothing. */
+static pthread_key_t sweep_key;
+static int sweep_calls;
+static void *sweep_value_seen;
+static int sweep_key_was_clear;
+
+static void sweep_destructor(void *value) {
+    sweep_calls++;
+    sweep_value_seen = value;
+    sweep_key_was_clear = (pthread_getspecific(sweep_key) == 0);
+}
+
+static void *sweep_worker(void *arg) {
+    (void)arg;
+    if (pthread_setspecific(sweep_key, (void *)0xC0FFEE) != 0) {
+        return (void *)1;
+    }
+    return (void *)0;
+}
+
+/* pthread_exit is the other door out of a thread, and a destructor list that
+   only ran on the return path would be right about half the threads a
+   browser has. */
+static int exit_path_destructor_calls;
+
+static void count_exit_path(void *arg) {
+    (void)arg;
+    exit_path_destructor_calls++;
+}
+
+static void *exit_path_worker(void *arg) {
+    (void)arg;
+    __cxa_thread_atexit(count_exit_path, 0, 0);
+    pthread_exit((void *)0);
+    return (void *)1;
+}
+
+/* The thread-specific storage table held one row per thread that had EVER
+   existed rather than one per live thread, so the thirty-fourth thread to
+   call pthread_setspecific got ENOMEM and every one after it did too. Forty
+   threads, created and joined one at a time, is past that edge with room. */
+#define STORAGE_ROUNDS 40
+
+static pthread_key_t churn_key;
+
+static void *churn_worker(void *arg) {
+    long round = (long)arg;
+    if (pthread_setspecific(churn_key, (void *)(round + 1)) != 0) {
+        return (void *)1;
+    }
+    if (pthread_getspecific(churn_key) != (void *)(round + 1)) {
+        return (void *)2;
+    }
+    return (void *)0;
+}
+
 int main(void) {
     double alone = fp_work(1.0);
 
@@ -172,6 +278,110 @@ int main(void) {
     }
     if (pthread_mutex_unlock(&recursive_lock) != 0) {
         return 15;
+    }
+
+    /* A destructor that is not there cannot be run later, so refusing is the
+       only truthful answer. The C++ runtime never asks this, which is exactly
+       why nothing else would find it. */
+    if (__cxa_thread_atexit(0, (void *)1, 0) != -1) {
+        printf("threadtest: __cxa_thread_atexit accepted a null destructor\n");
+        return 16;
+    }
+
+    pthread_t g, h;
+    void *rg = 0, *rh = 0;
+    if (pthread_create(&g, 0, destructor_worker, (void *)0) != 0 ||
+        pthread_join(g, &rg) != 0 ||
+        pthread_create(&h, 0, destructor_worker, (void *)1) != 0 ||
+        pthread_join(h, &rh) != 0) {
+        return 16;
+    }
+    if (rg != (void *)0 || rh != (void *)0) {
+        printf("threadtest: a thread_local destructor ran at registration or "
+               "could not be registered (%ld, %ld)\n", (long)rg, (long)rh);
+        return 16;
+    }
+    for (int which = 0; which < 2; which++) {
+        if (destructor_count[which] != THREAD_DESTRUCTORS) {
+            printf("threadtest: thread %d ran %d of %d thread_local "
+                   "destructors\n", which, destructor_count[which],
+                   THREAD_DESTRUCTORS);
+            return 17;
+        }
+        for (int i = 0; i < THREAD_DESTRUCTORS; i++) {
+            int wanted = THREAD_DESTRUCTORS - 1 - i;
+            if (destructor_order[which][i] != wanted) {
+                printf("threadtest: thread_local destructor %d of thread %d "
+                       "was %d, wanted %d - the order is not reversed\n",
+                       i, which, destructor_order[which][i], wanted);
+                return 18;
+            }
+        }
+    }
+    /* Each list is the THREAD's, not the program's. Two threads that shared
+       one would still run eighteen destructors in some order and pass every
+       check above. */
+    if (destructor_thread_of[0] == destructor_thread_of[1] ||
+        destructor_thread_of[0] == (int)sys_gettid() ||
+        destructor_thread_of[1] == (int)sys_gettid()) {
+        printf("threadtest: the two threads' destructors ran on the same "
+               "thread (%d, %d; main is %d)\n", destructor_thread_of[0],
+               destructor_thread_of[1], (int)sys_gettid());
+        return 19;
+    }
+
+    if (pthread_key_create(&sweep_key, sweep_destructor) != 0) {
+        return 20;
+    }
+    pthread_t i_thread;
+    void *ri = 0;
+    if (pthread_create(&i_thread, 0, sweep_worker, 0) != 0 ||
+        pthread_join(i_thread, &ri) != 0 || ri != (void *)0) {
+        return 20;
+    }
+    if (sweep_calls != 1 || sweep_value_seen != (void *)0xC0FFEE ||
+        !sweep_key_was_clear) {
+        printf("threadtest: pthread key destructor ran %d time(s), saw %p, "
+               "key clear %d\n", sweep_calls, sweep_value_seen,
+               sweep_key_was_clear);
+        return 20;
+    }
+    /* The main thread never touched the key, so nothing is owed for it. */
+    if (pthread_key_delete(sweep_key) != 0 || sweep_calls != 1) {
+        return 20;
+    }
+
+    pthread_t j_thread;
+    void *rj = 0;
+    if (pthread_create(&j_thread, 0, exit_path_worker, 0) != 0 ||
+        pthread_join(j_thread, &rj) != 0 || rj != (void *)0) {
+        return 21;
+    }
+    if (exit_path_destructor_calls != 1) {
+        printf("threadtest: pthread_exit ran %d destructors, wanted 1\n",
+               exit_path_destructor_calls);
+        return 21;
+    }
+
+    if (pthread_key_create(&churn_key, 0) != 0) {
+        return 22;
+    }
+    for (long round = 0; round < STORAGE_ROUNDS; round++) {
+        pthread_t churn;
+        void *rc = 0;
+        if (pthread_create(&churn, 0, churn_worker, (void *)round) != 0 ||
+            pthread_join(churn, &rc) != 0) {
+            return 22;
+        }
+        if (rc != (void *)0) {
+            printf("threadtest: thread %ld could not use thread-specific "
+                   "storage (%ld) - the table keeps a row per thread that "
+                   "ever existed\n", round, (long)rc);
+            return 22;
+        }
+    }
+    if (pthread_key_delete(churn_key) != 0) {
+        return 22;
     }
 
     printf("threadtest: all checks passed (protected %ld of %ld; unprotected lost %ld)\n",

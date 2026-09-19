@@ -20,6 +20,15 @@ typedef struct virtual_file_system_ops {
 
     int (*readdir)(const char *rel, uint32_t *cookie, leanfs_directory_entry_t *out);
 
+    /* Optional. A mounted filesystem that has symbolic links answers
+       readlink(2) here; one that has none leaves it null and every path under
+       it is not a link, which is what virtual_file_system_readlink used to
+       assume of all of them. /proc/self/exe is a link on every system that
+       has a /proc, and a program asking where it is calls readlink rather
+       than open - which is how M165 found this: //content's own startup
+       resolves /proc/self/exe and reached a NOTREACHED when it could not. */
+    int64_t (*readlink)(const char *rel, char *buffer, size_t maxlen);
+
     void (*close)(int handle);
 
     int (*readable)(int handle);

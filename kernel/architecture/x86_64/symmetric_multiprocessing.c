@@ -12,6 +12,7 @@
 #include "lapic.h"
 #include "memory_management/heap.h"
 #include "memory_management/virtual_memory.h"
+#include "library/spinlock.h"
 #include "panic.h"
 #include "profile/sampler.h"
 #include "scheduler/scheduler.h"
@@ -122,6 +123,36 @@ void smp_broadcast_schedule_tick(void) {
     lapic_send_ipi_all_excl_self(IPI_SCHEDULE_VECTOR | LAPIC_ICR_DELIVERY_FIXED);
 }
 
+/* One core at a time may ask, because the acknowledgement count below is a
+   single number rather than one per request. The lock is taken WITHOUT
+   disabling interrupts on purpose: the asking core spins here waiting for
+   every other core to take an interrupt, and a core that cannot take one
+   would never answer. For the same reason nothing that holds a lock another
+   core takes with interrupts off may call this. */
+static spinlock_t shootdown_lock;
+static volatile int shootdown_acknowledgements;
+
+void smp_tlb_shootdown(void) {
+    if (!initialized || smp_cpu_count < 2) {
+        return;
+    }
+
+    spin_lock(&shootdown_lock);
+    __atomic_store_n(&shootdown_acknowledgements, smp_cpu_count - 1,
+                     __ATOMIC_SEQ_CST);
+    lapic_send_ipi_all_excl_self(IPI_TLB_SHOOTDOWN_VECTOR |
+                                 LAPIC_ICR_DELIVERY_FIXED);
+    while (__atomic_load_n(&shootdown_acknowledgements, __ATOMIC_SEQ_CST) > 0) {
+        cpu_spin_hint();
+    }
+    spin_unlock(&shootdown_lock);
+}
+
+void smp_tlb_shootdown_acknowledge(void) {
+    virtual_memory_flush_local_tlb();
+    __atomic_sub_fetch(&shootdown_acknowledgements, 1, __ATOMIC_SEQ_CST);
+}
+
 void smp_halt_other_cpus(void) {
     if (!initialized) {
         return;
@@ -216,5 +247,7 @@ void lapic_vector_handler(isr_regs_t *regs) {
         profile_sample(regs);
         scheduler_account_tick((regs->cs & 3) != 0);
         scheduler_tick_cpu(smp_current_cpu());
+    } else if (regs->vector == IPI_TLB_SHOOTDOWN_VECTOR) {
+        smp_tlb_shootdown_acknowledge();
     }
 }

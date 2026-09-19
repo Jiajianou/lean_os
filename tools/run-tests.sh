@@ -151,6 +151,13 @@ else
 
   run_stage "four cores, and the work shared between them" ./tools/smp-test.sh
 
+  # Beside it rather than in the battery above, because the battery boots ONE
+  # core and a shootdown between cores is not something one core can be wrong
+  # about: with smp_tlb_shootdown stubbed out, the single-core battery still
+  # passed [m83]. On four it fails.
+  run_stage "fork out of a process whose other threads are still running" \
+    ./tools/fork-smp-test.sh
+
   if [ "$TIER" = "full" ]; then
     run_stage "the same battery, through the I/O APIC" \
       bash -c 'LEANOS_IOAPIC=1 ./tools/qemu-serial-test.sh 1500'

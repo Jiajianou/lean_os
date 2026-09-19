@@ -1,0 +1,102 @@
+A Dawn back end the Dawn back-end flag does not gate.
+
+M158's patch 0035 found a WebGPU dependency use_dawn did not gate, and M161's
+0045 found Blink's half of the same thing. This is that sentence once more,
+one flag further in: use_dawn is TRUE in this build since M165, and what is
+not gated now is not WebGPU but VULKAN.
+
+gpu/command_buffer/service/BUILD.gn compiles three Vulkan Ozone shared-image
+representations. Two of them - vulkan_ozone_image_representation and
+skia_vk_ozone_image_representation - are added inside
+
+  if (enable_vulkan) { ... if (use_ozone) { ... } }
+
+The third is added seventy lines below inside if (use_dawn), asking only
+use_ozone, and the file it names opens with
+
+  #include <dawn/native/VulkanBackend.h>
+  #include <sync/sync.h>
+  #include <vulkan/vulkan.h>
+
+so an Ozone platform with no Vulkan matches the condition as written and
+cannot compile the file. sync/sync.h is libsync, which M159 removed, and the
+file also reaches ui/gfx/linux/drm_util_linux.h, which is libdrm and which
+patch 0037 gated - so it is on the far side of two lines this port had
+already drawn, through a condition that asked about neither.
+
+Asking enable_vulkan is the same question its two siblings already ask.
+
+And the OTHER half, which is the mistake this whole milestone is about: the
+call site. ozone_image_backing.cc includes the header and constructs the
+class under BUILDFLAG(USE_DAWN) alone, so gating only the definition leaves a
+caller with nothing to call - exactly what M164 found six earlier milestones
+had each done once. It is graded by a link rather than by a build.
+
+Nothing here is about this OS: any build with use_dawn = true, use_ozone =
+true and enable_vulkan = false hits both halves.
+
+diff --git a/gpu/command_buffer/service/BUILD.gn b/gpu/command_buffer/service/BUILD.gn
+index 58537a332e..b8fa5687c9 100644
+--- a/gpu/command_buffer/service/BUILD.gn
++++ b/gpu/command_buffer/service/BUILD.gn
+@@ -513,7 +513,17 @@ target(link_target_type, "gles2_sources") {
+         "shared_image/dawn_gl_texture_representation.h",
+       ]
+     }
+-    if (use_ozone) {
++    # enable_vulkan as well as use_ozone. The file this names opens with
++    # dawn/native/VulkanBackend.h, sync/sync.h and vulkan/vulkan.h, and the
++    # condition as written asks only whether this is an Ozone platform - so an
++    # Ozone platform with no Vulkan matches it and cannot compile the file.
++    #
++    # enable_vulkan is the flag the SIBLING representation already uses:
++    # vulkan_ozone_image_representation.cc is added seventy lines above inside
++    # if (enable_vulkan) { ... if (use_ozone) }, and skia_vk_ozone with it.
++    # This is the one Vulkan Ozone representation of the three that is outside
++    # that question.
++    if (use_ozone && enable_vulkan) {
+       sources += [
+         "shared_image/dawn_ozone_image_representation.cc",
+         "shared_image/dawn_ozone_image_representation.h",
+diff --git a/gpu/command_buffer/service/shared_image/ozone_image_backing.cc b/gpu/command_buffer/service/shared_image/ozone_image_backing.cc
+index 6855b869a5..97fc091637 100644
+--- a/gpu/command_buffer/service/shared_image/ozone_image_backing.cc
++++ b/gpu/command_buffer/service/shared_image/ozone_image_backing.cc
+@@ -55,11 +55,18 @@
+ #if BUILDFLAG(USE_DAWN)
+ #include "gpu/command_buffer/service/dawn_context_provider.h"
+ #include "gpu/command_buffer/service/graphite_utils.h"
+-#include "gpu/command_buffer/service/shared_image/dawn_ozone_image_representation.h"
+ #include "gpu/command_buffer/service/shared_image/skia_graphite_dawn_image_representation.h"
+ #include "third_party/skia/include/gpu/graphite/Context.h"
+ #include "third_party/skia/include/gpu/graphite/Image.h"
+ #include "third_party/skia/include/gpu/graphite/Recorder.h"
++
++// DawnOzoneImageRepresentation is Dawn's VULKAN representation - its own
++// first include is dawn/native/VulkanBackend.h - so it is compiled under
++// enable_vulkan, the same question vulkan_ozone_image_representation.h above
++// is compiled under. USE_DAWN alone is one condition short.
++#if BUILDFLAG(ENABLE_VULKAN)
++#include "gpu/command_buffer/service/shared_image/dawn_ozone_image_representation.h"
++#endif
+ #endif  // BUILDFLAG(USE_DAWN)
+ 
+ namespace gpu {
+@@ -160,7 +167,7 @@ std::unique_ptr<DawnImageRepresentation> OzoneImageBacking::ProduceDawn(
+   // Creating a representation in GPU is not allowed when usage is CPU only.
+   CHECK(!(usage().Has(SHARED_IMAGE_USAGE_CPU_ONLY_READ_WRITE)));
+ 
+-#if BUILDFLAG(USE_DAWN)
++#if BUILDFLAG(USE_DAWN) && BUILDFLAG(ENABLE_VULKAN)
+   wgpu::TextureFormat webgpu_format = ToDawnFormat(format());
+   if (webgpu_format == wgpu::TextureFormat::Undefined) {
+     return nullptr;
+@@ -169,7 +176,7 @@ std::unique_ptr<DawnImageRepresentation> OzoneImageBacking::ProduceDawn(
+   return std::make_unique<DawnOzoneImageRepresentation>(
+       manager, this, tracker, device, webgpu_format, std::move(view_formats),
+       pixmap_);
+-#else  // !BUILDFLAG(USE_DAWN)
++#else
+   return nullptr;
+ #endif
+ }

@@ -660,9 +660,24 @@ int virtual_memory_cow_break(uint64_t pml4_phys, uint64_t virt) {
         return 0;
     }
     uint64_t entry = pt[PT_INDEX(virt)];
-    if (!(entry & PTE_PRESENT) || !(entry & PTE_COW)) {
+    if (!(entry & PTE_PRESENT)) {
         spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
         return 0;
+    }
+    if (!(entry & PTE_COW)) {
+        /* Not copy-on-write any more. Until fork could be called from a
+           process with more than one thread, that meant the fault was about
+           something else and the caller was right to treat a zero as fatal.
+           Now two siblings can take the same fault and the one that waited
+           for this lock arrives to find the page already private - it is the
+           only core still holding the read-only translation, so the fault is
+           answered by discarding that rather than by copying a second time. */
+        int already_broken = (entry & PTE_WRITABLE) != 0;
+        if (already_broken) {
+            __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+        }
+        spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
+        return already_broken;
     }
 
     uint64_t old_phys = entry & PTE_ADDRESS_MASK;
@@ -707,4 +722,10 @@ uint64_t virtual_memory_create_address_space(void) {
 
 void virtual_memory_switch_address_space(uint64_t pml4_phys) {
     __asm__ volatile("mov %0, %%cr3" : : "r"(pml4_phys) : "memory");
+}
+
+void virtual_memory_flush_local_tlb(void) {
+    uint64_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
 }

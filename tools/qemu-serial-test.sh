@@ -256,6 +256,8 @@ REQUIRED_MARKERS=(
   "chromiumblink: done"
   "[m162] the display compositor on this machine:"
   "chromiumviz: done"
+  "[m165] //content on this machine:"
+  "chromiumcontent: done"
   "mathltest: done"
   "[m125] lvgl rendered"
   "[m125] a third-party toolkit on this compositor:"

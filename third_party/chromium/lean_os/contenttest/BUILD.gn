@@ -1,0 +1,23 @@
+# A program that links //content - the layer a browser's processes are made
+# of - and that this machine runs.
+#
+# M163 got //content to COMPILE and M164 found what a compile cannot see: a
+# gate on a definition is half a seam, and the other half is a caller that
+# only a link names. This target is the instrument for that, and it is the
+# reason it exists rather than a program that merely uses //content: nothing
+# below //content in this port was large enough for the gaps to show.
+#
+# //content/public/app is the embedder's entry point - ContentMainRunner,
+# the delegate, and the process-type dispatch that decides whether this
+# process is the browser, a renderer, a utility or the GPU service. It is
+# what the browser binary calls on its first line.
+executable("contenttest") {
+  sources = [ "chromium_content_test.cc" ]
+  deps = [
+    "//base",
+    "//content/public/app",
+    "//content/public/browser",
+    "//content/public/common",
+    "//url",
+  ]
+}

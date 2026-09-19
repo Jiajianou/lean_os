@@ -1,6 +1,10 @@
 #pragma once
 
-#define LEANFS_START_LBA 8192u
+/* Must equal the Makefile's FS_START_LBA. The two are separate because one is
+   read by make and the other by the compiler, and the image's recipe checks
+   that the boot image has not grown into it - which is how M165 found this
+   needed moving, at 8336 sectors of kernel. */
+#define LEANFS_START_LBA 16384u
 
 #define LEANFS_START_BLOCK (LEANFS_START_LBA / LEANFS_SECTORS_PER_BLOCK)
 

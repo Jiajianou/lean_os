@@ -51,6 +51,31 @@ fi
 rm -f "$LINK"
 ln -s "$FORK" "$LINK"
 
+# Tint, which is Dawn's shader compiler, generates part of its own source with
+# a Go program, and Dawn looks for the toolchain at a path inside its own
+# checkout rather than on PATH. The checkout ships linux-amd64, linux-arm64
+# and mac-arm64 directories with nothing in them, because gclient fetches the
+# real thing for a platform Dawn supports and this is a Mac host building for
+# an operating system Dawn has never heard of.
+#
+# A symlink to the host's own Go is the whole fix, and it is here rather than
+# made by hand in the checkout because a hand-made file in a gitignored tree is
+# a build that works on one machine. M165 inherited exactly that.
+if [ -d "$SRC/third_party/dawn/tools/golang" ]; then
+  GOBIN=$(command -v go 2>/dev/null)
+  if [ -n "$GOBIN" ]; then
+    for arch in mac-arm64 mac-amd64; do
+      if [ -d "$SRC/third_party/dawn/tools/golang/$arch" ] ||
+         [ "$arch" = "mac-arm64" ]; then
+        mkdir -p "$SRC/third_party/dawn/tools/golang/$arch/bin"
+        ln -sf "$GOBIN" "$SRC/third_party/dawn/tools/golang/$arch/bin/go"
+      fi
+    done
+  else
+    echo "build-chromium: no go on PATH - Tint's source generator needs one" >&2
+  fi
+fi
+
 # The fork's patch series. Every one of these is meant to be a seam somebody
 # else could use rather than a mention of this OS, which is why Chromium's
 # tree still contains the word lean_os nowhere.
@@ -186,6 +211,22 @@ ozone_extra_path = "//lean_os/ozone_extra.gni"
 # machine is one file the kernel maps, and /bin/chromiumv8 having to find a
 # second one would be a fact about this port rather than about V8.
 v8_use_external_startup_data = false
+
+# ICU's data, for the same reason and in the same words. Its declare_args
+# comment says what the flag is: "Tells icu to load an external data file
+# rather than rely on the icudata being linked directly into the binary."
+#
+# The external file is icudtl.dat, which ICU finds beside the executable - so
+# a program on this machine would have to be two files, and M165 found what
+# that costs when it is not: //content's startup calls
+# base::i18n::InitializeICU(), which reaches
+#
+#   ERROR:base/i18n/icu_util.cc:237] Invalid file descriptor to ICU data
+#   FATAL:base/i18n/icu_util.cc:310] Check failed: result.
+#
+# and the process is gone before it has decided what kind of process it is.
+# Linking the data in is what every other one-file program here does.
+icu_use_data_file = false
 
 # Ozone's platform backends, which are the one place a Linux GN
 # configuration reaches for a host library this machine has no idea about:
@@ -381,7 +422,44 @@ skia_use_dawn = false
 enable_vulkan = false
 enable_swiftshader = false
 enable_swiftshader_vulkan = false
-use_dawn = false
+
+# use_dawn is TRUE, and that reverses M158's position on this one flag for a
+# reason M165 found at the link rather than in an opinion.
+#
+# There is no supported configuration of Blink without WebGPU. Its module list
+# names //third_party/blink/renderer/modules/webgpu unconditionally,
+# dawn_object.cc calls blink::DawnControlClientHolder whatever the flag says,
+# and modules/webgl's WebGPU-backed context does too. M161's patch 0045 wrote
+# the platform half correctly - it adds those sources inside an if (use_dawn)
+# the flag false those twelve files are not compiled and the definitions are
+# not there; the FIRST link of a program against //content failed on exactly
+# that and nothing else. A -k 0 build could not say so, because every one of
+# those callers compiles perfectly well against a declaration.
+#
+# So the question is not whether to build Dawn but which Dawn to build, and
+# Dawn's own flags are a THIRD family after Chromium's four above and ANGLE's
+# three below - each defaulted from the same is_linux this port has now met a
+# dozen times. With all six off, gn path --with-data has no route from
+# anything here to SwiftShader or to the Vulkan loader, and what Dawn compiles
+# is its NULL backend, which dawn_enable_null already defaults to true.
+#
+# That is the honest shape of WebGPU on a machine with no adapter, and it is
+# not a stub this project wrote: navigator.gpu.requestAdapter() answers null,
+# which is what the specification says to do when there is no adapter. M65's
+# rule is satisfied by the null backend in a way it would not be by a
+# SwiftShader that pretends there is one.
+#
+# dawn_enable_desktop_gl is the sixth and M164's measurement did not name it -
+# dawn_enable_opengl is the OR of dawn_enable_opengles and dawn_enable_desktop_gl, so
+# turning off only the first leaves Dawn's OpenGL backend compiled on a
+# machine with no GL at all.
+use_dawn = true
+dawn_enable_vulkan = false
+dawn_enable_vulkan_loader = false
+dawn_enable_vulkan_validation_layers = false
+dawn_use_swiftshader = false
+dawn_enable_opengles = false
+dawn_enable_desktop_gl = false
 
 # ANGLE's own two, which are not the same switches as Chromium's above and
 # which is why M158's four did not remove SwiftShader from the graph.
@@ -558,7 +636,7 @@ use_crash_key_stubs = true
 # among them, on a machine that has no seccomp and whose answer to "what may
 # this process do" is a capability set assigned at spawn. That looked like
 # the second of CLAUDE.md's two remaining conditions arriving five rungs
-# early. It is not. `gn path --all` finds exactly ONE route:
+# early. It is not. gn path --all finds exactly ONE route:
 #
 #   //components/viz/service:service -> //components/vrp_flags:vrp_flags
 #     -> //sandbox/policy:policy -> //sandbox/linux:seccomp_bpf

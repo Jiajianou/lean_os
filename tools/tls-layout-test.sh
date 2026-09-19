@@ -114,7 +114,15 @@ probe_one() {
       i=$((i + 1))
       continue
     fi
-    actual=$(od -An -td8 -j $((i * 8)) -N 8 "$OUT/$name.bin" | tr -d ' \n')
+    # Hex, not -td8. BSD od - which is the od on this host - accepts -td8,
+    # consumes eight bytes for each value, and prints the low BYTE of it:
+    # 0xffffffffffffff58 comes out as 88 rather than as -168. Read as a signed
+    # byte that is right for every offset down to -128, and every offset this
+    # test produced was, until M165 added 140 bytes of thread-local storage to
+    # this libc and pushed the segment past that. The instrument graded
+    # nothing outside one byte for eighteen milestones and looked green.
+    hexword=$(od -An -tx8 -j $((i * 8)) -N 8 "$OUT/$name.bin" | tr -d ' \n')
+    actual=$(( 0x$hexword ))
     expected=$((offset - span))
     CHECKS=$((CHECKS + 1))
     if [ "$actual" != "$expected" ]; then

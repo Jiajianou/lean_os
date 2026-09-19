@@ -1,0 +1,315 @@
+Four more callers, and the feature with two ends.
+
+M164 found twenty undefined symbols and wrote down what nearly every one of
+them was: a caller an earlier milestone left behind when it gated a
+definition out. These are the rest of them, found by the first link that got
+past WebGPU. Three are that same thing again. The fourth is not, and it is
+the one worth reading.
+
+INOTIFY AND LANDLOCK, IN THE SAME FUNCTION
+
+content/app/content_main_runner_impl.cc calls
+base::GetMaxNumberOfInotifyWatches() to pre-read
+/proc/sys/fs/inotify/max_user_watches before the sandbox closes, and
+sandbox::policy::ReportLandlockStatus() to ask whether Landlock is there.
+The first call is guarded by nothing at all; base/BUILD.gn compiles the
+inotify watcher under has_linux_kernel and ships file_path_watcher_stub.cc
+otherwise. The second is guarded by IS_LINUX || IS_CHROMEOS - the family -
+while sandbox/policy/BUILD.gn compiles landlock_util.cc under the condition
+patch 0047 gave it. Landlock is a Linux Security Module, which is to say a
+kernel interface. M144's line, twice in one function.
+
+THE SECOND V4L2 FACTORY
+
+M164 gated media/capture's V4L2 camera and fixed "the factory that names
+it". There are two factories. video_capture_buffer_tracker_factory_impl.cc
+is the other one:
+
+  #elif BUILDFLAG(IS_LINUX)
+    return std::make_unique<V4L2GpuMemoryBufferTracker>();
+
+where media/capture/BUILD.gn has compiled video/linux under has_linux_kernel
+since patch 0044. The arm at the end of that chain returns nullptr, which is
+what every platform Chromium has no GPU buffer tracker for already gets.
+
+A FEATURE HAS TWO ENDS, AND GATING THE MOJOM BREAKS BOTH
+
+net::NetworkChangeNotifierPassive is compiled in net/BUILD.gn under
+is_android || is_chromeos || (is_linux && has_linux_kernel), because it keeps
+an AddressMapCacheLinux - the address map that rtnetlink fills in. Five
+places in //services/network still named it: the mojom feature
+network_change_notifier_in_browser, NetworkChangeManager::OnNetworkChanged in
+the header AND the source, NetworkChangeNotifierPassiveFactory, and the
+network_service.cc line that installs that factory.
+
+What the feature MEANS is why five was not enough. The browser process
+watches for network changes and PUSHES them to a sandboxed network service,
+which runs a passive notifier because it cannot watch anything itself. On
+Linux what the browser watches is rtnetlink. So there is a second end:
+content/browser/network_service_client.cc is the pusher, and it calls
+OnNetworkChanged from three places behind IS_ANDROID || IS_LINUX.
+
+Gating the mojom feature is not like gating an implementation. It removes a
+METHOD FROM AN INTERFACE, so every user on both sides of that interface stops
+compiling at once - which is how the pusher was found, and only after the
+receiver had been gated and built. An implementation gated out is found by a
+link; an interface method gated out is found by a compile, in files nobody
+was looking at.
+
+This is the third time in this port that a feature has needed every site
+before it was off - libsync in M159 took two directories, and
+use_network_interface_change_listener in M160 took two enables in one
+BUILD.gn. Both files edited here already carry M163's has_linux_kernel on
+SOME of their blocks and not others, which is what made the remaining ones
+easy to miss: a guard that is present thirty lines away reads as a guard that
+is present.
+
+A platform in the Linux family with no rtnetlink has nothing to push and no
+passive notifier to push it into. net::NetworkChangeNotifier's own default is
+what every platform outside that list already gets.
+
+Chromium's tree still contains the word lean_os nowhere.
+
+diff --git a/content/app/content_main_runner_impl.cc b/content/app/content_main_runner_impl.cc
+index 0cdbd98324..782a416226 100644
+--- a/content/app/content_main_runner_impl.cc
++++ b/content/app/content_main_runner_impl.cc
+@@ -434,8 +434,13 @@ void PreSandboxInit() {
+   CRYPTO_pre_sandbox_init();
+ 
+   // Pre-read /proc/sys/fs/inotify/max_user_watches so it doesn't have to be
+-  // allowed by the sandbox.
++  // allowed by the sandbox. The file and the function are both inotify(7),
++  // which base/BUILD.gn already compiles under has_linux_kernel rather than
++  // under the platform family - a platform in the Linux family whose kernel is
++  // its own gets file_path_watcher_stub.cc, which declares no such function.
++#if BUILDFLAG(HAS_LINUX_KERNEL) || BUILDFLAG(IS_ANDROID)
+   base::GetMaxNumberOfInotifyWatches();
++#endif
+ 
+ #if BUILDFLAG(ENABLE_LIBRARY_CDMS)
+   // Ensure access to the library CDMs before the sandbox is turned on.
+@@ -1120,12 +1125,16 @@ int ContentMainRunnerImpl::Initialize(ContentMainParams params) {
+   }
+ #endif  // BUILDFLAG(USE_ZYGOTE)
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++  // Landlock is a Linux Security Module - a kernel interface - so the question
++  // is has_linux_kernel rather than which family this platform is gated as,
++  // which is also the condition sandbox/policy/BUILD.gn compiles
++  // landlock_util.cc under.
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+   if (process_type.empty()) {
+     // Check if Landlock is supported.
+     sandbox::policy::ReportLandlockStatus();
+   }
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#endif  // BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+   // Return -1 to indicate no early termination.
+   return -1;
+diff --git a/content/browser/network_service_client.h b/content/browser/network_service_client.h
+index fced78db3e..1ae93b1c65 100644
+--- a/content/browser/network_service_client.h
++++ b/content/browser/network_service_client.h
+@@ -31,7 +31,8 @@ class WebRtcConnectionsObserver;
+ 
+ class NetworkServiceClient
+     : public network::mojom::URLLoaderNetworkServiceObserver,
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_ANDROID) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL))
+       public net::NetworkChangeNotifier::ConnectionTypeObserver,
+       public net::NetworkChangeNotifier::MaxBandwidthObserver,
+       public net::NetworkChangeNotifier::IPAddressObserver,
+@@ -63,7 +64,8 @@ class NetworkServiceClient
+   void OnApplicationStateChange(base::android::ApplicationState state);
+ #endif
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_ANDROID) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL))
+   // net::NetworkChangeNotifier::ConnectionTypeObserver implementation:
+   void OnConnectionTypeChanged(
+       net::NetworkChangeNotifier::ConnectionType type) override;
+@@ -76,7 +78,7 @@ class NetworkServiceClient
+   // net::NetworkChangeNotifier::IPAddressObserver implementation:
+   void OnIPAddressChanged(
+       net::NetworkChangeNotifier::IPAddressChangeType change_type) override;
+-#endif  // BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#endif  // BUILDFLAG(IS_ANDROID) || (IS_LINUX && HAS_LINUX_KERNEL)
+ 
+ #if BUILDFLAG(IS_WIN)
+   // Called when the network service sandbox is enabled.
+@@ -141,7 +143,8 @@ class NetworkServiceClient
+       app_status_listener_;
+ #endif
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_ANDROID) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL))
+   mojo::Remote<network::mojom::NetworkChangeManager> network_change_manager_;
+ #endif  // BUILDFLAG(IS_ANDROID)
+ 
+diff --git a/media/capture/video/video_capture_buffer_tracker_factory_impl.cc b/media/capture/video/video_capture_buffer_tracker_factory_impl.cc
+index dfc373fdd8..5f2ee6aa0b 100644
+--- a/media/capture/video/video_capture_buffer_tracker_factory_impl.cc
++++ b/media/capture/video/video_capture_buffer_tracker_factory_impl.cc
+@@ -14,7 +14,12 @@
+ #include "media/capture/video/chromeos/gpu_memory_buffer_tracker_cros.h"
+ #elif BUILDFLAG(IS_APPLE)
+ #include "media/capture/video/apple/gpu_memory_buffer_tracker_apple.h"
+-#elif BUILDFLAG(IS_LINUX)
++// video/linux is V4L2, and media/capture/BUILD.gn already compiles it under
++// has_linux_kernel rather than under the platform family - so a platform in
++// the Linux family whose kernel is its own has no V4L2GpuMemoryBufferTracker
++// to name. The arm it gets instead is the one at the end of this chain, which
++// returns nullptr, and which is the truth about a machine with no camera.
++#elif BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "media/capture/video/linux/v4l2_gpu_memory_buffer_tracker.h"
+ #elif BUILDFLAG(IS_WIN)
+ #include "media/capture/video/win/gpu_memory_buffer_tracker_win.h"
+@@ -42,7 +47,7 @@ VideoCaptureBufferTrackerFactoryImpl::CreateTracker(
+       return std::make_unique<GpuMemoryBufferTrackerCros>();
+ #elif BUILDFLAG(IS_APPLE)
+       return std::make_unique<GpuMemoryBufferTrackerApple>();
+-#elif BUILDFLAG(IS_LINUX)
++#elif BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+       return std::make_unique<V4L2GpuMemoryBufferTracker>();
+ #elif BUILDFLAG(IS_WIN)
+       if (!dxgi_device_manager_) {
+diff --git a/services/network/BUILD.gn b/services/network/BUILD.gn
+index a029e50ac9..d33cc4875d 100644
+--- a/services/network/BUILD.gn
++++ b/services/network/BUILD.gn
+@@ -337,7 +337,9 @@ component("network_service") {
+     ]
+   }
+ 
+-  if (is_linux) {
++  # This factory's whole body is `new net::NetworkChangeNotifierPassive`, and
++  # net/BUILD.gn compiles that class under has_linux_kernel.
++  if (is_linux && has_linux_kernel) {
+     sources += [
+       "network_change_notifier_passive_factory.cc",
+       "network_change_notifier_passive_factory.h",
+diff --git a/content/browser/network_service_client.cc b/content/browser/network_service_client.cc
+--- a/content/browser/network_service_client.cc
++++ b/content/browser/network_service_client.cc
+@@ -136,11 +136,12 @@
+ NetworkServiceClient::~NetworkServiceClient() {
+   if (IsOutOfProcessNetworkService()) {
+     net::CertDatabase::GetInstance()->RemoveObserver(this);
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_ANDROID) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL))
+     net::NetworkChangeNotifier::RemoveConnectionTypeObserver(this);
+     net::NetworkChangeNotifier::RemoveMaxBandwidthObserver(this);
+     net::NetworkChangeNotifier::RemoveIPAddressObserver(this);
+-#endif  // BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#endif  // BUILDFLAG(IS_ANDROID) || (IS_LINUX && HAS_LINUX_KERNEL)
+   }
+ }
+ 
+@@ -163,7 +164,8 @@
+ }
+ #endif  // BUILDFLAG(IS_ANDROID)
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_ANDROID) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL))
+ void NetworkServiceClient::OnConnectionTypeChanged(
+     net::NetworkChangeNotifier::ConnectionType type) {
+   network_change_manager_->OnNetworkChanged(
+@@ -199,7 +201,7 @@
+       network::mojom::ConnectionSubtype(
+           net::NetworkChangeNotifier::GetConnectionSubtype()));
+ }
+-#endif  // BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#endif  // BUILDFLAG(IS_ANDROID) || (IS_LINUX && HAS_LINUX_KERNEL)
+ 
+ #if BUILDFLAG(IS_WIN)
+ mojo::PendingRemote<network::mojom::SocketBroker>
+@@ -219,7 +221,8 @@
+ 
+ void NetworkServiceClient::OnNetworkServiceInitialized(
+     network::mojom::NetworkService* service) {
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_ANDROID) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL))
+   if (IsOutOfProcessNetworkService()) {
+     DCHECK(!net::NetworkChangeNotifier::CreateIfNeeded());
+     service->GetNetworkChangeManager(
+@@ -248,7 +251,7 @@
+     net::NetworkChangeNotifier::AddMaxBandwidthObserver(this);
+     net::NetworkChangeNotifier::AddIPAddressObserver(this);
+   }
+-#endif  // BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#endif  // BUILDFLAG(IS_ANDROID) || (IS_LINUX && HAS_LINUX_KERNEL)
+ }
+ 
+ void NetworkServiceClient::OnSSLCertificateError(
+diff --git a/services/network/public/mojom/BUILD.gn b/services/network/public/mojom/BUILD.gn
+--- a/services/network/public/mojom/BUILD.gn
++++ b/services/network/public/mojom/BUILD.gn
+@@ -655,7 +655,18 @@
+   ]
+ 
+   enabled_features = []
+-  if (is_android || is_chromeos || is_linux) {
++
++  # has_linux_kernel on the Linux arm, for the same reason the sibling feature
++  # below carries it. What this feature means is that the browser process
++  # watches for network changes and PUSHES them to a sandboxed network
++  # service, which then runs a net::NetworkChangeNotifierPassive - and on
++  # Linux what the browser watches is rtnetlink, while the passive notifier
++  # itself keeps an AddressMapCacheLinux and is compiled in net/BUILD.gn under
++  # exactly this condition. A platform in the Linux family with no rtnetlink
++  # has nothing to push and no passive notifier to push it into; it gets
++  # net::NetworkChangeNotifier's own default, which is what every platform
++  # outside this list already gets.
++  if (is_android || is_chromeos || (is_linux && has_linux_kernel)) {
+     enabled_features += [ "network_change_notifier_in_browser" ]
+   }
+ 
+diff --git a/services/network/network_service.cc b/services/network/network_service.cc
+--- a/services/network/network_service.cc
++++ b/services/network/network_service.cc
+@@ -405,7 +405,7 @@
+   // `registry` holds a valid instance when a NetworkService is out-of-process.
+   if (registry_) {
+     mojo::SetDefaultProcessErrorHandler(base::BindRepeating(&HandleBadMessage));
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+     net::NetworkChangeNotifier::SetFactory(
+         new network::NetworkChangeNotifierPassiveFactory());
+ #endif
+diff --git a/services/network/network_change_manager.h b/services/network/network_change_manager.h
+--- a/services/network/network_change_manager.h
++++ b/services/network/network_change_manager.h
+@@ -55,7 +55,8 @@
+       mojo::PendingRemote<mojom::NetworkChangeManagerClient> client_remote)
+       override;
+ 
+-#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL))
+   void OnNetworkChanged(
+       bool dns_changed,
+       mojom::IPAddressChangeType ip_address_change_type,
+diff --git a/services/network/network_change_manager.cc b/services/network/network_change_manager.cc
+--- a/services/network/network_change_manager.cc
++++ b/services/network/network_change_manager.cc
+@@ -48,7 +48,11 @@
+   clients_.push_back(std::move(client_remote));
+ }
+ 
+-#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++// The mojom method this overrides is behind network_change_notifier_in_browser,
++// whose Linux arm now asks has_linux_kernel - and the type this body casts to,
++// net::NetworkChangeNotifierPassive, is compiled under the same question.
++#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL))
+ void NetworkChangeManager::OnNetworkChanged(
+     bool dns_changed,
+     mojom::IPAddressChangeType ip_address_change_type,
