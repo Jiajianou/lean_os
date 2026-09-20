@@ -402,9 +402,38 @@ void scheduler_init_ap(int cpu_id) {
     irq_restore(flags);
 }
 
+static int thread_group_has_live_members(int group, const task_t *except);
+
+/* Reset the slots of leaders whose groups have finished since they were
+   last looked at.
+
+   scheduler_reap_slot holds a leader's slot while its threads are still
+   running, and releases it when the last of them is reaped. A thread nobody
+   joins is reaped by nobody, so without this the leader's slot would be held
+   until the machine stopped - and a task table with 128 entries in it fills
+   up quietly, as spawns that fail rather than as anything that says why.
+
+   Here because it has to run somewhere that can take a lock and wait, and a
+   spawn is the moment the answer matters. task_exit cannot do it: a fatal
+   signal is delivered on the timer interrupt, and scheduler_reap_slot waits
+   for a task to leave its kernel stack. */
+static void release_finished_leaders(void) {
+    for (int i = 0; i < task_count; i++) {
+        task_t *o = &tasks[i];
+        if (o->state != TASK_TERMINATED || o->is_thread) {
+            continue;
+        }
+        if (thread_group_has_live_members(o->tgid, o)) {
+            continue;
+        }
+        scheduler_reap_slot(o);
+    }
+}
+
 static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
                                   uint64_t heap_start, uint64_t shared_memory_base, task_t *thread_of) {
     _Static_assert(TASK_STACK_SIZE % 4096 == 0, "a kernel stack must be a whole number of frames");
+    release_finished_leaders();
     uint8_t *stack_base = (uint8_t *)(uintptr_t)physical_memory_try_alloc_contiguous(TASK_STACK_SIZE / 4096);
     if (!stack_base) {
         return (task_t *)0;
@@ -1078,10 +1107,67 @@ int scheduler_has_free_task_slot(void) {
     return 0;
 }
 
+/* Whether any task of this thread group is still running.
+
+   By GROUP and not by page table, though the question is about the address
+   space. A tgid is a pid and carries its slot's generation, so it names one
+   group for ever; a pml4_phys is a physical frame, and the frame of an
+   address space that has been torn down is handed to the next process that
+   asks for one. Comparing those made a terminated leader match a stranger
+   that inherited its page table, and its slot was then held for ever - which
+   on a busy machine is a task table that fills up, and a boot that stops
+   getting anywhere rather than crashing. */
+static int thread_group_has_live_members(int group, const task_t *except) {
+    int live = 0;
+    uint64_t flags = irq_save_disable();
+    spin_lock(&scheduler_lock);
+    for (int i = 0; i < task_count; i++) {
+        const task_t *o = &tasks[i];
+        if (o == except || o->state == TASK_FREE || o->state == TASK_TERMINATED) {
+            continue;
+        }
+        if (o->tgid == group) {
+            live = 1;
+            break;
+        }
+    }
+    spin_unlock(&scheduler_lock);
+    irq_restore(flags);
+    return live;
+}
+
 void scheduler_reap_slot(task_t *t) {
     if (!t || t->state != TASK_TERMINATED) {
         return;
     }
+
+    /* A thread-group leader's slot is not reset while its threads are still
+       running in the address space it owns.
+
+       Everything below belongs to the ADDRESS SPACE rather than to the task:
+       the mapping table is freed, the memfd references it holds are
+       forgotten, and the slot goes back with a new generation - after which
+       scheduler_vm_owner() cannot find the owner at all, and every surviving
+       thread is running in a space with no record of what is mapped in it.
+       The teardown then frees the frames of a shared mapping a second time,
+       at the same virtual address every run.
+
+       M167 stopped a terminated leader from giving up its page table while
+       its threads still ran. This is the same process one step further
+       along, and it is not the leader that does it: the PARENT reaps it, so
+       an address space loses its regions to a wait() in a different process
+       entirely. Chromium's browser reaps a child whose main thread returned
+       first, which is every child it has.
+
+       Nothing is lost by holding the slot - wait() reads the exit code and
+       sets `reaped` before calling this - and the slot comes back below, as
+       soon as the last thread that was using the space is itself reaped. */
+    if (!t->is_thread && thread_group_has_live_members(t->tgid, t)) {
+        return;
+    }
+    const int reaped_group = t->tgid;
+    const int reaped_a_thread = t->is_thread;
+
     /* task_exit_with_code released this on the way out and it is normally
        null by now. A task that reached TERMINATED without going through
        that path still holds one, and since M146 the table is a heap
@@ -1214,6 +1300,22 @@ void scheduler_reap_slot(task_t *t) {
     irq_restore(flags);
     if (stack) {
         physical_memory_free_contiguous((uint64_t)(uintptr_t)stack, TASK_STACK_SIZE / 4096);
+    }
+
+    /* And the slot held above, now that the thread using the address space
+       has gone. A leader is never a thread, so this recurses exactly once.
+
+       This is here rather than in task_exit_with_code because that runs from
+       the scheduler - a fatal signal is delivered on the timer interrupt -
+       and this function waits for a task to leave its kernel stack and takes
+       the scheduler lock. Reaping is work for whoever called wait(). */
+    if (reaped_a_thread &&
+        !thread_group_has_live_members(reaped_group, (const task_t *)0)) {
+        task_t *leader = scheduler_task_by_id(reaped_group);
+        if (leader && leader != t && leader->state == TASK_TERMINATED &&
+            !leader->is_thread) {
+            scheduler_reap_slot(leader);
+        }
     }
 }
 

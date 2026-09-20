@@ -8949,6 +8949,14 @@ static void boot_selftests_system(void) {
                 line = saved ? end + 1 : end;
             }
             if (cn_rc != 0) {
+                /* The number matters. This block drains the pipe whether the
+                   program finished or the deadline did, so every line the
+                   program printed is above either way - and "see the lines
+                   above" cannot tell a program that failed from one that
+                   never got to the end. -1 is the deadline. */
+                kernel_log_puts("[m150] chromiumnet exited ");
+                kernel_log_put_dec((uint32_t)(cn_rc < 0 ? 99 : cn_rc));
+                kernel_log_puts(cn_rc == -1 ? " (or never finished)\n" : "\n");
                 panic("M150 self-test: Chromium's //url and //net do not work "
                       "on this machine - see the chromiumnet lines above");
             }

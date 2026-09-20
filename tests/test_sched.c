@@ -399,6 +399,97 @@ TEST(scheduler, a_recycled_slot_inherits_nothing_from_the_task_that_had_it) {
     q13_kill(reused);
 }
 
+/* M168. A thread-group leader's slot is not reset while its threads are
+   still running in the address space it owns.
+
+   Everything scheduler_reap_slot does belongs to the ADDRESS SPACE rather
+   than to the task: it frees the mapping table, forgets the memfd references
+   that table holds, and hands the slot to the next task with a new
+   generation - after which scheduler_vm_owner() cannot find the owner at all
+   and every surviving thread is running in a space with no record of what is
+   mapped in it. The teardown then frees the frames of a shared mapping a
+   second time.
+
+   And it is not the leader that does this to itself: its PARENT reaps it.
+   Chromium's browser reaps a child whose main thread returned first, which
+   is every child it has. */
+TEST(scheduler, a_leaders_slot_is_held_while_its_threads_are_still_running) {
+    q13_boot();
+    task_t *leader = q13_spawn("leader");
+    task_t *thread = q13_spawn("thread");
+    REQUIRE(leader != NULL);
+    REQUIRE(thread != NULL);
+
+    /* An address space of their own: a task still on the kernel's page table
+       has no user space for anybody to be left running in. */
+    const uint64_t shared_space = 0x2000;
+    leader->pml4_phys = shared_space;
+    thread->pml4_phys = shared_space;
+    thread->tgid = leader->tgid;
+    thread->is_thread = 1;
+
+    mmap_region_t *const table = leader->mmaps;
+    const int generation_before = leader->generation;
+
+    leader->state = TASK_TERMINATED;
+    scheduler_reap_slot(leader);
+
+    /* Held: still terminated, still the owner, still holding the table the
+       running thread reaches through scheduler_vm_owner(). */
+    CHECK_EQ(leader->state, TASK_TERMINATED);
+    CHECK_EQ(leader->generation, generation_before);
+    CHECK_EQ(leader->is_thread, 0);
+    CHECK(leader->mmaps == table);
+    CHECK(leader->pml4_phys == shared_space);
+
+    /* And released the moment the last thread using the space is reaped -
+       by the same call, so nothing has to come back for it later. */
+    thread->state = TASK_TERMINATED;
+    thread->pml4_phys = 0;
+    scheduler_reap_slot(thread);
+
+    CHECK_EQ(thread->state, TASK_FREE);
+    CHECK_EQ(leader->state, TASK_FREE);
+    CHECK(leader->mmaps == NULL);
+}
+
+TEST(scheduler, a_leader_with_nobody_left_is_reaped_at_once) {
+    q13_boot();
+    task_t *leader = q13_spawn("leader");
+    REQUIRE(leader != NULL);
+
+    /* The ordinary case, and the one every single-threaded program takes:
+       the last task out has already torn its address space down and is on
+       the kernel's page table by the time anybody reaps it. */
+    leader->state = TASK_TERMINATED;
+    scheduler_reap_slot(leader);
+    CHECK_EQ(leader->state, TASK_FREE);
+}
+
+TEST(scheduler, a_thread_is_reaped_even_though_its_leader_is_still_running) {
+    q13_boot();
+    task_t *leader = q13_spawn("leader");
+    task_t *thread = q13_spawn("thread");
+    REQUIRE(leader != NULL);
+    REQUIRE(thread != NULL);
+    const uint64_t shared_space = 0x3000;
+    leader->pml4_phys = shared_space;
+    thread->pml4_phys = shared_space;
+    thread->tgid = leader->tgid;
+    thread->is_thread = 1;
+
+    /* The rule is about the OWNER. A thread holds nothing the others need,
+       so holding its slot would be a leak rather than a safeguard - and a
+       browser makes thousands of them. */
+    thread->state = TASK_TERMINATED;
+    scheduler_reap_slot(thread);
+    CHECK_EQ(thread->state, TASK_FREE);
+    CHECK_EQ(leader->state, TASK_READY);
+
+    leader->pml4_phys = 0;
+    q13_kill(leader);
+}
+
 TEST(scheduler, a_reaped_childs_peak_resident_set_reaches_its_parent) {
     q13_boot();
     task_t *parent = q13_spawn("parent");
