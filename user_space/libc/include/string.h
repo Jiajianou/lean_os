@@ -27,6 +27,7 @@ char *strchr(const char *s, int c);
 
 char *strerror(int errnum);
 int strerror_r(int errnum, char *buf, size_t buflen);
+char *strsignal(int signum);
 char *strrchr(const char *s, int c);
 char *strstr(const char *haystack, const char *needle);
 size_t strspn(const char *s, const char *accept);

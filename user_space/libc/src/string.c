@@ -1,3 +1,4 @@
+#include <signal.h>
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -183,6 +184,41 @@ char *strerror(int errnum) {
         }
     }
     return (char *)"error";
+}
+
+/* POSIX strsignal(3), in the shape strerror() above already has: the NAME
+   rather than a sentence, because a name is what a caller printing "child
+   exited on %s" wants and a sentence is what it would have to parse. The
+   table is this machine's own signal numbers from system_api, not Linux's -
+   SIGCHLD is 17 here and SIGBUS is 7, and a table copied from somewhere else
+   would be right about most of them. */
+char *strsignal(int signum) {
+    static const struct {
+        int number;
+        const char *name;
+    } NAMES[] = {
+        {SIGHUP, "SIGHUP"},       {SIGINT, "SIGINT"},
+        {SIGQUIT, "SIGQUIT"},     {SIGILL, "SIGILL"},
+        {SIGTRAP, "SIGTRAP"},     {SIGABRT, "SIGABRT"},
+        {SIGBUS, "SIGBUS"},       {SIGFPE, "SIGFPE"},
+        {SIGKILL, "SIGKILL"},     {SIGUSR1, "SIGUSR1"},
+        {SIGSEGV, "SIGSEGV"},     {SIGUSR2, "SIGUSR2"},
+        {SIGPIPE, "SIGPIPE"},     {SIGALRM, "SIGALRM"},
+        {SIGTERM, "SIGTERM"},     {SIGCHLD, "SIGCHLD"},
+        {SIGCONT, "SIGCONT"},     {SIGSTOP, "SIGSTOP"},
+        {SIGTSTP, "SIGTSTP"},     {SIGTTIN, "SIGTTIN"},
+        {SIGTTOU, "SIGTTOU"},     {SIGURG, "SIGURG"},
+        {SIGXCPU, "SIGXCPU"},     {SIGXFSZ, "SIGXFSZ"},
+        {SIGVTALRM, "SIGVTALRM"}, {SIGPROF, "SIGPROF"},
+        {SIGWINCH, "SIGWINCH"},   {SIGIO, "SIGIO"},
+        {SIGSYS, "SIGSYS"},
+    };
+    for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
+        if (NAMES[i].number == signum) {
+            return (char *)NAMES[i].name;
+        }
+    }
+    return (char *)"unknown signal";
 }
 
 int strerror_r(int errnum, char *buffer, size_t buflen) {

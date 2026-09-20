@@ -33,6 +33,17 @@ void exit(int status) {
     }
 }
 
+/* C99 7.22.4.5: terminate without running the atexit handlers and without
+   flushing anything. The difference from exit() is the whole of it, so this
+   cannot be a call to exit() - and the difference from _exit(2) is nothing at
+   all on this machine, which is why one calls the other rather than the two
+   being written twice. */
+void _Exit(int status) {
+    sys_exit(status);
+    for (;;) {
+    }
+}
+
 void abort(void) {
     sys_exit(134);
     for (;;) {

@@ -2115,6 +2115,18 @@ static long sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4, u
     drop_record_locks(self, &self->descriptor_table->slots[newfd]);
     file_descriptor_release(&self->descriptor_table->slots[newfd]);
     self->descriptor_table->slots[newfd] = self->descriptor_table->slots[oldfd];
+    /* "The FD_CLOEXEC flag associated with the new file descriptor shall be
+       cleared" - POSIX, dup2(). Copying the whole slot carried it across
+       instead, and the only way to see that is to dup2 a close-on-exec
+       descriptor and then exec: the copy vanishes, and what the child reports
+       is not "this descriptor was closed" but whatever it was about to do
+       with it. Chromium's launcher does exactly that for every child process
+       it starts - the shared memory region it hands a renderer is
+       close-on-exec in the browser and dup2'd to a fixed number in the fork -
+       so every child died in the same place, three rungs away from the cause.
+       F_DUPFD is built on this call and inherits the fix; F_DUPFD_CLOEXEC
+       sets the flag again afterwards, which is why it was never wrong. */
+    self->descriptor_table->slots[newfd].cloexec = 0;
     file_descriptor_retain(&self->descriptor_table->slots[newfd]);
     return (long)newfd;
 }
@@ -4773,6 +4785,40 @@ static long sys_waitpid(uint64_t pid_argument, uint64_t status_pointer, uint64_t
     }
 }
 
+/* Follow a symbolic link once, in place.
+
+   execve(2) follows links, and until M167 nothing here did - there were no
+   links to follow. /proc/self/exe is the one that matters and it is the one
+   every multi-process Chromium program uses: content::ChildProcessHost asks
+   for the path of the executable to re-run and that is what Linux gives it,
+   so a renderer, a utility process and the network service are all launched
+   by exec'ing it. Reading it instead of following it gets the TEXT of the
+   target path - "/bin/chromiumshell" - and an ELF header that begins with a
+   slash is not one, which is why the launcher's message was "failed to
+   execvp" on a file that is plainly there.
+
+   Once rather than in a loop: this kernel's only links are procfs's, they
+   point at real files, and a chain would have to be built before it could
+   be followed. Resolving BEFORE the manifest is consulted is not incidental
+   either - the capability set comes from the spawn path, and /proc/self/exe
+   is not a name anybody can write a manifest entry for. */
+static void follow_link_in_place(char *path, size_t capacity) {
+    char target[LEANFS_MAX_PATH];
+    int64_t n = virtual_file_system_readlink(path, target, sizeof(target) - 1);
+    if (n <= 0 || (size_t)n >= sizeof(target)) {
+        return;
+    }
+    target[n] = '\0';
+    if (target[0] != '/') {
+        return;
+    }
+    size_t length = (size_t)n + 1;
+    if (length > capacity) {
+        return;
+    }
+    k_memcpy(path, target, length);
+}
+
 static long sys_execve(isr_regs_t *regs) {
     task_t *self = scheduler_current();
     if (!self || self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
@@ -4786,6 +4832,7 @@ static long sys_execve(isr_regs_t *regs) {
     if (copy_path_from_user(path, regs->rdi) != 0) {
         return -1;
     }
+    follow_link_in_place(path, sizeof(path));
 
     user_vectors_t v;
     if (copy_vectors_from_user(path, regs->rsi, regs->rdx, 0, &v) != 0) {

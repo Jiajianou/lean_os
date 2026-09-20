@@ -1201,6 +1201,72 @@ PROBE
       check $? "installed as /bin/chromiumcontent - the [m165] boot self-test runs it"
     fi
 
+  # M167. Chromium's OWN browser, rather than a program written here that
+  # links its libraries. content_shell is the embedder the Chromium tree
+  # ships, and what it proves is different in kind: it starts the processes a
+  # browser is made of, through the paths Chromium uses to start them.
+  SHELLPROGRAM="$SRC/out/$OUT_NAME/content_shell"
+  if [ ! -f "$SHELLPROGRAM" ]; then
+    echo "chromium-test: content_shell has not been linked - skipping" \
+         "(tools/build-chromium.sh content/shell:content_shell)"
+  else
+    file "$SHELLPROGRAM" | grep -q "ELF 64-bit LSB executable, x86-64"
+    check $? "Chromium's own browser links for this machine as an x86-64 EXEC"
+
+    "${PREFIX}readelf" -l "$SHELLPROGRAM" | grep -q "INTERP"
+    [ $? -ne 0 ]
+    check $? "and has no interpreter, like every other program in this image"
+
+    # A file rather than a shell variable: this binary's symbol table does not
+    # fit in one, and what a command substitution does when it does not fit is
+    # give back something shorter without saying so - which reads as "the
+    # symbol is absent" and is how these two checks failed on a binary that
+    # has 56 and 579 of them.
+    SHELLWORK=$(mktemp -d)
+    SHELLSYMS="$SHELLWORK/shell.syms"
+    "${PREFIX}nm" -C "$SHELLPROGRAM" > "$SHELLSYMS" 2>/dev/null
+
+    # The browser's own window, and the process types it starts. Asked of the
+    # binary rather than of the build, which is M159's rule.
+    grep -qE " [TtWw] .*content::Shell::CreateNewWindow" "$SHELLSYMS"
+    check $? "and content::Shell is in it - the browser, not a library that links"
+    grep -qE " [TtWw] .*content::RenderProcessHostImpl" "$SHELLSYMS"
+    check $? "and RenderProcessHostImpl, which is what launches a renderer"
+
+    # Crashpad is ptrace(2), PR_SET_DUMPABLE and /proc/<pid>/task - Linux's
+    # kernel - and there is no crash reporting service here for a report to
+    # reach. It arrived as a DATA dependency, which nothing links and ninja
+    # builds anyway: M162's note about gn path --with-data, a second time.
+    grep -qE " [TtWwDdBb] .*crashpad::" "$SHELLSYMS"
+    [ $? -ne 0 ]
+    check $? "and no crashpad in it, whose Linux half is ptrace and PR_SET_DUMPABLE"
+
+    # libpfm4 is perf_event_open(2) and <linux/perf_event.h>, reached from
+    # google_benchmark through base's test support.
+    grep -qE " [TtWw] .*pfm_" "$SHELLSYMS"
+    [ $? -ne 0 ]
+    check $? "and no hardware performance counters, which are Linux's own kernel"
+
+    IMAGE="$ROOT/build/os-image.bin"
+    if [ ! -f "$IMAGE" ]; then
+      echo "chromium-test: no $IMAGE - run make, then this again"
+    else
+      SHELLSTRIPPED="$ROOT/build/content_shell.stripped"
+      cp "$SHELLPROGRAM" "$SHELLSTRIPPED"
+      "${PREFIX}strip" "$SHELLSTRIPPED"
+      make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
+      "$ROOT/build/leanfs-put" "$IMAGE" "$SHELLSTRIPPED" /bin/chromiumshell > /dev/null
+      check $? "installed as /bin/chromiumshell - the [m167] boot self-test runs it"
+
+      # Beside the binary, because that is where DIR_ASSETS is and where
+      # ShellMainDelegate::InitializeResourceBundle looks for it.
+      "$ROOT/build/leanfs-put" "$IMAGE" "$SRC/out/$OUT_NAME/content_shell.pak" \
+           /bin/content_shell.pak > /dev/null
+      check $? "with content_shell.pak beside it, which its resource bundle needs"
+    fi
+    rm -rf "$SHELLWORK"
+  fi
+
     # M165. __cxa_thread_atexit, which is the last of M164's list and the only
     # one with a subsystem behind it rather than a definition: a thread_local
     # with a non-trivial destructor needs a per-thread list run at thread exit,

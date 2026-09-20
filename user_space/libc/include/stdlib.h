@@ -42,6 +42,7 @@ extern char *program_invocation_name;
 extern char *program_invocation_short_name;
 
 void exit(int status) __attribute__((noreturn));
+void _Exit(int status) __attribute__((noreturn));
 void abort(void) __attribute__((noreturn));
 
 int atoi(const char *s);

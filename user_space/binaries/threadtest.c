@@ -2,6 +2,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include "syscall_wrappers.h"
@@ -202,7 +203,121 @@ static void *churn_worker(void *arg) {
     return (void *)0;
 }
 
-int main(void) {
+
+/* M167. A process outlives its first thread: main calls pthread_exit(), the
+   process goes on running in a thread it created, and that thread keeps
+   using memory the process mapped.
+
+   Until M167 the thread-group leader reset its own record of the address
+   space as it terminated, even though its threads were still running in it.
+   Everything that reaches the address space through the owner - the
+   mappings, the break, the page fault handler's own page table - was then
+   handed the KERNEL's, and the shared pages of a memfd stayed mapped into a
+   space nothing could release them from. The teardown at the end freed
+   frames the memfd still owned, and the machine stopped with a double free
+   three layers from the cause.
+
+   The check is what the surviving thread can still do, and then that every
+   frame comes back - which is what [m79] measures around this program. */
+
+static unsigned long leader_exit_pages = 64;
+#define LEADER_EXIT_BYTE  0x5C
+
+static volatile unsigned char *leader_exit_mapping;
+
+static int leader_exit_bare;
+
+static void *outlives_the_leader(void *unused) {
+    (void)unused;
+    if (leader_exit_bare) {
+        sys_exit(0);
+    }
+
+    /* The leader is on its way out while this runs. Touching pages that have
+       not been faulted in yet is the point: the fault has to be answered
+       against this address space, and the region it needs is the one the
+       process owns rather than this thread's own empty table. */
+    for (int round = 0; round < 200; round++) {
+        sys_yield();
+    }
+    for (unsigned long i = 0; i < leader_exit_pages; i++) {
+        leader_exit_mapping[i * 4096] = (unsigned char)(LEADER_EXIT_BYTE + i);
+    }
+    for (unsigned long i = 0; i < leader_exit_pages; i++) {
+        if (leader_exit_mapping[i * 4096] !=
+            (unsigned char)(LEADER_EXIT_BYTE + i)) {
+            sys_exit(24);
+        }
+    }
+
+    /* A mapping made AFTER the leader has gone, because mmap answers out of
+       the owner's region table too. */
+    void *late = mmap(0, 4096, PROT_READ | PROT_WRITE,
+                      MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (late == MAP_FAILED) {
+        sys_exit(25);
+    }
+    ((volatile unsigned char *)late)[0] = 0x7E;
+    if (((volatile unsigned char *)late)[0] != 0x7E) {
+        sys_exit(26);
+    }
+    munmap(late, 4096);
+
+    munmap((void *)leader_exit_mapping, leader_exit_pages * 4096);
+
+    /* This thread ends the process, because it is the only one left and the
+       exit code has to be this mode's answer rather than whatever a thread
+       returning happens to leave behind. */
+    sys_exit(0);
+    return 0;
+}
+
+static int leader_exit_mode(const char *pages_text) {
+    if (pages_text) {
+        unsigned long n = 0;
+        for (const char *c = pages_text; *c >= '0' && *c <= '9'; c++) {
+            n = n * 10 + (unsigned long)(*c - '0');
+        }
+        if (n) {
+            leader_exit_pages = n;
+        }
+        leader_exit_bare = (pages_text[0] == 'b');
+    }
+    /* An ordinary private mapping. The bug this reproduces is about which
+       address space the OWNER names, which a page fault on any mapping
+       exercises - the memfd this used at first proved the same thing twice
+       and dragged a second subsystem into the measurement. */
+    leader_exit_mapping = (volatile unsigned char *)mmap(
+        0, leader_exit_pages * 4096, PROT_READ | PROT_WRITE,
+        MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (leader_exit_bare) {
+        munmap((void *)leader_exit_mapping, leader_exit_pages * 4096);
+        leader_exit_mapping = 0;
+    }
+    if (leader_exit_mapping == (volatile unsigned char *)MAP_FAILED) {
+        return 23;
+    }
+    /* One page touched here, so the mapping is real before the leader goes
+       and the rest are faults the surviving thread has to take. */
+    if (leader_exit_mapping) {
+        leader_exit_mapping[0] = LEADER_EXIT_BYTE;
+    }
+
+    pthread_t survivor;
+    if (pthread_create(&survivor, 0, outlives_the_leader, 0) != 0) {
+        return 23;
+    }
+
+    /* The leader leaves. The process does not. */
+    pthread_exit(0);
+    return 27;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && argv[1] && strcmp(argv[1], "leaderexit") == 0) {
+        return leader_exit_mode(argc > 2 ? argv[2] : 0);
+    }
+
     double alone = fp_work(1.0);
 
     pthread_t a, b;

@@ -934,12 +934,39 @@ void task_exit_with_code(int code) {
         irq_restore(eflags);
 
         if (!others) {
-            scheduler_release_shared_range(t, USER_MMAP_BASE, USER_MMAP_LIMIT);
+            /* The regions belong to the ADDRESS SPACE, and the task standing
+               here at the end need not be the one that owns them - a process
+               whose main thread returned first is torn down by whichever
+               thread is last. Reading an empty table then releases nothing,
+               and the teardown below goes on to free the frames of every
+               shared and memfd page still mapped - frames the memfd owns and
+               will free again. The panic that follows says "double-free" and
+               names a frame, which is three layers from the cause.
+
+               M146 drew this line for descriptors, M165 for mappings and
+               M166 for capabilities; this is the same one, on the path that
+               only runs once per process and so was never the one being
+               looked at. */
+            task_t *space = scheduler_vm_owner(t);
+            if (!space || space->pml4_phys != dead) {
+                space = t;
+            }
+            scheduler_release_shared_range(space, USER_MMAP_BASE,
+                                           USER_MMAP_LIMIT);
         }
-        t->pml4_phys = virtual_memory_kernel_pml4_phys();
-        virtual_memory_switch_address_space(t->pml4_phys);
-        loaded_pml4_phys[cpu] = t->pml4_phys;
+        /* Only when this address space is going away. A task that is
+           terminated but whose threads are still running MUST go on naming
+           the space they share: scheduler_vm_owner() finds the leader, and
+           everything that reaches for the address space through the owner -
+           the mappings, the break, the page fault handler's own pml4 - would
+           otherwise be handed the KERNEL's. Resetting it unconditionally was
+           invisible while a process was its main thread, and is how a memfd
+           page stayed mapped into an address space nobody could release it
+           from. */
         if (!others) {
+            t->pml4_phys = virtual_memory_kernel_pml4_phys();
+            virtual_memory_switch_address_space(t->pml4_phys);
+            loaded_pml4_phys[cpu] = t->pml4_phys;
             process_destroy_address_space(dead);
         }
     }

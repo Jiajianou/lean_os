@@ -1,0 +1,465 @@
+Chromium's own browser, and the four things between it and this machine.
+
+content_shell is the embedder the Chromium tree ships - the browser the
+Chromium team runs their own tests against - and building it is a different
+claim from building a program written here that links Chromium's libraries.
+It starts the processes a browser is made of, through the code Chromium
+starts them with.
+
+A -k 0 build of //content/shell:content_shell failed in 53 places. All 53
+were four things, and every one of them is a line this port has drawn
+before.
+
+CRASHPAD, WHICH IS LINUX'S KERNEL AND A SERVICE THAT IS NOT THERE
+
+45 of the 53. features.h, sys/prctl.h, sys/ptrace.h, SYS_rt_tgsigqueueinfo,
+SYS_gettid, setresuid, ELF32_ST_VISIBILITY - crashpad's Linux half.
+
+args.gn already said use_crash_key_stubs = true for exactly this reason and
+it did nothing here, because content_shell reaches crashpad by a different
+route: `if (!is_fuchsia)` on its deps, and then
+
+    data_deps += [ "//components/crash/core/app:chrome_crashpad_handler" ]
+
+which is a DATA dependency. Nothing links it and ninja builds it anyway.
+M159 found the Vulkan loader the same way and M162 wrote down the
+instrument: gn path cannot see data dependencies without --with-data.
+
+Fuchsia is the platform Chromium already had in this position - it is
+use_crash_key_stubs' own default - and a platform in the Linux family with
+none of Linux's kernel is in the same one. The condition is named once, in
+content/shell/common/shell_switches.h, because the four sites that have to
+agree about it are in three files and the link found the one that did not.
+
+LIBPFM4, WHICH IS perf_event_open(2)
+
+8 more. google_benchmark asks for hardware performance counters `if
+(is_linux)`, reaching them through //base/test:test_support, which
+content_shell_lib depends on through //ui/aura:test_support. It is
+has_linux_kernel, and google_benchmark runs without the counters.
+
+A SHARED LIBRARY IN A STATIC PROGRAM
+
+base/test:test_support publishes libtest_trace_processor.so, and it is a
+shared_library deliberately - the comment on it says why: two sqlite
+implementations with the same symbols, hidden behind a library boundary. A
+platform whose programs are statically linked has no boundary to hide them
+behind, and ld.lld says "attempted static link of dynamic object".
+has_symbol_interposition is the flag that already means this, in
+BUILDCONFIG.gn's own words.
+
+CALLERS LEFT BEHIND, THE FOURTH AND FIFTH TIME
+
+M164 wrote the sentence and this milestone met it twice more, both in TEST
+SUPPORT - which is code a browser drags in and nothing else here had:
+
+  - net::MockNetworkChangeNotifier declares SetAddressMapOwnerLinux and an
+    override of GetAddressMapOwnerInternal under `#if BUILDFLAG(IS_LINUX)`,
+    while the class it mocks gates both on HAS_LINUX_KERNEL as well. An
+    override of a method that is not there is found by a COMPILE - of
+    something that includes the mock, which is never the thing that was
+    gated.
+  - NetworkServiceTestHelper overrides GetAddressMapCacheLinux, whose mojom
+    method is behind use_network_interface_change_listener - which M160's
+    patch 0041 gates on has_linux_kernel.
+  - content/test:test_support compiles sandbox_status_service.cc `if
+    (is_linux || is_chromeos)`, and it reports what SandboxLinux did.
+    Patch 0047 gated SandboxLinux. That one is found by a LINK, and then
+    its own caller in shell_content_utility_client.cc by a second link.
+
+And one header rather than a feature: gpu's test_shared_image_interface.cc
+includes <linux/memfd.h> for MFD_CLOEXEC. This platform has memfd_create(2)
+and declares it, with that constant, in <sys/mman.h> where the rest of the
+mapping calls are - so what is gated is the header.
+
+WHAT IS NOT HERE
+
+No sandbox arrives with any of this. content_shell is built with the same
+seccomp-less, namespace-less configuration every other program in this port
+uses, and the binary is checked for it: no crashpad::, no pfm_.
+
+diff --git a/base/test/BUILD.gn b/base/test/BUILD.gn
+--- a/base/test/BUILD.gn
++++ b/base/test/BUILD.gn
+@@ -297,7 +297,15 @@
+   # problematic for Cronet because of targets like
+   #   //third_party/perfetto/src/trace_processor/perfetto_sql/stdlib:stdlib_generated_file
+   # that would require special support in gn2bp (AOSP Cronet).
+-  if (!is_cronet_build) {
++  # ...and neither does a platform whose programs are statically linked. The
++  # target below is a shared_library ON PURPOSE - see the comment on it - and
++  # a shared library cannot go into an executable that has no dynamic loader
++  # behind it: ld.lld says "attempted static link of dynamic object". What it
++  # buys is a test being able to query a trace with SQL, which is a facility
++  # rather than a feature of the browser. has_symbol_interposition is the
++  # flag that already means "this platform's programs are dynamically linked"
++  # - BUILDCONFIG.gn's comment on it says so in those words.
++  if (!is_cronet_build && has_symbol_interposition) {
+     public_deps += [ "//third_party/perfetto:perfetto_test_support" ]
+     public_deps += [ ":test_trace_processor" ]
+     sources += [
+diff --git a/content/public/test/network_service_test_helper.cc b/content/public/test/network_service_test_helper.cc
+--- a/content/public/test/network_service_test_helper.cc
++++ b/content/public/test/network_service_test_helper.cc
+@@ -765,7 +765,12 @@
+     std::move(callback).Run();
+   }
+ 
+-#if BUILDFLAG(IS_LINUX)
++// The mojom method this overrides is behind use_network_interface_change
++// _listener, which patch 0041 gates on has_linux_kernel - so on a platform in
++// the Linux family without it there is no such method to override, and this
++// guard has to agree with that one. An implementation gated out is found by a
++// link; an override of a method that is not there is found by a compile.
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+   void GetAddressMapCacheLinux(
+       GetAddressMapCacheLinuxCallback callback) override {
+     const net::AddressMapOwnerLinux* address_map_owner =
+@@ -773,7 +778,7 @@
+     std::move(callback).Run(address_map_owner->GetAddressMap(),
+                             address_map_owner->GetOnlineLinks());
+   }
+-#endif  // BUILDFLAG(IS_LINUX)
++#endif  // BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+   void AllowsGSSAPILibraryLoad(
+       AllowsGSSAPILibraryLoadCallback callback) override {
+diff --git a/content/shell/BUILD.gn b/content/shell/BUILD.gn
+--- a/content/shell/BUILD.gn
++++ b/content/shell/BUILD.gn
+@@ -85,8 +85,6 @@
+ static_library("content_shell_app") {
+   testonly = true
+   sources = [
+-    "app/shell_crash_reporter_client.cc",
+-    "app/shell_crash_reporter_client.h",
+     "app/shell_main_delegate.cc",
+     "app/shell_main_delegate.h",
+   ]
+@@ -105,7 +103,17 @@
+       "//ui/native_theme",
+     ]
+   }
+-  if (!is_fuchsia) {
++  # Fuchsia is the platform Chromium already had in this position, and
++  # use_crash_key_stubs' own default is is_fuchsia. A platform in the Linux
++  # family with none of Linux's kernel is in the same position for the same
++  # reason: crashpad's implementation here is ptrace(2), PR_SET_DUMPABLE,
++  # /proc/<pid>/task and rt_tgsigqueueinfo, and there is no crash reporting
++  # service on this machine for a report to reach either.
++  if (!is_fuchsia && (!is_linux || has_linux_kernel)) {
++    sources += [
++      "app/shell_crash_reporter_client.cc",
++      "app/shell_crash_reporter_client.h",
++    ]
+     deps += [
+       "//components/crash/core/app",
+       "//components/crash/core/app:test_support",
+@@ -389,7 +397,7 @@
+       "browser/fuchsia_view_presenter.h",
+     ]
+     deps += [ "//third_party/fuchsia-sdk/sdk/fidl/fuchsia.element:fuchsia.element_hlcpp" ]
+-  } else {
++  } else if (!is_linux || has_linux_kernel) {
+     deps += [
+       "//components/crash/content/browser",
+       "//components/crash/core/app",
+@@ -803,7 +811,12 @@
+     if (is_win) {
+       data_deps +=
+           [ "//third_party/crashpad/crashpad/handler:crashpad_handler" ]
+-    } else if (is_linux || is_chromeos) {
++    } else if ((is_linux && has_linux_kernel) || is_chromeos) {
++      # A data_deps rather than a deps, so nothing links it and ninja builds
++      # it anyway - which is how crashpad's Linux half survived being taken
++      # out of this target's deps above. M159 found the Vulkan loader the
++      # same way and M162 wrote down the instrument: gn path CANNOT SEE data
++      # dependencies without --with-data.
+       data_deps += [ "//components/crash/core/app:chrome_crashpad_handler" ]
+     }
+ 
+diff --git a/content/shell/app/shell_main_delegate.cc b/content/shell/app/shell_main_delegate.cc
+--- a/content/shell/app/shell_main_delegate.cc
++++ b/content/shell/app/shell_main_delegate.cc
+@@ -32,7 +32,6 @@
+ #include "content/public/common/content_switches.h"
+ #include "content/public/common/main_function_params.h"
+ #include "content/public/common/url_constants.h"
+-#include "content/shell/app/shell_crash_reporter_client.h"
+ #include "content/shell/browser/shell_content_browser_client.h"
+ #include "content/shell/common/shell_content_client.h"
+ #include "content/shell/common/shell_paths.h"
+@@ -57,8 +56,9 @@
+ #include "content/shell/android/shell_descriptors.h"
+ #endif
+ 
+-#if !BUILDFLAG(IS_FUCHSIA)
++#if SHELL_HAS_A_CRASH_HANDLER
+ #include "components/crash/core/app/crashpad.h"  // nogncheck
++#include "content/shell/app/shell_crash_reporter_client.h"
+ #endif
+ 
+ #if BUILDFLAG(IS_APPLE)
+@@ -104,7 +104,7 @@
+ #endif
+ };
+ 
+-#if !BUILDFLAG(IS_FUCHSIA)
++#if SHELL_HAS_A_CRASH_HANDLER
+ content::ShellCrashReporterClient& GetShellCrashReporterClient() {
+   static base::NoDestructor<content::ShellCrashReporterClient>
+       shell_crash_client;
+@@ -295,7 +295,7 @@
+ // Disable platform crash handling and initialize the crash reporter, if
+ // requested.
+ // TODO(crbug.com/40188745): Implement crash reporter integration for Fuchsia.
+-#if !BUILDFLAG(IS_FUCHSIA)
++#if SHELL_HAS_A_CRASH_HANDLER
+   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+           switches::kEnableCrashReporter)) {
+     std::string process_type =
+@@ -311,7 +311,7 @@
+ #endif
+     }
+   }
+-#endif  // !BUILDFLAG(IS_FUCHSIA)
++#endif  // SHELL_HAS_A_CRASH_HANDLER
+ 
+   crash_reporter::InitializeCrashKeys();
+ 
+@@ -367,6 +367,7 @@
+ 
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+ void ShellMainDelegate::ZygoteForked() {
++#if SHELL_HAS_A_CRASH_HANDLER
+   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+           switches::kEnableCrashReporter)) {
+     std::string process_type =
+@@ -376,6 +377,11 @@
+     crash_reporter::SetFirstChanceExceptionHandler(
+         v8::TryHandleWebAssemblyTrapPosix);
+   }
++#endif
++  // The override stays where the crash handler does not: patch 0047 gated the
++  // zygote itself on has_linux_kernel, so on this platform nothing ever calls
++  // this - and a declaration that disagreed with the header would be a second
++  // thing to keep in step for no gain.
+ }
+ #endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+ 
+diff --git a/content/shell/browser/shell_content_browser_client.cc b/content/shell/browser/shell_content_browser_client.cc
+--- a/content/shell/browser/shell_content_browser_client.cc
++++ b/content/shell/browser/shell_content_browser_client.cc
+@@ -163,11 +163,19 @@
+ int GetCrashSignalFD(const base::CommandLine& command_line) {
+   return crashpad::CrashHandlerHost::Get()->GetDeathSignalSocket();
+ }
+-#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#elif (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    SHELL_HAS_A_CRASH_HANDLER
+ int GetCrashSignalFD(const base::CommandLine& command_line) {
+   int fd;
+   pid_t pid;
+   return crash_reporter::GetHandlerSocket(&fd, &pid) ? fd : -1;
++}
++#else
++int GetCrashSignalFD(const base::CommandLine& command_line) {
++  // No handler, so no socket to share with a child. The caller below already
++  // treats a negative descriptor as "nothing to map", which is what a
++  // platform without a crash handler has.
++  return -1;
+ }
+ #endif
+ 
+@@ -465,7 +473,8 @@
+   command_line->CopySwitchesFrom(*base::CommandLine::ForCurrentProcess(),
+                                  kForwardSwitches);
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    SHELL_HAS_A_CRASH_HANDLER
+   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+           switches::kEnableCrashReporter)) {
+     int fd;
+@@ -476,7 +485,8 @@
+           base::NumberToString(pid));
+     }
+   }
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#endif  // (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) &&
++        // SHELL_HAS_A_CRASH_HANDLER
+ 
+   if (command_line->GetSwitchValueASCII(switches::kProcessType) ==
+           switches::kRendererProcess &&
+diff --git a/content/shell/common/shell_switches.h b/content/shell/common/shell_switches.h
+--- a/content/shell/common/shell_switches.h
++++ b/content/shell/common/shell_switches.h
+@@ -59,4 +59,23 @@
+ 
+ }  // namespace switches
+ 
++// Whether this build of Content Shell has a crash handler behind it at all.
++//
++// Fuchsia is the platform Chromium already had in this position, and the
++// guards in shell_main_delegate.cc and shell_content_browser_client.cc were
++// written for it. A platform in the Linux family with none of Linux's own
++// kernel is in the same position for the same reasons: crashpad's
++// implementation here is ptrace(2), PR_SET_DUMPABLE, /proc/<pid>/task and
++// rt_tgsigqueueinfo, and there is no crash reporting service for a report to
++// reach. Spelt here rather than at each site, because conditions in two
++// files that have to agree are two chances for them not to - which is how
++// the link found crash_reporter::GetHandlerSocket after the compile was
++// already clean.
++#if !BUILDFLAG(IS_FUCHSIA) && \
++    (!BUILDFLAG(IS_LINUX) || BUILDFLAG(HAS_LINUX_KERNEL))
++#define SHELL_HAS_A_CRASH_HANDLER 1
++#else
++#define SHELL_HAS_A_CRASH_HANDLER 0
++#endif
++
+ #endif  // CONTENT_SHELL_COMMON_SHELL_SWITCHES_H_
+diff --git a/content/shell/utility/shell_content_utility_client.cc b/content/shell/utility/shell_content_utility_client.cc
+--- a/content/shell/utility/shell_content_utility_client.cc
++++ b/content/shell/utility/shell_content_utility_client.cc
+@@ -43,7 +43,13 @@
+ #include "sandbox/policy/sandbox.h"
+ #include "services/test/echo/echo_service.h"
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++// SandboxStatusService reports what SandboxLinux did, and patch 0047 gates
++// SandboxLinux on has_linux_kernel - so on a platform in the Linux family
++// without it there is no such service to bind. Gating the service and
++// leaving this behind is the half a compile cannot see: it is a link that
++// names it.
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+ #include "content/test/sandbox_status_service.h"
+ #endif
+ 
+@@ -212,7 +218,8 @@
+   binders->Add<mojom::PowerMonitorTest>(
+       &PowerMonitorTestImpl::MakeSelfOwnedReceiver,
+       base::SingleThreadTaskRunner::GetCurrentDefault());
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
++    BUILDFLAG(HAS_LINUX_KERNEL)
+   if (register_sandbox_status_helper_) {
+     binders->Add<content::mojom::SandboxStatusService>(
+         base::BindRepeating(
+diff --git a/content/test/BUILD.gn b/content/test/BUILD.gn
+--- a/content/test/BUILD.gn
++++ b/content/test/BUILD.gn
+@@ -833,7 +833,11 @@
+     ]
+   }
+ 
+-  if (is_linux || is_chromeos) {
++  # SandboxLinux is the seccomp-bpf and namespace sandbox, which patch 0047
++  # gates on has_linux_kernel. This service reports its status, so it was
++  # being compiled against a class that is not there - and being test support
++  # rather than browser code, nothing built it until content_shell did.
++  if ((is_linux || is_chromeos) && has_linux_kernel) {
+     sources += [
+       "sandbox_status_service.cc",
+       "sandbox_status_service.h",
+diff --git a/gpu/command_buffer/client/test_shared_image_interface.cc b/gpu/command_buffer/client/test_shared_image_interface.cc
+--- a/gpu/command_buffer/client/test_shared_image_interface.cc
++++ b/gpu/command_buffer/client/test_shared_image_interface.cc
+@@ -29,7 +29,14 @@
+ #include "ui/gfx/gpu_memory_buffer_handle.h"
+ 
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++// <linux/memfd.h> is Linux's own header and carries only the MFD_ constants.
++// A platform in the Linux family without Linux's kernel can still have
++// memfd_create(2) - this one does, and declares it and MFD_CLOEXEC in
++// <sys/mman.h> where the rest of the mapping calls are - so what is gated
++// here is the header rather than the feature.
++#if BUILDFLAG(HAS_LINUX_KERNEL)
+ #include <linux/memfd.h>
++#endif
+ #include <sys/mman.h>
+ #include <unistd.h>
+ #endif
+diff --git a/net/BUILD.gn b/net/BUILD.gn
+--- a/net/BUILD.gn
++++ b/net/BUILD.gn
+@@ -2441,7 +2441,11 @@
+     ]
+   }
+ 
+-  if (is_linux || is_chromeos || is_android) {
++  # AddressTrackerLinux is rtnetlink, and the sources that build it are
++  # already gated on has_linux_kernel further up this file. Its test helper
++  # was not, so it went on being compiled against a class that is not there -
++  # which is a thing only a target that uses net's test support finds.
++  if ((is_linux || is_chromeos || is_android) && has_linux_kernel) {
+     sources += [
+       "base/address_tracker_linux_test_util.cc",
+       "base/address_tracker_linux_test_util.h",
+diff --git a/net/base/mock_network_change_notifier.cc b/net/base/mock_network_change_notifier.cc
+--- a/net/base/mock_network_change_notifier.cc
++++ b/net/base/mock_network_change_notifier.cc
+@@ -103,11 +103,17 @@
+   return connection_cost_;
+ }
+ 
+-#if BUILDFLAG(IS_LINUX)
++// The class this mocks gates these on HAS_LINUX_KERNEL as well as on the
++// platform family - the address map owner IS AddressTrackerLinux, which is
++// rtnetlink. This guard said only IS_LINUX, so it declared an override of a
++// method that does not exist and a pointer to a type that does not. A
++// mismatch like this cannot be found by building the thing that was gated;
++// it is found by building something that includes the mock.
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ AddressMapOwnerLinux* MockNetworkChangeNotifier::GetAddressMapOwnerInternal() {
+   return address_map_owner_;
+ }
+-#endif  // BUILDFLAG(IS_LINUX)
++#endif  // BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+ 
+ MockNetworkChangeNotifier::MockNetworkChangeNotifier(
+     std::unique_ptr<SystemDnsConfigChangeNotifier> dns_config_notifier)
+diff --git a/net/base/mock_network_change_notifier.h b/net/base/mock_network_change_notifier.h
+--- a/net/base/mock_network_change_notifier.h
++++ b/net/base/mock_network_change_notifier.h
+@@ -84,7 +84,13 @@
+   // use_default_connection_cost_implementation is set to true.
+   ConnectionCost GetCurrentConnectionCost() override;
+ 
+-#if BUILDFLAG(IS_LINUX)
++// The class this mocks gates these on HAS_LINUX_KERNEL as well as on the
++// platform family - the address map owner IS AddressTrackerLinux, which is
++// rtnetlink. This guard said only IS_LINUX, so it declared an override of a
++// method that does not exist and a pointer to a type that does not. A
++// mismatch like this cannot be found by building the thing that was gated;
++// it is found by building something that includes the mock.
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+   void SetAddressMapOwnerLinux(AddressMapOwnerLinux* address_map_owner) {
+     address_map_owner_ = address_map_owner;
+   }
+@@ -104,7 +110,8 @@
+   bool use_default_connection_cost_implementation_ = false;
+   NetworkChangeNotifier::NetworkList connected_networks_;
+   std::unique_ptr<SystemDnsConfigChangeNotifier> dns_config_notifier_;
+-#if BUILDFLAG(IS_LINUX)
++// Gated with the declaration above, and for the same reason.
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+   raw_ptr<AddressMapOwnerLinux> address_map_owner_ = nullptr;
+ #endif
+ };
+diff --git a/third_party/google_benchmark/BUILD.gn b/third_party/google_benchmark/BUILD.gn
+--- a/third_party/google_benchmark/BUILD.gn
++++ b/third_party/google_benchmark/BUILD.gn
+@@ -79,7 +79,11 @@
+     "BENCHMARK_VERSION=\"1.9.0\"",
+   ]
+ 
+-  if (is_linux) {
++  # Hardware performance counter support, which is libpfm4, which is
++  # perf_event_open(2) and <linux/perf_event.h> - Linux's own kernel rather
++  # than the Linux family. google_benchmark builds and runs without it; the
++  # counters are what it cannot read.
++  if (is_linux && has_linux_kernel) {
+     # Include hardware performance counter support.
+     defines += [ "HAVE_LIBPFM=1" ]
+     deps = [ "//third_party/libpfm4" ]
