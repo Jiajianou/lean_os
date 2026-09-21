@@ -58,9 +58,17 @@ typedef struct {
 
 typedef struct {
     volatile unsigned seq;
+    /* The clock this condition variable's absolute deadlines are measured
+       against. pthread_cond_timedwait(3) takes an ABSOLUTE time, and which
+       clock that time is on is a property of the variable rather than of the
+       call - pthread_condattr_setclock is how it is chosen, and POSIX's
+       default is CLOCK_REALTIME. Keeping it here is what makes the two agree;
+       when they did not, every timed wait in the process returned ETIMEDOUT
+       the instant it was made. */
+    int clock;
 } pthread_cond_t;
 
-#define PTHREAD_COND_INITIALIZER {0}
+#define PTHREAD_COND_INITIALIZER {0, 0}
 
 typedef struct { int clock; } pthread_condattr_t;
 typedef struct { int type; int protocol; } pthread_mutexattr_t;

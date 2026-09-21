@@ -338,6 +338,8 @@ void scheduler_init(void) {
     tasks[0].cwd[0] = '/';
     tasks[0].cwd[1] = '\0';
     tasks[0].env_block = NULL;
+    tasks[0].cmdline_block = NULL;
+    tasks[0].cmdline_length = 0;
     tasks[0].env_length = 0;
     tasks[0].env_count = 0;
     set_task_name(&tasks[0], "kernel");
@@ -393,6 +395,8 @@ void scheduler_init_ap(int cpu_id) {
     t->cwd[0] = '/';
     t->cwd[1] = '\0';
     t->env_block = NULL;
+    t->cmdline_block = NULL;
+    t->cmdline_length = 0;
     t->env_length = 0;
     t->env_count = 0;
     set_task_name(t, "cpu-idle");
@@ -526,6 +530,8 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
         t->cwd[1] = '\0';
     }
     t->env_block = NULL;
+    t->cmdline_block = NULL;
+    t->cmdline_length = 0;
     t->env_length = 0;
     t->env_count = 0;
     for (int i = 0; i <= SIG_MAX; i++) {
@@ -1168,6 +1174,12 @@ void scheduler_reap_slot(task_t *t) {
     const int reaped_group = t->tgid;
     const int reaped_a_thread = t->is_thread;
 
+    /* The command line belongs to the address space, so it goes when the last
+       member of the group does - not at task_exit, where a leader that
+       outlives its own main thread would take it away from threads that are
+       still running and still have a /proc entry. */
+    scheduler_release_cmdline(t);
+
     /* task_exit_with_code released this on the way out and it is normally
        null by now. A task that reached TERMINATED without going through
        that path still holds one, and since M146 the table is a heap
@@ -1269,6 +1281,8 @@ void scheduler_reap_slot(task_t *t) {
     t->caps = 0;
     scheduler_reset_file_descriptors_to_std(t);
     t->env_block = NULL;
+    t->cmdline_block = NULL;
+    t->cmdline_length = 0;
     t->env_length = 0;
     t->env_count = 0;
     t->sig_pending = 0;
@@ -1786,8 +1800,21 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
         t->cwd[1] = '\0';
     }
     t->env_block = NULL;
+    t->cmdline_block = NULL;
+    t->cmdline_length = 0;
     t->env_length = 0;
     t->env_count = 0;
+    /* A fork has the command line of what it forked from until it execs, and
+       a child caught between the two is a real thing to see in a process
+       list: Chromium's launcher forks and then execs /proc/self/exe. */
+    if (space->cmdline_block && space->cmdline_length) {
+        char *copy = (char *)kmalloc(space->cmdline_length);
+        if (copy) {
+            k_memcpy(copy, space->cmdline_block, space->cmdline_length);
+            t->cmdline_block = copy;
+            t->cmdline_length = space->cmdline_length;
+        }
+    }
 
     for (int i = 0; i <= SIG_MAX; i++) {
         t->sig_handler[i] = parent->sig_handler[i];
@@ -2007,6 +2034,65 @@ void scheduler_raise_signal_group(int pgid, int sig) {
 int scheduler_signal_pending(void) {
     task_t *t = current_task[smp_current_cpu()];
     return (t->sig_pending & ~t->sig_blocked) != 0;
+}
+
+void scheduler_release_cmdline(task_t *t) {
+    char *block = t->cmdline_block;
+    t->cmdline_block = NULL;
+    t->cmdline_length = 0;
+    if (block) {
+        kfree(block);
+    }
+}
+
+void scheduler_set_cmdline(task_t *t, const char *const *argv) {
+    scheduler_release_cmdline(t);
+    if (!t || !argv || !argv[0]) {
+        return;
+    }
+    uint32_t needed = 0;
+    for (int i = 0; argv[i]; i++) {
+        uint32_t length = (uint32_t)k_strlen(argv[i]) + 1;
+        if (needed + length > TASK_CMDLINE_MAX) {
+            break;
+        }
+        needed += length;
+    }
+    if (needed == 0) {
+        return;
+    }
+    char *block = (char *)kmalloc(needed);
+    if (!block) {
+        return;
+    }
+    uint32_t at = 0;
+    for (int i = 0; argv[i]; i++) {
+        uint32_t length = (uint32_t)k_strlen(argv[i]) + 1;
+        if (at + length > needed) {
+            break;
+        }
+        k_memcpy(block + at, argv[i], length);
+        at += length;
+    }
+    t->cmdline_block = block;
+    t->cmdline_length = at;
+}
+
+/* Asked of the owner rather than of the task, because a thread has no
+   command line of its own and /proc/<tid>/cmdline is defined to answer with
+   the process's. */
+const char *scheduler_cmdline(task_t *t, uint32_t *length) {
+    task_t *owner = scheduler_vm_owner(t);
+    if (!owner || !owner->cmdline_block) {
+        if (length) {
+            *length = 0;
+        }
+        return (const char *)0;
+    }
+    if (length) {
+        *length = owner->cmdline_length;
+    }
+    return owner->cmdline_block;
 }
 
 void scheduler_release_env(task_t *t) {

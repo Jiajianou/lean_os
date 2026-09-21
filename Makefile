@@ -102,7 +102,7 @@ KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*' 
 KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
                $(patsubst kernel/%.c,$(KOBJ)/%.o,$(KERNEL_C_SRCS))
 
-.PHONY: all run leanfs-put preseed toybox packages browser browser-if-built os-pkg sysroot print-user-programs syms font font-check clean distclean
+.PHONY: all run leanfs-put preseed toybox packages fonts browser browser-if-built os-pkg sysroot print-user-programs syms font font-check clean distclean
 
 all: $(IMAGE)
 
@@ -364,7 +364,16 @@ NETSURF_BIN := $(BUILD)/netsurf/netsurf
 $(NETSURF_BIN): tools/build-netsurf.sh user_space/binaries/nsfb_leanos.c
 	@./tools/build-netsurf.sh
 
-browser: $(NETSURF_BIN) $(IMAGE) $(LEANFS_PUT) preseed
+# The fonts, and the file fontconfig looks for. Their own step rather than
+# part of the browser's, because they are a property of the machine: the
+# next program that draws text asks the same question through the same
+# library, and an image with no /etc/fonts/fonts.conf has no fonts at all as
+# far as that library is concerned.
+.PHONY: fonts
+fonts: $(IMAGE) $(LEANFS_PUT)
+	@./tools/install-fonts.sh
+
+browser: $(NETSURF_BIN) $(IMAGE) $(LEANFS_PUT) preseed fonts
 	@./tools/install-netsurf.sh
 
 browser-if-built: $(IMAGE) $(LEANFS_PUT)
@@ -454,10 +463,15 @@ $(LD_SO): user_space/loader/ld-lean.c user_space/loader/ld-start.S
 sysroot-headers:
 	@if [ ! -d $(SYSROOT)/usr/include ]; then \
 	  echo "sysroot-headers: no sysroot yet - run 'make sysroot'"; exit 1; fi
-	@cp -R user_space/libc/include/. $(SYSROOT)/usr/local/include/
-	@cp -R system_api/include/. $(SYSROOT)/usr/include/
-	@cp user_space/library/syscall_wrappers.h $(SYSROOT)/usr/include/
-	@echo "sysroot-headers: $(SYSROOT) headers refreshed from the tree"
+	@# Only the headers whose CONTENTS moved, because a copy that rewrites
+	@# every mtime is an hour of Chromium rebuilding things nobody touched -
+	@# see tools/copy-changed.sh, which is M169 paying for that twice.
+	@echo "sysroot-headers: libc  $$(./tools/copy-changed.sh user_space/libc/include $(SYSROOT)/usr/local/include) file(s) changed"
+	@echo "sysroot-headers: abi   $$(./tools/copy-changed.sh system_api/include $(SYSROOT)/usr/include) file(s) changed"
+	@cmp -s user_space/library/syscall_wrappers.h $(SYSROOT)/usr/include/syscall_wrappers.h || \
+	  cp user_space/library/syscall_wrappers.h $(SYSROOT)/usr/include/
+	@cmp -s user_space/library/window_manager_client.h $(SYSROOT)/usr/include/window_manager_client.h || \
+	  cp user_space/library/window_manager_client.h $(SYSROOT)/usr/include/
 
 # M140: and the library half, for the same reason. M139 could add a header
 # without rebuilding the world; adding a libc *function* still could not,
@@ -645,7 +659,8 @@ TEST_KERNEL_SRCS := kernel/library/kernel_library.c kernel/memory_management/hea
                     kernel/drivers/usb_hid.c kernel/drivers/xhci_ring.c \
                     kernel/drivers/nvme_split.c kernel/drivers/pci.c \
                     kernel/inter_process_communication/eventfd.c kernel/inter_process_communication/timerfd.c kernel/inter_process_communication/epoll.c \
-                    kernel/inter_process_communication/memfd.c
+                    kernel/inter_process_communication/memfd.c \
+                    kernel/process/resource_limits.c
 
 TEST_USER_SRCS := user_space/library/symbol_table.c \
                   user_space/library/sha256.c user_space/library/os_package.c \

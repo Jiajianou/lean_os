@@ -28,3 +28,8 @@ void physical_memory_free_contiguous(uint64_t phys_address, uint64_t count);
 
 void physical_memory_frame_reference(uint64_t phys_address);
 uint8_t physical_memory_frame_refs(uint64_t phys_address);
+
+/* Set by whatever is about to free a frame, and printed by the panic if the
+   free turns out to be a second one. See physical_memory_free_frame. */
+extern const char *pmm_free_site;
+extern uint64_t pmm_free_virt;

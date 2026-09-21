@@ -66,6 +66,23 @@
 #include "syscall.h"
 #include "window_manager.h"
 
+#define BROWSER_SHOT_DIRECTORY PATH_TEMPORARY_DIRECTORY "shot"
+#define BROWSER_SHOT_FILE BROWSER_SHOT_DIRECTORY "/1.png"
+#define BROWSER_SECONDS 420
+/* Half-second polls, so this is fifteen seconds of nothing changing. */
+#define BROWSER_SETTLE_POLLS 30
+/* One page, and every value in it chosen so a harness can do the arithmetic
+   itself: a body with no margin filling the window, and one absolutely
+   positioned box whose edges are the only thing a correct layout can put
+   where they are. No text, because text needs fonts and fonts are a
+   different question from whether this browser paints. */
+#define BROWSER_PAGE_WIDTH  400
+#define BROWSER_PAGE_HEIGHT 300
+#define BROWSER_PAGE \
+    "data:text/html,<html><body style=\"margin:0;background:rgb(0,160,0)\">" \
+    "<div style=\"position:absolute;left:40px;top:30px;width:120px;" \
+    "height:60px;background:rgb(200,0,0)\"></div></body></html>"
+
 #define FOR_EACH_EMBEDDED_PROGRAM(X) \
     X(hello)                         \
     X(echo)                          \
@@ -273,6 +290,244 @@ static int selftest_contains(const char *haystack, const char *needle) {
         }
     }
     return 0;
+}
+
+/* The picture the browser drew, on the serial line.
+   A test that grades pixels needs the pixels, and the only wire out of this
+   machine that a harness already reads is the serial log. Base64 because a
+   PNG is bytes and this line is text; sixty characters a line because a log
+   with one enormous line in it is a log nobody can read. */
+/* A PNG's first chunk is IHDR and it is not compressed, so what the picture
+   claims to be is eight bytes at a fixed offset. That is all this reads: the
+   pixels are graded on the host by tools/browser-shot.py, because a decoder
+   is a thing that can itself be wrong and the one place it must not also be
+   is inside the machine it is grading. */
+/* What the browser's processes are, asked of the machine rather than of the
+   browser. Every child is the same program under the same name, so "three
+   processes" says nothing about WHICH three - and when one of them dies and
+   is restarted, the only place that difference is written down is the
+   command line it was started with. /proc/<pid>/cmdline already holds it. */
+/* Where the browser's processes actually were. The kernel already samples the
+   instruction pointer on the timer interrupt and keys the buckets by task, so
+   what it needs is somebody to turn it on around the thing being measured and
+   print the top of it. The addresses are symbolised on the host against the
+   unstripped binary, which is the only copy that has the names. */
+static void browser_print_profile(void) {
+    profile_stop();
+    static prof_sample_t samples[256];
+    int n = profile_snapshot(samples, 256);
+    for (int round = 0; round < 24 && round < n; round++) {
+        int best = -1;
+        for (int i = 0; i < n; i++) {
+            if (samples[i].count == 0) {
+                continue;
+            }
+            if (best < 0 || samples[i].count > samples[best].count) {
+                best = i;
+            }
+        }
+        if (best < 0) {
+            break;
+        }
+        kernel_log_puts("[profile] pid ");
+        kernel_log_put_dec((uint32_t)samples[best].pid);
+        kernel_log_puts(" count ");
+        kernel_log_put_dec((uint32_t)samples[best].count);
+        kernel_log_puts(" rip 0x");
+        kernel_log_put_hex64(samples[best].rip);
+        kernel_log_putc('\n');
+        samples[best].count = 0;
+    }
+}
+
+/* What the machine was asked to do while the browser ran. A process that is
+   spinning is spinning on something, and if that something is a system call
+   this file says which - /proc/syscalls counts every one of them. It is what
+   found M169's second bug: 227 million reads of the monotonic clock against
+   1,786 futex waits, in a four hundred second run. */
+static void browser_print_syscalls(void) {
+    int fd = (int)do_syscall(SYS_open, (uint64_t)"/proc/syscalls", OPEN_READ, 0);
+    if (fd < 0) {
+        return;
+    }
+    static char text[8192];
+    long n = do_syscall(SYS_read, (uint64_t)fd, (uint64_t)text,
+                        sizeof(text) - 1);
+    do_syscall(SYS_close, (uint64_t)fd, 0, 0);
+    if (n <= 0) {
+        return;
+    }
+    text[n] = '\0';
+    for (char *line = text; *line;) {
+        char *end = line;
+        while (*end && *end != '\n') {
+            end++;
+        }
+        char saved = *end;
+        *end = '\0';
+        kernel_log_puts("[syscalls] ");
+        kernel_log_puts(line);
+        kernel_log_putc('\n');
+        *end = saved;
+        line = saved ? end + 1 : end;
+    }
+}
+
+static void browser_report_processes(const char *name) {
+    for (int i = 0; i < scheduler_task_count(); i++) {
+        task_t *t = scheduler_task_by_slot(i);
+        if (!t || t->state == TASK_FREE || t->state == TASK_TERMINATED ||
+            t->is_thread || k_strcmp(t->name, name) != 0) {
+            continue;
+        }
+        char path[48];
+        int at = 0;
+        const char *prefix = "/proc/";
+        while (*prefix) {
+            path[at++] = *prefix++;
+        }
+        uint32_t id = (uint32_t)t->id;
+        char digits[12];
+        int d = 0;
+        do {
+            digits[d++] = (char)('0' + (id % 10));
+            id /= 10;
+        } while (id && d < 11);
+        while (d) {
+            path[at++] = digits[--d];
+        }
+        const char *tail = "/cmdline";
+        while (*tail) {
+            path[at++] = *tail++;
+        }
+        path[at] = '\0';
+
+        int fd = (int)do_syscall(SYS_open, (uint64_t)path, OPEN_READ, 0);
+        if (fd < 0) {
+            continue;
+        }
+        static char line[512];
+        long n = do_syscall(SYS_read, (uint64_t)fd, (uint64_t)line,
+                            sizeof(line) - 1);
+        do_syscall(SYS_close, (uint64_t)fd, 0, 0);
+        if (n <= 0) {
+            continue;
+        }
+        line[n] = '\0';
+        /* cmdline is NUL-separated, which is a file format rather than a
+           sentence. */
+        for (long j = 0; j < n; j++) {
+            if (line[j] == '\0') {
+                line[j] = ' ';
+            }
+        }
+        kernel_log_puts("[browser] pid ");
+        kernel_log_put_dec((uint32_t)t->id);
+        kernel_log_puts(" state ");
+        kernel_log_put_dec((uint32_t)t->state);
+        kernel_log_puts(" ticks ");
+        kernel_log_put_dec((uint32_t)(t->user_ticks + t->sys_ticks));
+        kernel_log_puts(": ");
+        kernel_log_puts(line);
+        kernel_log_putc('\n');
+    }
+}
+
+static int browser_shot_size(const char *path, uint32_t *width, uint32_t *height) {
+    int fd = (int)do_syscall(SYS_open, (uint64_t)path, OPEN_READ, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    uint8_t head[24];
+    long n = do_syscall(SYS_read, (uint64_t)fd, (uint64_t)head, sizeof(head));
+    do_syscall(SYS_close, (uint64_t)fd, 0, 0);
+    if (n != (long)sizeof(head)) {
+        return -1;
+    }
+    static const uint8_t magic[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+    for (int i = 0; i < 8; i++) {
+        if (head[i] != magic[i]) {
+            return -1;
+        }
+    }
+    if (head[12] != 'I' || head[13] != 'H' || head[14] != 'D' || head[15] != 'R') {
+        return -1;
+    }
+    *width = ((uint32_t)head[16] << 24) | ((uint32_t)head[17] << 16) |
+             ((uint32_t)head[18] << 8) | (uint32_t)head[19];
+    *height = ((uint32_t)head[20] << 24) | ((uint32_t)head[21] << 16) |
+              ((uint32_t)head[22] << 8) | (uint32_t)head[23];
+    return 0;
+}
+
+static void browser_shot_print(const char *path) {
+    int fd = (int)do_syscall(SYS_open, (uint64_t)path, OPEN_READ, 0);
+    if (fd < 0) {
+        kernel_log_puts("[shot] could not be opened\n");
+        return;
+    }
+    static const char b64[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    static uint8_t chunk[3072];
+    char line[80];
+    int used = 0;
+    size_t total = 0;
+    uint8_t carry[3];
+    int carried = 0;
+    kernel_log_puts("[shot] begin\n");
+    for (;;) {
+        long n = do_syscall(SYS_read, (uint64_t)fd, (uint64_t)chunk,
+                            (uint64_t)sizeof(chunk));
+        if (n <= 0) {
+            break;
+        }
+        total += (size_t)n;
+        /* The leftover of one read is the start of the next group rather than
+           a group of its own. A short read that emitted its own padded group
+           would produce base64 that decodes - into a picture with bytes
+           inserted in the middle of it, which is the kind of wrong that does
+           not announce itself. */
+        for (long i = 0; i < n; i++) {
+            carry[carried++] = chunk[i];
+            if (carried < 3) {
+                continue;
+            }
+            carried = 0;
+            uint32_t v = ((uint32_t)carry[0] << 16) |
+                         ((uint32_t)carry[1] << 8) | (uint32_t)carry[2];
+            line[used++] = b64[(v >> 18) & 63];
+            line[used++] = b64[(v >> 12) & 63];
+            line[used++] = b64[(v >> 6) & 63];
+            line[used++] = b64[v & 63];
+            if (used >= 60) {
+                line[used] = '\0';
+                kernel_log_puts("[shot] ");
+                kernel_log_puts(line);
+                kernel_log_putc('\n');
+                used = 0;
+            }
+        }
+    }
+    if (carried) {
+        uint32_t v = (uint32_t)carry[0] << 16;
+        if (carried > 1) {
+            v |= (uint32_t)carry[1] << 8;
+        }
+        line[used++] = b64[(v >> 18) & 63];
+        line[used++] = b64[(v >> 12) & 63];
+        line[used++] = carried > 1 ? b64[(v >> 6) & 63] : '=';
+        line[used++] = '=';
+    }
+    if (used) {
+        line[used] = '\0';
+        kernel_log_puts("[shot] ");
+        kernel_log_puts(line);
+        kernel_log_putc('\n');
+    }
+    do_syscall(SYS_close, (uint64_t)fd, 0, 0);
+    kernel_log_puts("[shot] end ");
+    kernel_log_put_dec((uint32_t)total);
+    kernel_log_puts(" bytes\n");
 }
 
 static void selftest_reap(task_t *t) {
@@ -3681,6 +3936,259 @@ static void boot_selftests_system(void) {
                    "window and segment reclaimed, SYS_shm_free refusing a kernel address, and "
                    "every pointer-taking syscall refusing every shape of bad pointer "
                    "self-test passed (7/7 checks).\n\n");
+    }
+
+    if (boot_browser_enabled()) {
+        /* Chromium's own browser, asked for the one thing a browser is for.
+           M167 got it to three processes and M168 kept it alive for seven
+           minutes; neither asked it to draw anything, and a browser that
+           starts its processes and paints nothing is not a browser.
+
+           This runs on a switch of its own rather than inside the battery
+           because the battery is 470 seconds before it reaches the browser
+           at all, and what is being iterated on here is one program. */
+        do_syscall(SYS_mkdir, (uint64_t)BROWSER_SHOT_DIRECTORY, 0, 0);
+        /* A picture left by an earlier run would be graded as this one's,
+           and it would be graded as a PASS. */
+        do_syscall(SYS_unlink, (uint64_t)BROWSER_SHOT_FILE, 0, 0);
+
+        int br_pipe[2];
+        if (do_syscall(SYS_pipe, (uint64_t)br_pipe, 0, 0) != 0) {
+            panic("browser: could not make a pipe for the browser's report");
+        }
+        do_syscall(SYS_dup2, (uint64_t)br_pipe[1], 1, 0);
+        do_syscall(SYS_dup2, (uint64_t)br_pipe[1], 2, 0);
+
+        size_t br_bytes = 0;
+        uint8_t *br_image = read_program(PATH_BIN_DIRECTORY "chromiumshell",
+                                         &br_bytes);
+        if (!br_image) {
+            kernel_log_puts("[m169] /bin/chromiumshell is not on this image - "
+                       "skipped. tools/build-chromium.sh "
+                       "content/shell:content_shell builds it and "
+                       "tools/chromium-test.sh installs it.\n");
+            kernel_log_puts("[browser] done\n");
+            power_shutdown(POWER_OFF);
+        }
+        const char *br_argv[] = {
+            PATH_BIN_DIRECTORY "chromiumshell",
+            "--enable-logging=stderr", "--v=0",
+            "--ozone-platform=headless",
+            "--ozone-dump-file=" BROWSER_SHOT_DIRECTORY,
+            "--disable-gpu",
+            "--content-shell-host-window-size=400x300",
+            "--content-shell-hide-toolbar",
+            /* One process, and it is a measurement rather than a
+               convenience. Chromium's own browser runs here as four
+               processes - [m167] requires that and gets it - but a renderer
+               in a process of its OWN never submits a compositor frame on
+               this machine yet: every process starts, the machine goes
+               quiet, and the window keeps the one frame the browser drew
+               before the page existed. In one process the same page, the
+               same Blink, the same //cc and the same Skia produce the
+               picture below. So what is graded here is the rendering, and
+               what is not graded here is the frame crossing a process
+               boundary - which is the next rung and is named rather than
+               hidden. */
+            "--single-process",
+            BROWSER_PAGE,
+            0};
+        profile_reset();
+        profile_start();
+        task_t *brt = process_spawnv("chromiumshell", br_image, br_bytes,
+                                     br_argv);
+        kfree(br_image);
+
+        static char br_out[262144];
+        size_t br_got = 0;
+        long br_deadline = (long)pit_get_ticks() + BROWSER_SECONDS * PIT_HZ;
+        uint32_t br_settled_size = 0;
+        int br_settled = 0;
+        long br_next_poll = 0;
+        int br_last_live = 0;
+        int br_presents = 0;
+        for (;;) {
+            long avail = do_syscall(SYS_pipe_poll, (uint64_t)br_pipe[0], 0, 0);
+            if (avail > 0 && br_got < sizeof(br_out) - 1) {
+                size_t room = sizeof(br_out) - 1 - br_got;
+                long n = do_syscall(SYS_read, (uint64_t)br_pipe[0],
+                                    (uint64_t)(br_out + br_got),
+                                    (uint64_t)((size_t)avail < room
+                                               ? (size_t)avail : room));
+                if (n > 0) {
+                    br_got += (size_t)n;
+                }
+                continue;
+            }
+            if (brt && do_syscall(SYS_wait_nb, (uint64_t)brt->id, 0, 0) != -2) {
+                break;
+            }
+            /* Stop when the picture is there and has stopped growing, not
+               after a fixed wait. A browser does not exit, so the only thing
+               that can say "this is finished" is the thing being waited for -
+               and the file is written by a thread pool task, so it appears
+               at whatever size the encoder has got to. Two polls at the same
+               size is the difference between a PNG and half of one. */
+            os_stat_t br_shot;
+            long br_now = (long)pit_get_ticks();
+            if (br_now < br_next_poll) {
+                do_syscall(SYS_yield, 0, 0, 0);
+                continue;
+            }
+            br_next_poll = br_now + PIT_HZ / 2;
+            int br_live = 0;
+            for (int i = 0; i < scheduler_task_count(); i++) {
+                task_t *t = scheduler_task_by_slot(i);
+                if (t && t->state != TASK_FREE && t->state != TASK_TERMINATED &&
+                    !t->is_thread && k_strcmp(t->name, "chromiumshell") == 0) {
+                    br_live++;
+                }
+            }
+            if (br_live != br_last_live) {
+                br_last_live = br_live;
+                kernel_log_puts("[browser] --- ");
+                kernel_log_put_dec((uint32_t)br_live);
+                kernel_log_puts(" process(es) ---\n");
+                browser_report_processes("chromiumshell");
+            }
+            if (do_syscall(SYS_stat, (uint64_t)BROWSER_SHOT_FILE,
+                           (uint64_t)&br_shot, 0) == 0 && br_shot.size > 0) {
+                if (br_shot.size == br_settled_size) {
+                    br_settled++;
+                } else {
+                    kernel_log_puts("[browser] present: ");
+                    kernel_log_put_dec(br_shot.size);
+                    kernel_log_puts(" bytes at ");
+                    kernel_log_put_dec((uint32_t)(br_now / PIT_HZ));
+                    kernel_log_puts(" s\n");
+                    br_settled = 0;
+                    br_settled_size = br_shot.size;
+                    br_presents++;
+                }
+                /* The FIRST present is the window the browser drew before
+                   any page existed - its frame and its blank client area -
+                   so a run that stopped at the first one would grade the
+                   browser rather than the page. The page is the second. */
+                if (br_presents < 2) {
+                    br_settled = 0;
+                }
+                /* The browser presents its empty window long before the page
+                   it was given has loaded, so "the file stopped changing"
+                   has to mean stopped for a while rather than stopped since
+                   the last poll - the first version of this graded the
+                   window the browser drew before the renderer existed. */
+                if (br_settled >= BROWSER_SETTLE_POLLS) {
+                    break;
+                }
+            }
+            if ((long)pit_get_ticks() > br_deadline) {
+                break;
+            }
+            do_syscall(SYS_yield, 0, 0, 0);
+        }
+        br_out[br_got] = '\0';
+        browser_report_processes("chromiumshell");
+        browser_print_profile();
+        browser_print_syscalls();
+
+        for (int round = 0; round < 1200; round++) {
+            int outstanding = 0;
+            for (int i = 0; i < scheduler_task_count(); i++) {
+                task_t *o = scheduler_task_by_slot(i);
+                if (!o || o->state == TASK_FREE) {
+                    continue;
+                }
+                if (o->state == TASK_TERMINATED) {
+                    selftest_reap(o);
+                    continue;
+                }
+                if (k_strcmp(o->name, "chromiumshell") != 0) {
+                    continue;
+                }
+                outstanding++;
+                scheduler_raise_signal(o, SIGKILL);
+            }
+            if (!outstanding) {
+                int leftover = 0;
+                for (int i = 0; i < scheduler_task_count(); i++) {
+                    task_t *o = scheduler_task_by_slot(i);
+                    if (o && o->state != TASK_FREE &&
+                        k_strcmp(o->name, "chromiumshell") == 0) {
+                        leftover++;
+                    }
+                }
+                if (!leftover) {
+                    break;
+                }
+            }
+            do_syscall(SYS_yield, 0, 0, 0);
+        }
+        do_syscall(SYS_close, (uint64_t)br_pipe[0], 0, 0);
+        do_syscall(SYS_close, (uint64_t)br_pipe[1], 0, 0);
+        file_descriptor_release(&scheduler_current()->descriptor_table->slots[1]);
+        scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
+        file_descriptor_release(&scheduler_current()->descriptor_table->slots[2]);
+        scheduler_current()->descriptor_table->slots[2].type = FILE_DESCRIPTOR_STDOUT;
+
+        for (char *line = br_out; *line;) {
+            char *end = line;
+            while (*end && *end != '\n') {
+                end++;
+            }
+            char saved = *end;
+            *end = '\0';
+            kernel_log_puts("chromiumshell: ");
+            kernel_log_puts(line);
+            kernel_log_putc('\n');
+            *end = saved;
+            line = saved ? end + 1 : end;
+        }
+
+        uint32_t shot_width = 0;
+        uint32_t shot_height = 0;
+        os_stat_t shot;
+        if (do_syscall(SYS_stat, (uint64_t)BROWSER_SHOT_FILE,
+                       (uint64_t)&shot, 0) != 0) {
+            kernel_log_puts("[m169] the browser wrote no picture at "
+                       BROWSER_SHOT_FILE "\n");
+        } else if (browser_shot_size(BROWSER_SHOT_FILE, &shot_width,
+                                     &shot_height) != 0) {
+            kernel_log_puts("[m169] what it wrote is not a PNG\n");
+        } else if (shot_width < BROWSER_PAGE_WIDTH ||
+                   shot_height < BROWSER_PAGE_HEIGHT) {
+            /* Bigger than the document, because Chromium draws its own
+               window frame around it - a headless ozone window has no
+               decorations from anybody else. How much bigger is Chromium's
+               business; what is asserted here is that the document fits, and
+               the PIXELS are graded on the host by tools/browser-shot.py,
+               because a decoder is a thing that can itself be wrong and the
+               one place it must not also be is inside the machine it is
+               grading. */
+            kernel_log_puts("[m169] the picture is ");
+            kernel_log_put_dec(shot_width);
+            kernel_log_puts("x");
+            kernel_log_put_dec(shot_height);
+            kernel_log_puts(" and the document alone is ");
+            kernel_log_put_dec(BROWSER_PAGE_WIDTH);
+            kernel_log_puts("x");
+            kernel_log_put_dec(BROWSER_PAGE_HEIGHT);
+            kernel_log_puts("\n");
+        } else {
+            kernel_log_puts("[m169] Chromium drew a page on this machine: ");
+            kernel_log_put_dec(shot_width);
+            kernel_log_puts("x");
+            kernel_log_put_dec(shot_height);
+            kernel_log_puts(" pixels, ");
+            kernel_log_put_dec((uint32_t)shot.size);
+            kernel_log_puts(" bytes of PNG - a document Blink laid out, //cc "
+                       "recorded and rastered, viz aggregated, Skia filled "
+                       "and Chromium's own Rust encoder wrote. It is printed "
+                       "below so the pixels can be graded by something that "
+                       "is not this machine.\n");
+            browser_shot_print(BROWSER_SHOT_FILE);
+        }
+        kernel_log_puts("[browser] done\n");
+        power_shutdown(POWER_OFF);
     }
 
     if (boot_forksmp_enabled()) {
@@ -9798,8 +10306,9 @@ static void boot_selftests_system(void) {
                     break;
                 }
                 /* Three is the claim: the browser, and two processes it
-                   started. Waiting longer than that buys nothing this
-                   milestone asserts. */
+                   started. What it DRAWS is graded by tools/browser-test.sh
+                   rather than here - see the browser switch above, and M169
+                   for why that run is a different one. */
                 if (sh_processes_seen >= 3 && sh_got > 0) {
                     break;
                 }
@@ -11481,6 +11990,8 @@ static void boot_selftests_system(void) {
                    "a guard page, and touching far below the stack pointer - still "
                    "killing only the program that made them - and one mapping split "
                    "into 512 regions that all kept their own contents and protections "
+                   "- and a system call handed a read-only page refusing to write it, "
+                   "where a C library answering for itself would have taken the signal "
                    "- self-test passed (");
         kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
         kernel_log_puts(" ms).\n\n");

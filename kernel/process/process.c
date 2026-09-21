@@ -274,6 +274,9 @@ static task_t *spawn_common(const char *name, const uint8_t *image, size_t image
 
     task_t *t = task_spawn_in(name, pml4_phys, user_task_launcher, arguments,
                                USER_HEAP_START, USER_SHARED_MEMORY_BASE);
+    if (t) {
+        scheduler_set_cmdline(t, argv);
+    }
     if (!t) {
         kfree(arguments);
         process_destroy_address_space(pml4_phys);

@@ -75,6 +75,8 @@ extern "C" {
 #define OS_ERROR_ACCESS 13
 #define OS_ERROR_INTR  4
 #define OS_ERROR_AGAIN 5
+#define OS_ERROR_PERMISSION 1
+#define OS_ERROR_INVALID 22
 #define SYS_rmdir  43
 #define SYS_time   44
 
@@ -252,7 +254,13 @@ typedef struct {
 #define SYS_thread_setname        132
 #define SYS_thread_getname        133
 
-#define SYSCALL_COUNT 134
+/* Resource limits. A C library cannot answer these honestly: getrlimit has
+   to say EFAULT for a pointer it cannot write, and only the kernel can look
+   at a page table before writing. See system_api/include/os_resource.h. */
+#define SYS_getrlimit             134
+#define SYS_setrlimit             135
+
+#define SYSCALL_COUNT 136
 
 #ifdef __cplusplus
 }

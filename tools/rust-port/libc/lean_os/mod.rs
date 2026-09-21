@@ -178,6 +178,11 @@ s! {
 
     pub struct pthread_cond_t {
         seq: c_uint,
+        // The clock its absolute deadlines are on - CLOCK_REALTIME unless
+        // pthread_condattr_setclock said otherwise. M169: measuring a
+        // monotonic deadline against the wall clock is what this field
+        // stopped, and the C header carries it too.
+        clock: c_int,
     }
 
     pub struct pthread_rwlock_t {
@@ -295,7 +300,7 @@ pub const PTHREAD_MUTEX_INITIALIZER: pthread_mutex_t = pthread_mutex_t {
     owner: 0,
     count: 0,
 };
-pub const PTHREAD_COND_INITIALIZER: pthread_cond_t = pthread_cond_t { seq: 0 };
+pub const PTHREAD_COND_INITIALIZER: pthread_cond_t = pthread_cond_t { seq: 0, clock: CLOCK_REALTIME };
 pub const PTHREAD_RWLOCK_INITIALIZER: pthread_rwlock_t = pthread_rwlock_t { state: 0 };
 pub const PTHREAD_MUTEX_NORMAL: c_int = 0;
 pub const PTHREAD_MUTEX_DEFAULT: c_int = 0;

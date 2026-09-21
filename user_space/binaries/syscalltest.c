@@ -180,6 +180,13 @@ static const entry_t table[] = {
 
     {SYS_thread_setname, CLASS_POINTER, 1, NULL},
     {SYS_thread_getname, CLASS_POINTER, 1, NULL},
+
+    /* M169. The pointer is the whole reason these are system calls: a
+       getrlimit that cannot write its answer has to say EFAULT rather than
+       take the signal, which is what a C library answering for itself
+       does. */
+    {SYS_getrlimit,      CLASS_POINTER, 2, NULL},
+    {SYS_setrlimit,      CLASS_POINTER, 2, NULL},
 };
 #define N_TABLE ((int)(sizeof(table) / sizeof(table[0])))
 

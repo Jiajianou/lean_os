@@ -23,3 +23,9 @@ int boot_forksmp_enabled(void);
 int boot_pytest_enabled(void);
 
 int boot_pybuild_enabled(void);
+
+/* Chromium's own browser, rendering a page and nothing else. The battery it
+   lives in is 470 seconds before it reaches the browser at all, and what a
+   browser needs graded - did a page come out the far side as pixels - is one
+   run of one program. This switch is that run. */
+int boot_browser_enabled(void);

@@ -46,6 +46,7 @@ static int bootstrap_cached = -1;
 static int forksmp_cached = -1;
 static int pybuild_cached = -1;
 static int pytest_cached = -1;
+static int browser_cached = -1;
 
 void fwcfg_init(void) {
     selftest_cached = -1;
@@ -54,6 +55,7 @@ void fwcfg_init(void) {
     forksmp_cached = -1;
     pybuild_cached = -1;
     pytest_cached = -1;
+    browser_cached = -1;
 
     uint8_t sig[4];
     fwcfg_select(FWCFG_SIGNATURE);
@@ -190,4 +192,15 @@ int boot_selftests_enabled(void) {
 
     selftest_cached = (n == 1 && buffer[0] == '1') ? 1 : 0;
     return selftest_cached;
+}
+
+int boot_browser_enabled(void) {
+    if (browser_cached >= 0) {
+        return browser_cached;
+    }
+    char buffer[8];
+    k_memset(buffer, 0, sizeof(buffer));
+    int n = fwcfg_read_file("opt/leanos/browser", buffer, sizeof(buffer) - 1);
+    browser_cached = (n == 1 && buffer[0] == '1') ? 1 : 0;
+    return browser_cached;
 }

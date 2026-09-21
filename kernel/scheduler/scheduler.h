@@ -175,6 +175,14 @@ typedef struct task {
     uint8_t idle_wait_depth;
     char cwd[PATH_MAX_LENGTH];
     char *env_block;
+    /* The argument vector this program was started with, NUL-separated, as
+       /proc/<pid>/cmdline(5) is defined to hold it. It belongs to the
+       ADDRESS SPACE rather than to the task - every thread of a process has
+       the same command line - so it is written by a spawn or an exec and
+       released by the reap of the last member of the group, which is where
+       M168 put everything else of that kind. */
+    char *cmdline_block;
+    uint32_t cmdline_length;
     uint32_t env_length;
     uint32_t env_count;
     uint64_t sig_handler[SIG_MAX + 1];
@@ -265,6 +273,14 @@ void scheduler_set_task_name(task_t *t, const char *name);
 void task_exit_with_signal(int sig) __attribute__((noreturn));
 
 void scheduler_release_env(task_t *t);
+
+/* TASK_CMDLINE_MAX is a ceiling rather than a size: what it has to be bigger
+   than is a real command line, and Chromium's renderer is started with about
+   twenty arguments. Linux's own limit for the same file is a page. */
+#define TASK_CMDLINE_MAX 4096
+void scheduler_set_cmdline(task_t *t, const char *const *argv);
+void scheduler_release_cmdline(task_t *t);
+const char *scheduler_cmdline(task_t *t, uint32_t *length);
 
 unsigned int scheduler_set_alarm(task_t *t, unsigned int seconds);
 

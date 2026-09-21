@@ -709,18 +709,86 @@ static int the_thread_attributes_are_answered_truthfully(void) {
     }
     int clock = -1;
     if (pthread_condattr_getclock(&condition_attributes, &clock) != 0 ||
-        clock != CLOCK_MONOTONIC) {
+        clock != CLOCK_REALTIME) {
         return 99;
     }
     if (pthread_condattr_setclock(&condition_attributes, CLOCK_MONOTONIC) != 0) {
         return 100;
     }
-    if (pthread_condattr_setclock(&condition_attributes,
-                                  CLOCK_REALTIME) != ENOTSUP) {
+    if (pthread_condattr_getclock(&condition_attributes, &clock) != 0 ||
+        clock != CLOCK_MONOTONIC) {
         return 101;
     }
-    if (pthread_condattr_destroy(&condition_attributes) != 0) {
+    if (pthread_condattr_setclock(&condition_attributes, CLOCK_REALTIME) != 0) {
         return 102;
+    }
+    if (pthread_condattr_setclock(&condition_attributes, 12345) != EINVAL) {
+        return 103;
+    }
+
+    /* M169. And the half that matters: a deadline is an ABSOLUTE time on a
+       particular clock, and a variable that was told which clock has to
+       measure against that one.
+
+       Asking is not enough. pthread_condattr_setclock accepted
+       CLOCK_MONOTONIC here for a hundred and sixty milestones and
+       pthread_cond_timedwait went on comparing the deadline with the wall
+       clock, which on this machine is about fifty-five years further along -
+       so every timed wait returned ETIMEDOUT immediately, and every caller
+       waiting on one spun. Nothing noticed until four Chromium processes did
+       it at once on a single core.
+
+       So the check is that time PASSES. Both clocks, because the bug was in
+       the disagreement between them rather than in either one. */
+    if (pthread_condattr_setclock(&condition_attributes, CLOCK_MONOTONIC) != 0) {
+        return 104;
+    }
+    for (int which = 0; which < 2; which++) {
+        int clock_id = which == 0 ? CLOCK_MONOTONIC : CLOCK_REALTIME;
+        if (pthread_condattr_setclock(&condition_attributes, clock_id) != 0) {
+            return 105;
+        }
+        pthread_cond_t timed;
+        pthread_mutex_t guard = PTHREAD_MUTEX_INITIALIZER;
+        if (pthread_cond_init(&timed, &condition_attributes) != 0) {
+            return 106;
+        }
+        struct timespec start;
+        if (clock_gettime(clock_id, &start) != 0) {
+            return 107;
+        }
+        struct timespec deadline = start;
+        deadline.tv_nsec += 200 * 1000 * 1000L;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_nsec -= 1000000000L;
+            deadline.tv_sec += 1;
+        }
+        pthread_mutex_lock(&guard);
+        int rc = pthread_cond_timedwait(&timed, &guard, &deadline);
+        pthread_mutex_unlock(&guard);
+        if (rc != ETIMEDOUT) {
+            return 108;
+        }
+        struct timespec done;
+        if (clock_gettime(clock_id, &done) != 0) {
+            return 109;
+        }
+        long long elapsed_ms =
+            ((long long)done.tv_sec - start.tv_sec) * 1000LL +
+            ((long long)done.tv_nsec - start.tv_nsec) / 1000000LL;
+        /* 150 rather than 200: every clock here has millisecond resolution
+           and the futex wait rounds, so the floor is "it really waited"
+           rather than "it waited exactly". */
+        if (elapsed_ms < 150) {
+            return 110;
+        }
+        if (pthread_cond_destroy(&timed) != 0) {
+            return 111;
+        }
+    }
+
+    if (pthread_condattr_destroy(&condition_attributes) != 0) {
+        return 112;
     }
     return 0;
 }

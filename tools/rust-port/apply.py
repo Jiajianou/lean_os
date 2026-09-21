@@ -246,35 +246,13 @@ mod imp {
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {""",
      "...so a socket goes the same fcntl(F_SETFL) way a file does"),
 
-    ("sys/pal/unix/sync/condvar.rs",
-     """    target_os = "redox",
-    target_os = "teeos",
-)))]
-impl Condvar {
-    pub const PRECISE_TIMEOUT: bool = true;""",
-     """    target_os = "redox",
-    target_os = "teeos",
-    target_os = "lean_os",
-)))]
-impl Condvar {
-    pub const PRECISE_TIMEOUT: bool = true;""",
-     "this libc has no pthread_condattr_setclock"),
-
-    ("sys/pal/unix/sync/condvar.rs",
-     """    target_os = "redox",
-    target_os = "teeos",
-))]
-impl Condvar {
-    pub const PRECISE_TIMEOUT: bool = false;""",
-     """    target_os = "redox",
-    target_os = "teeos",
-    target_os = "lean_os",
-))]
-impl Condvar {
-    pub const PRECISE_TIMEOUT: bool = false;""",
-     "this libc has no pthread_condattr_setclock, and its "
-     "pthread_cond_timedwait reads the deadline against the realtime clock, "
-     "which is what CLOCK_REALTIME in this arm already says"),
+    # M169 removed two edits that used to be here. They put lean_os in the
+    # list of platforms whose pthread_condattr_setclock does not work, and
+    # into the arm whose comment says its deadlines are read against
+    # CLOCK_REALTIME - which was the truth about this libc and is the bug
+    # M169 fixed rather than a property of the platform. With the clock
+    # remembered by the condition variable, this target takes rust-src's
+    # ordinary monotonic arm and needs no edit at all.
 
     ("sys/random/mod.rs",
      """    any(target_os = "horizon", target_os = "cygwin") => {""",

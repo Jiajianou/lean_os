@@ -36,6 +36,8 @@
 #include "memory_management/virtual_memory.h"
 #include "power/power.h"
 #include "os_file_system.h"
+#include "os_resource.h"
+#include "process/resource_limits.h"
 #include "process.h"
 #include "process/process.h"
 #include "process/package_capabilities.h"
@@ -1459,6 +1461,65 @@ static long sys_fdpath(uint64_t fd, uint64_t out_pointer, uint64_t out_length,
         return -1;
     }
     return (long)n;
+}
+
+/* Resource limits. The whole reason these are system calls rather than a
+   table in the C library is the pointer: getrlimit(2) must answer EFAULT
+   for a destination it cannot write, and user code that writes through the
+   pointer itself takes the signal instead of reporting it. Chromium's
+   base::ProtectedMemory uses exactly that as a measurement - it makes a page
+   read-only and then calls getrlimit on it, requiring -1/EFAULT - and a
+   renderer died on every page of its protected section here.
+
+   The numbers are in kernel/process/resource_limits.c, which is a unit a
+   host test compiles: what they are is a fact about this machine and belongs
+   somewhere that can be graded without booting it. */
+static long sys_getrlimit(uint64_t resource, uint64_t out_pointer, uint64_t a3,
+                          uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    os_rlimit_t limit;
+    if (resource_limit_for(resource, &limit) != 0) {
+        return -OS_ERROR_INVALID;
+    }
+    /* The order matters and it is the order Linux uses: a resource this
+       kernel does not know is EINVAL whatever the pointer is, and only then
+       is the destination looked at. A caller probing a page with a resource
+       number nobody implements would otherwise get EFAULT for the wrong
+       reason. */
+    if (copy_to_user(out_pointer, &limit, sizeof(limit)) != 0) {
+        return -OS_ERROR_FAULT;
+    }
+    return 0;
+}
+
+/* Nothing here can be changed, and that is M65's rule rather than an
+   omission: a descriptor table is a fixed array in the task, the task table
+   is a fixed array in the scheduler, and a setrlimit that returned 0 would
+   be claiming a ceiling had moved when nothing about the machine had. So
+   the value asked for is compared with the one that is true, and anything
+   else is EPERM - which is what a process without privilege gets on Linux
+   for raising a hard limit, and is a refusal a caller can act on. */
+static long sys_setrlimit(uint64_t resource, uint64_t in_pointer, uint64_t a3,
+                          uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    os_rlimit_t current;
+    if (resource_limit_for(resource, &current) != 0) {
+        return -OS_ERROR_INVALID;
+    }
+    os_rlimit_t wanted;
+    if (copy_from_user(&wanted, in_pointer, sizeof(wanted)) != 0) {
+        return -OS_ERROR_FAULT;
+    }
+    if (wanted.current == current.current && wanted.maximum == current.maximum) {
+        return 0;
+    }
+    return -OS_ERROR_PERMISSION;
 }
 
 static long sys_rusage(uint64_t who, uint64_t out_pointer, uint64_t a3,
@@ -3026,8 +3087,13 @@ static long sys_mprotect(uint64_t address, uint64_t length, uint64_t prot, uint6
         return -1;
     }
     if (in_image) {
+        /* Bytes, not pages. This asked about (end - address) / PAGE_SIZE
+           BYTES, which for any range is a number small enough to fall inside
+           the first page - so "is every page in this range really mapped"
+           only ever looked at the first one, and a range with a hole in it
+           was accepted. M169 found it while reading the call beside it. */
         if (!virtual_memory_user_range_ok(self->pml4_phys, address,
-                                          (end - address) / PAGE_SIZE, 0)) {
+                                          end - address, 0)) {
             return -1;
         }
     } else {
@@ -4899,6 +4965,11 @@ static long sys_execve(isr_regs_t *regs) {
     virtual_memory_switch_address_space(new_pml4);
     process_destroy_address_space(old_pml4);
 
+    /* An exec replaces the program, so it replaces the command line: a
+       /proc/<pid>/cmdline still naming what this process used to be is how
+       every child of a browser looked identical. */
+    scheduler_set_cmdline(self, v.argv);
+
     self->heap_brk = USER_HEAP_START;
     self->heap_mapped_end = USER_HEAP_START;
     self->shared_memory_next_vaddr = USER_SHARED_MEMORY_BASE;
@@ -5087,6 +5158,8 @@ static const syscall_function_t syscall_table[SYSCALL_COUNT] = {
     [SYS_sockname] = sys_sockname,
     [SYS_munmap] = sys_munmap,
     [SYS_thread_create] = sys_thread_create,
+    [SYS_getrlimit] = sys_getrlimit,
+    [SYS_setrlimit] = sys_setrlimit,
     [SYS_thread_setname] = sys_thread_setname,
     [SYS_thread_getname] = sys_thread_getname,
     [SYS_thread_exit] = sys_thread_exit,

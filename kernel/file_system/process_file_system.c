@@ -238,9 +238,24 @@ static void generate(process_file_t *f, int kind, int pid) {
         break;
     }
     case P_CMDLINE: {
+        /* cmdline(5) is the argument vector, NUL-separated, with a NUL after
+           the last one. This used to answer with the task's NAME, which is
+           the program's basename and nothing else - true of the first
+           argument and of nothing after it, and the reason every process a
+           browser starts looked identical here: the only thing that tells a
+           renderer from a network service is --type=, which is in argv. */
         task_t *t = scheduler_task_by_id(pid);
-        if (t) {
+        uint32_t length = 0;
+        const char *block = t ? scheduler_cmdline(t, &length) : (const char *)0;
+        if (block) {
+            for (uint32_t i = 0; i < length && at < cap; i++) {
+                f->buffer[at++] = block[i];
+            }
+        } else if (t) {
             at = put_string(f->buffer, at, cap, t->name);
+            if (at < cap) {
+                f->buffer[at++] = '\0';
+            }
         }
         break;
     }

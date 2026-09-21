@@ -130,6 +130,8 @@ run_stage "the FILE layer, off the machine" ./tools/stdio-test.sh
 run_stage "packages, against the host's sha256 and cmp" ./tools/pkg-test.sh
 run_stage "iconv, against the host's" ./tools/iconv-test.sh
 run_stage "uchar, against Python's own encoders" ./tools/uchar-test.sh
+run_stage "the PNG reader the browser's picture is graded by" \
+  python3 ./tools/browser-shot.py --self-test
 run_stage "what bindgen believes this target is, against gcc" \
   python3 ./tools/chromium-bindgen-test.py
 run_stage "realpath, against the host's" ./tools/realpath-test.sh
@@ -157,6 +159,14 @@ else
   # passed [m83]. On four it fails.
   run_stage "fork out of a process whose other threads are still running" \
     ./tools/fork-smp-test.sh
+
+  # And beside those for the same kind of reason: the battery reaches the
+  # browser 470 seconds into a boot and asks it to become three processes,
+  # which is M167's claim. This asks it to DRAW, which is a different run on
+  # a different switch, and the pixels it produces are graded on this side of
+  # the serial line by a decoder written here.
+  run_stage "Chromium drawing a page, graded as pixels" \
+    ./tools/browser-test.sh
 
   if [ "$TIER" = "full" ]; then
     run_stage "the same battery, through the I/O APIC" \

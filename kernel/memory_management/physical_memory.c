@@ -27,6 +27,18 @@ static uint64_t search_hint;
 
 static spinlock_t physical_memory_lock;
 
+/* What the free was, for the panic below.
+
+   "pmm_free_frame: double-free or invalid frame" names a frame number and
+   nothing else, and a frame number says nothing about which subsystem let go
+   of it twice. M167 spent four instrumented boots getting from that message
+   to a cause, and M168 spent several more; both times the useful facts were
+   the same three - the frame's own state, the SITE that was freeing, and the
+   VIRTUAL ADDRESS it was mapped at, which says whether it was a stack, an
+   image or the mmap arena. So the panic carries them. */
+const char *pmm_free_site = "?";
+uint64_t pmm_free_virt = 0;
+
 static inline void bitmap_set(uint64_t frame) {
     bitmap[frame / 8] |= (uint8_t)(1u << (frame % 8));
 }
@@ -230,6 +242,21 @@ void physical_memory_free_frame(uint64_t phys_address) {
     uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
     uint64_t f = phys_address / PAGE_SIZE;
     if (f >= total_frames || !bitmap_test(f) || frame_refs[f] == 0) {
+        kernel_log_puts("[pmm] free frame 0x");
+        kernel_log_put_hex64(phys_address);
+        kernel_log_puts(" index 0x");
+        kernel_log_put_hex64(f);
+        kernel_log_puts(" of 0x");
+        kernel_log_put_hex64(total_frames);
+        kernel_log_puts(" bitmap ");
+        kernel_log_put_dec((uint32_t)(f < total_frames ? bitmap_test(f) : 0));
+        kernel_log_puts(" refs ");
+        kernel_log_put_dec((uint32_t)(f < total_frames ? frame_refs[f] : 0));
+        kernel_log_puts(" site ");
+        kernel_log_puts(pmm_free_site);
+        kernel_log_puts(" virt 0x");
+        kernel_log_put_hex64(pmm_free_virt);
+        kernel_log_putc('\n');
         panic("pmm_free_frame: double-free or invalid frame");
     }
     if (--frame_refs[f] == 0) {

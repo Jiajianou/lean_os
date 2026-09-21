@@ -283,6 +283,9 @@ into a fresh image is ordered rather than automatic:
 make toybox                  # /bin/toybox and 143 command names
 tools/build-packages.sh      # cross-build grep and bzip2 into .osp archives
 make packages                # ...and write them into the image as /pkg/repo
+make fonts                   # DejaVu, and the /etc/fonts/fonts.conf that
+                             #   says where it is - a property of the
+                             #   machine rather than of one browser
 make browser                 # cross-build NetSurf, libcurl and 14
                              #   libraries, and write the browser in
 ```
@@ -638,6 +641,63 @@ Several instruments, and none of them subsumes another:
   nothing says at the call site: the partitions, then WTF, then Oilpan - in
   that order, because `InitializeWtf` allocates without bringing the
   partitions up, and `PaintController` collects.
+
+- **And a page, drawn.** Chromium's own browser renders a real document on
+  this machine and the pixels come back: `/bin/chromiumshell` is given a
+  `data:` URL with a body colour and one absolutely positioned box, and what
+  it writes is a PNG - 400x300 of document inside the window frame Chromium
+  draws for itself, the body filling 112,800 pixels of `rgb(0,160,0)` and the
+  box 7,200 of `rgb(200,0,0)` with its edges exactly where the stylesheet put
+  them. Blink laid it out, `//cc` recorded and rastered it, viz aggregated
+  it, Skia filled it and Chromium's own Rust encoder wrote it.
+
+  The picture leaves the machine over the **serial line**, in base64, because
+  that is the only wire out of a booted machine a harness already reads - and
+  it is decoded and graded by `tools/browser-shot.py`, a PNG reader written
+  here, on the host. A decoder is a thing that can itself be wrong, and the
+  one place it must not also be is inside the machine it is grading; it has a
+  `--self-test` in the fast tier that reads a picture it made itself through
+  all five PNG filters.
+
+  **That run is one process, and saying so is the point.** Chromium here is
+  four processes and `[m167]` requires it; a renderer in a process of its own
+  does not yet submit a compositor frame on this machine, so the window keeps
+  the one frame the browser drew before the page existed. In one process the
+  same Blink, the same `//cc` and the same Skia produce the picture above.
+  What is graded is the rendering; what is not graded is the frame crossing a
+  process boundary.
+
+  **Two things this machine had been getting wrong for years came out of it,
+  and neither is about browsers.**
+
+  `getrlimit(2)` was not a system call. It was a table of constants in this C
+  library, and it wrote the answer through the caller's pointer - so a
+  pointer it could not write got a SIGSEGV where POSIX says EFAULT. Chromium
+  uses exactly that as a measurement: `base::ProtectedMemory` makes a page of
+  its own data read-only and then calls `getrlimit` **on that page**, taking
+  the refusal as proof the protection took. Every renderer died there. It is
+  a system call now, answering with the kernel's own numbers - the descriptor
+  table, the task table, the stack the loader laid out - because only the
+  kernel can look at a page table before it writes.
+
+  And `pthread_cond_timedwait` measured a **monotonic** deadline against the
+  **wall clock**. `pthread_condattr_setclock` accepted `CLOCK_MONOTONIC` and
+  refused `CLOCK_REALTIME`; the wait then compared the absolute time it was
+  given with `time(2)`, which on this machine is about fifty-five years
+  further along. Every timed wait returned `ETIMEDOUT` the instant it was
+  made, and every caller waiting on one spun. From underneath that looked
+  like **227,895,895 reads of the monotonic clock against 1,786 futex waits**
+  in a four-hundred-second run, four processes burning a single core and a
+  browser that never drew. A condition variable remembers its clock now;
+  the same run makes 18,334.
+
+  Two smaller ones came with them. `mprotect` handed its "is every page of
+  this range really mapped" check a **page count where it wanted bytes**, so
+  for any range the number fell inside the first page and only that page was
+  ever looked at. And `/proc/<pid>/cmdline` answered with the program's
+  *name* rather than its argument vector - which is why every process a
+  browser starts looked identical from outside, and why finding out that two
+  of them were the storage and network services took an afternoon.
 
 - **A libm for the format the hardware has.** `long double` on x86-64 is
   the x87's 80-bit extended type, and this libc has the C99 set for it -

@@ -1,4 +1,7 @@
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <sys/resource.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -133,6 +136,88 @@ static int ordinary(void) {
     protectable[0] = 0x5B;
     if (protectable[0] != 0x5B) {
         return 15;
+    }
+
+    /* M169. A system call that cannot write its answer says so.
+
+       This is the protected-memory pattern, and it belongs here rather than
+       beside the other resource-limit checks because what it is about is a
+       page rather than a limit: Chromium makes a page of its own data
+       read-only, hands its address to getrlimit(2), and takes -1 with EFAULT
+       as its proof that the protection took. A getrlimit answered inside the
+       C library writes through the pointer and the caller takes SIGSEGV
+       instead, which is what happened to every renderer this machine
+       started. So the call has to reach the kernel, because the kernel is
+       the only thing here that can look at a page table before it writes.
+
+       The second half is the part that makes the first non-vacuous: the same
+       call with the same pointer must SUCCEED once the page is writable
+       again, and must answer with this machine's own numbers. A getrlimit
+       that always failed would pass the check above. */
+    if (mprotect((void *)page_of_data, PAGE, PROT_READ) != 0) {
+        return 16;
+    }
+    struct rlimit probe_limit;
+    errno = 0;
+    if (getrlimit(RLIMIT_NPROC, (struct rlimit *)page_of_data) != -1 ||
+        errno != EFAULT) {
+        printf("vmtest: getrlimit wrote into a read-only page (errno %d)\n",
+               errno);
+        return 16;
+    }
+    if (mprotect((void *)page_of_data, PAGE, PROT_READ | PROT_WRITE) != 0) {
+        return 16;
+    }
+    if (getrlimit(RLIMIT_NPROC, (struct rlimit *)page_of_data) != 0) {
+        return 16;
+    }
+    if (getrlimit(RLIMIT_NOFILE, &probe_limit) != 0 ||
+        probe_limit.rlim_cur != (rlim_t)OPEN_MAX) {
+        printf("vmtest: getrlimit(RLIMIT_NOFILE) is not this machine's "
+               "descriptor table\n");
+        return 16;
+    }
+    errno = 0;
+    if (getrlimit(RLIM_NLIMITS + 1, &probe_limit) != -1 || errno != EINVAL) {
+        printf("vmtest: getrlimit accepted a resource that does not exist\n");
+        return 16;
+    }
+    errno = 0;
+    if (setrlimit(RLIMIT_NOFILE, (const struct rlimit *)0) != -1 ||
+        errno != EFAULT) {
+        printf("vmtest: setrlimit read through a null pointer\n");
+        return 16;
+    }
+    /* A limit that cannot move says so. The descriptor table is a fixed
+       array in the task, so asking for a different ceiling is EPERM rather
+       than a zero that changes nothing - M65's rule, on a call that has a
+       return value for exactly this. */
+    probe_limit.rlim_cur = probe_limit.rlim_max = 4;
+    errno = 0;
+    if (setrlimit(RLIMIT_NOFILE, &probe_limit) != -1 || errno != EPERM) {
+        printf("vmtest: setrlimit claimed to lower a ceiling that is fixed\n");
+        return 16;
+    }
+
+    /* M169. And the range a protection is asked for is checked to its end.
+       sys_mprotect handed its "is every page of this range really mapped"
+       check a PAGE COUNT where it wanted BYTES, so for any range the number
+       fell inside the first page and only that page was ever looked at - a
+       range running off the end of the image was accepted and half applied.
+
+       The first unmapped page above this image is found by asking, one page
+       at a time, for the protection those pages already have; then a range
+       ending in that page must be refused. */
+    unsigned long walk = page_of_data;
+    for (int steps = 0; steps < 65536; steps++) {
+        if (mprotect((void *)(walk + PAGE), PAGE, PROT_READ | PROT_WRITE) != 0) {
+            break;
+        }
+        walk += PAGE;
+    }
+    if (mprotect((void *)walk, 2 * PAGE, PROT_READ | PROT_WRITE) == 0) {
+        printf("vmtest: mprotect accepted a range running off the image\n");
+        return 17;
     }
 
     /* M156. One reservation, split until it is hundreds of regions - which is
@@ -288,7 +373,9 @@ static int ordinary(void) {
     unlink(VM_FILE);
 
     printf("vmtest: fixed, hinted, protected, executed, dropped, reserved, "
-           "grown, and a file mapped both ways - all checks passed\n");
+           "grown, a file mapped both ways, a system call refusing to write "
+           "a read-only page, and a range running off the image refused - "
+           "all checks passed\n");
     return 0;
 }
 

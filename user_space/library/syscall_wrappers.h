@@ -36,6 +36,9 @@ long sys_spawnve(const char *path, const char *const *argv, const char *const *e
 long sys_thread_create(void *entry, void *arg, unsigned long stack_top);
 void sys_thread_exit(int value) __attribute__((noreturn));
 long sys_gettid(void);
+long sys_getrlimit(int resource, void *out);
+long sys_setrlimit(int resource, const void *in);
+
 long sys_thread_setname(const char *name);
 long sys_thread_getname(char *out, unsigned long length);
 

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #include "syscall_wrappers.h"
@@ -313,6 +314,67 @@ static int leader_exit_mode(const char *pages_text) {
     return 27;
 }
 
+
+/* M169. As many threads as this library says it supports.
+
+   sysconf(_SC_THREAD_THREADS_MAX) answered 128 while the registry behind
+   pthread_create held 32, so the thirty-third thread was refused with EAGAIN
+   by a library that had just said it would take a hundred and twenty-eight.
+   Nothing on this machine had ever wanted more than a handful; Chromium in
+   one process wants more than thirty-two before it has finished starting.
+
+   The count is taken from sysconf rather than written here, because what is
+   being graded is that the answer and the behaviour are the same answer. */
+static void *counting_worker(void *argument) {
+    __atomic_fetch_add((int *)argument, 1, __ATOMIC_RELAXED);
+    return (void *)7;
+}
+
+static int as_many_threads_as_promised(void) {
+    long promised = sysconf(_SC_THREAD_THREADS_MAX);
+    if (promised < 2) {
+        printf("threadtest: sysconf says %ld threads\n", promised);
+        return 40;
+    }
+    /* Half, because the kernel's task table is the whole machine's and the
+       rest of the machine is running too. Half of the promise is still four
+       times what the old registry held, which is what this is about. */
+    int want = (int)(promised / 2);
+    if (want > 64) {
+        want = 64;
+    }
+    pthread_t *threads = (pthread_t *)calloc((size_t)want, sizeof(pthread_t));
+    if (!threads) {
+        return 41;
+    }
+    int ran = 0;
+    int made = 0;
+    for (int i = 0; i < want; i++) {
+        if (pthread_create(&threads[i], 0, counting_worker, &ran) != 0) {
+            break;
+        }
+        made++;
+    }
+    for (int i = 0; i < made; i++) {
+        void *value = 0;
+        if (pthread_join(threads[i], &value) != 0 || value != (void *)7) {
+            free(threads);
+            return 42;
+        }
+    }
+    free(threads);
+    if (made != want) {
+        printf("threadtest: sysconf promises %ld threads and the %d'th was "
+               "refused\n", promised, made + 1);
+        return 43;
+    }
+    if (ran != want) {
+        printf("threadtest: %d of %d threads ran\n", ran, want);
+        return 44;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && argv[1] && strcmp(argv[1], "leaderexit") == 0) {
         return leader_exit_mode(argc > 2 ? argv[2] : 0);
@@ -497,6 +559,11 @@ int main(int argc, char **argv) {
     }
     if (pthread_key_delete(churn_key) != 0) {
         return 22;
+    }
+
+    int many = as_many_threads_as_promised();
+    if (many != 0) {
+        return many;
     }
 
     printf("threadtest: all checks passed (protected %ld of %ld; unprotected lost %ld)\n",

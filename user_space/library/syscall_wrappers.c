@@ -106,6 +106,14 @@ long sys_sockname(int fd, os_sockaddr_t *out) {
     return do_syscall(SYS_sockname, (long)fd, (long)out, 0);
 }
 
+long sys_getrlimit(int resource, void *out) {
+    return do_syscall(SYS_getrlimit, resource, (long)out, 0);
+}
+
+long sys_setrlimit(int resource, const void *in) {
+    return do_syscall(SYS_setrlimit, resource, (long)in, 0);
+}
+
 long sys_thread_setname(const char *name) {
     return do_syscall(SYS_thread_setname, (long)name, 0, 0);
 }

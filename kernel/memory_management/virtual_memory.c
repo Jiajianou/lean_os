@@ -510,19 +510,25 @@ void virtual_memory_destroy_address_space(uint64_t pml4_phys, const virtual_memo
                     }
                     uint64_t virt = (i << 39) | (j << 30) | (k << 21) | (l << 12);
                     if (address_in_owned(virt, owned, owned_count)) {
+                        pmm_free_site = "destroy:page";
+                        pmm_free_virt = virt;
                         physical_memory_free_frame(pt[l] & PTE_ADDRESS_MASK);
                     }
                     pt[l] = 0;
                 }
+                pmm_free_site = "destroy:pt";
                 physical_memory_free_frame(pd[k] & PTE_ADDRESS_MASK);
                 pd[k] = 0;
             }
+            pmm_free_site = "destroy:pd";
             physical_memory_free_frame(pdpt[j] & PTE_ADDRESS_MASK);
             pdpt[j] = 0;
         }
+        pmm_free_site = "destroy:pdpt";
         physical_memory_free_frame(pml4[i] & PTE_ADDRESS_MASK);
         pml4[i] = 0;
     }
+    pmm_free_site = "destroy:pml4";
     physical_memory_free_frame(pml4_phys);
     spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
 }

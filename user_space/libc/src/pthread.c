@@ -23,7 +23,15 @@ typedef struct {
 extern void *__lean_tls_setup(void);
 extern void __lean_run_thread_destructors(void);
 
-#define MAX_THREADS 32
+/* As many threads as this machine has task slots, because that is the real
+   ceiling: a thread here IS a task, and the kernel's table is MAX_TASKS.
+   sysconf(_SC_THREAD_THREADS_MAX) has answered 128 since it was written, and
+   this registry held 32 - so the library refused the thirty-third thread
+   with EAGAIN while telling anyone who asked that it supported four times
+   that many. Chromium in one process wants more than thirty-two before it
+   has finished starting, and what that looks like from outside is
+   "pthread_create: EAGAIN" three seconds in. */
+#define MAX_THREADS 128
 
 static struct {
     pthread_t tid;
@@ -186,11 +194,21 @@ int pthread_once(pthread_once_t *once, void (*init)(void)) {
 }
 
 int pthread_cond_init(pthread_cond_t *c, const void *attribute) {
-    (void)attribute;
     if (!c) {
         return 22;
     }
     c->seq = 0;
+    /* The attribute is not ignored any more, and the difference is the whole
+       of M169's second bug: a caller that asks for CLOCK_MONOTONIC and is
+       given a variable that measures against CLOCK_REALTIME hands it
+       deadlines about 1.7 billion seconds in the past. */
+    c->clock = CLOCK_REALTIME;
+    if (attribute) {
+        const pthread_condattr_t *a = (const pthread_condattr_t *)attribute;
+        if (a->clock == CLOCK_MONOTONIC || a->clock == CLOCK_REALTIME) {
+            c->clock = a->clock;
+        }
+    }
     return 0;
 }
 
@@ -212,16 +230,41 @@ int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m) {
     return 0;
 }
 
+/* How long until an absolute deadline, on the clock this variable keeps its
+   deadlines on. The answer is in milliseconds because that is the futex
+   wait's unit and the resolution of every clock on this machine.
+
+   Getting the clock wrong here does not fail: it returns a number, and the
+   number is enormous and negative, so the wait expires immediately and the
+   caller loops. Chromium's base::ConditionVariable asks for CLOCK_MONOTONIC
+   and waits on it in every thread pool it has; against CLOCK_REALTIME that
+   is a difference of about fifty-five years, so four of its processes spun
+   on a single core for four hundred seconds and its renderer never drew
+   anything. 227 million clock reads and 1,786 futex waits is what that looks
+   like from underneath. */
+static long cond_remaining_ms(const pthread_cond_t *c,
+                              const struct timespec *abstime) {
+    struct timespec now;
+    if (clock_gettime(c->clock, &now) != 0) {
+        return 0;
+    }
+    long long left = ((long long)abstime->tv_sec - (long long)now.tv_sec) * 1000LL +
+                     ((long long)abstime->tv_nsec - (long long)now.tv_nsec) / 1000000LL;
+    if (left < 0) {
+        return 0;
+    }
+    if (left > 0x7FFFFFFFLL) {
+        left = 0x7FFFFFFFLL;
+    }
+    return (long)left;
+}
+
 int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m,
                             const struct timespec *abstime) {
     if (!c || !m || !abstime) {
         return 22;
     }
-    long now_s = sys_time(0);
-    long remaining_ms = (abstime->tv_sec - now_s) * 1000 + abstime->tv_nsec / 1000000;
-    if (remaining_ms < 0) {
-        remaining_ms = 0;
-    }
+    long remaining_ms = cond_remaining_ms(c, abstime);
     long deadline = sys_uptime_ms() + remaining_ms;
 
     unsigned observed = c->seq;
@@ -621,19 +664,20 @@ int pthread_mutexattr_getprotocol(const pthread_mutexattr_t *attribute, int *out
     return 0;
 }
 
-/* A condition variable here times out against CLOCK_MONOTONIC, because that
-   is the clock a relative wait must not be moved by. CLOCK_REALTIME is
-   refused for the same reason the protocol above is. */
+/* Both clocks are real answers now, and they have to be: the point of this
+   call is that a caller waiting on a relative delay does not want its
+   deadline moved by someone setting the date, and the caller that says so
+   gets CLOCK_MONOTONIC while the one that says nothing gets POSIX's default.
+   Refusing CLOCK_REALTIME used to be the position here, and what made it
+   untenable was not the refusal but its other half: the variable measured
+   against CLOCK_REALTIME whatever it had been told. */
 int pthread_condattr_setclock(pthread_condattr_t *attribute, int clock) {
     if (!attribute) {
         return EINVAL;
     }
-    if (clock == CLOCK_MONOTONIC) {
+    if (clock == CLOCK_MONOTONIC || clock == CLOCK_REALTIME) {
         attribute->clock = clock;
         return 0;
-    }
-    if (clock == CLOCK_REALTIME) {
-        return ENOTSUP;
     }
     return EINVAL;
 }
@@ -942,7 +986,9 @@ int pthread_condattr_init(pthread_condattr_t *attribute) {
     if (!attribute) {
         return 22;
     }
-    attribute->clock = CLOCK_MONOTONIC;
+    /* POSIX: the default is CLOCK_REALTIME, and a default that is not the
+       standard's is a difference every caller has to know about. */
+    attribute->clock = CLOCK_REALTIME;
     return 0;
 }
 
