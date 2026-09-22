@@ -5,20 +5,65 @@ import os
 import struct
 import sys
 
-START_LBA = 8192
-SECTOR = 512
-BLOCK = 4096
+# M176: read the geometry out of the kernel's own headers rather than keeping
+# a second copy of it here. There were seven numbers in this block and one of
+# them had been wrong since M165, which moved the filesystem from LBA 8192 to
+# 16384 and did not move this. Both of the instruments that use this reader -
+# tools/crash-test.sh and tools/image-tree-test.sh - had been looking at a
+# sector inside the boot image ever since, finding program bytes where a
+# superblock should be and failing before they examined anything. Neither is in
+# the default tier, so nothing said so for ten milestones.
+#
+# A constant that must equal another constant somewhere else is a bug waiting
+# for someone to move one of them. These are parsed, and a name that is missing
+# is an error rather than a default.
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_HEADERS = (
+    os.path.join(_HERE, "..", "kernel", "file_system", "leanfs.h"),
+    os.path.join(_HERE, "..", "kernel", "file_system", "leanfs_format.h"),
+)
+
+
+def _defines():
+    found = {}
+    for header in _HEADERS:
+        with open(header) as handle:
+            for line in handle:
+                parts = line.split()
+                if len(parts) >= 3 and parts[0] == "#define":
+                    found[parts[1]] = parts[2]
+    return found
+
+
+def _number(defines, name):
+    if name not in defines:
+        sys.exit("leanfs-fsck: %s is not defined in the kernel's headers - "
+                 "this reader and the filesystem have diverged" % name)
+    text = defines[name].rstrip("uU")
+    try:
+        return int(text, 0)
+    except ValueError:
+        sys.exit("leanfs-fsck: %s is %r, which this reader cannot evaluate" %
+                 (name, defines[name]))
+
+
+_D = _defines()
+
+START_LBA = _number(_D, "LEANFS_START_LBA")
+SECTOR = _number(_D, "LEANFS_SECTOR_SIZE")
+BLOCK = _number(_D, "LEANFS_BLOCK_SIZE")
 SECTORS_PER_BLOCK = BLOCK // SECTOR
 START_BLOCK = START_LBA // SECTORS_PER_BLOCK
-MAX_INODES = 131072
-DATA_BLOCKS = 524288
+MAX_INODES = _number(_D, "LEANFS_MAX_INODES")
+DATA_BLOCKS = _number(_D, "LEANFS_DATA_BLOCKS")
 INODE_SIZE = 128
-DIRECT_BLOCKS = 16
+DIRECT_BLOCKS = _number(_D, "LEANFS_DIRECT_BLOCKS")
 INDIRECT_POINTERS = BLOCK // 4
-MAGIC = 0x3553464C
-VERSION = 5
-STATE_CLEAN = 0
-STATE_DIRTY = 0x4449525A
+MAGIC = _number(_D, "LEANFS_MAGIC")
+VERSION = _number(_D, "LEANFS_VERSION")
+STATE_CLEAN = _number(_D, "LEANFS_STATE_CLEAN")
+STATE_DIRTY = _number(_D, "LEANFS_STATE_DIRTY")
 
 TYPE_FREE, TYPE_FILE, TYPE_DIR, TYPE_LINK = 0, 1, 2, 3
 DIRENT_HDR = 8
