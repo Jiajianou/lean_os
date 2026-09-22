@@ -20,6 +20,7 @@ void fake_block_device_reset(uint32_t sectors);
 void fake_block_device_free(void);
 void fake_block_device_reset_counters(void);
 uint64_t fake_block_device_reads(void);
+uint64_t fake_block_device_read_calls(void);
 uint64_t fake_block_device_writes(void);
 uint8_t *fake_block_device_sector(uint32_t lba);
 uint32_t fake_block_device_sector_count(void);

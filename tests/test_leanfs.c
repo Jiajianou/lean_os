@@ -491,3 +491,134 @@ TEST(leanfs, a_directory_created_on_a_failing_disk_is_reported) {
     CHECK(leanfs_is_directory("/yes"));
     fake_block_device_free();
 }
+
+/* M176. Block 16 is where the indirect table takes over and block 1040 where
+   the double-indirect one does, so 1200 blocks is the smallest file with bytes
+   on all three paths. Nothing in this suite had ever read a file past the
+   sixteen direct blocks - the largest was thirteen - which is how a cache in
+   front of the two table reads every double-indirect block performs could have
+   gone in with the suite still green. */
+#define M176_SPAN_BLOCKS 1200
+
+TEST(leanfs, a_file_spanning_direct_indirect_and_double_indirect_reads_back) {
+    fs_fixture();
+    const size_t n = (size_t)M176_SPAN_BLOCKS * LEANFS_BLOCK_SIZE;
+    uint8_t *buffer = (uint8_t *)malloc(n);
+    uint8_t *back = (uint8_t *)malloc(n);
+    REQUIRE(buffer && back);
+
+    for (size_t i = 0; i < n; i++) {
+        buffer[i] = (uint8_t)(i * 31u + (i >> 12));
+    }
+    CHECK_EQ(leanfs_write("/spans", buffer, n), 0);
+
+    memset(back, 0xAA, n);
+    CHECK_EQ(leanfs_read("/spans", back, n), (int64_t)n);
+    CHECK_EQ(memcmp(buffer, back, n), 0);
+
+    /* Again, because the second read is the one that runs entirely out of a
+       warm table cache and is where a stale entry would show. */
+    memset(back, 0x55, n);
+    CHECK_EQ(leanfs_read("/spans", back, n), (int64_t)n);
+    CHECK_EQ(memcmp(buffer, back, n), 0);
+
+    free(buffer);
+    free(back);
+    fake_block_device_free();
+}
+
+TEST(leanfs, two_large_files_read_alternately_do_not_borrow_each_others_tables) {
+    fs_fixture();
+    const size_t n = (size_t)M176_SPAN_BLOCKS * LEANFS_BLOCK_SIZE;
+    uint8_t *one = (uint8_t *)malloc(n);
+    uint8_t *two = (uint8_t *)malloc(n);
+    uint8_t *back = (uint8_t *)malloc(n);
+    REQUIRE(one && two && back);
+
+    for (size_t i = 0; i < n; i++) {
+        one[i] = (uint8_t)(i * 7u + 1u);
+        two[i] = (uint8_t)(i * 13u + 2u);
+    }
+    CHECK_EQ(leanfs_write("/one", one, n), 0);
+    CHECK_EQ(leanfs_write("/two", two, n), 0);
+
+    for (int round = 0; round < 3; round++) {
+        memset(back, 0, n);
+        CHECK_EQ(leanfs_read("/one", back, n), (int64_t)n);
+        CHECK_EQ(memcmp(one, back, n), 0);
+        memset(back, 0, n);
+        CHECK_EQ(leanfs_read("/two", back, n), (int64_t)n);
+        CHECK_EQ(memcmp(two, back, n), 0);
+    }
+
+    free(one);
+    free(two);
+    free(back);
+    fake_block_device_free();
+}
+
+/* And the optimisation itself, which correctness cannot see. Every
+   double-indirect block used to cost two extra table reads - the root, which
+   is the same block for the whole file, and an inner table that changes once
+   every LEANFS_INDIRECT_POINTERS blocks - so a read of N blocks cost about 3N.
+   The ceiling here is 1.5N, which a regression to the old behaviour fails and
+   which leaves room for the inner table legitimately changing. */
+TEST(leanfs, a_large_read_does_not_fetch_the_same_tables_over_and_over) {
+    fs_fixture();
+    const size_t n = (size_t)M176_SPAN_BLOCKS * LEANFS_BLOCK_SIZE;
+    uint8_t *buffer = (uint8_t *)malloc(n);
+    uint8_t *back = (uint8_t *)malloc(n);
+    REQUIRE(buffer && back);
+    for (size_t i = 0; i < n; i++) {
+        buffer[i] = (uint8_t)i;
+    }
+    CHECK_EQ(leanfs_write("/counted", buffer, n), 0);
+
+    fake_block_device_reset_counters();
+    CHECK_EQ(leanfs_read("/counted", back, n), (int64_t)n);
+    CHECK_EQ(memcmp(buffer, back, n), 0);
+
+    uint64_t sectors = fake_block_device_reads();
+    uint64_t blocks_read = sectors / LEANFS_SECTORS_PER_BLOCK;
+    CHECK(blocks_read >= M176_SPAN_BLOCKS);
+    CHECK(blocks_read <= (uint64_t)(M176_SPAN_BLOCKS * 3 / 2));
+
+    free(buffer);
+    free(back);
+    fake_block_device_free();
+}
+
+/* And the other half of M176, which the sector count cannot see. The block
+   cache's line is one leanfs block, so one call per block used to mean one
+   DEVICE read per block - 54,528 of them for the 213 MiB program this
+   milestone was measuring, at 4 KiB each, where the disk budget in
+   tests/budgets.tsv measures a MiB at a time and reaches four times the rate.
+   Neighbouring blocks go in one request now, so what changes is the number of
+   CALLS rather than the number of sectors. */
+TEST(leanfs, neighbouring_blocks_are_asked_for_in_one_request) {
+    fs_fixture();
+    const size_t n = (size_t)M176_SPAN_BLOCKS * LEANFS_BLOCK_SIZE;
+    uint8_t *buffer = (uint8_t *)malloc(n);
+    uint8_t *back = (uint8_t *)malloc(n);
+    REQUIRE(buffer && back);
+    for (size_t i = 0; i < n; i++) {
+        buffer[i] = (uint8_t)(i * 17u);
+    }
+    CHECK_EQ(leanfs_write("/runs", buffer, n), 0);
+
+    fake_block_device_reset_counters();
+    CHECK_EQ(leanfs_read("/runs", back, n), (int64_t)n);
+    CHECK_EQ(memcmp(buffer, back, n), 0);
+
+    uint64_t calls = fake_block_device_read_calls();
+    uint64_t sectors = fake_block_device_reads();
+    /* Every block still arrives - the sectors prove that - but it takes far
+       fewer requests than there are blocks. One call per block would be 1200. */
+    CHECK(sectors >= (uint64_t)M176_SPAN_BLOCKS * LEANFS_SECTORS_PER_BLOCK);
+    CHECK(calls >= 1);
+    CHECK(calls <= (uint64_t)M176_SPAN_BLOCKS / 4);
+
+    free(buffer);
+    free(back);
+    fake_block_device_free();
+}

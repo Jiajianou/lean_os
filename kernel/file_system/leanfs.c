@@ -77,12 +77,50 @@ static void mark_all_blocks(void) {
 
 static int io_error;
 
+/* M176: the two indirect tables the last map_block read, remembered so a
+   sequential read does not fetch them again for every block. A 213 MiB
+   program is 54,528 blocks, and every one of them past the direct range used
+   to cost two extra 4 KiB reads - the double-indirect root, which is the SAME
+   block for the whole file, and an inner table that changes once every 1024
+   blocks. Two thirds of the device traffic in a large read was re-reading
+   those two.
+
+   Correctness comes from throwing it away rather than from tracking writes:
+   every leanfs operation starts with io_begin, and any call that may ALLOCATE
+   drops it too, so a cached table cannot outlive a change to one. */
+static uint32_t table_cache_root_block;
+static uint32_t table_cache_root[LEANFS_INDIRECT_POINTERS];
+static int table_cache_root_valid;
+static uint32_t table_cache_leaf_block;
+static uint32_t table_cache_leaf[LEANFS_INDIRECT_POINTERS];
+static int table_cache_leaf_valid;
+
+static void table_cache_forget(void) {
+    table_cache_root_valid = 0;
+    table_cache_leaf_valid = 0;
+}
+
 static void io_begin(void) {
     io_error = 0;
+    table_cache_forget();
 }
 
 static int io_failed(void) {
     return io_error;
+}
+
+/* M176: how many neighbouring blocks one device request may carry. A MiB is
+   what tests/budgets.tsv measures the disk at, and the block cache's hit path
+   copies a sector at a time, so a larger run would trade device calls for
+   memcpy calls rather than remove work. */
+#define LEANFS_READ_RUN_BLOCKS 256
+
+static void block_read_run(uint32_t block, uint32_t count, void *destination) {
+    if (block_device_read(block * LEANFS_SECTORS_PER_BLOCK,
+                          count * LEANFS_SECTORS_PER_BLOCK, destination) != 0) {
+        io_error = 1;
+        k_memset(destination, 0, (size_t)count * LEANFS_BLOCK_SIZE);
+    }
 }
 
 static void block_read(uint32_t block, void *destination) {
@@ -98,6 +136,12 @@ static void block_write(uint32_t block, const void *source) {
 }
 
 static void block_write_meta(uint32_t block, const void *source) {
+    /* M176: every indirect table is written through here, so this is where a
+       cached copy of one stops being true. io_begin and the allocating path
+       already drop it, but an operation that frees blocks and then reads the
+       map again would sit between the two - and a cache that is right except
+       in one path is not a cache, it is a bug with a schedule. */
+    table_cache_forget();
     if (block_device_write(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, source) != 0) {
         io_error = 1;
     }
@@ -279,6 +323,10 @@ static int64_t map_block(int idx, uint32_t logical, int allocate) {
     leanfs_inode_t *inode = &inodes[idx];
     static uint32_t table[LEANFS_INDIRECT_POINTERS];
 
+    if (allocate) {
+        table_cache_forget();
+    }
+
     if (logical >= (uint32_t)LEANFS_MAX_FILE_BLOCKS) {
         return -1;
     }
@@ -336,8 +384,23 @@ static int64_t map_block(int idx, uint32_t logical, int allocate) {
     if (!use_dindirect) {
         table_block = root;
     } else {
-        block_read(sb.data_block + root, (uint8_t *)table);
-        if (!block_present(table[outer])) {
+        uint32_t outer_entry;
+        if (!allocate && table_cache_root_valid && table_cache_root_block == root) {
+            /* Read the one slot wanted rather than copying the table to get
+               at it. Copying 4 KiB to look up 4 bytes is what the first
+               version of this cache did, and it spent more on the memcpy
+               than the block cache had been spending on the lookup. */
+            outer_entry = table_cache_root[outer];
+        } else {
+            block_read(sb.data_block + root, (uint8_t *)table);
+            if (!allocate) {
+                k_memcpy(table_cache_root, table, sizeof(table_cache_root));
+                table_cache_root_block = root;
+                table_cache_root_valid = 1;
+            }
+            outer_entry = table[outer];
+        }
+        if (!block_present(outer_entry)) {
             if (!allocate) {
                 return -1;
             }
@@ -350,11 +413,21 @@ static int64_t map_block(int idx, uint32_t logical, int allocate) {
             static uint32_t empty[LEANFS_INDIRECT_POINTERS];
             k_memset(empty, 0, sizeof(empty));
             block_write_meta(sb.data_block + (uint32_t)t, (const uint8_t *)empty);
+            outer_entry = (uint32_t)t;
         }
-        table_block = table[outer];
+        table_block = outer_entry;
     }
 
+    if (!allocate && table_cache_leaf_valid && table_cache_leaf_block == table_block) {
+        uint32_t entry = table_cache_leaf[slot];
+        return block_present(entry) ? (int64_t)entry : -1;
+    }
     block_read(sb.data_block + table_block, (uint8_t *)table);
+    if (!allocate) {
+        k_memcpy(table_cache_leaf, table, sizeof(table_cache_leaf));
+        table_cache_leaf_block = table_block;
+        table_cache_leaf_valid = 1;
+    }
     if (block_present(table[slot])) {
         return table[slot];
     }
@@ -488,6 +561,33 @@ static int64_t inode_pread(int idx, void *buffer, size_t length, uint32_t off) {
         }
         if (block_device < 0) {
             k_memset((uint8_t *)buffer + copied, 0, chunk);
+        } else if (within == 0 && chunk == LEANFS_BLOCK_SIZE) {
+            /* M176: a whole block going to a whole block needs no staging.
+               Every byte of a large read used to be copied twice - once from
+               the device into block_buffer and once out of it - for the sake
+               of the partial block at each end, which is what `within` and
+               `chunk` are already measuring.
+
+               And blocks that are next to each other on the disk are asked
+               for together. The block cache's line is one leanfs block, so
+               one call per block is one DEVICE read per block, and a 4 KiB
+               request costs a device about what a much larger one does -
+               which is why the block layer's own budget measures a MiB at a
+               time and reaches four times this rate. The run is capped so the
+               cache's per-sector loop on a hit cannot grow without bound. */
+            uint32_t run = 1;
+            while (run < LEANFS_READ_RUN_BLOCKS &&
+                   copied + (size_t)(run + 1) * LEANFS_BLOCK_SIZE <= length) {
+                int64_t next = map_block(idx, position / LEANFS_BLOCK_SIZE + run, 0);
+                if (next != block_device + run) {
+                    break;
+                }
+                run++;
+            }
+            block_read_run(sb.data_block + (uint32_t)block_device, run,
+                           (uint8_t *)buffer + copied);
+            copied += (size_t)run * LEANFS_BLOCK_SIZE;
+            continue;
         } else {
             block_read(sb.data_block + (uint32_t)block_device, block_buffer);
             k_memcpy((uint8_t *)buffer + copied, block_buffer + within, chunk);
