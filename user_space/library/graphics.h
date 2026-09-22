@@ -4,6 +4,10 @@
 
 #include "user_interface_font.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     uint32_t *pixels;
     int32_t width;
@@ -101,3 +105,7 @@ void graphics_stroke_rounded(graphics_context_t *context, int32_t x, int32_t y, 
 void graphics_draw_button_state(graphics_context_t *context, int32_t x, int32_t y, int32_t w, int32_t h,
                             uint32_t bg_color, uint32_t border_color,
                             const char *label, uint32_t label_color, int pressed);
+
+#ifdef __cplusplus
+}
+#endif

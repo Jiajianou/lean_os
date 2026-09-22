@@ -11,6 +11,7 @@ static spinlock_t memfd_lock;
 typedef struct memfd {
     int used;
     int refs;
+    uint32_t slot;
     uint16_t generation;
     uint32_t pages;
     uint64_t size;
@@ -19,55 +20,116 @@ typedef struct memfd {
     char name[MEMFD_NAME_MAX];
 } memfd_t;
 
-static memfd_t table[MEMFD_MAX];
+/* An array of pointers rather than of objects, so that a struct memfd * a
+   caller holds stays valid across a growth, and each object lives for the
+   rest of the boot once made: its generation is what lets a stale tag in a
+   region table be told apart from a live one, and a generation that
+   restarted at zero would say "live" about a memfd that is long gone. */
+static memfd_t **table;
+static uint32_t capacity;
+
+static int memfd_grow_locked(void) {
+    if (capacity >= MEMFD_MAX) {
+        return -1;
+    }
+    uint32_t want = capacity ? capacity * 2 : MEMFD_INITIAL;
+    if (want > MEMFD_MAX) {
+        want = MEMFD_MAX;
+    }
+    memfd_t **grown = (memfd_t **)kmalloc((size_t)want * sizeof(memfd_t *));
+    if (!grown) {
+        return -1;
+    }
+    for (uint32_t i = 0; i < capacity; i++) {
+        grown[i] = table[i];
+    }
+    for (uint32_t i = capacity; i < want; i++) {
+        grown[i] = (memfd_t *)0;
+    }
+    memfd_t **old = table;
+    table = grown;
+    capacity = want;
+    if (old) {
+        kfree(old);
+    }
+    return 0;
+}
 
 void memfd_init(void) {
+    /* Once, before the heap holds anything of ours; a host test that resets
+       the heap under it calls this again, and a table from before the reset
+       would be a pointer into memory that is no longer the table. */
     uint64_t f = spin_lock_irqsave(&memfd_lock);
-    for (int i = 0; i < MEMFD_MAX; i++) {
-        table[i].used = 0;
-    }
+    table = (memfd_t **)0;
+    capacity = 0;
     spin_unlock_irqrestore(&memfd_lock, f);
 }
 
 struct memfd *memfd_create_object(const char *name) {
     uint64_t f = spin_lock_irqsave(&memfd_lock);
-    for (int i = 0; i < MEMFD_MAX; i++) {
-        if (table[i].used) {
-            continue;
+    uint32_t i = 0;
+    for (;;) {
+        for (; i < capacity; i++) {
+            if (!table[i] || !table[i]->used) {
+                break;
+            }
         }
-        table[i].used = 1;
-        table[i].refs = 1;
-        table[i].pages = 0;
-        table[i].size = 0;
-        table[i].frames = (uint64_t *)0;
-        table[i].seals = 0;
-        if (name) {
-            k_strlcpy(table[i].name, name, MEMFD_NAME_MAX);
-        } else {
-            table[i].name[0] = '\0';
+        if (i < capacity) {
+            break;
         }
-        spin_unlock_irqrestore(&memfd_lock, f);
-        return &table[i];
+        if (memfd_grow_locked() != 0) {
+            spin_unlock_irqrestore(&memfd_lock, f);
+            return (memfd_t *)0;
+        }
+    }
+    memfd_t *m = table[i];
+    if (!m) {
+        /* Objects arrive MEMFD_INITIAL at a time - one page's worth - because
+           this kernel's kmalloc hands a fresh growth the whole page it
+           mapped and never splits it, so 65,536 objects made one call each
+           would be 65,536 pages. The capacity is always a multiple of
+           MEMFD_INITIAL, so a chunk never crosses it. */
+        uint32_t first = i - (i % MEMFD_INITIAL);
+        memfd_t *chunk = (memfd_t *)kmalloc(sizeof(memfd_t) * MEMFD_INITIAL);
+        if (!chunk) {
+            spin_unlock_irqrestore(&memfd_lock, f);
+            return (memfd_t *)0;
+        }
+        for (uint32_t j = 0; j < MEMFD_INITIAL; j++) {
+            chunk[j].used = 0;
+            chunk[j].generation = 0;
+            chunk[j].slot = first + j;
+            table[first + j] = &chunk[j];
+        }
+        m = table[i];
+    }
+    m->used = 1;
+    m->refs = 1;
+    m->pages = 0;
+    m->size = 0;
+    m->frames = (uint64_t *)0;
+    m->seals = 0;
+    if (name) {
+        k_strlcpy(m->name, name, MEMFD_NAME_MAX);
+    } else {
+        m->name[0] = '\0';
     }
     spin_unlock_irqrestore(&memfd_lock, f);
-    return (memfd_t *)0;
+    return m;
 }
 
-uint8_t memfd_slot(const struct memfd *m) {
-    return m ? (uint8_t)(m - table) : 0;
+uint32_t memfd_slot(const struct memfd *m) {
+    return m ? m->slot : 0;
 }
 
 uint16_t memfd_generation(const struct memfd *m) {
     return m ? m->generation : 0;
 }
 
-struct memfd *memfd_by_tag(uint8_t slot, uint16_t generation) {
-    if (slot >= MEMFD_MAX) {
-        return (memfd_t *)0;
-    }
+struct memfd *memfd_by_tag(uint32_t slot, uint16_t generation) {
     uint64_t f = spin_lock_irqsave(&memfd_lock);
-    memfd_t *m = &table[slot];
-    int ok = m->used && m->generation == generation;
+    memfd_t *m = slot < capacity ? table[slot] : (memfd_t *)0;
+    int ok = m && m->used && m->generation == generation;
     spin_unlock_irqrestore(&memfd_lock, f);
     return ok ? m : (memfd_t *)0;
 }
@@ -231,8 +293,8 @@ const char *memfd_name(const struct memfd *m) {
 int memfd_in_use(void) {
     uint64_t f = spin_lock_irqsave(&memfd_lock);
     int n = 0;
-    for (int i = 0; i < MEMFD_MAX; i++) {
-        if (table[i].used) {
+    for (uint32_t i = 0; i < capacity; i++) {
+        if (table[i] && table[i]->used) {
             n++;
         }
     }
@@ -243,9 +305,9 @@ int memfd_in_use(void) {
 const char *memfd_first_live_name(void) {
     uint64_t f = spin_lock_irqsave(&memfd_lock);
     const char *name = "";
-    for (int i = 0; i < MEMFD_MAX; i++) {
-        if (table[i].used) {
-            name = table[i].name;
+    for (uint32_t i = 0; i < capacity; i++) {
+        if (table[i] && table[i]->used) {
+            name = table[i]->name;
             break;
         }
     }
@@ -256,11 +318,18 @@ const char *memfd_first_live_name(void) {
 uint32_t memfd_pages_held(void) {
     uint64_t f = spin_lock_irqsave(&memfd_lock);
     uint32_t n = 0;
-    for (int i = 0; i < MEMFD_MAX; i++) {
-        if (table[i].used) {
-            n += table[i].pages;
+    for (uint32_t i = 0; i < capacity; i++) {
+        if (table[i] && table[i]->used) {
+            n += table[i]->pages;
         }
     }
     spin_unlock_irqrestore(&memfd_lock, f);
     return n;
+}
+
+uint32_t memfd_capacity(void) {
+    uint64_t f = spin_lock_irqsave(&memfd_lock);
+    uint32_t c = capacity;
+    spin_unlock_irqrestore(&memfd_lock, f);
+    return c;
 }

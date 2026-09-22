@@ -87,7 +87,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
 
 THIRD_PARTY_PROGRAMS := whetstone
 
-USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest os pkgtest dirtest browsertest netrecv unixtest epolltest memfdtest posixtest basetest
+USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest os pkgtest dirtest browsertest netrecv unixtest epolltest memfdtest posixtest basetest browser
 USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
 
 LVGL_PROGRAMS := desktop_applications
@@ -102,7 +102,7 @@ KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*' 
 KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
                $(patsubst kernel/%.c,$(KOBJ)/%.o,$(KERNEL_C_SRCS))
 
-.PHONY: all run leanfs-put preseed toybox packages fonts browser browser-if-built os-pkg sysroot print-user-programs syms font font-check clean distclean
+.PHONY: all run leanfs-put preseed toybox packages fonts browser browser-if-built netsurf os-pkg sysroot print-user-programs syms font font-check clean distclean
 
 all: $(IMAGE)
 
@@ -373,16 +373,32 @@ $(NETSURF_BIN): tools/build-netsurf.sh user_space/binaries/nsfb_leanos.c
 fonts: $(IMAGE) $(LEANFS_PUT)
 	@./tools/install-fonts.sh
 
-browser: $(NETSURF_BIN) $(IMAGE) $(LEANFS_PUT) preseed fonts
-	@./tools/install-netsurf.sh
+# The browser is Chromium's own content_shell since M171, built by
+# tools/build-chromium.sh out of Chromium's own ninja - which is not a
+# Makefile step, being most of an hour and a 54 GB checkout. `make browser`
+# installs what that produced; `browser-if-built` is what the harnesses run
+# after a kernel rebuild has recreated the disk, and says so when there is
+# nothing to install. NetSurf is still buildable as `make netsurf` and is no
+# longer the program the Browser icon opens.
+CHROMIUM_SHELL_BIN := $(BUILD)/chromium/src/out/LeanOS/content_shell
+
+browser: $(IMAGE) $(LEANFS_PUT) preseed
+	@if [ ! -f $(CHROMIUM_SHELL_BIN) ]; then \
+		echo "browser: no $(CHROMIUM_SHELL_BIN) - tools/build-chromium.sh content/shell:content_shell builds it" >&2; \
+		exit 1; \
+	fi
+	@./tools/install-browser.sh
 
 browser-if-built: $(IMAGE) $(LEANFS_PUT)
-	@if [ ! -f $(NETSURF_BIN) ]; then \
-		echo "browser: not built - \`make browser\` builds and installs it (an image without a browser is a valid image)."; \
+	@if [ ! -f $(CHROMIUM_SHELL_BIN) ]; then \
+		echo "browser: not built - tools/build-chromium.sh content/shell:content_shell, then \`make browser\` (an image without a browser is a valid image)."; \
 	else \
 		$(MAKE) --no-print-directory preseed >/dev/null || exit 1; \
-		./tools/install-netsurf.sh || exit 1; \
+		./tools/install-browser.sh || exit 1; \
 	fi
+
+netsurf: $(NETSURF_BIN) $(IMAGE) $(LEANFS_PUT) preseed fonts
+	@./tools/install-netsurf.sh
 
 PKG_REPO_DIR := $(BUILD)/repo
 
@@ -472,6 +488,12 @@ sysroot-headers:
 	  cp user_space/library/syscall_wrappers.h $(SYSROOT)/usr/include/
 	@cmp -s user_space/library/window_manager_client.h $(SYSROOT)/usr/include/window_manager_client.h || \
 	  cp user_space/library/window_manager_client.h $(SYSROOT)/usr/include/
+	@# And the two it includes, which an ozone platform compiled inside
+	@# Chromium's build reaches through it (M171).
+	@cmp -s user_space/library/graphics.h $(SYSROOT)/usr/include/graphics.h || \
+	  cp user_space/library/graphics.h $(SYSROOT)/usr/include/
+	@cmp -s user_space/library/user_interface_font.h $(SYSROOT)/usr/include/user_interface_font.h || \
+	  cp user_space/library/user_interface_font.h $(SYSROOT)/usr/include/
 
 # M140: and the library half, for the same reason. M139 could add a header
 # without rebuilding the world; adding a libc *function* still could not,
@@ -501,18 +523,35 @@ sysroot-libc: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(LIBDL_A) $(UOBJ)/crt0.o $(UOBJ)/cr
 	done
 	@echo "sysroot-libc: $(SYSROOT) libraries refreshed from the tree"
 
+# Non-destructive, and it copies only what CHANGED. It used to begin with
+# rm -rf and cp -R, which rewrote the modification time of every header in
+# the sysroot every time it ran - and gcc-test.sh, cxx-test.sh,
+# clang-test.sh and build-dynamic.sh each run it, so every default tier did
+# it four times. Chromium's build watches those headers (M169 measured it:
+# an hour of libc++, V8, ANGLE and Blink rebuilding for 92 headers nobody
+# had changed), which made the tier that grades a milestone the thing that
+# cost the next one an hour before it started. copy-changed.sh compares
+# contents; a header that did not change keeps its mtime and nothing above
+# it rebuilds. The third-party libraries installed here by their own `make
+# install` are no longer deleted either, which CLAUDE.md warned about.
+define copy_if_changed
+cmp -s $(1) $(2) || cp $(1) $(2)
+endef
+
 sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(LIBDL_A) $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o
-	@rm -rf $(SYSROOT)
 	@mkdir -p $(SYSROOT)/usr/local/include $(SYSROOT)/usr/include $(SYSROOT)/usr/lib
-	@cp -R user_space/libc/include/. $(SYSROOT)/usr/local/include/
-	@cp -R system_api/include/. $(SYSROOT)/usr/include/
-	@cp user_space/library/syscall_wrappers.h $(SYSROOT)/usr/include/
-	@cp $(LIBC_A) $(SYSROOT)/usr/lib/libc.a
-	@cp $(LIBC_SO) $(SYSROOT)/usr/lib/libc.so
+	@./tools/copy-changed.sh user_space/libc/include $(SYSROOT)/usr/local/include >/dev/null
+	@./tools/copy-changed.sh system_api/include $(SYSROOT)/usr/include >/dev/null
+	@$(call copy_if_changed,user_space/library/syscall_wrappers.h,$(SYSROOT)/usr/include/syscall_wrappers.h)
+	@$(call copy_if_changed,user_space/library/window_manager_client.h,$(SYSROOT)/usr/include/window_manager_client.h)
+	@$(call copy_if_changed,user_space/library/graphics.h,$(SYSROOT)/usr/include/graphics.h)
+	@$(call copy_if_changed,user_space/library/user_interface_font.h,$(SYSROOT)/usr/include/user_interface_font.h)
+	@$(call copy_if_changed,$(LIBC_A),$(SYSROOT)/usr/lib/libc.a)
+	@$(call copy_if_changed,$(LIBC_SO),$(SYSROOT)/usr/lib/libc.so)
 	@# M99: the loader, so that -pie can find dlopen without a path
 	@# being typed. See $(LD_SO)'s rule above.
-	@cp $(LD_SO) $(SYSROOT)/usr/lib/ld-lean.so
-	@cp $(UOBJ)/crt0.o $(SYSROOT)/usr/lib/crt1.o
+	@$(call copy_if_changed,$(LD_SO),$(SYSROOT)/usr/lib/ld-lean.so)
+	@$(call copy_if_changed,$(UOBJ)/crt0.o,$(SYSROOT)/usr/lib/crt1.o)
 	@# M97: and the PIE startup under the name the driver looks for.
 	@# crt0-pie.asm is crt0.asm with its two calls routed through the
 	@# PLT; every toolchain calls that file Scrt1.o, so this one does
@@ -522,9 +561,9 @@ sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(LIBDL_A) $(UOBJ)/crt0.o $(UOBJ)/crti.o 
 	@# it belongs in the sysroot beside the other three.
 	@nasm -f elf64 -o $(UOBJ)/crt0-pie.o user_space/library/crt0-pie.asm
 	@cp $(UOBJ)/crt0-pie.o $(SYSROOT)/usr/lib/Scrt1.o
-	@cp $(UOBJ)/crti.o $(SYSROOT)/usr/lib/crti.o
-	@cp $(UOBJ)/crtn.o $(SYSROOT)/usr/lib/crtn.o
-	@cp user_space/library/user.ld $(SYSROOT)/usr/lib/lean_os.ld
+	@$(call copy_if_changed,$(UOBJ)/crti.o,$(SYSROOT)/usr/lib/crti.o)
+	@$(call copy_if_changed,$(UOBJ)/crtn.o,$(SYSROOT)/usr/lib/crtn.o)
+	@$(call copy_if_changed,user_space/library/user.ld,$(SYSROOT)/usr/lib/lean_os.ld)
 	@# M97: libm.a, and it is empty on purpose.
 	@#
 	@# g++'s link spec ends in `-lm` on essentially every target, so a
@@ -557,7 +596,7 @@ sysroot: $(LIBC_A) $(LIBC_SO) $(LD_SO) $(LIBDL_A) $(UOBJ)/crt0.o $(UOBJ)/crti.o 
 	@# libc.a because a definition there would be bound at link time
 	@# and outrank the loader's real ones. See
 	@# user_space/libc/libdl/dlfcn_static.c.
-	@cp $(LIBDL_A) $(SYSROOT)/usr/lib/libdl.a
+	@$(call copy_if_changed,$(LIBDL_A),$(SYSROOT)/usr/lib/libdl.a)
 	@# M138: librt.a and libpthread.a, empty, and for the third time the
 	@# argument libm.a makes above. Rust's standard library writes
 	@# #[link(name = "rt")] and #[link(name = "pthread")] for every unix,

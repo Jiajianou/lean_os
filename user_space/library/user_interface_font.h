@@ -2,6 +2,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define UI_FONT_MAX_COLS 16
 #define UI_FONT_MAX_ROWS 24
 
@@ -48,3 +52,7 @@ extern const ui_font_t ui_font_large;
 
 #define UI_GLYPH_SPECIAL_FIRST 0x01
 #define UI_GLYPH_SPECIAL_LAST  0x08
+
+#ifdef __cplusplus
+}
+#endif

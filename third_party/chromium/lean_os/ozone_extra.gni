@@ -1,5 +1,12 @@
-ozone_external_platforms = []
-ozone_external_platform_deps = []
+# The out-of-tree ozone platform ui/ozone/BUILD.gn builds and lists. Its name
+# is what --ozone-platform= takes and what the generated constructor list
+# capitalises: "leanos" -> CreateOzonePlatformLeanos (see
+# ui/ozone/generate_constructor_list.py). Headless stays the DEFAULT in
+# args.gn, because the boot battery runs the browser before the desktop is
+# up and grades its picture over the serial line; the desktop passes the
+# switch.
+ozone_external_platforms = [ "leanos" ]
+ozone_external_platform_deps = [ "//lean_os/ozone:leanos" ]
 ozone_external_platform_test_deps = []
 ozone_external_platform_integration_test_deps = []
 ozone_external_platform_ui_test_support_deps = []

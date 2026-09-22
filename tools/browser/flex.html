@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>An empty flex container</title>
+<!-- M117. apple.com killed the browser on NetSurf's own assertion
+     (layout.c: box->height != AUTO), and a bisection of the page down to
+     three empty divs found this: an empty `display: flex` container.
+     NetSurf's flex layout allocates its item list with
+     calloc(number_of_children, ...) - zero here - and this libc's
+     malloc(0) returned NULL, which NetSurf, like every program written
+     against glibc, macOS or musl, reads as out of memory. The layout
+     failed silently and the assertion came some frames later. The
+     properties are apple.com's, on the box that did it; the red block
+     comes AFTER the container in the source, so it is on screen only
+     if the layout finished. tools/qemu-input-test.sh's
+     browser_survives_an_empty_flex_container types this page in. -->
+<style>
+  body { margin: 0; background: #ffffff; }
+  .flyout { position: relative; }
+  .empty { display: flex; margin: 0 auto; width: 100%; max-width: 1024px;
+           box-sizing: border-box; flex-wrap: wrap; padding-top: 50px; }
+  .after { background: #e02020; width: 420px; height: 220px; margin: 20px; }
+</style>
+</head>
+<body>
+<div class="flyout"><div><div class="empty"></div></div></div>
+<div class="after"></div>
+<p>M117: an empty flex container, and a block after it.</p>
+</body>
+</html>

@@ -2652,16 +2652,16 @@ static int mmap_mergeable(const mmap_region_t *r, uint32_t prot, int handle,
            !r->shared && !shared && r->prot == prot;
 }
 
-static void region_tag_reference(uint8_t memfd_id, uint16_t memfd_gen) {
+static void region_tag_reference(uint32_t memfd_id, uint16_t memfd_gen) {
     if (!memfd_id) {
         return;
     }
-    memfd_region_reference(memfd_by_tag((uint8_t)(memfd_id - 1), memfd_gen));
+    memfd_region_reference(memfd_by_tag(memfd_id - 1, memfd_gen));
 }
 
 static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32_t prot,
                                 int handle, uint32_t file_page, int shared, int merge,
-                                uint8_t memfd_id, uint16_t memfd_gen) {
+                                uint32_t memfd_id, uint16_t memfd_gen) {
     uint64_t end = base + (uint64_t)pages * PAGE_SIZE;
     for (uint32_t i = 0; merge && i < t->mmap_capacity; i++) {
         if (t->mmaps[i].pages == 0) {
@@ -2805,7 +2805,7 @@ static long sys_mmap(uint64_t address, uint64_t length, uint64_t prot, uint64_t 
 
     int handle = -1;
     uint32_t file_page = 0;
-    uint8_t memfd_id = 0;
+    uint32_t memfd_id = 0;
     uint16_t memfd_gen = 0;
     if (!anon) {
         if ((long)fd < 0 || (uint64_t)fd >= MAX_FILE_DESCRIPTORS) {
@@ -2831,7 +2831,7 @@ static long sys_mmap(uint64_t address, uint64_t length, uint64_t prot, uint64_t 
                 return -1;
             }
             memfd_region_reference(m);
-            memfd_id = (uint8_t)(memfd_slot(m) + 1);
+            memfd_id = memfd_slot(m) + 1;
             memfd_gen = memfd_generation(m);
             file_page = (uint32_t)(offset / PAGE_SIZE);
             goto have_backing;
@@ -3027,7 +3027,7 @@ static int mmap_split_for(task_t *t, uint64_t address, uint64_t end) {
         int handle = t->mmaps[i].handle;
         uint32_t fp = t->mmaps[i].file_page + (uint32_t)((cut - rstart) / PAGE_SIZE);
         int shared = t->mmaps[i].shared;
-        uint8_t mid = t->mmaps[i].memfd_id;
+        uint32_t mid = t->mmaps[i].memfd_id;
         uint16_t mgen = t->mmaps[i].memfd_gen;
         t->mmaps[i].pages = (uint32_t)((cut - rstart) / PAGE_SIZE);
         region_tag_reference(mid, mgen);

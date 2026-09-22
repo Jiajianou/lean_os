@@ -88,7 +88,7 @@ static const icon_def_t ICONS[] = {
     {"Paint",    PATH_BIN_DIRECTORY "gui_paint",    "", ICON_PAINT},
     {"Tasks",    PATH_BIN_DIRECTORY "task_manager", "", ICON_TASKS},
     {"README",   PATH_BIN_DIRECTORY "text_editor",  PATH_HOME_DIRECTORY "readme.txt", ICON_EDITOR},
-    {"Browser",  PATH_BIN_DIRECTORY "netsurf",      "", ICON_BROWSER},
+    {"Browser",  PATH_BIN_DIRECTORY "browser",      "", ICON_BROWSER},
 };
 #define ICON_COUNT ((int)(sizeof(ICONS) / sizeof(ICONS[0])))
 

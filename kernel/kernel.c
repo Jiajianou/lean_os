@@ -148,6 +148,7 @@
     X(pkgtest)                    \
     X(dirtest)                  \
     X(browsertest)              \
+    X(browser)                  \
     X(netrecv)                  \
     X(unixtest)                 \
     X(epolltest)                \
@@ -10870,65 +10871,102 @@ static void boot_selftests_system(void) {
     }
 
     {
-        os_stat_t nst;
-        if (do_syscall(SYS_stat, (uint64_t)(PATH_BIN_DIRECTORY "netsurf"),
-                        (uint64_t)&nst, 0) != 0) {
-            kernel_log_puts("[m113] /bin/netsurf is not on this image - skipped. "
-                       "`make browser` builds and installs it.\n\n");
+        /* The browser on this image, since M171: Chromium's own content_shell
+           as /bin/chromiumshell and the first-party launcher the desktop
+           opens it through. What is graded is that it is INSTALLED the way a
+           shipped program is - the engine, the resource bundle it looks for
+           beside itself, the launcher, the home page, the fonts fontconfig
+           finds, and the capability grant - because a browser that is on the
+           disk with any of those missing starts and shows nothing, which is
+           what the interactive suite's browser tests then have to explain. */
+        os_stat_t sst;
+        if (do_syscall(SYS_stat, (uint64_t)(PATH_BIN_DIRECTORY "chromiumshell"),
+                        (uint64_t)&sst, 0) != 0) {
+            kernel_log_puts("[m113] /bin/chromiumshell is not on this image - skipped. "
+                       "tools/build-chromium.sh content/shell:content_shell builds it "
+                       "and `make browser` installs it.\n\n");
         } else {
             int all_ok = 1;
 
-            if (nst.kind != OS_STAT_FILE || nst.size < 1024u * 1024u) {
-                kernel_log_puts("[m113] /bin/netsurf is there but is not a "
+            if (sst.kind != OS_STAT_FILE || sst.size < 64u * 1024u * 1024u) {
+                kernel_log_puts("[m113] /bin/chromiumshell is there but is not a "
                            "plausible browser: kind ");
-                kernel_log_put_dec((uint32_t)nst.kind);
+                kernel_log_put_dec((uint32_t)sst.kind);
                 kernel_log_puts(", ");
-                kernel_log_put_dec((uint32_t)(nst.size / 1024u));
-                kernel_log_puts(" KiB\n");
+                kernel_log_put_dec((uint32_t)(sst.size / (1024u * 1024u)));
+                kernel_log_puts(" MiB\n");
                 all_ok = 0;
             }
 
-            os_stat_t cst;
-            if (do_syscall(SYS_stat, (uint64_t)"/usr/share/netsurf/default.css",
-                            (uint64_t)&cst, 0) != 0 || cst.size == 0) {
-                kernel_log_puts("[m113] /usr/share/netsurf/default.css is missing or "
-                           "empty - the cascade has no default stylesheet\n");
-                all_ok = 0;
+            static const struct {
+                const char *path;
+                const char *why;
+            } BROWSER_FILES[] = {
+                {PATH_BIN_DIRECTORY "browser",
+                 "the launcher the Browser icon runs, which execs the engine "
+                 "with this desktop's switches"},
+                {PATH_BIN_DIRECTORY "content_shell.pak",
+                 "the resource bundle content_shell looks for beside itself"},
+                {"/usr/share/browser/home.html",
+                 "the page the launcher opens when given none"},
+                {"/etc/fonts/fonts.conf",
+                 "what fontconfig reads to find any font at all"},
+                {"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                 "the font fonts.conf points at"},
+            };
+            for (size_t i = 0; i < sizeof(BROWSER_FILES) / sizeof(BROWSER_FILES[0]); i++) {
+                os_stat_t fst;
+                if (do_syscall(SYS_stat, (uint64_t)BROWSER_FILES[i].path,
+                                (uint64_t)&fst, 0) != 0 || fst.size == 0) {
+                    kernel_log_puts("[m113] ");
+                    kernel_log_puts(BROWSER_FILES[i].path);
+                    kernel_log_puts(" is missing or empty - ");
+                    kernel_log_puts(BROWSER_FILES[i].why);
+                    kernel_log_putc('\n');
+                    all_ok = 0;
+                }
             }
 
-            os_stat_t fst;
-            if (do_syscall(SYS_stat,
-                            (uint64_t)"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                            (uint64_t)&fst, 0) != 0 || fst.size == 0) {
-                kernel_log_puts("[m113] DejaVuSans.ttf is not where freetype looks "
-                           "for it - a browser with no glyphs\n");
-                all_ok = 0;
-            }
-
-            uint32_t ncaps = caps_for_program(PATH_BIN_DIRECTORY "netsurf");
-            if (ncaps != (CAP_APP_DEFAULT | CAP_NETWORK)) {
-                kernel_log_puts("[m113] netsurf's capability grant is 0x");
-                kernel_log_put_hex32(ncaps);
-                kernel_log_puts(", not CAP_APP_DEFAULT | CAP_NETWORK\n");
-                all_ok = 0;
-            }
-            if (ncaps & CAP_FRAMEBUFFER) {
-                kernel_log_puts("[m113] netsurf holds CAP_FRAMEBUFFER - it paints "
-                           "its window's shared segment and must not have "
-                           "authority over the screen\n");
-                all_ok = 0;
+            /* The launcher and the program it becomes carry the same grant,
+               because an exec keeps the intersection (M166): a launcher with
+               more would be narrowed, and one with less would leave the
+               browser unable to open a socket. Neither holds CAP_FRAMEBUFFER:
+               the engine paints its window's shared segment, as NetSurf did,
+               and has no more authority over the screen than the clock. */
+            static const char *const BROWSER_PROGRAMS[] = {
+                PATH_BIN_DIRECTORY "browser",
+                PATH_BIN_DIRECTORY "chromiumshell",
+            };
+            for (size_t i = 0; i < 2; i++) {
+                uint32_t bcaps = caps_for_program(BROWSER_PROGRAMS[i]);
+                if (bcaps != (CAP_APP_DEFAULT | CAP_NETWORK)) {
+                    kernel_log_puts("[m113] ");
+                    kernel_log_puts(BROWSER_PROGRAMS[i]);
+                    kernel_log_puts("'s capability grant is 0x");
+                    kernel_log_put_hex32(bcaps);
+                    kernel_log_puts(", not CAP_APP_DEFAULT | CAP_NETWORK\n");
+                    all_ok = 0;
+                }
+                if (bcaps & CAP_FRAMEBUFFER) {
+                    kernel_log_puts("[m113] ");
+                    kernel_log_puts(BROWSER_PROGRAMS[i]);
+                    kernel_log_puts(" holds CAP_FRAMEBUFFER - it paints its "
+                               "window's shared segment and must not have "
+                               "authority over the screen\n");
+                    all_ok = 0;
+                }
             }
 
             if (!all_ok) {
                 panic("M113 self-test: the browser on this image is not "
                       "installed the way a shipped program is");
             }
-            kernel_log_puts("[m113] the browser is installed: /bin/netsurf (");
-            kernel_log_put_dec((uint32_t)(nst.size / 1024u));
-            kernel_log_puts(" KiB), its default stylesheet and DejaVuSans.ttf "
-                       "where the compiled-in paths look for them, holding "
-                       "CAP_FS_WRITE and CAP_NETWORK and NOT CAP_FRAMEBUFFER "
-                       "- self-test passed.\n\n");
+            kernel_log_puts("[m113] the browser is installed: /bin/chromiumshell (");
+            kernel_log_put_dec((uint32_t)(sst.size / (1024u * 1024u)));
+            kernel_log_puts(" MiB) with its resource bundle beside it, /bin/browser "
+                       "to open it, a home page, fonts.conf and DejaVuSans.ttf "
+                       "where fontconfig looks, both holding CAP_FS_WRITE and "
+                       "CAP_NETWORK and NOT CAP_FRAMEBUFFER - self-test passed.\n\n");
         }
     }
 

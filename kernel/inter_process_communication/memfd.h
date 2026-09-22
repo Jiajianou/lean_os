@@ -2,7 +2,17 @@
 
 #include <stdint.h>
 
-#define MEMFD_MAX 32
+/* The table of memfds is a heap allocation that doubles, from
+   MEMFD_INITIAL entries to a ceiling of MEMFD_MAX - M156's shape for the
+   mmap region table, and for the same reason: a browser is made of shared
+   memory regions. Every mojo data pipe, every software-composited frame's
+   bitmap, the histogram allocator and the discardable memory chunks are
+   each one, and a fixed 32 was the count at which Chromium's own
+   PlatformSharedMemoryRegion gave up on memfd_create and went looking for
+   /dev/shm (M171). A slot number is a uint32_t now; it used to be a uint8_t
+   in every mapped region's tag. */
+#define MEMFD_INITIAL 32
+#define MEMFD_MAX 65536
 
 #define MEMFD_MAX_PAGES 4096
 
@@ -22,10 +32,10 @@ struct memfd *memfd_create_object(const char *name);
 void memfd_reference(struct memfd *m);
 void memfd_unref(struct memfd *m);
 
-uint8_t memfd_slot(const struct memfd *m);
+uint32_t memfd_slot(const struct memfd *m);
 uint16_t memfd_generation(const struct memfd *m);
 
-struct memfd *memfd_by_tag(uint8_t slot, uint16_t generation);
+struct memfd *memfd_by_tag(uint32_t slot, uint16_t generation);
 
 int memfd_truncate(struct memfd *m, uint64_t size);
 
@@ -47,3 +57,4 @@ const char *memfd_first_live_name(void);
 
 int memfd_in_use(void);
 uint32_t memfd_pages_held(void);
+uint32_t memfd_capacity(void);

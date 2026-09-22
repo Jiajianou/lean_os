@@ -5,6 +5,10 @@
 #include "graphics.h"
 #include "window_manager.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     int32_t window_id;
     uint32_t width, height;
@@ -66,3 +70,7 @@ int window_manager_wait_ms(window_manager_window_t *win, const int *extra_file_d
 int window_manager_present(window_manager_window_t *win);
 
 int window_manager_reconnect_if_needed(window_manager_window_t *win);
+
+#ifdef __cplusplus
+}
+#endif

@@ -69,7 +69,7 @@ typedef struct {
     int handle;
     uint32_t file_page;
     uint8_t shared;
-    uint8_t memfd_id;
+    uint32_t memfd_id;
     uint16_t memfd_gen;
 } mmap_region_t;
 

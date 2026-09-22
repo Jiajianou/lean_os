@@ -384,6 +384,12 @@ browsertest_elf_start:
     incbin "build/browsertest.elf"
 browsertest_elf_end:
 
+global browser_elf_start
+global browser_elf_end
+browser_elf_start:
+    incbin "build/browser.elf"
+browser_elf_end:
+
 global netrecv_elf_start
 global netrecv_elf_end
 netrecv_elf_start:

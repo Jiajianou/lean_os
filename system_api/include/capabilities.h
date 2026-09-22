@@ -92,6 +92,7 @@ static const cap_grant_t CAP_GRANTS[] = {
     {"chromiumnet",   CAP_APP_DEFAULT | CAP_NETWORK},
     {"chromiumcontent", CAP_APP_DEFAULT | CAP_NETWORK},
     {"chromiumshell", CAP_APP_DEFAULT | CAP_NETWORK},
+    {"browser",       CAP_APP_DEFAULT | CAP_NETWORK},
     {"audiograb",     CAP_APP_DEFAULT | CAP_AUDIO},
     {"text_editor",   CAP_APP_DEFAULT | CAP_CLIPBOARD},
     {"badptr",        CAP_ALL},

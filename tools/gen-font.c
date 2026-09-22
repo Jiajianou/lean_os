@@ -1342,6 +1342,7 @@ static void build_user_interface_font_header(void) {
     out_length = 0;
     emit("#pragma once\n\n");
     emit("#include <stdint.h>\n\n");
+    emit("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
     emit("#define UI_FONT_MAX_COLS %d\n", UI_MAX_COLS);
     emit("#define UI_FONT_MAX_ROWS %d\n\n", UI_MAX_ROWS);
     emit("typedef struct {\n"
@@ -1383,6 +1384,7 @@ static void build_user_interface_font_header(void) {
     }
     emit("\n#define UI_GLYPH_SPECIAL_FIRST 0x%02X\n", UI_SPECIAL_FIRST);
     emit("#define UI_GLYPH_SPECIAL_LAST  0x%02X\n", UI_SPECIAL_LAST);
+    emit("\n#ifdef __cplusplus\n}\n#endif\n");
 }
 
 static void build_user_interface_font_source(void) {

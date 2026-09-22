@@ -1247,22 +1247,42 @@ PROBE
     [ $? -ne 0 ]
     check $? "and no hardware performance counters, which are Linux's own kernel"
 
+    # M171. The browser is a window on this desktop: an ozone platform of this
+    # project's own, under third_party/chromium/lean_os/ozone, that draws
+    # into the compositor's shared segment and reads the window's event pipe
+    # through the same client library every desktop program links. Graded on
+    # the BINARY (M159's rule): the constructor ui/ozone's generated list
+    # names, and the client library's connect call reached from it.
+    grep -qE " [TtWw] .*ui::CreateOzonePlatformLeanos" "$SHELLSYMS"
+    check $? "and this desktop's own ozone platform is in it, as ui::CreateOzonePlatformLeanos"
+    grep -qE " [TtWw] window_manager_connect$" "$SHELLSYMS"
+    check $? "which connects to the compositor through this project's window_manager_connect"
+    grep -qE " [TtWw] .*ui::LeanOsWindow::DispatchKey" "$SHELLSYMS"
+    check $? "and turns the compositor's key events into ui::KeyEvents"
+
+    # Headless stays the default: the boot battery runs the browser before
+    # the desktop is up and grades its picture over the serial line, and
+    # the desktop's launcher passes --ozone-platform=leanos itself.
+    ARGSFILE="$SRC/out/$OUT_NAME/args.gn"
+    grep -qE '^ozone_platform = "headless"$' "$ARGSFILE"
+    check $? "while headless stays the default platform, for the battery's serial-line picture"
+    grep -qE 'ozone_external_platforms = \[ "leanos" \]' "$ROOT/third_party/chromium/lean_os/ozone_extra.gni"
+    check $? "and ozone_extra.gni is how ui/ozone learned the platform's name - no patch"
+
+    # The launcher and the engine carry the same grant, because an exec keeps
+    # the intersection (M166) - see user_space/binaries/browser.c.
+    grep -qE '\{"browser", *CAP_APP_DEFAULT \| CAP_NETWORK\}' \
+         "$ROOT/system_api/include/capabilities.h"
+    check $? "/bin/browser, the launcher the desktop opens, is granted what the engine is"
+
     IMAGE="$ROOT/build/os-image.bin"
     if [ ! -f "$IMAGE" ]; then
       echo "chromium-test: no $IMAGE - run make, then this again"
     else
-      SHELLSTRIPPED="$ROOT/build/content_shell.stripped"
-      cp "$SHELLPROGRAM" "$SHELLSTRIPPED"
-      "${PREFIX}strip" "$SHELLSTRIPPED"
-      make -s -C "$ROOT" leanfs-put > /dev/null 2>&1
-      "$ROOT/build/leanfs-put" "$IMAGE" "$SHELLSTRIPPED" /bin/chromiumshell > /dev/null
-      check $? "installed as /bin/chromiumshell - the [m167] boot self-test runs it"
-
-      # Beside the binary, because that is where DIR_ASSETS is and where
-      # ShellMainDelegate::InitializeResourceBundle looks for it.
-      "$ROOT/build/leanfs-put" "$IMAGE" "$SRC/out/$OUT_NAME/content_shell.pak" \
-           /bin/content_shell.pak > /dev/null
-      check $? "with content_shell.pak beside it, which its resource bundle needs"
+      # One installer, shared with `make browser`: the engine, its resource
+      # bundle, the launcher, the home page and the fonts.
+      "$ROOT/tools/install-browser.sh" > /dev/null
+      check $? "installed by tools/install-browser.sh - the [m113], [m167] and [m169] boot self-tests run it"
     fi
     rm -rf "$SHELLWORK"
   fi

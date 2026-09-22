@@ -184,8 +184,21 @@ static void set_task_name(task_t *t, const char *name) {
     t->name[i] = '\0';
 }
 
+/* A task's first frame carries rflags with IF CLEAR, and interrupts are
+   enabled here, after the lock is dropped. schedule() holds scheduler_lock
+   across context_switch, and context_switch's popfq restores whatever flags
+   the incoming frame has: a task that had been running saved its flags
+   inside schedule() with interrupts off, but a NEW task's frame is built by
+   hand, and for a hundred and seventy milestones it said 0x202. That is IF
+   set, two instructions before the unlock below - and a timer tick that came
+   due while schedule() had interrupts off fires at that popfq, takes the
+   tick path that wants scheduler_lock, and spins on it for ever on the one
+   CPU that could release it. It was "about one boot in ten hangs" for years;
+   M170's blocking sleep made the tick take the lock on most ticks of an idle
+   machine, and it became three boots in three (M171). */
 static void task_entry_trampoline(void) {
     spin_unlock(&scheduler_lock);
+    cpu_enable_interrupts();
     task_t *t = current_task[smp_current_cpu()];
     t->entry(t->arg);
     task_exit();
@@ -196,6 +209,8 @@ extern void fork_return_to_user(void *frame) __attribute__((noreturn));
 static void fork_child_trampoline(void) __attribute__((noreturn));
 static void fork_child_trampoline(void) {
     spin_unlock(&scheduler_lock);
+    /* Interrupts stay off from here to the iretq, which restores the
+       parent's user-mode flags - IF set - with the lock long released. */
     task_t *t = current_task[smp_current_cpu()];
     fork_return_to_user((void *)(t->kernel_stack_top - sizeof(isr_regs_t)));
 }
@@ -567,7 +582,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
 
     uint64_t *sp = (uint64_t *)t->kernel_stack_top;
     *(--sp) = (uint64_t)task_entry_trampoline;
-    *(--sp) = 0x202;
+    *(--sp) = 0x2;
     *(--sp) = 0;
     *(--sp) = 0;
     *(--sp) = 0;
@@ -1466,7 +1481,7 @@ void scheduler_region_forget_memfd(mmap_region_t *r) {
     if (!r || !r->memfd_id) {
         return;
     }
-    struct memfd *m = memfd_by_tag((uint8_t)(r->memfd_id - 1), r->memfd_gen);
+    struct memfd *m = memfd_by_tag((uint32_t)(r->memfd_id - 1), r->memfd_gen);
     r->memfd_id = 0;
     r->memfd_gen = 0;
     memfd_region_unref(m);
@@ -1536,7 +1551,7 @@ void scheduler_regions_retain_memfds(task_t *t) {
         if (t->mmaps[i].pages == 0 || !t->mmaps[i].memfd_id) {
             continue;
         }
-        struct memfd *m = memfd_by_tag((uint8_t)(t->mmaps[i].memfd_id - 1),
+        struct memfd *m = memfd_by_tag((uint32_t)(t->mmaps[i].memfd_id - 1),
                                        t->mmaps[i].memfd_gen);
         if (!m) {
             t->mmaps[i].memfd_id = 0;
@@ -1601,7 +1616,7 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
 
     const mmap_region_t *region = mmap_region_for(self, page);
     if (region && region->memfd_id) {
-        struct memfd *m = memfd_by_tag((uint8_t)(region->memfd_id - 1), region->memfd_gen);
+        struct memfd *m = memfd_by_tag((uint32_t)(region->memfd_id - 1), region->memfd_gen);
         if (!m) {
             return 0;
         }
@@ -1899,7 +1914,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
 
     uint64_t *sp = (uint64_t *)child_frame;
     *(--sp) = (uint64_t)fork_child_trampoline;
-    *(--sp) = 0x202;
+    *(--sp) = 0x2;
     *(--sp) = 0;
     *(--sp) = 0;
     *(--sp) = 0;

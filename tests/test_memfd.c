@@ -2,11 +2,15 @@
 
 #include "fakes/fakes.h"
 #include "inter_process_communication/memfd.h"
+#include "memory_management/heap.h"
 #include "process/process.h"
 
 #include <string.h>
 
 static void clean(void) {
+    fake_physical_memory_reset();
+    fake_virtual_memory_reset();
+    heap_init();
     memfd_init();
     CHECK_EQ(memfd_in_use(), 0);
     CHECK_EQ(memfd_pages_held(), 0);
@@ -82,6 +86,13 @@ TEST(memfd, a_grow_that_runs_out_of_memory_changes_nothing) {
     REQUIRE(m != NULL);
     CHECK_EQ(memfd_truncate(m, 2 * PAGE_SIZE), 0);
     uint64_t first = memfd_frame(m, 0);
+    /* The frame array a grow allocates comes off the kernel heap, and a heap
+       that has to grow for it takes a physical frame of its own that kfree
+       never gives back - so the heap is given that room first, and what is
+       measured below is the memfd's frames alone. */
+    void *warm = kmalloc(5 * sizeof(uint64_t) + 64);
+    REQUIRE(warm != NULL);
+    kfree(warm);
     uint64_t before = fake_physical_memory_outstanding();
     fake_physical_memory_fail_after((int64_t)fake_physical_memory_total_allocs() + 2);
     CHECK_EQ(memfd_truncate(m, 5 * PAGE_SIZE), -1);
@@ -162,17 +173,79 @@ TEST(memfd, seals_are_promises_that_do_not_come_off) {
     clean();
 }
 
+TEST(memfd, the_table_grows_past_its_first_size_and_a_pointer_survives_it) {
+    clean();
+    struct memfd *first = memfd_create_object("first");
+    REQUIRE(first != NULL);
+    CHECK_EQ(memfd_truncate(first, PAGE_SIZE), 0);
+    uint64_t frame = memfd_frame(first, 0);
+    CHECK(frame != 0);
+    CHECK_EQ(memfd_capacity(), (uint32_t)MEMFD_INITIAL);
+    struct memfd *rest[MEMFD_INITIAL];
+    for (int i = 0; i < MEMFD_INITIAL; i++) {
+        rest[i] = memfd_create_object(NULL);
+        REQUIRE(rest[i] != NULL);
+    }
+    CHECK_EQ(memfd_capacity(), (uint32_t)MEMFD_INITIAL * 2);
+    CHECK_EQ(memfd_in_use(), MEMFD_INITIAL + 1);
+    CHECK(memfd_slot(rest[MEMFD_INITIAL - 1]) >= (uint32_t)MEMFD_INITIAL);
+    CHECK(memfd_by_tag(memfd_slot(rest[MEMFD_INITIAL - 1]),
+                       memfd_generation(rest[MEMFD_INITIAL - 1])) == rest[MEMFD_INITIAL - 1]);
+    CHECK_EQ(memfd_frame(first, 0), frame);
+    CHECK_EQ(memfd_size(first), (uint64_t)PAGE_SIZE);
+    for (int i = 0; i < MEMFD_INITIAL; i++) {
+        memfd_unref(rest[i]);
+    }
+    memfd_unref(first);
+    clean();
+}
+
+TEST(memfd, a_growth_the_heap_cannot_afford_refuses_and_leaves_the_table_as_it_was) {
+    clean();
+    struct memfd *held[MEMFD_INITIAL];
+    for (int i = 0; i < MEMFD_INITIAL; i++) {
+        held[i] = memfd_create_object(NULL);
+        REQUIRE(held[i] != NULL);
+    }
+    CHECK_EQ(memfd_capacity(), (uint32_t)MEMFD_INITIAL);
+    /* The next object needs a bigger table and a new chunk, both off the
+       heap, and the heap needs a page for either. Refuse it that page. */
+    fake_virtual_memory_fail_map_after(0);
+    CHECK(memfd_create_object(NULL) == NULL);
+    fake_virtual_memory_fail_map_after(-1);
+    CHECK_EQ(memfd_capacity(), (uint32_t)MEMFD_INITIAL);
+    CHECK_EQ(memfd_in_use(), MEMFD_INITIAL);
+    for (int i = 0; i < MEMFD_INITIAL; i++) {
+        CHECK(memfd_by_tag(memfd_slot(held[i]), memfd_generation(held[i])) == held[i]);
+    }
+    struct memfd *after = memfd_create_object("after");
+    REQUIRE(after != NULL);
+    CHECK_EQ(memfd_capacity(), (uint32_t)MEMFD_INITIAL * 2);
+    memfd_unref(after);
+    for (int i = 0; i < MEMFD_INITIAL; i++) {
+        memfd_unref(held[i]);
+    }
+    clean();
+}
+
 TEST(memfd, running_out_of_objects_refuses_and_recovers) {
     clean();
-    struct memfd *all[MEMFD_MAX];
+    static struct memfd *all[MEMFD_MAX];
     for (int i = 0; i < MEMFD_MAX; i++) {
         all[i] = memfd_create_object(NULL);
         REQUIRE(all[i] != NULL);
     }
+    CHECK_EQ(memfd_capacity(), (uint32_t)MEMFD_MAX);
     CHECK(memfd_create_object(NULL) == NULL);
+    CHECK(memfd_by_tag(MEMFD_MAX, memfd_generation(all[0])) == NULL);
+    uint32_t slot0 = memfd_slot(all[0]);
+    uint16_t gen0 = memfd_generation(all[0]);
     memfd_unref(all[0]);
+    CHECK(memfd_by_tag(slot0, gen0) == NULL);
     all[0] = memfd_create_object(NULL);
     REQUIRE(all[0] != NULL);
+    CHECK_EQ(memfd_slot(all[0]), slot0);
+    CHECK(memfd_generation(all[0]) != gen0);
     for (int i = 0; i < MEMFD_MAX; i++) {
         memfd_unref(all[i]);
     }
@@ -244,7 +317,6 @@ TEST(memfd, a_size_change_inside_one_page_is_recorded) {
     clean();
 }
 
-#include "memory_management/heap.h"
 #include "scheduler/scheduler.h"
 
 static task_t parent_task;

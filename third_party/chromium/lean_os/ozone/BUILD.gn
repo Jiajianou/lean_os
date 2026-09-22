@@ -1,0 +1,62 @@
+# This machine's own ozone platform: a Chromium window IS a compositor
+# window here.
+#
+# Ozone is the seam Chromium has for exactly this - a platform supplies the
+# window, the pixels and the input, and everything above it is unchanged.
+# The headless platform (ui/ozone/platform/headless) is what M167 through
+# M170 ran the browser on; it writes each frame to a PNG, which is how the
+# picture left the machine over the serial line. This platform writes each
+# frame into the shared-memory segment the compositor handed the window and
+# reads the window's event pipe, which is what user_space/binaries/nsfb_leanos.c
+# did for NetSurf in one file - here it is six, because ozone's contract has
+# more parts than libnsfb's.
+#
+# Nothing here is patched into Chromium. ozone_extra.gni names this target
+# as an out-of-tree platform, and ui/ozone generates the constructor list
+# from that, which is the mechanism Chromium ships for a platform it has
+# never heard of.
+
+import("//gpu/vulkan/features.gni")
+
+source_set("leanos") {
+  sources = [
+    "client_native_pixmap_factory_leanos.cc",
+    "client_native_pixmap_factory_leanos.h",
+    "leanos_screen.cc",
+    "leanos_screen.h",
+    "leanos_surface_factory.cc",
+    "leanos_surface_factory.h",
+    "leanos_window.cc",
+    "leanos_window.h",
+    "leanos_window_manager.cc",
+    "leanos_window_manager.h",
+    "ozone_platform_leanos.cc",
+    "ozone_platform_leanos.h",
+  ]
+
+  defines = [ "OZONE_IMPLEMENTATION" ]
+
+  deps = [
+    "//base",
+    "//components/viz/common/resources:shared_image_format",
+    "//gpu/vulkan:buildflags",
+    "//skia",
+    "//ui/base",
+    "//ui/base/cursor",
+    "//ui/base/ime",
+    "//ui/display",
+    "//ui/events",
+    "//ui/events:dom_keycode_converter",
+    "//ui/events/ozone/layout",
+    "//ui/events/platform",
+    "//ui/gfx/geometry",
+    "//ui/ozone:ozone_base",
+    "//ui/ozone/common",
+    "//ui/platform_window",
+  ]
+
+  # The window-manager client is in this sysroot's libc.a already - every
+  # program on the desktop links it - so there is no library to name here.
+  # What has to be found is its header, and the two it includes, which the
+  # sysroot carries since M171.
+}

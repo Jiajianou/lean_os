@@ -168,28 +168,39 @@ UEFI firmware
   the machine, and libjpeg's is the sharpest instrument in this tree: it
   ships the files the IJG's own encoder and decoder produced in **1995**,
   and its `make test` requires byte equality with them.
-- **A web browser.** **NetSurf 3.11**, built for this machine by this
-  project's own compiler, on the desktop as **Browser** - libhubbub
-  parsing HTML5, libdom, **libcss** doing the cascade, **Duktape**
-  running JavaScript, freetype rasterising the text, and **libcurl over
-  mbedtls over this project's own TCP** for `http` and `https`. Fifteen
-  third-party projects and **no edit to any of their source**: the
-  display port is *one file*, because libnsfb registers its surfaces at
-  runtime and NetSurf picks one by name, and the pixels are zero copy -
-  libnsfb's XRGB8888 is byte-for-byte this compositor's own word layout.
+- **A web browser.** **Chromium** - its own `content_shell`, built for
+  this machine out of Chromium's own ninja and on the desktop as
+  **Browser**: Blink laying the page out, V8 running its JavaScript, Skia
+  drawing it, `//cc` and viz compositing it, `//net` and BoringSSL
+  fetching it over this project's own TCP. What connects that to this
+  desktop is an **ozone platform** of this project's own, six files under
+  `third_party/chromium/lean_os/ozone`, which is the seam Chromium ships
+  for a window system it has never heard of: each frame is painted by
+  Skia straight into the shared-memory segment the compositor handed the
+  window - no copy, because Skia's N32 layout and the compositor's word
+  are the same four bytes - and the window's event pipe is read on the
+  browser's UI thread and turned into `ui::Event`s. Nothing in Chromium's
+  tree was patched to add the platform; `ozone_extra.gni` names it and
+  `ui/ozone` generates the constructor list.
 
-  **It reaches the real web.** `https://www.google.com/` loads and
-  renders in about six seconds, verified against certificate authorities
-  that arrive as a *package*. Getting there found a bug in this project's
-  `malloc` that had been present for ninety-five milestones: it returned
-  8-byte-aligned memory where x86-64 requires 16, and no program had ever
-  noticed because none had been built by a compiler that vectorised a
-  store into the heap.
+  The desktop opens it through `/bin/browser`, a first-party launcher
+  that execs `/bin/chromiumshell` with the six switches this desktop
+  needs spelled out once. It runs as **one process**, and that is a
+  measurement rather than a preference: a renderer in a process of its
+  own does not yet submit a compositor frame on this machine, and saying
+  so is the condition for the next milestone.
 
-  It holds `CAP_FS_WRITE | CAP_NETWORK` and nothing else. **Not**
-  `CAP_FRAMEBUFFER`: twenty megabytes of somebody else's C and C++,
-  running a JavaScript engine on bytes from a machine nobody here
-  controls, with no more authority over the screen than the clock has.
+  It held `CAP_FS_WRITE | CAP_NETWORK` and nothing else when it was
+  NetSurf, and it holds the same now. **Not** `CAP_FRAMEBUFFER`: two
+  hundred megabytes of somebody else's C++ and Rust, running a
+  JavaScript engine on bytes from a machine nobody here controls, with
+  no more authority over the screen than the clock has.
+
+  NetSurf 3.11 was the browser from M113 to M170 - fifteen third-party
+  projects, a one-file display port, and `https://www.google.com/` in
+  about six seconds - and getting it here found a `malloc` that returned
+  8-byte-aligned memory where x86-64 requires 16. It is still buildable
+  as `make netsurf`; the Browser icon no longer opens it.
 - **`AF_UNIX` with `SCM_RIGHTS`.** `socketpair`, names and abstract
   names, `sendmsg`/`recvmsg`, and a descriptor - a pipe end, an open
   file, a socket - crossing to another process as a reference to *the
@@ -286,8 +297,11 @@ make packages                # ...and write them into the image as /pkg/repo
 make fonts                   # DejaVu, and the /etc/fonts/fonts.conf that
                              #   says where it is - a property of the
                              #   machine rather than of one browser
-make browser                 # cross-build NetSurf, libcurl and 14
-                             #   libraries, and write the browser in
+tools/build-chromium.sh content/shell:content_shell
+                             # Chromium's own browser, out of Chromium's
+                             #   own ninja - most of an hour, once
+make browser                 # ...and write it into the image, with its
+                             #   launcher, home page and fonts
 ```
 
 The two compilers for this target are separate again, and neither is part

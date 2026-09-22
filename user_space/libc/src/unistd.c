@@ -162,6 +162,7 @@ int close(int fd) {
 int access(const char *path, int mode) {
     os_stat_t st;
     if (sys_stat(path, &st) != 0) {
+        errno = __lean_path_errno(path, 0);
         return -1;
     }
     (void)mode;

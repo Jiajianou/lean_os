@@ -30,7 +30,7 @@ ICONS = [
     ("Paint", "gui_paint", 506, ICON_X),
     ("Tasks", "task_manager", 596, ICON_X),
     ("README", "text_editor", 56, ICON_X + 90),
-    ("Browser", "netsurf", 146, ICON_X + 90),
+    ("Browser", "browser", 146, ICON_X + 90),
 ]
 
 CTX_MENU_BG = 0x243040
@@ -431,6 +431,13 @@ def save_failure_shot(machine, name):
     os.makedirs(ARTIFACT_DIR, exist_ok=True)
     dst = os.path.join(ARTIFACT_DIR, "%s.ppm" % name)
     shutil.copyfile(src, dst)
+    # And what the machine said, beside what it showed: a program that dies
+    # under a test prints why on the serial line, and the temporary directory
+    # that log lives in is gone by the time anybody reads the verdict.
+    try:
+        shutil.copyfile(machine.log_path, os.path.join(ARTIFACT_DIR, "%s.log" % name))
+    except OSError:
+        pass
     return dst
 
 ICON_TILE_BOX = (122, 32, 48, 48)
@@ -1764,9 +1771,9 @@ def test_browser_renders_a_page(m):
                     timeout=45.0)
 
     shot = wait_for(m, lambda s: _blue_in_page(s) > 5000,
-                    "the page painted its background but NetSurf's own banner "
-                    "image never appeared on it - libpng did not decode it, or "
-                    "the plotters did not draw it",
+                    "the page painted its background but the home page's blue "
+                    "banner never appeared on it - the stylesheet was not "
+                    "applied, or the frame never reached the window",
                     timeout=45.0)
 
     region = _page_columns(shot)
@@ -1793,7 +1800,7 @@ def test_browser_renders_a_page(m):
                 text += 1
 
     check(blue > 5000,
-          "only %d blue pixels on the page - NetSurf's own banner image did "
+          "only %d blue pixels on the page - the home page's banner did "
           "not decode, or did not draw" % blue)
     check(blue > 20 * (red + 1),
           "%d blue against %d red on a page whose banner is blue. If those "
@@ -1804,6 +1811,18 @@ def test_browser_renders_a_page(m):
           "only %d dark pixels between white ones - freetype rasterised no "
           "text onto the page" % text)
 
+# content_shell's address bar is a views Textfield to the right of its four
+# buttons, in the first row of the window's client area. A click in it puts
+# the caret at the click rather than at the end, so the whole field is
+# selected before the address is typed - which is also how a person does it.
+URL_BAR = (750, 104)
+
+def _focus_url_bar(m):
+    m.click(*URL_BAR)
+    time.sleep(0.3)
+    m.sendkey("ctrl-a")
+    time.sleep(0.2)
+
 def test_browser_loads_a_page_from_another_machine(m):
     boot(m)
     browser = ICONS[-1]
@@ -1813,10 +1832,7 @@ def test_browser_loads_a_page_from_another_machine(m):
              "the browser never finished showing its own start page",
              timeout=45.0)
 
-    m.click(620, 151)
-    time.sleep(0.3)
-    for _ in range(60):
-        m.sendkey("backspace")
+    _focus_url_bar(m)
     m.type_text(qemu_input.NET_PAGE_URL)
     started = time.time()
     m.sendkey("ret")
@@ -1841,11 +1857,8 @@ def test_browser_survives_an_empty_flex_container(m):
     wait_for(m, lambda s: _blue_in_page(s) > 5000,
              "the browser never finished showing its own start page",
              timeout=45.0)
-    m.click(620, 151)
-    time.sleep(0.3)
-    for _ in range(60):
-        m.sendkey("backspace")
-    m.type_text("file:///usr/share/netsurf/flex.html")
+    _focus_url_bar(m)
+    m.type_text("file:///usr/share/browser/flex.html")
     m.sendkey("ret")
     wait_for(m, lambda s: s.count_color(0xE02020, 180, 160, 820, 560) > 20000,
              "the block after an empty flex container never appeared - the "
