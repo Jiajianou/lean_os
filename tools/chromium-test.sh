@@ -1260,6 +1260,7 @@ PROBE
     grep -qE " [TtWw] .*ui::LeanOsWindow::DispatchKey" "$SHELLSYMS"
     check $? "and turns the compositor's key events into ui::KeyEvents"
 
+
     # Headless stays the default: the boot battery runs the browser before
     # the desktop is up and grades its picture over the serial line, and
     # the desktop's launcher passes --ozone-platform=leanos itself.
@@ -1274,6 +1275,14 @@ PROBE
     grep -qE '\{"browser", *CAP_APP_DEFAULT \| CAP_NETWORK\}' \
          "$ROOT/system_api/include/capabilities.h"
     check $? "/bin/browser, the launcher the desktop opens, is granted what the engine is"
+
+    # M173. The desktop's browser is Chromium's own process model: the
+    # launcher does not pass --single-process, and viz stays in the browser
+    # process because the window it paints into is there.
+    [ "$(grep -c -- '"--single-process"' "$ROOT/user_space/binaries/browser.c" || true)" = "0" ]
+    check $? "and the launcher does not ask for one process - the renderer is in its own"
+    grep -q -- '"--in-process-gpu"' "$ROOT/user_space/binaries/browser.c"
+    check $? "with the viz compositor in the browser process, where its window is"
 
     IMAGE="$ROOT/build/os-image.bin"
     if [ ! -f "$IMAGE" ]; then

@@ -23,10 +23,14 @@
    running JavaScript from a machine nobody here controls paints its own
    window's shared segment, as NetSurf did, and nothing else.
 
-   --single-process is a measurement rather than a preference, recorded in
-   M169: a renderer in a process of its own does not yet submit a compositor
-   frame on this machine. When it does, this line goes and the renderer's
-   capability sandbox (M166) is what a page runs under. */
+   --in-process-gpu because this machine has no GPU and the viz compositor
+   would otherwise live in a GPU process of its own, drawing into a window
+   only the browser process has: the ozone platform looks a widget's shared
+   segment up in the process that connected it. The renderer is in a process
+   of its own, under M166's capability sandbox - M173 got it there, and what
+   was in the way was a utility process dying a second after it started,
+   which nothing had been able to see until this launcher gave descriptor 2
+   somewhere to go. */
 
 #define BROWSER_PROGRAM PATH_BIN_DIRECTORY "chromiumshell"
 #define BROWSER_HOME_PAGE "file:///usr/share/browser/home.html"
@@ -49,7 +53,7 @@ int main(int argc, char **argv) {
         BROWSER_PROGRAM,
         "--ozone-platform=leanos",
         "--disable-gpu",
-        "--single-process",
+        "--in-process-gpu",
         "--content-shell-host-window-size=900x640",
         "--enable-logging=stderr",
         "--v=0",

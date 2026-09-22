@@ -274,6 +274,15 @@ static uint64_t clock_now_ns(void) {
     return pit_get_ticks() * (1000ULL / PIT_HZ) * 1000000ULL;
 }
 
+/* What one syscall stages on the KERNEL STACK between a user buffer and a
+   socket, in either direction. It is not the socket's buffer size: M173 grew
+   the ring from 4 KB to 64 KB for a browser whose IPC had been living on
+   partial sends, and three arrays that had been sized by the ring burst a
+   32 KB kernel stack into the next task's - the scheduler noticed it was
+   standing 33 KB below the stack it thought it was on. Every user of this
+   loops or reports a partial count, so a chunk is all it ever needed. */
+#define UNIX_STAGING_CHUNK 4096
+
 static long sys_write(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
@@ -321,8 +330,8 @@ static long sys_write(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4
     if (slot->type == FILE_DESCRIPTOR_UNIX) {
         uint64_t sent = 0;
         while (sent < length) {
-            uint32_t chunk = (length - sent) > UNIX_BUFFER_SIZE ? UNIX_BUFFER_SIZE : (uint32_t)(length - sent);
-            uint8_t staging[UNIX_BUFFER_SIZE];
+            uint32_t chunk = (length - sent) > UNIX_STAGING_CHUNK ? UNIX_STAGING_CHUNK : (uint32_t)(length - sent);
+            uint8_t staging[UNIX_STAGING_CHUNK];
             if (copy_from_user(staging, buffer + sent, chunk) != 0) {
                 return sent ? (long)sent : -1;
             }
@@ -457,8 +466,8 @@ static long sys_read(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4,
         }
     }
     if (slot->type == FILE_DESCRIPTOR_UNIX) {
-        uint32_t want = length > UNIX_BUFFER_SIZE ? UNIX_BUFFER_SIZE : (uint32_t)length;
-        uint8_t staging[UNIX_BUFFER_SIZE];
+        uint32_t want = length > UNIX_STAGING_CHUNK ? UNIX_STAGING_CHUNK : (uint32_t)length;
+        uint8_t staging[UNIX_STAGING_CHUNK];
         for (;;) {
             uint64_t seq = scheduler_event_sequence();
             long n = unix_socket_receive(slot->un, staging, want, (file_descriptor_slot_t *)0, 0,
@@ -3514,7 +3523,7 @@ static long sys_connectun(uint64_t fd, uint64_t name_pointer, uint64_t length, u
     return u ? unix_socket_connect(u, name, (int)length) : -1;
 }
 
-#define UNIX_MESSAGE_STAGING UNIX_BUFFER_SIZE
+#define UNIX_MESSAGE_STAGING UNIX_STAGING_CHUNK
 
 static long sys_sendmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)flags; (void)a4; (void)a5; (void)a6;
@@ -4961,6 +4970,18 @@ static long sys_execve(isr_regs_t *regs) {
     if (peak > self->max_rss_pages) {
         self->max_rss_pages = peak;
     }
+    /* Release the OLD address space's shared and memfd-backed regions before
+       tearing it down, exactly as task_exit does. process_destroy_address_space
+       walks the page tables and frees every present frame; a memfd frame is
+       owned by the memfd object, not by this address space, so freeing it in
+       the walk leaves the memfd holding a dangling reference it frees a second
+       time when the descriptor closes - a double free that only surfaced once
+       a browser passed memfds to children that then exec'd (M173). This runs
+       while self->pml4_phys is still old_pml4, which release_shared_range
+       reads, and it unmaps those pages so the walk below skips them; the
+       memfd region references are dropped by scheduler_regions_forget_memfds
+       just after, as before. */
+    scheduler_release_shared_range(self, USER_MMAP_BASE, USER_MMAP_LIMIT);
     self->pml4_phys = new_pml4;
     virtual_memory_switch_address_space(new_pml4);
     process_destroy_address_space(old_pml4);

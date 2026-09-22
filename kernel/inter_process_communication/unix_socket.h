@@ -10,7 +10,7 @@
 
 #define UNIX_PATH_MAX 108
 
-#define UNIX_BUFFER_SIZE 4096
+#define UNIX_BUFFER_SIZE 65536
 
 #define UNIX_MAX_SEGS 16
 

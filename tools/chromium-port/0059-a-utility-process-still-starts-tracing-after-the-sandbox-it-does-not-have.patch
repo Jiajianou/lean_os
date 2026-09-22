@@ -1,0 +1,57 @@
+A utility process on the Linux family without Linux's kernel still starts
+tracing after the sandbox it does not have.
+
+Patch 0047 gated the whole Linux arm of UtilityMain on HAS_LINUX_KERNEL,
+which is right for what most of it is - seccomp-bpf, the pre-sandbox hooks,
+the zygote - and wrong for the last two things in it. ContentMainRunnerImpl
+defers startup tracing to "after sandbox initialisation" for every non-GPU
+child on this family (needs_startup_tracing_after_sandbox_init), and the
+renderer's arm kept its InitTracingPostFeatureList; the utility's went with
+the sandbox. So the network service and the storage service each registered
+their first perfetto data source - memory_instrumentation::ClientProcessImpl,
+inside ChildThreadImpl::Init, before anything else runs - against the fake
+muxer, which is PERFETTO_FATAL: a ud2, SIGILL, and a child that dies a second
+after it starts, with its last words on a descriptor that until M171 went
+nowhere. [m167] counted it as "a storage service that died" and did not ask
+why.
+
+This is M164's sentence one more time - a gate on a definition takes a
+caller with it - and the shape of the fix is the same: a second arm of the
+same #if for the Linux family as a whole, carrying only the half that is
+not about the sandbox.
+
+diff --git a/content/utility/utility_main.cc b/content/utility/utility_main.cc
+index 0596792..522cd9d 100644
+--- a/content/utility/utility_main.cc
++++ b/content/utility/utility_main.cc
+@@ -431,6 +431,30 @@ int UtilityMain(MainFunctionParams parameters) {
+     base::HangWatcher::GetInstance()->Start();
+   }
+ 
++#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++  // The Linux family without Linux's kernel: no seccomp sandbox to enter,
++  // but the two things above that are not about the sandbox still have to
++  // happen, because ContentMainRunnerImpl deferred them here for every
++  // non-GPU child on this family. A utility process that skips the tracing
++  // initialisation registers its first data source against the fake muxer,
++  // which is fatal - ChildThreadImpl::Init does it through
++  // memory_instrumentation::ClientProcessImpl before anything else runs.
++  if (parameters.needs_startup_tracing_after_sandbox_init) {
++    tracing::InitTracingPostFeatureList(/*enable_consumer=*/false,
++                                        /*will_trace_thread_restart=*/false);
++  }
++
++  if (base::HangWatcher::IsEnabled() &&
++      !base::HangWatcher::GetInstance()->IsStarted()) {
++    DCHECK(parameters.hang_watcher_not_started_time.has_value());
++    base::TimeDelta uncovered_hang_watcher_time =
++        base::TimeTicks::Now() -
++        parameters.hang_watcher_not_started_time.value();
++    base::UmaHistogramTimes("HangWatcher.UtilityProcess.UncoveredStartupTime",
++                            uncovered_hang_watcher_time);
++    base::HangWatcher::GetInstance()->Start();
++  }
++
+ #elif BUILDFLAG(IS_WIN)
+   std::optional<base::win::ScopedCOMInitializer> scoped_com_initializer;
+   if (message_pump_type == base::MessagePumpType::UI) {

@@ -1776,6 +1776,21 @@ def test_browser_renders_a_page(m):
                     "applied, or the frame never reached the window",
                     timeout=45.0)
 
+    # Chromium's own process model, or it is not Chromium: the launcher's
+    # exec line is followed by the children it started - a renderer, the
+    # network and storage services - each an exec of /proc/self/exe the
+    # kernel logs as a load. M173 made this true on the desktop; before it
+    # the same test passed with --single-process.
+    log = m.read_log()
+    after = log[log.index("browser: exec"):] if "browser: exec" in log else ""
+    children = after.count("[elf] loaded") - 1
+    check(children >= 3,
+          "the browser started %d child process(es); Chromium here is a "
+          "renderer, a network service and a storage service at the least "
+          "(M173)" % children)
+    check("Received signal" not in after and "Tracing not initialized" not in after,
+          "a browser child process died - see the guest log")
+
     region = _page_columns(shot)
     check(region is not None,
           "no column of this screen has a dense run of white in it, so there "
@@ -1785,19 +1800,31 @@ def test_browser_renders_a_page(m):
           "the page is only %d columns wide; a browser window here is ~780"
           % (x1 - x0))
 
-    blue = red = text = 0
-    for y in range(0, shot.height, 2):
-        for x in range(x0, x1 + 1, 2):
-            c = shot.px(x, y)
-            r, g, b = (c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF
-            if b > 150 and b - r > 50:
-                blue += 1
-            if r > 150 and r - b > 50:
-                red += 1
-            if (r < 96 and g < 96 and b < 96 and x0 + 3 < x < x1 - 3 and
-                    shot.px(x - 3, y) == 0xFFFFFF and
-                    shot.px(x + 3, y) == 0xFFFFFF):
-                text += 1
+    def _page_pixels(s):
+        blue = red = text = 0
+        for y in range(0, s.height, 2):
+            for x in range(x0, x1 + 1, 2):
+                c = s.px(x, y)
+                r, g, b = (c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF
+                if b > 150 and b - r > 50:
+                    blue += 1
+                if r > 150 and r - b > 50:
+                    red += 1
+                if (r < 96 and g < 96 and b < 96 and x0 + 3 < x < x1 - 3 and
+                        s.px(x - 3, y) == 0xFFFFFF and
+                        s.px(x + 3, y) == 0xFFFFFF):
+                    text += 1
+        return blue, red, text
+
+    # The banner is a stylesheet colour and is on screen the moment the
+    # renderer's first frame is; the glyphs come a moment later, from the
+    # font service in the browser process over mojo (M173). A shot taken at
+    # the first sight of blue can be honest and textless.
+    shot = wait_for(m, lambda s: _page_pixels(s)[2] > 100,
+                    "the page painted its banner but no text followed it - "
+                    "the renderer got no glyphs from the browser's font service",
+                    timeout=30.0)
+    blue, red, text = _page_pixels(shot)
 
     check(blue > 5000,
           "only %d blue pixels on the page - the home page's banner did "
@@ -2060,7 +2087,17 @@ def run_one(name, fn, boot_timeout, snapshot=None):
     try:
         use = None if name in COLD_BOOT_TESTS else snapshot
         with Machine(boot_timeout=boot_timeout, snapshot=use) as m:
-            fn(m)
+            try:
+                fn(m)
+            except Failure as exc:
+                # A check() that fails names no screendump; a wait_for that
+                # fails already saved one. Either way the machine is about to
+                # be torn down with its log, and a failure with no log is a
+                # failure that has to be reproduced before it can be read.
+                if "screendump saved" not in str(exc):
+                    where = save_failure_shot(m, current_test())
+                    raise Failure("%s (screendump and guest log saved to %s)" % (exc, where))
+                raise
     except Failure as exc:
         return (name, str(exc), "   FAIL (%.0fs): %s" % (time.time() - started, exc))
     except KeyboardInterrupt:

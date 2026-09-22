@@ -185,10 +185,13 @@ UEFI firmware
 
   The desktop opens it through `/bin/browser`, a first-party launcher
   that execs `/bin/chromiumshell` with the six switches this desktop
-  needs spelled out once. It runs as **one process**, and that is a
-  measurement rather than a preference: a renderer in a process of its
-  own does not yet submit a compositor frame on this machine, and saying
-  so is the condition for the next milestone.
+  needs spelled out once. It is **Chromium's own process model**: the
+  browser process owns the window, the **renderer runs in a process of
+  its own** under the capability sandbox, and the network and storage
+  services are utility processes of their own. Only the viz compositor
+  stays in the browser process (`--in-process-gpu`), because this machine
+  has no GPU and the window it paints into belongs to the process that
+  opened it.
 
   It held `CAP_FS_WRITE | CAP_NETWORK` and nothing else when it was
   NetSurf, and it holds the same now. **Not** `CAP_FRAMEBUFFER`: two
