@@ -1260,6 +1260,13 @@ PROBE
     grep -qE " [TtWw] .*ui::LeanOsWindow::DispatchKey" "$SHELLSYMS"
     check $? "and turns the compositor's key events into ui::KeyEvents"
 
+    # M174: the platform connects a popup - a menu, a tooltip, a <select> - as
+    # a window the compositor places, and captures the mouse for it. Graded on
+    # the binary: the client calls the platform reaches for a popup.
+    grep -qE " [TtWw] window_manager_connect_popup$" "$SHELLSYMS"
+    check $? "and connects a popup through window_manager_connect_popup - a placed menu window (M174)"
+    grep -qE " [TtWw] window_manager_set_capture$" "$SHELLSYMS"
+    check $? "and grabs the mouse for it through window_manager_set_capture, so a click outside dismisses it"
 
     # Headless stays the default: the boot battery runs the browser before
     # the desktop is up and grades its picture over the serial line, and

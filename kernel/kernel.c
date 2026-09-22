@@ -149,6 +149,7 @@
     X(dirtest)                  \
     X(browsertest)              \
     X(browser)                  \
+    X(popuptest)                \
     X(netrecv)                  \
     X(unixtest)                 \
     X(epolltest)                \

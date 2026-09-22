@@ -97,6 +97,8 @@ class LeanOsWindow : public PlatformWindow {
   std::unique_ptr<base::FileDescriptorWatcher::Controller> event_watcher_;
 
   uint8_t buttons_ = 0;
+  bool is_popup_ = false;
+  bool has_capture_ = false;
   gfx::Point last_mouse_;
   bool visible_ = false;
   bool activated_ = false;

@@ -31,6 +31,14 @@ typedef struct {
     char title[WINDOW_MANAGER_TITLE_MAX];
     int32_t client_pid;
     uint8_t confirm_close;
+    /* A popup is a window the CLIENT places: no title bar, no taskbar slot,
+       no focus of its own, above every ordinary window, at an offset from
+       its parent window's client origin, and gone with its parent. It is
+       what a menu, a tooltip or a select's list is to a toolkit (M174). */
+    uint8_t popup;
+    int32_t parent_window_id;
+    int32_t popup_x;
+    int32_t popup_y;
 } window_manager_create_request_t;
 
 typedef struct {
@@ -124,6 +132,11 @@ typedef enum {
     WINDOW_MANAGER_ACTION_VETO_SHUTDOWN = 14,
     WINDOW_MANAGER_ACTION_CONFIRM_MODE = 12,
     WINDOW_MANAGER_ACTION_PRESENT = 15,
+    /* Every mouse event goes to this window, wherever the cursor is, with
+       coordinates relative to it, until it is released - how a menu learns
+       about a click outside itself. */
+    WINDOW_MANAGER_ACTION_CAPTURE = 16,
+    WINDOW_MANAGER_ACTION_RELEASE_CAPTURE = 17,
 } window_manager_action_type_t;
 
 static inline int32_t window_manager_pack_mode(uint32_t width, uint32_t height) {

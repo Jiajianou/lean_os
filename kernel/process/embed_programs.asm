@@ -390,6 +390,12 @@ browser_elf_start:
     incbin "build/browser.elf"
 browser_elf_end:
 
+global popuptest_elf_start
+global popuptest_elf_end
+popuptest_elf_start:
+    incbin "build/popuptest.elf"
+popuptest_elf_end:
+
 global netrecv_elf_start
 global netrecv_elf_end
 netrecv_elf_start:

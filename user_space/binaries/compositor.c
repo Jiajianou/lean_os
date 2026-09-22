@@ -157,6 +157,8 @@ typedef struct {
     uint8_t close_requested;
     uint8_t confirm_close;
     int32_t client_pid;
+    uint8_t is_popup;
+    int32_t parent_window;
     char title[WINDOW_MANAGER_TITLE_MAX];
 } window_t;
 
@@ -169,7 +171,7 @@ static uint32_t accent_color = TITLEBAR_FOCUS_COLOR;
 static uint32_t wallpaper_id = 1;
 
 static int point_in_window(const window_t *win, int32_t x, int32_t y) {
-    int32_t top = (win->is_panel || win->is_desktop) ? win->y - win->overhang : win->y - TITLEBAR_H;
+    int32_t top = (win->is_panel || win->is_desktop || win->is_popup) ? win->y - win->overhang : win->y - TITLEBAR_H;
     return x >= win->x && x < win->x + win->w && y >= top && y < win->y + win->h;
 }
 
@@ -324,7 +326,8 @@ static int z_count;
 
 #define ZBAND_DESKTOP  0
 #define ZBAND_ORDINARY 1
-#define ZBAND_PANEL    2
+#define ZBAND_POPUP    2
+#define ZBAND_PANEL    3
 
 static int window_band(const window_t *win) {
     if (win->is_desktop) {
@@ -332,6 +335,9 @@ static int window_band(const window_t *win) {
     }
     if (win->is_panel) {
         return ZBAND_PANEL;
+    }
+    if (win->is_popup) {
+        return ZBAND_POPUP;
     }
     return ZBAND_ORDINARY;
 }
@@ -729,7 +735,7 @@ static void blit_window(const window_t *win) {
         return;
     }
     size_t row_bytes = (size_t)(x1 - x0) * sizeof(uint32_t);
-    int32_t radius = (win->is_panel || win->is_desktop)
+    int32_t radius = (win->is_panel || win->is_desktop || win->is_popup)
                          ? 0
                          : graphics_clamp_radius(win->w, 2 * FRAME_RADIUS, FRAME_RADIUS);
     for (int32_t row = y0; row < y1; row++) {
@@ -782,10 +788,11 @@ typedef enum {
 #define WCLASS_DESKTOP  1u
 #define WCLASS_ORDINARY 2u
 #define WCLASS_PANEL    4u
-#define WCLASS_ALL      (WCLASS_DESKTOP | WCLASS_ORDINARY | WCLASS_PANEL)
+#define WCLASS_POPUP    8u
+#define WCLASS_ALL      (WCLASS_DESKTOP | WCLASS_ORDINARY | WCLASS_PANEL | WCLASS_POPUP)
 
 static int point_occluded_by(const window_t *win, int32_t px, int32_t py) {
-    if (win->is_panel || win->is_desktop) {
+    if (win->is_panel || win->is_desktop || win->is_popup) {
         return point_in_window(win, px, py);
     }
     return px >= win->x - BORDER && px < win->x + win->w + BORDER &&
@@ -799,6 +806,9 @@ static int window_class_bit(const window_t *win) {
     if (win->is_panel) {
         return WCLASS_PANEL;
     }
+    if (win->is_popup) {
+        return WCLASS_POPUP;
+    }
     return WCLASS_ORDINARY;
 }
 
@@ -808,9 +818,9 @@ static int hit_region_matches(const window_t *win, int32_t px, int32_t py,
     case HIT_FRAME:
         return point_occluded_by(win, px, py);
     case HIT_TITLEBAR:
-        return !win->is_panel && !win->is_desktop && point_in_titlebar(win, px, py);
+        return !win->is_panel && !win->is_desktop && !win->is_popup && point_in_titlebar(win, px, py);
     case HIT_BUTTON:
-        if (win->is_panel || win->is_desktop) {
+        if (win->is_panel || win->is_desktop || win->is_popup) {
             return 0;
         }
         for (int b = 0; b < BTN_COUNT; b++) {
@@ -825,7 +835,7 @@ static int hit_region_matches(const window_t *win, int32_t px, int32_t py,
         }
         return 0;
     case HIT_RESIZE: {
-        if (win->is_panel || win->is_desktop) {
+        if (win->is_panel || win->is_desktop || win->is_popup) {
             return 0;
         }
         int mask = resize_hit_mask(win, px, py);
@@ -1290,6 +1300,11 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
             blit_window(win);
             continue;
         }
+        if (win->is_popup) {
+            blit_window(win);
+            stroke_rounded(win->x - 1, win->y - 1, win->w + 2, win->h + 2, 0, BORDER_COLOR, BORDER_ALPHA);
+            continue;
+        }
         int focused = (i == focused_window);
         draw_window_shadow(win, focused);
         stroke_rounded(win->x - BORDER, win->y - TITLEBAR_H - BORDER,
@@ -1432,7 +1447,7 @@ static void switch_workspace(int to) {
     if (focused_window < 0) {
         for (int z = z_count - 1; z >= 0; z--) {
             window_t *w = &windows[zorder[z]];
-            if (w->alive && !w->minimized && !w->is_panel && !w->is_desktop && window_here(w)) {
+            if (w->alive && !w->minimized && !w->is_panel && !w->is_desktop && !w->is_popup && window_here(w)) {
                 set_focus(zorder[z]);
                 break;
             }
@@ -1532,12 +1547,24 @@ static int toast_click(int32_t px, int32_t py) {
     return 0;
 }
 
+static int capture_window = -1;
+
 static void reclaim_window(int idx) {
     window_t *win = &windows[idx];
     if (!win->alive) {
         return;
     }
-    if (!win->is_panel && !win->is_desktop && !win->minimized) {
+    if (!win->is_popup) {
+        for (int p = 0; p < window_count; p++) {
+            if (windows[p].alive && windows[p].is_popup && windows[p].parent_window == idx) {
+                reclaim_window(p);
+            }
+        }
+    }
+    if (capture_window == idx) {
+        capture_window = -1;
+    }
+    if (!win->is_panel && !win->is_desktop && !win->is_popup && !win->minimized) {
         anim_window_close(idx);
     }
     slot_w[idx] = -1;
@@ -1678,7 +1705,7 @@ static void accept_pending_window(int request_read_file_descriptor, int response
         return;
     }
 
-    if (request.client_pid > 0) {
+    if (request.client_pid > 0 && !request.popup) {
         for (int i = 0; i < window_count; i++) {
             if (windows[i].alive && windows[i].client_pid == request.client_pid) {
                 if (windows[i].needs_rebuffer && rebuffer_window(i) != 0) {
@@ -1716,6 +1743,17 @@ static void accept_pending_window(int request_read_file_descriptor, int response
 
     uint32_t width = (request.panel || request.desktop) ? framebuffer_info.width : request.width;
     uint32_t height = request.desktop ? framebuffer_info.height : request.height;
+    int popup_parent = -1;
+    if (request.popup) {
+        int pw = request.parent_window_id;
+        if (pw < 0 || pw >= window_count || !windows[pw].alive || windows[pw].is_popup ||
+            windows[pw].client_pid != request.client_pid) {
+            refuse_window(response_write_file_descriptor, request.client_pid,
+                          "a popup needs a live parent window of its own process");
+            return;
+        }
+        popup_parent = pw;
+    }
 
     long shared_memory_id = sys_shared_memory_create((size_t)width * height * sizeof(uint32_t));
     long vaddr = shared_memory_id < 0 ? -1 : sys_shared_memory_map(shared_memory_id);
@@ -1752,6 +1790,10 @@ static void accept_pending_window(int request_read_file_descriptor, int response
     } else if (request.desktop) {
         win->x = 0;
         win->y = 0;
+    } else if (request.popup) {
+        const window_t *parent = &windows[popup_parent];
+        win->x = max_i32(min_i32(parent->x + request.popup_x, (int32_t)framebuffer_info.width - (int32_t)width), 0);
+        win->y = max_i32(min_i32(parent->y + request.popup_y, (int32_t)framebuffer_info.height - (int32_t)height), 0);
     } else {
         win->x = 100 + idx * 40;
         int32_t cascade_y = 100 + idx * 40;
@@ -1782,10 +1824,13 @@ static void accept_pending_window(int request_read_file_descriptor, int response
     win->close_requested = 0;
     win->confirm_close = request.confirm_close;
     win->client_pid = request.client_pid;
-    if (!request.panel && !request.desktop) {
+    win->is_popup = request.popup ? 1 : 0;
+    win->parent_window = popup_parent;
+    if (!request.panel && !request.desktop && !request.popup) {
         anim_window_open(idx);
     }
     win->workspace = (request.panel || request.desktop) ? (int8_t)-1
+                   : request.popup ? windows[popup_parent].workspace
                    : (restored ? restored->workspace : (int8_t)current_workspace);
     slot_x[idx] = 0;
     slot_w[idx] = -1;
@@ -1807,7 +1852,7 @@ static void accept_pending_window(int request_read_file_descriptor, int response
         window_count++;
     }
     sys_write(response_write_file_descriptor, &response, sizeof(response));
-    if (!win->is_panel) {
+    if (!win->is_panel && !win->is_popup) {
         set_focus(idx);
     }
 }
@@ -1824,7 +1869,7 @@ static void accept_pending_query(int query_read_file_descriptor, int query_respo
     response.current_workspace = current_workspace;
     for (int i = 0; i < window_count; i++) {
         const window_t *win = &windows[i];
-        if (!win->alive) {
+        if (!win->alive || win->is_popup) {
             continue;
         }
         int out = response.count;
@@ -1865,6 +1910,14 @@ static void apply_window_action(int idx, uint32_t action, int32_t value) {
             set_focus(-1);
         }
         dirty = 1;
+    } else if (action == WINDOW_MANAGER_ACTION_CAPTURE) {
+        capture_window = idx;
+    } else if (action == WINDOW_MANAGER_ACTION_RELEASE_CAPTURE) {
+        if (capture_window == idx) {
+            capture_window = -1;
+        }
+    } else if (action == WINDOW_MANAGER_ACTION_CLOSE && win->is_popup) {
+        reclaim_window(idx);
     } else if (action == WINDOW_MANAGER_ACTION_CLOSE) {
         if (win->confirm_close) {
             window_manager_event_t ev = {0};
@@ -2658,7 +2711,7 @@ static int window_under_cursor(void) {
 
 static void focus_window_under_cursor(void) {
     int hit = window_under_cursor();
-    if (hit >= 0 && !windows[hit].is_panel) {
+    if (hit >= 0 && !windows[hit].is_panel && !windows[hit].is_popup) {
         set_focus(hit);
     }
 }
@@ -2679,6 +2732,29 @@ static void handle_mouse(void) {
         }
         if (cursor_y >= (int32_t)framebuffer_info.height) {
             cursor_y = (int32_t)framebuffer_info.height - 1;
+        }
+
+        if (capture_window >= 0 && windows[capture_window].alive && drag_mode == DRAG_NONE) {
+            const window_t *cw = &windows[capture_window];
+            window_manager_event_t ev = {0};
+            ev.type = WINDOW_MANAGER_EVENT_MOUSE_MOVE;
+            ev.x = cursor_x - cw->x;
+            ev.y = cursor_y - cw->y;
+            ev.buttons = mev.buttons;
+            ev.time_ms = mev.time_ms;
+            send_event(cw, &ev);
+            if (mev.buttons != previous_buttons) {
+                ev.type = WINDOW_MANAGER_EVENT_MOUSE_BUTTON;
+                send_event(cw, &ev);
+            }
+            if (mev.wheel != 0) {
+                ev.type = WINDOW_MANAGER_EVENT_MOUSE_WHEEL;
+                ev.wheel = mev.wheel;
+                send_event(cw, &ev);
+            }
+            previous_buttons = mev.buttons;
+            dirty = 1;
+            continue;
         }
 
         int left_down_edge = (mev.buttons & 1) && !(previous_buttons & 1);
@@ -3191,7 +3267,7 @@ static void session_save(void) {
     int saved = 0;
     for (int i = 0; i < window_count && saved < SESSION_MAX; i++) {
         window_t *w = &windows[i];
-        if (!w->alive || w->is_panel || w->is_desktop) {
+        if (!w->alive || w->is_panel || w->is_desktop || w->is_popup) {
             continue;
         }
         char prog[24];

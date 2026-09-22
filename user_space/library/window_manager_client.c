@@ -19,7 +19,7 @@ static long read_exact(int fd, void *buffer, size_t length) {
 #define WINDOW_MANAGER_CONNECT_TIMEOUT_MS 400
 #define WINDOW_MANAGER_CONNECT_ATTEMPTS   12
 
-static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h, uint8_t panel, uint8_t translucent, uint8_t desktop, uint8_t confirm_close, const char *title, window_manager_window_t *out) {
+static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h, uint8_t panel, uint8_t translucent, uint8_t desktop, uint8_t confirm_close, const char *title, uint8_t popup, int32_t parent_window_id, int32_t popup_x, int32_t popup_y, window_manager_window_t *out) {
     int request_file_descriptors[2];
     int response_file_descriptors[2];
     if (sys_pipe_open(WINDOW_MANAGER_REQUEST_PIPE, request_file_descriptors) != 0 || sys_pipe_open(WINDOW_MANAGER_RESPONSE_PIPE, response_file_descriptors) != 0) {
@@ -34,6 +34,10 @@ static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h
     request.translucent = translucent;
     request.desktop = desktop;
     request.confirm_close = confirm_close;
+    request.popup = popup;
+    request.parent_window_id = parent_window_id;
+    request.popup_x = popup_x;
+    request.popup_y = popup_y;
     request.client_pid = (int32_t)sys_getpid();
     int i = 0;
     for (; title && title[i] && i < WINDOW_MANAGER_TITLE_MAX - 1; i++) {
@@ -120,19 +124,19 @@ static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h
 }
 
 int window_manager_connect(uint32_t width, uint32_t height, const char *title, window_manager_window_t *out) {
-    return connect_common(width, height, 0, WINDOW_MANAGER_PANEL_NONE, 0, 0, 0, title, out);
+    return connect_common(width, height, 0, WINDOW_MANAGER_PANEL_NONE, 0, 0, 0, title, 0, -1, 0, 0, out);
 }
 
 int window_manager_connect_panel(uint32_t height, uint32_t dock_h, window_manager_window_t *out) {
-    return connect_common(0, height, dock_h, WINDOW_MANAGER_PANEL_BOTTOM, 1, 0, 0, "", out);
+    return connect_common(0, height, dock_h, WINDOW_MANAGER_PANEL_BOTTOM, 1, 0, 0, "", 0, -1, 0, 0, out);
 }
 
 int window_manager_connect_desktop(window_manager_window_t *out) {
-    return connect_common(0, 0, 0, WINDOW_MANAGER_PANEL_NONE, 0, 1, 0, "", out);
+    return connect_common(0, 0, 0, WINDOW_MANAGER_PANEL_NONE, 0, 1, 0, "", 0, -1, 0, 0, out);
 }
 
 int window_manager_connect_confirm_close(uint32_t width, uint32_t height, const char *title, window_manager_window_t *out) {
-    return connect_common(width, height, 0, WINDOW_MANAGER_PANEL_NONE, 0, 0, 1, title, out);
+    return connect_common(width, height, 0, WINDOW_MANAGER_PANEL_NONE, 0, 0, 1, title, 0, -1, 0, 0, out);
 }
 
 static int rehandshake(window_manager_window_t *win) {
@@ -150,11 +154,23 @@ static int rehandshake(window_manager_window_t *win) {
     window_manager_window_t fresh;
     if (connect_common(win->request_width, win->request_height, win->request_panel_dock_h,
                         win->request_panel, win->request_translucent, win->request_desktop,
-                        win->request_confirm_close, win->request_title, &fresh) != 0) {
+                        win->request_confirm_close, win->request_title, 0, -1, 0, 0, &fresh) != 0) {
         return 0;
     }
     *win = fresh;
     return 1;
+}
+
+int window_manager_connect_popup(int32_t parent_window_id, int32_t x, int32_t y, uint32_t width, uint32_t height, window_manager_window_t *out) {
+    return connect_common(width, height, 0, 0, 0, 0, 0, "", 1, parent_window_id, x, y, out);
+}
+
+int window_manager_set_capture(window_manager_window_t *win, int captured) {
+    if (!win || win->window_id < 0) {
+        return -1;
+    }
+    return window_manager_send_action(win->window_id, captured ? WINDOW_MANAGER_ACTION_CAPTURE
+                                                               : WINDOW_MANAGER_ACTION_RELEASE_CAPTURE);
 }
 
 int window_manager_reconnect_if_needed(window_manager_window_t *win) {

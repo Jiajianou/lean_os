@@ -1876,6 +1876,40 @@ def test_browser_loads_a_page_from_another_machine(m):
     print("    page from another machine on screen %.1f s after Enter"
           % (time.time() - started))
 
+def test_popup_window_opens_captures_and_dismisses(m):
+    boot(m)
+    # The launcher starts /bin/popuptest: a blue main window and a magenta
+    # popup the compositor places above it (M174).
+    m.sendkey("ctrl-spc")
+    wait_for(m, lambda s: s.px(*LAUNCHER_LOWER_PROBE) == LAUNCHER_LOWER_BG,
+             "Ctrl+Space did not open the launcher")
+    m.type_text("popuptest")
+    m.sendkey("ret")
+
+    POPUP = 0xE020E0
+    MAIN = 0x203A8C
+    wait_for(m, lambda s: s.count_color(MAIN, 0, 0, s.width, s.height) > 40000,
+             "popuptest's main window never appeared", timeout=20.0)
+    shot = wait_for(m, lambda s: s.count_color(POPUP, 0, 0, s.width, s.height) > 8000,
+                    "the popup the main window asked for was never placed - the "
+                    "compositor drew nothing where a client-positioned window "
+                    "belongs (M174)", timeout=15.0)
+    print("    popup placed: %d magenta pixels over the window"
+          % shot.count_color(POPUP, 0, 0, shot.width, shot.height))
+
+    # A click far from the popup. The popup holds the mouse (capture), so the
+    # compositor delivers this click to it with out-of-bounds coordinates,
+    # which is how a menu learns it was dismissed. The popup goes; the main
+    # window stays.
+    m.click(820, 560)
+    wait_for(m, lambda s: s.count_color(POPUP, 0, 0, s.width, s.height) < 1000,
+             "the popup did not close when a captured click landed outside it "
+             "(M174: the mouse grab did not route the outside click)",
+             timeout=15.0)
+    check(m.screenshot().count_color(MAIN, 0, 0, m.screenshot().width, m.screenshot().height) > 40000,
+          "the main window vanished with the popup - a popup's dismissal took "
+          "its parent with it")
+
 def test_browser_survives_an_empty_flex_container(m):
     boot(m)
     browser = ICONS[-1]
@@ -1984,6 +2018,8 @@ TESTS = [
      test_browser_loads_a_page_from_another_machine),
     ("browser_survives_an_empty_flex_container",
      test_browser_survives_an_empty_flex_container),
+    ("popup_window_opens_captures_and_dismisses",
+     test_popup_window_opens_captures_and_dismisses),
     ("window_animations_stay_smooth", test_window_animations_stay_smooth),
 ]
 
@@ -2003,6 +2039,7 @@ QUICK_TESTS = [
     "launching_an_app_does_not_disturb_the_rest_of_the_screen",
     "browser_loads_a_page_from_another_machine",
     "browser_survives_an_empty_flex_container",
+    "popup_window_opens_captures_and_dismisses",
     "window_animations_stay_smooth",
 ]
 

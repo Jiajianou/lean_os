@@ -155,31 +155,59 @@ LeanOsWindow::LeanOsWindow(PlatformWindowDelegate* delegate,
     : delegate_(delegate), manager_(manager), bounds_(properties.bounds) {
   widget_ = manager_->AddWindow(this);
 
-  // Only a top-level window is a window on this desktop. A menu, a tooltip
-  // or a drag image is a PlatformWindow to Chromium too, and the compositor
-  // has no notion of a window that is positioned by its client or that has
-  // no title bar - so those exist for Chromium's bookkeeping and draw
-  // nowhere. The condition for changing that is a popup the desktop can
-  // place: a request type the compositor does not have yet.
+  // Two shapes of window connect to the compositor: a top-level window, and
+  // a POPUP - a menu, a tooltip, a <select> list, an autofill dropdown. A
+  // popup is a window the client positions, above every ordinary window, with
+  // no title bar of its own and gone with its parent; the compositor learned
+  // to place one in M174. Chromium positions a popup in "screen" coordinates,
+  // and because every LeanOsWindow reports its origin as (0,0) the number it
+  // computes is already relative to the parent's client area, which is what
+  // window_manager_connect_popup wants.
+  //
+  // Everything else - a drag image, a bubble with no parent - stays a
+  // PlatformWindow that draws nowhere, because the compositor has no request
+  // for a window with no parent to hang off.
+  const bool is_popup = properties.type == PlatformWindowType::kPopup ||
+                        properties.type == PlatformWindowType::kMenu ||
+                        properties.type == PlatformWindowType::kTooltip ||
+                        properties.type == PlatformWindowType::kBubble;
+
+  uint32_t width = bounds_.width() > 0 ? bounds_.width() : 1;
+  uint32_t height = bounds_.height() > 0 ? bounds_.height() : 1;
+  auto connection = std::make_unique<window_manager_window_t>();
+  int connected = -1;
+
   if (properties.type == PlatformWindowType::kWindow) {
-    auto connection = std::make_unique<window_manager_window_t>();
-    uint32_t width = bounds_.width() > 0 ? bounds_.width() : 800;
-    uint32_t height = bounds_.height() > 0 ? bounds_.height() : 600;
-    if (window_manager_connect(width, height, kWindowTitle, connection.get()) == 0) {
-      connection_ = std::move(connection);
-      bounds_ = gfx::Rect(0, 0, connection_->graphics.width,
-                          connection_->graphics.height);
-      buffer_ = base::MakeRefCounted<LeanOsWindowBuffer>(
-          connection_->window_id, connection_->graphics.pixels, bounds_.size());
-      manager_->SetBuffer(widget_, buffer_);
-      event_watcher_ = base::FileDescriptorWatcher::WatchReadable(
-          connection_->evt_file_descriptor,
-          base::BindRepeating(&LeanOsWindow::OnEventPipeReadable,
-                              base::Unretained(this)));
-    } else {
-      LOG(ERROR) << "leanos: the compositor refused a " << width << "x" << height
-                 << " window - is the desktop running?";
+    connected = window_manager_connect(width > 1 ? width : 800,
+                                       height > 1 ? height : 600,
+                                       kWindowTitle, connection.get());
+  } else if (is_popup) {
+    LeanOsWindow* parent = properties.parent_widget != gfx::kNullAcceleratedWidget
+                               ? manager_->GetWindow(properties.parent_widget)
+                               : nullptr;
+    if (parent && parent->connection_) {
+      is_popup_ = true;
+      connected = window_manager_connect_popup(parent->connection_->window_id,
+                                               bounds_.x(), bounds_.y(),
+                                               width, height, connection.get());
     }
+  }
+
+  if (connected == 0) {
+    connection_ = std::move(connection);
+    bounds_ = gfx::Rect(bounds_.x(), bounds_.y(), connection_->graphics.width,
+                        connection_->graphics.height);
+    buffer_ = base::MakeRefCounted<LeanOsWindowBuffer>(
+        connection_->window_id, connection_->graphics.pixels,
+        gfx::Size(connection_->graphics.width, connection_->graphics.height));
+    manager_->SetBuffer(widget_, buffer_);
+    event_watcher_ = base::FileDescriptorWatcher::WatchReadable(
+        connection_->evt_file_descriptor,
+        base::BindRepeating(&LeanOsWindow::OnEventPipeReadable,
+                            base::Unretained(this)));
+  } else if (properties.type == PlatformWindowType::kWindow) {
+    LOG(ERROR) << "leanos: the compositor refused a " << width << "x" << height
+               << " window - is the desktop running?";
   }
 
   delegate_->OnAcceleratedWidgetAvailable(widget_);
@@ -231,7 +259,7 @@ void LeanOsWindow::SetBoundsInPixels(const gfx::Rect& bounds) {
   // space, which is the only space the compositor reports events in. What
   // changes here is nothing, but the delegate still expects to be told.
   bool origin_changed = bounds_.origin() != bounds.origin();
-  if (!connection_) {
+  if (!connection_ || is_popup_) {
     bounds_ = bounds;
   }
   delegate_->OnBoundsChanged({origin_changed});
@@ -251,12 +279,22 @@ gfx::Rect LeanOsWindow::GetBoundsInDIP() const {
 
 void LeanOsWindow::SetTitle(const std::u16string& title) {}
 
-void LeanOsWindow::SetCapture() {}
+void LeanOsWindow::SetCapture() {
+  if (connection_) {
+    window_manager_set_capture(connection_.get(), 1);
+    has_capture_ = true;
+  }
+}
 
-void LeanOsWindow::ReleaseCapture() {}
+void LeanOsWindow::ReleaseCapture() {
+  if (connection_ && has_capture_) {
+    window_manager_set_capture(connection_.get(), 0);
+    has_capture_ = false;
+  }
+}
 
 bool LeanOsWindow::HasCapture() const {
-  return false;
+  return has_capture_;
 }
 
 void LeanOsWindow::SetFullscreen(bool fullscreen, int64_t target_display_id) {

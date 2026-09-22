@@ -31,6 +31,10 @@ int window_manager_connect_desktop(window_manager_window_t *out);
 
 int window_manager_connect_confirm_close(uint32_t width, uint32_t height, const char *title, window_manager_window_t *out);
 
+int window_manager_connect_popup(int32_t parent_window_id, int32_t x, int32_t y, uint32_t width, uint32_t height, window_manager_window_t *out);
+
+int window_manager_set_capture(window_manager_window_t *win, int captured);
+
 int window_manager_query_windows(window_manager_query_response_t *out);
 
 int window_manager_send_action(int32_t window_id, uint32_t action);
