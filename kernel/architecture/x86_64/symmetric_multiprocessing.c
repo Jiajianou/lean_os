@@ -153,10 +153,21 @@ void smp_tlb_shootdown_acknowledge(void) {
     __atomic_sub_fetch(&shootdown_acknowledgements, 1, __ATOMIC_SEQ_CST);
 }
 
+static volatile int halt_requested;
+
+int smp_halt_was_requested(void) {
+    return halt_requested;
+}
+
 void smp_halt_other_cpus(void) {
     if (!initialized) {
         return;
     }
+    /* M175: say so before sending it. The NMI is the only way this kernel has
+       to stop a core that is not asking to be stopped, and a core that hears
+       one needs to tell "I was asked to halt" from "something is wrong with
+       this machine" - the first is silent, the second still reports. */
+    __atomic_store_n(&halt_requested, 1, __ATOMIC_SEQ_CST);
     lapic_send_ipi_all_excl_self(LAPIC_ICR_DELIVERY_NMI);
 }
 

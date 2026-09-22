@@ -164,6 +164,12 @@ typedef struct task {
     uint8_t full_slices;
     uint64_t last_block_tick;
     uint8_t is_idle;
+    /* M175: -1 for a task that allocated a kernel stack of its own and can
+       therefore run anywhere. A task that adopted the stack a CPU was already
+       standing on - the boot task, and each AP's idle identity - records that
+       CPU here, because its stack has exactly one owner and running it
+       elsewhere puts two cores on one stack. */
+    int home_cpu;
     uint64_t user_ticks;
     uint64_t sys_ticks;
     uint64_t child_user_ticks;

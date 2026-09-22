@@ -60,7 +60,7 @@ static uint64_t event_sequence;
 
 static int blocked_count;
 
-static task_t *pick_next(task_t *from);
+static task_t *pick_next(task_t *from, int cpu);
 void scheduler_dump_cpus(void);
 static void wake_expired(uint64_t now_ms);
 static void fire_expired_alarms(uint64_t now_ms);
@@ -331,6 +331,11 @@ static void scheduler_tick(void) {
 }
 
 void scheduler_init(void) {
+    /* M175: a free slot must not look bound to cpu 0. The table is static, so
+       every field starts at zero, and zero is a real CPU number. */
+    for (int i = 0; i < MAX_TASKS; i++) {
+        tasks[i].home_cpu = -1;
+    }
     tasks[0].state = TASK_RUNNING;
     tasks[0].generation = 0;
     tasks[0].id = PID_MAKE(0, 0);
@@ -358,6 +363,7 @@ void scheduler_init(void) {
     tasks[0].env_length = 0;
     tasks[0].env_count = 0;
     set_task_name(&tasks[0], "kernel");
+    tasks[0].home_cpu = 0;
     task_count = 1;
     current_task[0] = &tasks[0];
     loaded_pml4_phys[0] = tasks[0].pml4_phys;
@@ -415,6 +421,7 @@ void scheduler_init_ap(int cpu_id) {
     t->env_length = 0;
     t->env_count = 0;
     set_task_name(t, "cpu-idle");
+    t->home_cpu = cpu_id;
     current_task[cpu_id] = t;
     loaded_pml4_phys[cpu_id] = t->pml4_phys;
     spin_unlock(&scheduler_lock);
@@ -498,6 +505,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->pml4_phys = pml4_phys;
     t->stack_base = stack_base;
     t->kernel_stack_top = (uint64_t)(stack_base + TASK_STACK_SIZE);
+    t->home_cpu = -1;
 
     if (thread_of) {
         /* A thread. It does not get a copy of anything: it points at the
@@ -626,7 +634,7 @@ static int current_on_some_cpu(const task_t *t) {
     return 0;
 }
 
-static task_t *pick_next(task_t *from) {
+static task_t *pick_next(task_t *from, int cpu) {
     int start = PID_SLOT(from->id);
     task_t *idle = (task_t *)0;
     task_t *batch = (task_t *)0;
@@ -636,6 +644,12 @@ static task_t *pick_next(task_t *from) {
             continue;
         }
         if (&tasks[i] != from && current_on_some_cpu(&tasks[i])) {
+            continue;
+        }
+        /* M175: current_on_some_cpu only refuses a task somebody is running
+           right now. A stack-bound task is unavailable even when idle, because
+           what it would hand over is another CPU's stack rather than a task. */
+        if (tasks[i].home_cpu >= 0 && tasks[i].home_cpu != cpu) {
             continue;
         }
         if (tasks[i].prio == PRIO_BATCH && !tasks[i].is_idle) {
@@ -889,7 +903,7 @@ void schedule(void) {
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
     task_t *previous = current_task[cpu];
-    task_t *next = pick_next(previous);
+    task_t *next = pick_next(previous, cpu);
 
     if (next == previous) {
         spin_unlock(&scheduler_lock);
@@ -926,6 +940,18 @@ void schedule(void) {
     fpu_restore(next->fpu_state);
 
     cpu_write_msr(MSR_FS_BASE, next->fs_base);
+
+    if (previous->home_cpu >= 0 && previous->home_cpu != cpu) {
+        kernel_log_puts("[sched] cpu ");
+        kernel_log_put_dec((uint32_t)cpu);
+        kernel_log_puts(" was running '");
+        kernel_log_puts(previous->name[0] ? previous->name : "(unnamed)");
+        kernel_log_puts("', which is bound to the stack of cpu ");
+        kernel_log_put_dec((uint32_t)previous->home_cpu);
+        kernel_log_putc('\n');
+        scheduler_dump_cpus();
+        panic("sched: a stack-bound task ran on a CPU that is not its own");
+    }
 
     if (previous->kernel_stack_top != 0) {
         uint64_t sp = cpu_stack_pointer();
@@ -1311,6 +1337,7 @@ void scheduler_reap_slot(task_t *t) {
     uint8_t *stack = t->stack_base;
     t->stack_base = NULL;
     t->kernel_stack_top = 0;
+    t->home_cpu = -1;
     t->generation++;
     t->state = TASK_FREE;
     t->pending_signal = 0;
@@ -1863,6 +1890,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->pml4_phys = child_pml4;
     t->stack_base = stack_base;
     t->kernel_stack_top = (uint64_t)(stack_base + TASK_STACK_SIZE);
+    t->home_cpu = -1;
 
     t->descriptor_table = fresh;
     for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {

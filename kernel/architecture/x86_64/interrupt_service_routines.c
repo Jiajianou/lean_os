@@ -16,6 +16,7 @@
 
 #define PAGE_FAULT_VECTOR 14
 #define BREAKPOINT_VECTOR 3
+#define NMI_VECTOR 2
 
 static const char *exception_name(uint64_t vector) {
     static const char *const names[32] = {
@@ -141,6 +142,25 @@ static void dump_regs(isr_regs_t *r) {
 }
 
 void isr_handler(isr_regs_t *r) {
+    /* M175: the only NMI this kernel ever sends is smp_halt_other_cpus(),
+       which both panic() and the orderly shutdown use to stop the other
+       cores. Stopping is exactly what the sender is asking for, so a core
+       that hears it stops. Reporting an unhandled exception instead turned
+       every multi-core shutdown into one panic per core, and on a single-core
+       boot there was no second core to hear it - which is why a machine that
+       has had four-core support since M106 never showed this.
+
+       It says nothing on the way down on purpose: the core that decided to
+       stop has already printed why, and taking the log lock here would be
+       taking it against a core that may be holding it mid-panic. An NMI that
+       nobody asked for is a different event and still falls through to the
+       report below, because that one is about the machine. */
+    if (r->vector == NMI_VECTOR && smp_halt_was_requested()) {
+        for (;;) {
+            __asm__ volatile("cli; hlt");
+        }
+    }
+
     if (r->vector == BREAKPOINT_VECTOR) {
         uint64_t message = kernel_log_begin();
         kernel_log_puts("[isr] breakpoint (int3) hit - resuming\n");

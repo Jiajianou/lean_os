@@ -30,3 +30,4 @@ void smp_tlb_shootdown(void);
 void smp_tlb_shootdown_acknowledge(void);
 
 void smp_halt_other_cpus(void);
+int smp_halt_was_requested(void);

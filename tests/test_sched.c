@@ -987,3 +987,86 @@ TEST(scheduler, taking_two_locks_in_both_orders_is_caught) {
     CHECK_PANIC(spin_lock(&a), "lock order inversion");
     fake_spinlock_release_all();
 }
+
+/* M175: a CPU's idle identity adopts the stack the AP was already standing on,
+   so it records no stack of its own - and that is precisely what makes it
+   unrunnable anywhere else. pick_next used to hand it to any CPU that ran out
+   of work, because current_on_some_cpu only refuses a task somebody is running
+   RIGHT NOW, not one whose stack belongs to another core. The CPU that took it
+   then executed on another core's boot stack, and the damage surfaced much
+   later, somewhere else, as a real task standing on an address in the kernel
+   heap. Reaching it needs the taking CPU to have nothing of its own left to
+   run, because pick_next prefers the incumbent to any idle. */
+TEST(scheduler, an_idle_cpu_does_not_take_another_cpus_idle_identity) {
+    q13_boot();
+
+    static int cpu3_up;
+    static task_t *cpu3_idle;
+    if (!cpu3_up) {
+        cpu3_up = 1;
+        fake_arch_set_cpu(3);
+        scheduler_init_ap(3);
+        cpu3_idle = scheduler_current();
+    }
+    REQUIRE(cpu3_idle != NULL);
+    REQUIRE(cpu3_idle->kernel_stack_top == 0);
+
+    task_t *keeper = q13_spawn("m175keep");
+    task_t *filler = q13_spawn("m175fill");
+    REQUIRE(keeper != NULL);
+    REQUIRE(filler != NULL);
+
+    int left = 0;
+    for (int i = 0; i < 400 * Q13_QUANTUM && !left; i++) {
+        q13_tick(3);
+        fake_arch_set_cpu(3);
+        left = (scheduler_current() != cpu3_idle);
+    }
+    REQUIRE(left);
+    REQUIRE(cpu3_idle->state == TASK_READY);
+
+    fake_arch_set_cpu(3);
+    task_t *on_three = scheduler_current();
+    REQUIRE(on_three != NULL);
+    REQUIRE(on_three != cpu3_idle);
+
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *t = scheduler_task_by_slot(i);
+        if (!t || t == cpu3_idle || t == on_three) {
+            continue;
+        }
+        if (t->state == TASK_RUNNING || t->state == TASK_READY) {
+            t->state = TASK_BLOCKED;
+        }
+    }
+
+    int took_it = 0;
+    for (int i = 0; i < 40 * Q13_QUANTUM && !took_it; i++) {
+        q13_tick(0);
+        fake_arch_set_cpu(0);
+        took_it = (scheduler_current() == cpu3_idle);
+    }
+    CHECK_EQ(took_it, 0);
+
+    /* And the other direction, which is the half a blanket refusal would
+       break: cpu 3 must still be able to fall back to its OWN identity. */
+    on_three->state = TASK_BLOCKED;
+    for (int i = 0; i < 400 * Q13_QUANTUM; i++) {
+        fake_arch_set_cpu(3);
+        if (scheduler_current() == cpu3_idle) {
+            break;
+        }
+        q13_tick(3);
+    }
+    fake_arch_set_cpu(3);
+    CHECK_EQ(scheduler_current() == cpu3_idle, 1);
+
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *t = scheduler_task_by_slot(i);
+        if (t && t->state == TASK_BLOCKED) {
+            t->state = TASK_READY;
+        }
+    }
+    q13_kill(keeper);
+    q13_kill(filler);
+}

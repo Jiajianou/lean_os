@@ -71,6 +71,17 @@
 #define BROWSER_SECONDS 420
 /* Half-second polls, so this is fifteen seconds of nothing changing. */
 #define BROWSER_SETTLE_POLLS 30
+/* M175: and ninety of them - forty-five seconds - when only ONE present was
+   ever seen. The stage used to demand two, on the reasoning that the first is
+   the blank window the browser draws before a page exists. That is a claim
+   about TIMING rather than about the browser: if the first poll of the file
+   lands after the page is already drawn there is only ever one, br_settled was
+   then reset on every iteration, and the run waited out all 420 seconds of
+   BROWSER_SECONDS for a second present that was never coming. Four cores made
+   that the common case. A picture nobody has touched for this long is
+   finished; if it is the blank one, the host's pixel grader is what says so,
+   and that judgement does not belong in the machine being judged. */
+#define BROWSER_SETTLE_ALONE_POLLS 90
 /* One page, and every value in it chosen so a harness can do the arithmetic
    itself: a body with no margin filling the window, and one absolutely
    positioned box whose edges are the only thing a correct layout can put
@@ -4191,19 +4202,16 @@ static void boot_selftests_system(void) {
                     br_settled_size = br_shot.size;
                     br_presents++;
                 }
-                /* The FIRST present is the window the browser drew before
-                   any page existed - its frame and its blank client area -
-                   so a run that stopped at the first one would grade the
-                   browser rather than the page. The page is the second. */
-                if (br_presents < 2) {
-                    br_settled = 0;
-                }
                 /* The browser presents its empty window long before the page
-                   it was given has loaded, so "the file stopped changing"
-                   has to mean stopped for a while rather than stopped since
-                   the last poll - the first version of this graded the
-                   window the browser drew before the renderer existed. */
-                if (br_settled >= BROWSER_SETTLE_POLLS) {
+                   it was given has loaded, so "the file stopped changing" has
+                   to mean stopped for a WHILE. Two presents means the blank
+                   frame has already been seen and replaced, so a short wait is
+                   enough; one present might still be that blank frame, so it
+                   waits long enough that a browser still drawing would have
+                   written again. */
+                int br_needed = (br_presents >= 2) ? BROWSER_SETTLE_POLLS
+                                                   : BROWSER_SETTLE_ALONE_POLLS;
+                if (br_settled >= br_needed) {
                     break;
                 }
             }
