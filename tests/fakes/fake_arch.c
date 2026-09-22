@@ -18,6 +18,9 @@ static int broadcasts;
 void fake_arch_reset(void);
 int fake_arch_broadcasts(void) { return broadcasts; }
 void smp_broadcast_schedule_tick(void) { broadcasts++; }
+static int shootdowns;
+void smp_tlb_shootdown(void) { shootdowns++; }
+int fake_smp_shootdowns(void) { return shootdowns; }
 
 static uint64_t switches;
 uint64_t fake_arch_switches(void) { return switches; }
@@ -40,6 +43,7 @@ void fork_return_to_user(void *frame) {
 }
 
 void cpu_enable_interrupts(void) {}
+void cpu_disable_interrupts(void) {}
 void cpu_spin_hint(void) {}
 
 static uint64_t claimed_sp;

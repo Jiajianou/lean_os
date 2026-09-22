@@ -353,6 +353,37 @@ TEST(scheduler, a_group_signal_reaches_every_member_and_nobody_else) {
     q13_kill(out);
 }
 
+/* M172: whether a copy-on-write break has to tell the other cores. A frame
+   that moved is invisible to a thread on another core holding a read-only
+   translation of the old one, so the fault path asks this before it spends
+   a shootdown - and a task that is gone, or one in another address space,
+   holds no translation worth invalidating. */
+TEST(scheduler, an_address_space_is_shared_only_while_another_live_task_is_in_it) {
+    q13_boot();
+    task_t *a = q13_spawn("as-a");
+    task_t *b = q13_spawn("as-b");
+    task_t *c = q13_spawn("as-c");
+    REQUIRE(a != NULL);
+    REQUIRE(b != NULL);
+    REQUIRE(c != NULL);
+    a->pml4_phys = 0x7A000;
+    b->pml4_phys = 0x7B000;
+    c->pml4_phys = 0x7C000;
+    CHECK_EQ(scheduler_address_space_is_shared(a), 0);
+    CHECK_EQ(scheduler_address_space_is_shared((task_t *)0), 0);
+    b->pml4_phys = a->pml4_phys;
+    CHECK_EQ(scheduler_address_space_is_shared(a), 1);
+    CHECK_EQ(scheduler_address_space_is_shared(b), 1);
+    CHECK_EQ(scheduler_address_space_is_shared(c), 0);
+    b->state = TASK_TERMINATED;
+    CHECK_EQ(scheduler_address_space_is_shared(a), 0);
+    b->state = TASK_READY;
+    b->pml4_phys = 0x7B000;
+    q13_kill(c);
+    q13_kill(b);
+    q13_kill(a);
+}
+
 TEST(scheduler, a_slot_comes_back_and_the_recycled_pid_is_a_different_pid) {
     q13_boot();
     task_t *first = q13_spawn("first");

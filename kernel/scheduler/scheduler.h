@@ -338,6 +338,8 @@ void scheduler_thread_group_ticks(task_t *t, uint64_t *user_ticks_out, uint64_t 
 int scheduler_count_sharing_address_space(uint64_t pml4_phys);
 
 task_t *scheduler_task_by_slot(int slot);
+void scheduler_forget_address_space(uint64_t pml4_phys);
+int scheduler_address_space_is_shared(task_t *owner);
 
 int scheduler_task_count(void);
 

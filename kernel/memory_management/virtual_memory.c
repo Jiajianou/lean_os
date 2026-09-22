@@ -7,6 +7,7 @@
 #include "memory_management/e820.h"
 #include "memory_management/physical_memory.h"
 #include "panic.h"
+#include "scheduler/scheduler.h"
 
 static void virtual_memory_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags);
 
@@ -486,6 +487,11 @@ static int address_in_owned(uint64_t virt, const virtual_memory_range_t *owned, 
 }
 
 void virtual_memory_destroy_address_space(uint64_t pml4_phys, const virtual_memory_range_t *owned, int owned_count) {
+    /* A page table's frame goes back to the allocator here and can be handed
+       to the next address space; a CPU whose last loaded CR3 was this frame
+       would then skip the reload for a table that is not the one it
+       remembers. tgid learned this in M168 - a frame is not an identity. */
+    scheduler_forget_address_space(pml4_phys);
     uint64_t irq_flags = spin_lock_irqsave(&virtual_memory_lock);
     rss_release(pml4_phys);
     uint64_t *pml4 = phys_to_table(pml4_phys);
@@ -709,7 +715,26 @@ int virtual_memory_cow_break(uint64_t pml4_phys, uint64_t virt) {
     spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
 
     physical_memory_free_frame(old_phys);
-    return 1;
+    /* The frame behind this page has CHANGED, and that invlpg reached one
+       core. Another thread of the same process on another core can hold a
+       read-only translation of the old frame, and a read through it never
+       faults - so it goes on reading the page the child now owns, for as
+       long as that translation lives. The in-place path above keeps the same
+       frame and needs nothing; this path answers 2 so the caller can tell
+       the other cores. M172 found it by stamping the page a sibling wrote and
+       finding the stamp fresh and the value stale in the same frame. */
+    return 2;
+}
+
+uint64_t virtual_memory_lookup_frame(uint64_t pml4_phys, uint64_t virt) {
+    uint64_t irq_flags = spin_lock_irqsave(&virtual_memory_lock);
+    uint64_t *pml4 = phys_to_table(pml4_phys);
+    uint64_t *pdpt = table_walk(pml4, PML4_INDEX(virt), 0, 0);
+    uint64_t *pd = pdpt ? table_walk(pdpt, PDPT_INDEX(virt), 0, 0) : (uint64_t *)0;
+    uint64_t *pt = (pd && !(pd[PD_INDEX(virt)] & PTE_HUGE)) ? table_walk(pd, PD_INDEX(virt), 0, 0) : (uint64_t *)0;
+    uint64_t entry = pt ? pt[PT_INDEX(virt)] : 0;
+    spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
+    return entry;
 }
 
 uint64_t virtual_memory_create_address_space(void) {

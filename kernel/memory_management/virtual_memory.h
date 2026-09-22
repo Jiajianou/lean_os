@@ -62,3 +62,5 @@ void virtual_memory_switch_address_space(uint64_t pml4_phys);
    core changed the page tables under it calls this; there is nothing cheaper
    here, because invlpg needs the addresses and a shootdown carries none. */
 void virtual_memory_flush_local_tlb(void);
+uint64_t virtual_memory_lookup_frame(uint64_t pml4_phys, uint64_t virt);
+uint64_t virtual_memory_lookup_frame(uint64_t pml4_phys, uint64_t virt);

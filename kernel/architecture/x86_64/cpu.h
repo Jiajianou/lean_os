@@ -25,6 +25,7 @@ unsigned long long cpu_read_msr(unsigned int msr);
 
 #if defined(__x86_64__)
 static inline void cpu_enable_interrupts(void) { __asm__ volatile("sti"); }
+static inline void cpu_disable_interrupts(void) { __asm__ volatile("cli"); }
 static inline void cpu_spin_hint(void) { __asm__ volatile("pause"); }
 static inline unsigned long long cpu_stack_pointer(void) {
     unsigned long long sp;
@@ -33,6 +34,7 @@ static inline unsigned long long cpu_stack_pointer(void) {
 }
 #else
 void cpu_enable_interrupts(void);
+void cpu_disable_interrupts(void);
 void cpu_spin_hint(void);
 unsigned long long cpu_stack_pointer(void);
 #endif

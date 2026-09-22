@@ -1405,6 +1405,31 @@ void scheduler_wake_task(task_t *t) {
     irq_restore(flags);
 }
 
+void scheduler_forget_address_space(uint64_t pml4_phys) {
+    for (int c = 0; c < MAX_CPUS; c++) {
+        if (loaded_pml4_phys[c] == pml4_phys) {
+            loaded_pml4_phys[c] = 0;
+        }
+    }
+}
+
+/* Whether any OTHER live task shares this address space: the question a
+   copy-on-write break has to answer before deciding whether the other cores
+   need telling. */
+int scheduler_address_space_is_shared(task_t *owner) {
+    if (!owner) {
+        return 0;
+    }
+    for (int i = 0; i < task_count; i++) {
+        task_t *t = &tasks[i];
+        if (t != owner && t->state != TASK_FREE && t->state != TASK_TERMINATED &&
+            t->pml4_phys == owner->pml4_phys) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 task_t *scheduler_vm_owner(task_t *t) {
     if (!t || !t->is_thread) {
         return t;
@@ -1710,7 +1735,18 @@ int scheduler_fault_fill(uint64_t address, uint64_t error_code, uint64_t user_rs
 
     if (error_code & 1u) {
         if (error_code & 2u) {
-            return virtual_memory_cow_break(self->pml4_phys, page);
+            int broke = virtual_memory_cow_break(self->pml4_phys, page);
+            if (broke == 2 && scheduler_address_space_is_shared(self)) {
+                /* The frame moved and a sibling on another core may still be
+                   reading the old one. The shootdown waits for every core to
+                   answer, and a core answers with an interrupt, so this waits
+                   the way sys_fork's does: with interrupts on. A fault from
+                   ring 3 is on the task's own kernel stack, like a syscall. */
+                cpu_enable_interrupts();
+                smp_tlb_shootdown();
+                cpu_disable_interrupts();
+            }
+            return broke ? 1 : 0;
         }
         return 0;
     }
@@ -1742,8 +1778,14 @@ void scheduler_prefault_range(uint64_t address, uint64_t length, int for_write) 
         if (virtual_memory_user_range_ok(self->pml4_phys, page, 1, for_write)) {
             continue;
         }
-        if (for_write && virtual_memory_cow_break(self->pml4_phys, page)) {
-            continue;
+        if (for_write) {
+            int broke = virtual_memory_cow_break(self->pml4_phys, page);
+            if (broke == 2 && scheduler_address_space_is_shared(self)) {
+                smp_tlb_shootdown();
+            }
+            if (broke) {
+                continue;
+            }
         }
         fill_one_page(self, page, for_write);
     }

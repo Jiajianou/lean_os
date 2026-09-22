@@ -86,6 +86,11 @@ static void *sibling_main(void *argument) {
            boundary in between to wait for. */
         for (unsigned long spin = 0; spin < HOT_WRITES; spin++) {
             shared_pages[which * PAGE] = (char)sibling_write_value;
+            /* And a lap tag beside it, so that a frame this thread is
+               writing can be told from one it is not: M172 read a stale
+               value and a fresh tag out of the SAME frame, which is what
+               named the bug as a stale read of the value, not a lost write. */
+            shared_pages[which * PAGE + 8] = (char)(0x80 | (sibling_laps[which] & 0x7f));
         }
         char value = (char)sibling_write_value;
         for (unsigned long i = SIBLINGS; i < THREAD_PAGES; i++) {
@@ -248,8 +253,9 @@ static int threads_mode(void) {
         for (unsigned long i = 0; i < THREAD_PAGES; i++) {
             if (shared_pages[i * PAGE] != AFTER_FORK) {
                 printf("forktest: round %d: page %lu is 0x%02x rather than "
-                       "what this process last wrote - the child's writes "
-                       "reached the parent\n", round, i,
+                       "what this process last wrote - a sibling was still "
+                       "reading the frame fork took away from it (M172), or "
+                       "the child's writes reached the parent\n", round, i,
                        (unsigned)(unsigned char)shared_pages[i * PAGE]);
                 return 28;
             }
