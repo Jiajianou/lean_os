@@ -699,6 +699,30 @@ Several instruments, and none of them subsumes another:
   browser starts looked identical from outside, and why finding out that two
   of them were the storage and network services took an afternoon.
 
+- **A task that is asleep costs nothing.** `pit_sleep_ms()` halts in a loop
+  and leaves the caller **runnable**, so a task sleeping that way goes on
+  being picked and spends its whole slice halting. On an idle machine that is
+  free, which is why it survived a hundred and sixty milestones. On a busy
+  one it is a share of the processor per sleeper - and the TCP retransmit
+  timer, which sleeps a hundred milliseconds at a time and works for
+  microseconds between, was taking **29 seconds of CPU out of a 58-second
+  self-test stage**. It blocks now, and the boot self-test battery reaches
+  the desktop in **315 s where it took 611** - faster than any run ever
+  recorded on this machine, including before the regression was noticed.
+
+  The thing that makes it a test rather than a story is `[m170]`: the
+  timer's own tick counter is sampled across two seconds in which the
+  self-test deliberately does work, and the sleeper's share of them has to be
+  small. It reads **0 of 200**. Put the halting sleep back and it reads
+  **100 of 200** - half the machine - and the boot panics.
+
+  Finding it took an instrument rather than a guess. The budget that
+  noticed was three of mbedtls's own suites costing 82 s against a ceiling of
+  60; **the same fixture on a machine with nothing else on it cost 26**, so
+  the stage was not slower, the machine it ran on was busier. A list of every
+  live task with its tick count, printed either side of the stage, named the
+  thief in one line.
+
 - **A libm for the format the hardware has.** `long double` on x86-64 is
   the x87's 80-bit extended type, and this libc has the C99 set for it -
   fifty-two functions, graded to the unit in the last place of a 64-bit

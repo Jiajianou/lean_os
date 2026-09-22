@@ -59,7 +59,11 @@ static void log_ip(const char *label, uint32_t ip) {
 static void tcp_timer_thread(void *arg) {
     (void)arg;
     for (;;) {
-        pit_sleep_ms(TCP_TICK_MS);
+        /* Blocking rather than pit_sleep_ms, which halts in a loop and stays
+           runnable: this task sleeps 100 ms and works for microseconds, so
+           on a busy machine the halting is what it mostly does - 29 seconds
+           of CPU during a 58-second self-test stage, measured. M170. */
+        scheduler_sleep_ms(TCP_TICK_MS);
         tcp_tick();
     }
 }

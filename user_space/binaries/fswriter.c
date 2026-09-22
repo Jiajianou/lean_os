@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,9 +58,77 @@ static int read_all(const char *path, char *destination, int length) {
     return done;
 }
 
+
+/* M170. What a read costs, asked directly.
+
+   [m100g] is three of mbedtls's own suites reading their vectors a byte at a
+   time - 453,662 read(2) calls for 426 KB - so what that budget measures is
+   the cost of a small read, and it tripled. Inferring a syscall's cost from
+   an eighty-second stage of a twelve-minute boot is not measuring it, so
+   this does: a null call, a one-byte read, and a page-sized read, each
+   timed over the same number of iterations, printed in nanoseconds each.
+
+   The three together say which layer moved. If the null call moved, it is
+   the trap; if only the one-byte read moved, it is the path above it; if
+   the page-sized read moved by the same factor, it is the data. */
+static int read_bench(const char *path, long rounds) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("readbench: cannot open %s\n", path);
+        return 4;
+    }
+
+    struct timespec start, done;
+    volatile int sink = 0;
+
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (long i = 0; i < rounds; i++) {
+        sink += (int)getpid();
+    }
+    clock_gettime(CLOCK_MONOTONIC, &done);
+    long long null_ns = ((long long)done.tv_sec - start.tv_sec) * 1000000000LL +
+                        (done.tv_nsec - start.tv_nsec);
+
+    char one;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (long i = 0; i < rounds; i++) {
+        if (read(fd, &one, 1) != 1) {
+            lseek(fd, 0, SEEK_SET);
+        }
+    }
+    clock_gettime(CLOCK_MONOTONIC, &done);
+    long long one_ns = ((long long)done.tv_sec - start.tv_sec) * 1000000000LL +
+                       (done.tv_nsec - start.tv_nsec);
+
+    static char page[4096];
+    lseek(fd, 0, SEEK_SET);
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (long i = 0; i < rounds; i++) {
+        if (read(fd, page, sizeof(page)) <= 0) {
+            lseek(fd, 0, SEEK_SET);
+        }
+    }
+    clock_gettime(CLOCK_MONOTONIC, &done);
+    long long page_ns = ((long long)done.tv_sec - start.tv_sec) * 1000000000LL +
+                        (done.tv_nsec - start.tv_nsec);
+
+    close(fd);
+    if (sink == 0x7FFFFFFF) {
+        printf("readbench: (the null-call loop was not optimised away)\n");
+    }
+    printf("readbench: %ld rounds - getpid %lld ns, read(1) %lld ns, "
+           "read(4096) %lld ns each\n", rounds,
+           null_ns / rounds, one_ns / rounds, page_ns / rounds);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         return 2;
+    }
+    if (strcmp(argv[1], "readbench") == 0) {
+        return read_bench(argc > 2 ? argv[2] : "/bin/toybox",
+                          argc > 3 ? atol(argv[3]) : 20000L);
     }
     int id = atoi(argv[1]);
 

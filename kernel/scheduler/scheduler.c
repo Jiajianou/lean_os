@@ -810,6 +810,44 @@ void scheduler_block_on_sequence(const void *chan, uint64_t deadline_ms, uint64_
     unblock_self(self);
 }
 
+/* Sleep this task, and give the machine to whatever else wants it.
+
+   pit_sleep_ms() halts in a loop and leaves the caller RUNNABLE, so a task
+   that sleeps that way goes on being picked and spends its whole slice in
+   hlt. On an idle machine that costs nothing, which is why it went unnoticed
+   for a hundred and sixty milestones. On a busy one it costs a share of the
+   CPU per sleeper: measured, the TCP retransmit timer - which sleeps 100 ms
+   at a time and does a few microseconds of work between - burned 29 seconds
+   of processor during a 58-second self-test stage, and 150 seconds before it.
+   The stage costs 26 seconds on a machine with nothing else on it.
+
+   Blocking is what the scheduler already has for this; nothing here is new
+   except which primitive the sleeper reaches for. It returns early if a
+   signal is pending, which is what a sleeping task should do. */
+static const char sleep_channel;
+
+void scheduler_sleep_ms(uint32_t ms) {
+    int cpu = smp_current_cpu();
+    task_t *self = current_task[cpu];
+    if (!self || self->is_idle) {
+        return;
+    }
+    uint64_t deadline = pit_get_ticks() * (1000 / PIT_HZ) +
+                        (uint64_t)(ms ? ms : 1);
+    uint64_t sflags = irq_save_disable();
+    spin_lock(&scheduler_lock);
+    self->wait_chan = (const void *)&sleep_channel;
+    self->wake_deadline_ms = deadline;
+    self->state = TASK_BLOCKED;
+    blocked_count++;
+    spin_unlock(&scheduler_lock);
+    irq_restore(sflags);
+
+    scheduler_deliver_pending_signal();
+    schedule();
+    unblock_self(self);
+}
+
 void scheduler_block_on(const void *chan, uint64_t deadline_ms, spinlock_t *lock, uint64_t *flags) {
     int cpu = smp_current_cpu();
     uint64_t sflags = irq_save_disable();

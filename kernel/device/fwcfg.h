@@ -29,3 +29,7 @@ int boot_pybuild_enabled(void);
    browser needs graded - did a page come out the far side as pixels - is one
    run of one program. This switch is that run. */
 int boot_browser_enabled(void);
+
+/* What a read costs, on its own. M170: a boot that runs one benchmark and
+   stops is a minute; the battery that found the regression is twelve. */
+int boot_readbench_enabled(void);

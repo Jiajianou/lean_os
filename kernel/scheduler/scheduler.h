@@ -217,6 +217,11 @@ void scheduler_tick_cpu(int cpu);
 
 void scheduler_block_on(const void *chan, uint64_t deadline_ms, spinlock_t *lock, uint64_t *flags);
 
+/* A sleep that gives the CPU up rather than halting on it. See the comment
+   at the definition: pit_sleep_ms() stays runnable, which costs a share of a
+   busy machine for every task that is asleep in it. */
+void scheduler_sleep_ms(uint32_t ms);
+
 void scheduler_wake_all(const void *chan);
 
 int scheduler_wake_n(const void *chan, int max);

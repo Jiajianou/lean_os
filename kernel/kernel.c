@@ -373,6 +373,32 @@ static void browser_print_syscalls(void) {
     }
 }
 
+/* Every task this machine has, and what it has burned. M170: [m100g] costs
+   26 s on an idle machine and two to three times that eight hundred markers
+   into a boot, so the question is not what the stage does but who else is
+   running while it does it. A name and a tick count answers that. */
+static void selftest_report_tasks(const char *label) {
+    kernel_log_puts("[tasks] ");
+    kernel_log_puts(label);
+    kernel_log_putc('\n');
+    for (int i = 0; i < scheduler_task_count(); i++) {
+        task_t *t = scheduler_task_by_slot(i);
+        if (!t || t->state == TASK_FREE) {
+            continue;
+        }
+        kernel_log_puts("[tasks]   ");
+        kernel_log_put_dec((uint32_t)t->id);
+        kernel_log_puts(t->is_thread ? " thread" : " proc  ");
+        kernel_log_puts(" state ");
+        kernel_log_put_dec((uint32_t)t->state);
+        kernel_log_puts(" ticks ");
+        kernel_log_put_dec((uint32_t)(t->user_ticks + t->sys_ticks));
+        kernel_log_puts(" ");
+        kernel_log_puts(t->name[0] ? t->name : "(unnamed)");
+        kernel_log_putc('\n');
+    }
+}
+
 static void browser_report_processes(const char *name) {
     for (int i = 0; i < scheduler_task_count(); i++) {
         task_t *t = scheduler_task_by_slot(i);
@@ -3936,6 +3962,104 @@ static void boot_selftests_system(void) {
                    "window and segment reclaimed, SYS_shm_free refusing a kernel address, and "
                    "every pointer-taking syscall refusing every shape of bad pointer "
                    "self-test passed (7/7 checks).\n\n");
+    }
+
+    {
+        /* M170. A task that is asleep costs nothing.
+
+           pit_sleep_ms() halts in a loop and leaves the caller RUNNABLE, so
+           a task sleeping that way goes on being picked and spends its whole
+           slice halting. On an idle machine that is free, which is why it
+           survived a hundred and sixty milestones; on a busy one it is a
+           share of the processor per sleeper. The TCP retransmit timer
+           sleeps 100 ms and works for microseconds between, and it was
+           taking 29 seconds of CPU out of a 58-second self-test stage - a
+           stage that costs 26 seconds on a machine with nothing else on it.
+
+           So this measures it. The timer's own tick counter is sampled
+           across a window in which this task deliberately does work, and
+           what is required is that the sleeper's share of that window is
+           small. Before the fix it was about half; the check is written at
+           a tenth so that it grades the invariant rather than the number. */
+        task_t *sleeper = (task_t *)0;
+        for (int i = 0; i < scheduler_task_count(); i++) {
+            task_t *t = scheduler_task_by_slot(i);
+            if (t && t->state != TASK_FREE && k_strcmp(t->name, "tcp-timer") == 0) {
+                sleeper = t;
+                break;
+            }
+        }
+        if (!sleeper) {
+            kernel_log_puts("[m170] there is no tcp-timer on this machine - "
+                       "skipped (no network card).\n\n");
+        } else {
+            const uint32_t window_ticks = 2 * PIT_HZ;
+            uint64_t before = sleeper->user_ticks + sleeper->sys_ticks;
+            uint64_t started = pit_get_ticks();
+            volatile uint64_t churn = 0;
+            while (pit_get_ticks() - started < window_ticks) {
+                churn += pit_get_ticks();
+            }
+            if (churn == 0) {
+                kernel_log_puts("[m170] (the busy loop was optimised away)\n");
+            }
+            uint64_t spent = (sleeper->user_ticks + sleeper->sys_ticks) - before;
+            uint64_t ceiling = window_ticks / 10;
+            kernel_log_puts("[m170] the tcp-timer took ");
+            kernel_log_put_dec((uint32_t)spent);
+            kernel_log_puts(" of ");
+            kernel_log_put_dec(window_ticks);
+            kernel_log_puts(" ticks while this task was busy\n");
+            if (spent > ceiling) {
+                panic("M170 self-test: a sleeping task is taking the processor "
+                      "with it - see scheduler_sleep_ms");
+            }
+            kernel_log_puts("[m170] a task that is asleep costs nothing: the "
+                       "TCP retransmit timer, which sleeps a hundred "
+                       "milliseconds at a time, took ");
+            kernel_log_put_dec((uint32_t)spent);
+            kernel_log_puts(" of the ");
+            kernel_log_put_dec(window_ticks);
+            kernel_log_puts(" ticks this task spent working beside it - where "
+                       "halting in a loop and staying runnable took about "
+                       "half of them - self-test passed.\n\n");
+        }
+    }
+
+    if (boot_readbench_enabled()) {
+        /* One program, three loops, and the machine off again. The budget
+           that found this regression is eighty seconds inside a twelve
+           minute boot, which is not an instrument you can bisect with. */
+        static const char *const RB_PATHS[] = {
+            "/usr/share/m100/mbedtls/test_suite_shax.datax",
+            "/bin/toybox",
+        };
+        for (unsigned p = 0; p < 2; p++) {
+            os_stat_t rb;
+            if (do_syscall(SYS_stat, (uint64_t)RB_PATHS[p], (uint64_t)&rb, 0) != 0) {
+                kernel_log_puts("[readbench] missing: ");
+                kernel_log_puts(RB_PATHS[p]);
+                kernel_log_putc('\n');
+                continue;
+            }
+            size_t rb_bytes = 0;
+            uint8_t *rb_image = read_program(PATH_BIN_DIRECTORY "fswriter", &rb_bytes);
+            if (!rb_image) {
+                panic("readbench: /bin/fswriter is not on this disk");
+            }
+            const char *rb_argv[] = {PATH_BIN_DIRECTORY "fswriter", "readbench",
+                                     RB_PATHS[p], "20000", 0};
+            kernel_log_puts("[readbench] ");
+            kernel_log_puts(RB_PATHS[p]);
+            kernel_log_putc('\n');
+            task_t *rbt = process_spawnv("fswriter", rb_image, rb_bytes, rb_argv);
+            if (rbt) {
+                do_syscall(SYS_wait, (uint64_t)rbt->id, 0, 0);
+            }
+            kfree(rb_image);
+        }
+        kernel_log_puts("[readbench] done\n");
+        power_shutdown(POWER_OFF);
     }
 
     if (boot_browser_enabled()) {
@@ -7625,6 +7749,7 @@ static void boot_selftests_system(void) {
                 panic("M100g self-test: could not write the fixture");
             }
             uint64_t started = pit_get_ticks();
+            selftest_report_tasks("before m100g");
             long pid = do_syscall(SYS_spawn, (uint64_t)script, 0, 0);
             if (pid < 0) {
                 kernel_log_puts("[m100g] the fixture could not be spawned\n");
@@ -7672,6 +7797,7 @@ static void boot_selftests_system(void) {
                 kernel_log_puts("[m100g] ---- end\n");
                 panic("M100 self-test: mbedtls's own suites do not pass here");
             }
+            selftest_report_tasks("after m100g");
             kernel_log_perf("mbedtls_suites_ms", suites_ms, "ms");
             kernel_log_puts("[m100g] mbedtls's own suites: each reading its own vectors off "
                        "this disk and printing its own PASSED to the last one - "
