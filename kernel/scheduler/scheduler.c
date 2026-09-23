@@ -1475,7 +1475,8 @@ task_t *scheduler_vm_owner(task_t *t) {
 
 #define FILL_REFUSE ((uint64_t)-1)
 
-static uint64_t fill_policy(task_t *self, uint64_t page, int for_write, int for_exec) {
+static uint64_t fill_policy(uint64_t page, int for_write, int for_exec,
+                            const mmap_region_t *region) {
     if (page >= USER_STACK_LIMIT && page < USER_STACK_TOP) {
         if (for_exec) {
             return FILL_REFUSE;
@@ -1486,18 +1487,13 @@ static uint64_t fill_policy(task_t *self, uint64_t page, int for_write, int for_
     if (page < USER_MMAP_BASE || page >= USER_MMAP_LIMIT) {
         return FILL_REFUSE;
     }
-    const mmap_region_t *region = 0;
-    for (uint32_t i = 0; i < self->mmap_capacity; i++) {
-        if (self->mmaps[i].pages == 0) {
-            break;
-        }
-        uint64_t start = self->mmaps[i].base;
-        uint64_t end = start + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
-        if (page >= start && page < end) {
-            region = &self->mmaps[i];
-            break;
-        }
-    }
+    /* M180: the region is handed in rather than looked up again. This used to
+       be a second copy of mmap_region_for's walk, with the same fault of
+       re-reading the table on every iteration - so M179 fixed one of the two
+       places a page fault reads this table and left the other. One lookup per
+       fault is also one ANSWER: the two walks could disagree if a writer ran
+       between them, and the caller would then map a page with the permissions
+       of a region that the code doing the mapping had not found. */
     if (!region) {
         return FILL_REFUSE;
     }
@@ -1545,6 +1541,25 @@ static const mmap_region_t *mmap_region_for(task_t *self, uint64_t page) {
         }
     }
     return 0;
+}
+
+/* M180: the one way the fault path asks what covers an address, and it hands
+   back a COPY rather than a pointer into the table. A pointer stays correct
+   only as long as nobody shifts the entries around it, and sys_munmap does
+   exactly that while it works - so a caller holding one has a window it cannot
+   see. Everything the caller then does with the answer - reading a file,
+   mapping a frame, taking a memfd reference - is far too slow to hold the
+   table still across in any case.
+
+   A copy can be stale the moment it is taken. That is the same staleness a
+   caller racing a writer would have had anyway; what it cannot be is torn, or
+   half of one region and half of another. */
+static int mmap_region_snapshot(task_t *self, uint64_t page, mmap_region_t *out) {
+    const mmap_region_t *found = mmap_region_for(self, page);
+    if (found) {
+        *out = *found;
+    }
+    return found != 0;
 }
 
 void scheduler_region_forget_memfd(mmap_region_t *r) {
@@ -1701,12 +1716,17 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
         return 0;
     }
 
-    uint64_t flags = fill_policy(self, page, for_write, for_exec);
+    /* M180: one snapshot, used by the policy and by everything below it. */
+    mmap_region_t snapshot;
+    const mmap_region_t *region = mmap_region_snapshot(self, page, &snapshot)
+                                      ? &snapshot
+                                      : (const mmap_region_t *)0;
+
+    uint64_t flags = fill_policy(page, for_write, for_exec, region);
     if (flags == FILL_REFUSE) {
         return 0;
     }
 
-    const mmap_region_t *region = mmap_region_for(self, page);
     if (region && region->memfd_id) {
         struct memfd *m = memfd_by_tag((uint32_t)(region->memfd_id - 1), region->memfd_gen);
         if (!m) {
@@ -1776,7 +1796,8 @@ int scheduler_address_is_mapped(uint64_t address) {
     if (virtual_memory_user_range_ok(self->pml4_phys, page, 1, 0)) {
         return 1;
     }
-    if (mmap_region_for(self, page) != 0) {
+    mmap_region_t probe;
+    if (mmap_region_snapshot(self, page, &probe)) {
         return 1;
     }
     /* The stack grows into its own area on demand, so an address inside it
