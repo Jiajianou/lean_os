@@ -171,3 +171,75 @@ TEST(mmap_regions, releasing_twice_is_not_a_double_free) {
     CHECK(task.mmaps == NULL);
     CHECK_EQ(task.mmap_capacity, 0u);
 }
+
+/* M179: a table a growth replaced is NOT given back to the heap.
+
+   A page fault reads this table with no lock held, and it cannot take one -
+   a fault is how the kernel discovers it needs memory, so the fault path is
+   underneath the things a lock would protect. On one core that is harmless
+   because nothing else runs while the fault is being handled. On four, a
+   sibling thread calling mmap can grow the table while another core is
+   walking it, and the walk is then reading a block the heap has already
+   handed to somebody else. Every thread of a process shares the owner's
+   table, so this needs no unusual program to reach - a browser does it.
+
+   What that looked like on the machine was a thread-stack page that faulted
+   not-present, with cr2 exactly rsp-8, and fill_one_page_ex answering "this
+   address is not mine" because the region really was not in the bytes it
+   read. The process was killed for touching its own stack. */
+TEST(mmap_regions, a_table_a_growth_replaced_is_not_handed_back_to_the_heap) {
+    fixture();
+    REQUIRE(scheduler_regions_reserve(&task) == 0);
+    mmap_region_t *first = task.mmaps;
+    uint32_t first_capacity = task.mmap_capacity;
+    REQUIRE(first != NULL);
+    REQUIRE(first_capacity == MMAP_REGIONS_INITIAL);
+
+    for (uint32_t i = 0; i + 1 < first_capacity; i++) {
+        fill_region(&task, i);
+    }
+
+    REQUIRE(scheduler_regions_reserve(&task) == 0);
+    REQUIRE(task.mmaps != first);
+    REQUIRE(task.mmap_capacity > first_capacity);
+
+    /* Somebody else asks the heap for exactly what the old table occupied.
+       If it had been freed this is what lands on top of it. */
+    size_t bytes = sizeof(mmap_region_t) * (size_t)first_capacity;
+    void *scratch = kmalloc(bytes);
+    REQUIRE(scratch != NULL);
+    memset(scratch, 0xEE, bytes);
+
+    /* The replaced table still says what it said, because a fault on another
+       core could still be reading it. */
+    for (uint32_t i = 0; i + 1 < first_capacity; i++) {
+        CHECK_EQ(first[i].base, 0xA000000000ULL + (uint64_t)i * 0x1000);
+        CHECK_EQ(first[i].pages, 1u);
+    }
+
+    kfree(scratch);
+    scheduler_regions_release(&task);
+}
+
+/* And they do go back, all of them, when the address space does. */
+TEST(mmap_regions, releasing_gives_back_every_table_the_growths_left_behind) {
+    fixture();
+    size_t used_before = heap_used_bytes();
+
+    for (int grow = 0; grow < 4; grow++) {
+        REQUIRE(scheduler_regions_reserve(&task) == 0);
+        uint32_t used = regions_in_use(&task);
+        while (used + 1 < task.mmap_capacity) {
+            fill_region(&task, used);
+            used++;
+        }
+    }
+    REQUIRE(task.mmaps_retired_count >= 3);
+
+    scheduler_regions_release(&task);
+    CHECK_EQ(task.mmaps_retired_count, 0u);
+    CHECK(task.mmaps == NULL);
+    /* The heap never gives frames back to the PMM, so what proves these went
+       back is the heap's own accounting rather than the frame count. */
+    CHECK_EQ(heap_used_bytes(), used_before);
+}

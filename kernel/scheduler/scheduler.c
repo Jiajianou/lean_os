@@ -1524,14 +1524,24 @@ static const mmap_region_t *mmap_region_for(task_t *self, uint64_t page) {
     if (page < USER_MMAP_BASE || page >= USER_MMAP_LIMIT) {
         return 0;
     }
-    for (uint32_t i = 0; i < self->mmap_capacity; i++) {
-        if (self->mmaps[i].pages == 0) {
+    /* M179: capacity first, then the pointer, and then neither again - see
+       scheduler_regions_reserve for why that order and not the other. Reading
+       self->mmaps once per iteration was the other half of the same bug: the
+       table can be replaced between two iterations of a loop that is walking
+       it, which no amount of bounds checking helps with. */
+    uint32_t capacity = __atomic_load_n(&self->mmap_capacity, __ATOMIC_ACQUIRE);
+    const mmap_region_t *table = __atomic_load_n(&self->mmaps, __ATOMIC_ACQUIRE);
+    if (!table) {
+        return 0;
+    }
+    for (uint32_t i = 0; i < capacity; i++) {
+        if (table[i].pages == 0) {
             break;
         }
-        uint64_t start = self->mmaps[i].base;
-        uint64_t end = start + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
+        uint64_t start = table[i].base;
+        uint64_t end = start + (uint64_t)table[i].pages * PAGE_SIZE;
         if (page >= start && page < end) {
-            return &self->mmaps[i];
+            return &table[i];
         }
     }
     return 0;
@@ -1586,10 +1596,25 @@ int scheduler_regions_reserve(task_t *t) {
     for (uint32_t i = 0; i < t->mmap_capacity; i++) {
         grown[i] = t->mmaps[i];
     }
+    /* M179: publish the POINTER first and the capacity second, and read them
+       back the other way round in mmap_region_for. The two are not one word
+       and a fault handler reads them without a lock, so the pair can be torn;
+       of the two ways to tear it only one is dangerous. A reader that takes
+       the new pointer with the old capacity walks a prefix of a table that is
+       a superset of the old one, which is right. A reader that takes the OLD
+       pointer with the new capacity walks off the end of it. Storing the
+       pointer before the capacity, and loading the capacity before the
+       pointer, is what makes the second one impossible. */
     mmap_region_t *old = t->mmaps;
-    t->mmaps = grown;
-    t->mmap_capacity = wanted;
-    kfree(old);
+    __atomic_store_n(&t->mmaps, grown, __ATOMIC_RELEASE);
+    __atomic_store_n(&t->mmap_capacity, wanted, __ATOMIC_RELEASE);
+    /* And the old table is kept rather than freed - see mmaps_retired. */
+    if (old) {
+        if (t->mmaps_retired_count >= MMAP_RETIRED_MAX) {
+            panic("sched: more mmap tables retired than the capacity can double");
+        }
+        t->mmaps_retired[t->mmaps_retired_count++] = old;
+    }
     return 0;
 }
 
@@ -1598,6 +1623,13 @@ void scheduler_regions_release(task_t *t) {
     t->mmaps = 0;
     t->mmap_capacity = 0;
     kfree(table);
+    /* M179: and everything this table grew out of, which nothing can be
+       reading any more because the address space itself is going. */
+    for (uint32_t i = 0; i < t->mmaps_retired_count; i++) {
+        kfree(t->mmaps_retired[i]);
+        t->mmaps_retired[i] = 0;
+    }
+    t->mmaps_retired_count = 0;
 }
 
 void scheduler_regions_forget_memfds(task_t *t) {

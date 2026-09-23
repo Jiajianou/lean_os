@@ -62,6 +62,17 @@ typedef enum {
 #define MAX_MMAP_REGIONS      65536
 #define MMAP_REGIONS_INITIAL  32
 
+/* Every capacity the table can have, which is every doubling from
+   MMAP_REGIONS_INITIAL up to MAX_MMAP_REGIONS. The last one is never retired,
+   so this has one to spare. The assertion is what keeps it that way: move
+   either bound and the build stops, rather than the machine. */
+#define MMAP_RETIRED_MAX      12
+_Static_assert(((uint64_t)MMAP_REGIONS_INITIAL << MMAP_RETIRED_MAX) >=
+                   (uint64_t)MAX_MMAP_REGIONS,
+               "a table that doubles from MMAP_REGIONS_INITIAL to "
+               "MAX_MMAP_REGIONS leaves more retired tables than there is "
+               "room to keep");
+
 typedef struct {
     uint64_t base;
     uint32_t pages;
@@ -209,6 +220,17 @@ typedef struct task {
        it tolerates because they are all bounded by mmap_capacity. */
     mmap_region_t *mmaps;
     uint32_t mmap_capacity;
+    /* M179: the tables this one grew out of. A page fault reads the region
+       table without any lock - it cannot take one, because a fault is how the
+       kernel finds out it needs memory in the first place - so a table that
+       another thread has replaced may still be being walked when the
+       replacement is published. Freeing it there is a use-after-free that the
+       heap turns into somebody else's data. They are kept instead and go back
+       together when the address space does; the capacity doubles from
+       MMAP_REGIONS_INITIAL to MAX_MMAP_REGIONS, so there is a fixed and small
+       number of them and their total is smaller than the live one. */
+    mmap_region_t *mmaps_retired[MMAP_RETIRED_MAX];
+    uint32_t mmaps_retired_count;
     int tgid;
     uint8_t is_thread;
     uint8_t exiting;
