@@ -129,8 +129,16 @@ static void idle_task_body(void *arg) {
     }
 }
 
-void scheduler_spawn_idle_tasks(int cpus) {
-    for (int i = 0; i < cpus; i++) {
+/* M178: one for every CPU that could ever come online, and the caller does not
+   get to say how many - a count that has to match the machine is a count
+   somebody will get wrong, and somebody did: this was 2 from before there was
+   an SMP bringup at all, and smp_init runs five hundred lines after the call.
+   The number has to cover every CPU because a task that has marked itself
+   TERMINATED calls schedule() and must not come back, and the only way out of
+   pick_next for a terminated task is an idle one. Each AP can fall back to its
+   own idle identity; the BOOT cpu has none, so these are all it has. */
+void scheduler_spawn_idle_tasks(void) {
+    for (int i = 0; i < MAX_CPUS; i++) {
         task_t *t = task_spawn("idle", idle_task_body, (void *)0);
         if (!t) {
             panic("sched: could not spawn an idle task");

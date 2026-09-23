@@ -1070,3 +1070,88 @@ TEST(scheduler, an_idle_cpu_does_not_take_another_cpus_idle_identity) {
     q13_kill(keeper);
     q13_kill(filler);
 }
+
+/* M178: there has to be an idle task for every CPU, and this is where that
+   stops being a coincidence.
+
+   A task that has marked itself TERMINATED calls schedule() and must never
+   come back - task_exit_with_code panics if it does, and the panic is right,
+   because the stack it would return onto is about to be freed. schedule()
+   returns when pick_next hands back the task it was given, and for a
+   terminated `from` the only way out of pick_next is an idle task. So a CPU
+   that runs out of idle tasks turns an ordinary exit into a panic.
+
+   Each AP can always fall back to the idle identity scheduler_init_ap gave it.
+   The BOOT cpu has none - scheduler_init_ap runs only for application
+   processors - so the migratable ones are all cpu 0 has, and there must be
+   enough that every other CPU can be sitting on one and cpu 0 still finds a
+   free one. That means one per CPU.
+
+   It was two, from before this kernel had an SMP bringup at all: smp_init runs
+   five hundred lines after the call, so the count could not have been right by
+   anything but luck. Before M175 cpu 0 could take an AP's identity when it ran
+   out, which is the stack-sharing bug M175 removed - removing it was right and
+   it left cpu 0 with nothing to fall back on. */
+TEST(scheduler, there_is_an_idle_task_for_every_cpu_to_fall_back_to) {
+    q13_boot();
+    scheduler_spawn_idle_tasks();
+
+    int migratable = 0;
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *t = scheduler_task_by_slot(i);
+        if (!t || t->state == TASK_FREE) {
+            continue;
+        }
+        /* An AP's own identity is is_idle too, and is no use to another CPU -
+           it is bound to the stack that CPU is standing on. Only the ones that
+           allocated a stack of their own can be fallen back to from anywhere. */
+        if (t->is_idle && t->home_cpu < 0) {
+            migratable++;
+        }
+    }
+    CHECK(migratable >= MAX_CPUS);
+}
+
+/* And the behaviour that count exists for: a CPU whose only remaining work has
+   terminated leaves it, rather than being handed it back. */
+TEST(scheduler, a_terminated_task_is_not_handed_back_to_its_own_cpu) {
+    q13_boot();
+    scheduler_spawn_idle_tasks();
+
+    task_t *dying = q13_spawn("m178dying");
+    REQUIRE(dying != NULL);
+
+    int placed = 0;
+    for (int i = 0; i < 400 * Q13_QUANTUM && !placed; i++) {
+        q13_tick(0);
+        fake_arch_set_cpu(0);
+        placed = (scheduler_current() == dying);
+    }
+    REQUIRE(placed);
+
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *t = scheduler_task_by_slot(i);
+        if (!t || t == dying || t->is_idle) {
+            continue;
+        }
+        if (t->state == TASK_RUNNING || t->state == TASK_READY) {
+            t->state = TASK_BLOCKED;
+        }
+    }
+
+    dying->state = TASK_TERMINATED;
+    fake_arch_set_cpu(0);
+    fake_arch_stand_on(dying->kernel_stack_top - 64);
+    schedule();
+
+    fake_arch_set_cpu(0);
+    CHECK(scheduler_current() != dying);
+
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *t = scheduler_task_by_slot(i);
+        if (t && t->state == TASK_BLOCKED) {
+            t->state = TASK_READY;
+        }
+    }
+    scheduler_reap_slot(dying);
+}

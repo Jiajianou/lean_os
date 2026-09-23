@@ -13409,7 +13409,7 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
 
     fpu_init_cpu();
     scheduler_init();
-    scheduler_spawn_idle_tasks(2);
+    scheduler_spawn_idle_tasks();
     kernel_log_puts("[sched] round-robin scheduler initialized (this context is task 0).\n");
     task_spawn("demo-a", demo_task, "A");
     task_spawn("demo-b", demo_task, "B");

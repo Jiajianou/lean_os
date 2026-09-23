@@ -243,7 +243,7 @@ extern const int scheduler_keyboard_channel;
 #define SCHEDULER_SLEEP_CHAN (&scheduler_sleep_channel)
 #define SCHEDULER_KEYBOARD_CHAN (&scheduler_keyboard_channel)
 
-void scheduler_spawn_idle_tasks(int cpus);
+void scheduler_spawn_idle_tasks(void);
 
 void scheduler_mark_self_idle(void);
 
