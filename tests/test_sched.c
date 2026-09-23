@@ -1155,3 +1155,68 @@ TEST(scheduler, a_terminated_task_is_not_handed_back_to_its_own_cpu) {
     }
     scheduler_reap_slot(dying);
 }
+
+/* M182: the other end of M106's question. That one fires when a CPU is
+   standing somewhere the task it thinks it is running does not cover, which is
+   where the damage is SEEN - the bad stack pointer it complains about was put
+   into that task by an earlier context_switch saving it, so by the time it
+   fires the first event is long gone and the only thing named is the victim.
+
+   This one looks at a task's saved stack pointer BEFORE jumping to it. A task
+   whose rsp is not inside its own stack has never run there, so the corruption
+   is already in the task rather than in what the CPU is doing, and the dump
+   names whichever task's stack the bad pointer DOES fall in - which is the
+   difference between two cores having shared a stack and a stack having been
+   freed and handed out again. */
+TEST(scheduler, a_saved_stack_pointer_outside_its_own_task_is_caught_before_it_runs) {
+    q13_boot();
+    scheduler_spawn_idle_tasks();
+
+    task_t *runner = q13_spawn("m182run");
+    task_t *victim = q13_spawn("m182victim");
+    REQUIRE(runner != NULL);
+    REQUIRE(victim != NULL);
+
+    int placed = 0;
+    for (int i = 0; i < 400 * Q13_QUANTUM && !placed; i++) {
+        q13_tick(0);
+        fake_arch_set_cpu(0);
+        placed = (scheduler_current() == runner);
+    }
+    REQUIRE(placed);
+
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *t = scheduler_task_by_slot(i);
+        if (!t || t == runner || t == victim) {
+            continue;
+        }
+        if (t->state == TASK_RUNNING || t->state == TASK_READY) {
+            t->state = TASK_BLOCKED;
+        }
+    }
+    victim->state = TASK_READY;
+
+    /* Inside runner's stack rather than nowhere at all, so what is being
+       caught is "this is not YOUR stack" and not "this is not a stack". */
+    uint64_t borrowed = runner->kernel_stack_top - 64;
+    int borrowed_is_the_victims = borrowed >= (uint64_t)(uintptr_t)victim->stack_base &&
+                                  borrowed < victim->kernel_stack_top;
+    REQUIRE(!borrowed_is_the_victims);
+    victim->rsp = borrowed;
+
+    fake_arch_set_cpu(0);
+    fake_arch_stand_on(runner->kernel_stack_top - 64);
+    CHECK_PANIC(schedule(), "not in its own stack");
+    fake_spinlock_release_all();
+
+    victim->rsp = victim->kernel_stack_top - 64;
+    victim->state = TASK_BLOCKED;
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *t = scheduler_task_by_slot(i);
+        if (t && t->state == TASK_BLOCKED) {
+            t->state = TASK_READY;
+        }
+    }
+    q13_kill(runner);
+    q13_kill(victim);
+}

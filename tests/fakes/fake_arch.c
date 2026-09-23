@@ -26,9 +26,17 @@ static uint64_t switches;
 uint64_t fake_arch_switches(void) { return switches; }
 
 void context_switch(uint64_t *old_rsp_out, uint64_t new_rsp);
+unsigned long long cpu_stack_pointer(void);
 void context_switch(uint64_t *old_rsp_out, uint64_t new_rsp) {
+    /* M182: this used to save 0xC0DEC0DEC0DEC0DE, on the reasoning that
+       nothing should depend on what a fake switch leaves behind. Something
+       does now: schedule() checks that the task it is about to resume has a
+       saved stack pointer inside its own stack, and a sentinel is outside
+       every stack there is - so every task the host tests had ever switched
+       away from looked corrupt. It saves what it is standing on, which is
+       what the real one does. */
     if (old_rsp_out) {
-        *old_rsp_out = 0xC0DEC0DEC0DEC0DEull;
+        *old_rsp_out = (uint64_t)cpu_stack_pointer();
     }
     (void)new_rsp;
     switches++;

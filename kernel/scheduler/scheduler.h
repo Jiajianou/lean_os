@@ -406,6 +406,7 @@ int scheduler_file_descriptor_high_water(int *which_task_out);
 
 void scheduler_reap_slot(task_t *t);
 void scheduler_dump_cpus(void);
+void scheduler_dump_stack_owner(uint64_t address);
 
 void scheduler_reset_file_descriptors_to_std(task_t *t);
 

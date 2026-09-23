@@ -981,10 +981,77 @@ void schedule(void) {
         }
     }
 
+    /* M182: and the other end of the same question, asked of the task being
+       resumed. M106's check above fires when a CPU is standing somewhere its
+       current task's stack does not cover - which is where the damage is SEEN,
+       not where it is done: the rsp it complains about was written into that
+       task by an earlier context_switch saving it, so by then the first event
+       is long gone.
+
+       This one looks at next->rsp before jumping to it. A task whose saved
+       stack pointer is not inside its own stack has never run there, and the
+       task it DOES point into is named, which is the pair the other check
+       could only guess at. It costs two comparisons on a path that already
+       does an FPU save and a page-table compare. */
+    if (next->kernel_stack_top != 0) {
+        uint64_t resume = next->rsp;
+        uint64_t next_base = (uint64_t)(uintptr_t)next->stack_base;
+        if (resume < next_base || resume >= next->kernel_stack_top) {
+            kernel_log_puts("[sched] cpu ");
+            kernel_log_put_dec((uint32_t)cpu);
+            kernel_log_puts(" is resuming '");
+            kernel_log_puts(next->name[0] ? next->name : "(unnamed)");
+            kernel_log_puts("' pid 0x");
+            kernel_log_put_hex32((uint32_t)next->id);
+            kernel_log_puts(" at rsp=0x");
+            kernel_log_put_hex64(resume);
+            kernel_log_puts(", outside its own stack 0x");
+            kernel_log_put_hex64(next_base);
+            kernel_log_puts("..0x");
+            kernel_log_put_hex64(next->kernel_stack_top);
+            kernel_log_putc('\n');
+            scheduler_dump_stack_owner(resume);
+            scheduler_dump_cpus();
+            panic("sched: a task's saved stack pointer is not in its own stack");
+        }
+    }
+
     context_switch(&previous->rsp, next->rsp);
 
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
+}
+
+/* M182: whose stack is this address in? A saved rsp that is not in its own
+   task's stack is almost always in somebody else's, and which somebody is the
+   whole question - it is the difference between "two cores shared a stack" and
+   "a stack was freed and handed out again". */
+void scheduler_dump_stack_owner(uint64_t address) {
+    for (int i = 0; i < task_count; i++) {
+        task_t *t = &tasks[i];
+        if (t->state == TASK_FREE || t->kernel_stack_top == 0) {
+            continue;
+        }
+        uint64_t base = (uint64_t)(uintptr_t)t->stack_base;
+        if (address >= base && address < t->kernel_stack_top) {
+            kernel_log_puts("  that address is in '");
+            kernel_log_puts(t->name[0] ? t->name : "(unnamed)");
+            kernel_log_puts("' pid 0x");
+            kernel_log_put_hex32((uint32_t)t->id);
+            kernel_log_puts(" state ");
+            kernel_log_put_dec((uint32_t)t->state);
+            kernel_log_puts(" stack 0x");
+            kernel_log_put_hex64(base);
+            kernel_log_puts("..0x");
+            kernel_log_put_hex64(t->kernel_stack_top);
+            kernel_log_puts(", ");
+            kernel_log_put_dec((uint32_t)(t->kernel_stack_top - address));
+            kernel_log_puts(" bytes below its top\n");
+            return;
+        }
+    }
+    kernel_log_puts("  that address is in no live task's stack - a freed one, "
+               "or never a stack at all\n");
 }
 
 void scheduler_dump_cpus(void) {
