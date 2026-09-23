@@ -274,6 +274,92 @@ TEST(tcp_state, data_arriving_is_buffered_and_acknowledged) {
     tcp_release(l);
 }
 
+/* MSG_PEEK, from underneath. A peek that consumes is not a peek, and the way
+   this was found - M183 - is worth keeping in a test rather than in a story:
+   Chromium asks whether a socket is still alive by peeking ONE byte at it,
+   and until then this libc forwarded that to read(2). One byte disappeared
+   out of the middle of every TLS stream that already had data waiting, which
+   is a record header read one byte late, which is a fatal alert. The whole
+   defect is "the byte was still there afterwards", so that is what is
+   checked. */
+TEST(tcp_state, a_peek_shows_the_bytes_and_leaves_them_where_they_are) {
+    tcp_fixture();
+    struct tcpcb *l = NULL;
+    uint32_t pseq = 0, oseq = 0;
+    struct tcpcb *c = established(&l, &pseq, &oseq);
+    REQUIRE(c != NULL);
+
+    fake_net_reset();
+    const uint8_t body[] = "hello";
+    from_peer(OUR_PORT, PEER_PORT, pseq, oseq, F_ACK | F_PSH, body, 5);
+    CHECK_EQ(tcp_bytes_available(c), 5);
+
+    uint8_t one = 0;
+    CHECK_EQ(tcp_peek(c, &one, 1), 1);
+    CHECK_EQ(one, 'h');
+    CHECK_EQ(tcp_bytes_available(c), 5);
+
+    uint8_t all[16] = {0};
+    CHECK_EQ(tcp_peek(c, all, sizeof(all)), 5);
+    CHECK_MEMEQ(all, body, 5);
+    CHECK_EQ(tcp_bytes_available(c), 5);
+
+    memset(all, 0, sizeof(all));
+    CHECK_EQ(tcp_receive(c, all, sizeof(all)), 5);
+    CHECK_MEMEQ(all, body, 5);
+    CHECK_EQ(tcp_bytes_available(c), 0);
+    tcp_release(c);
+    tcp_release(l);
+}
+
+/* A peek takes nothing, so the window it would advertise has not moved -
+   and a stack that acknowledged a peek would be telling the sender it may
+   send more into a buffer that is just as full as it was. */
+TEST(tcp_state, a_peek_acknowledges_nothing_because_it_took_nothing) {
+    tcp_fixture();
+    struct tcpcb *l = NULL;
+    uint32_t pseq = 0, oseq = 0;
+    struct tcpcb *c = established(&l, &pseq, &oseq);
+    REQUIRE(c != NULL);
+
+    const uint8_t body[] = "hello";
+    from_peer(OUR_PORT, PEER_PORT, pseq, oseq, F_ACK | F_PSH, body, 5);
+    sent_t after_data;
+    REQUIRE(last_sent(&after_data));
+    int sent_before = fake_net_tx_count();
+
+    uint8_t one = 0;
+    CHECK_EQ(tcp_peek(c, &one, 1), 1);
+    CHECK_EQ(fake_net_tx_count(), sent_before);
+
+    uint8_t all[16] = {0};
+    CHECK_EQ(tcp_receive(c, all, sizeof(all)), 5);
+    sent_t after_read;
+    REQUIRE(last_sent(&after_read));
+    CHECK(after_read.window > after_data.window);
+    tcp_release(c);
+    tcp_release(l);
+}
+
+/* With nothing queued a peek is "would block" on a live connection and end
+   of file on a dead one - the two answers recv(2) has to be able to give,
+   because net::SocketPosix reads them as "still connected" and "gone". */
+TEST(tcp_state, a_peek_with_nothing_queued_says_which_kind_of_nothing) {
+    tcp_fixture();
+    struct tcpcb *l = NULL;
+    uint32_t pseq = 0, oseq = 0;
+    struct tcpcb *c = established(&l, &pseq, &oseq);
+    REQUIRE(c != NULL);
+
+    uint8_t one = 0;
+    CHECK_EQ(tcp_peek(c, &one, 1), 0);
+
+    from_peer(OUR_PORT, PEER_PORT, pseq, oseq, F_ACK | F_FIN, NULL, 0);
+    CHECK_EQ(tcp_peek(c, &one, 1), -1);
+    tcp_release(c);
+    tcp_release(l);
+}
+
 TEST(tcp_state, a_segment_out_of_order_is_not_delivered_as_if_it_were_in_order) {
     tcp_fixture();
     struct tcpcb *l = NULL;

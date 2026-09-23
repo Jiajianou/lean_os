@@ -54,6 +54,13 @@ long unix_socket_receive(struct unix_socket *s, uint8_t *out, uint32_t max,
                    file_descriptor_slot_t *file_descriptors_out, int max_file_descriptors, int *nfds_out,
                    int *flags_out);
 
+/* The bytes that are queued, without taking them out of the queue - the
+   AF_UNIX half of MSG_PEEK. Descriptors are NOT reported: a peek takes
+   nothing, and a descriptor handed over twice would be two references to
+   one object where the sender sent one. They stay queued for the receive
+   that follows. */
+long unix_socket_peek(struct unix_socket *s, uint8_t *out, uint32_t max);
+
 int unix_socket_pending(const struct unix_socket *s);
 int unix_socket_readable_bytes(const struct unix_socket *s);
 

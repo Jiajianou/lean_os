@@ -170,6 +170,11 @@ REQUIRED_MARKERS=(
   "[m64] the network reached user space: a DHCP lease rather than a"
   "[m65] capabilities: a manifest the kernel applies rather than a launcher,"
   "[m66] TCP: a handshake, 16 KiB through a 4 KiB buffer arriving byte for"
+  # The program's own words rather than the kernel's: [m66] panics if tcptest
+  # fails, but this says the peek checks RAN. M183 - a recv(MSG_PEEK) that
+  # consumed its byte is what stopped every https page in the browser.
+  "bytes read back whole after two peeks"
+  "[m183] a peek is a question and a ceiling says so"
   "[m67] a preemptible kernel: \`int 0x80\` is a trap gate, four concurrent"
   "[m69] input-to-photon:"
   "[m70] the kernel log is readable from user space:"

@@ -103,6 +103,7 @@ static const entry_t table[] = {
     {SYS_accept,        CLASS_BLOCK, 0, NULL},
     {SYS_connect,       CLASS_BLOCK, 2, NULL},
     {SYS_receive,          CLASS_BLOCK, 2, NULL},
+    {SYS_peek,          CLASS_BLOCK, 2, NULL},
     {SYS_recvfrom,      CLASS_BLOCK, 2, NULL},
 
     {SYS_getpid,        CLASS_PLAIN, 0, NULL},

@@ -495,6 +495,34 @@ int unix_socket_readable_bytes(const struct unix_socket *s) {
     return bytes;
 }
 
+long unix_socket_peek(struct unix_socket *s, uint8_t *out, uint32_t max) {
+    if (!s) {
+        return -1;
+    }
+    uint64_t f = spin_lock_irqsave(&unix_lock);
+    if (s->shut_rd) {
+        spin_unlock_irqrestore(&unix_lock, f);
+        return -1;
+    }
+    if (s->count == 0 && s->seg_count == 0) {
+        int eof = (!s->peer || s->peer->shut_wr);
+        spin_unlock_irqrestore(&unix_lock, f);
+        return eof ? -1 : 0;
+    }
+    /* A datagram is the unit on a SEQPACKET socket, so a peek shows the
+       message at the head and not the one behind it. */
+    uint32_t available = s->count;
+    if (s->type == UNIX_SOCKET_SEQPACKET && s->seg_count > 0) {
+        available = s->segs[s->seg_head].length;
+    }
+    uint32_t n = available < max ? available : max;
+    for (uint32_t i = 0; i < n; i++) {
+        out[i] = s->buffer[(s->head + i) % UNIX_BUFFER_SIZE];
+    }
+    spin_unlock_irqrestore(&unix_lock, f);
+    return (long)n;
+}
+
 int unix_socket_pending(const struct unix_socket *s) {
     if (!s) {
         return 0;

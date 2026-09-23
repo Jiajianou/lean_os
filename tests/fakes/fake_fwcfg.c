@@ -4,7 +4,11 @@
 
 void panic(const char *message);
 
-#define MAX_ITEMS 8
+/* The signature, the directory, and one item per switch fwcfg.c reads - so
+   this has to be two more than the number of switches, and it was exactly
+   the number of switches the last time the table in tests/test_fwcfg.c was
+   grown. */
+#define MAX_ITEMS 16
 #define MAX_BYTES 65536
 
 typedef struct {

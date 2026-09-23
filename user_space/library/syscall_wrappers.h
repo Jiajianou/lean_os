@@ -144,6 +144,7 @@ long sys_connstat(int fd);
 long sys_accept(int fd, os_sockaddr_t *from);
 long sys_send(int fd, const void *data, uint32_t length);
 long sys_receive(int fd, void *data, uint32_t max);
+long sys_peek(int fd, void *data, uint32_t max, int dontwait);
 long sys_bind(int fd, uint16_t port);
 long sys_sendto(int fd, uint32_t ip, uint16_t port, const void *data, uint32_t length);
 long sys_recvfrom(int fd, void *data, uint32_t max, os_sockaddr_t *from);

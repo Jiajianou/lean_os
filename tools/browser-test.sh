@@ -13,6 +13,29 @@ cd "$(dirname "$0")/.."
 IMAGE="${LEANOS_IMAGE:-build/os-image.bin}"
 LOG="${LEANOS_BROWSER_LOG:-build/browser-serial.log}"
 SECONDS_TO_RUN="${1:-900}"
+# The page, from outside the image. Without one the kernel's own data: URL is
+# what runs, which is the picture tools/browser-shot.py grades; with one this
+# harness is how a real page - a resolver, a connection, a certificate - is
+# asked for without editing a kernel constant and recreating the disk.
+BROWSER_URL="${2:-${LEANOS_BROWSER_URL:-}}"
+# The switches that are about the measurement rather than the machine. The
+# kernel's own default is "--v=0 --single-process"; this is how the four-process
+# arrangement the desktop runs - and the network service that is its own
+# process in it - is asked for here, where every child's stderr is on the
+# serial line.
+BROWSER_ARGS="${LEANOS_BROWSER_ARGS:-}"
+# Expanded below as ${URL_FWCFG[@]+"${URL_FWCFG[@]}"}: this Mac's bash is 3.2,
+# where "${empty[@]}" under `set -u` is an unbound variable rather than
+# nothing at all, and the script dies before QEMU starts.
+URL_FWCFG=()
+if [ -n "$BROWSER_URL" ]; then
+  URL_FWCFG+=(-fw_cfg "name=opt/leanos/browserurl,string=$BROWSER_URL")
+  echo "[harness] page: $BROWSER_URL"
+fi
+if [ -n "$BROWSER_ARGS" ]; then
+  URL_FWCFG+=(-fw_cfg "name=opt/leanos/browserargs,string=$BROWSER_ARGS")
+  echo "[harness] switches: $BROWSER_ARGS"
+fi
 QEMU_CPUS=${QEMU_CPUS:-1}
 QEMU_MEM=${QEMU_MEM:-4096}
 
@@ -36,6 +59,7 @@ qemu-system-x86_64 \
   -audiodev none,id=snd0 -device AC97,audiodev=snd0 \
   -fw_cfg name=opt/leanos/selftest,string=1 \
   -fw_cfg name=opt/leanos/browser,string=1 \
+  ${URL_FWCFG[@]+"${URL_FWCFG[@]}"} \
   -serial file:"$LOG" -monitor none &
 QEMU_PID=$!
 disown "$QEMU_PID" 2>/dev/null || true
@@ -74,6 +98,14 @@ fi
 
 # The picture, graded here rather than on the machine: a PNG decoder belongs
 # on the side that can be told it is wrong by something else.
+if [ -n "$BROWSER_URL" ] || [ -n "$BROWSER_ARGS" ]; then
+  echo "      page was ${BROWSER_URL:-the compiled-in one} - the pixel grader below is for the"
+  echo "      compiled-in page, so what to read is $LOG"
+  python3 tools/browser-shot.py "$LOG" --save build/browser-shot.png >/dev/null 2>&1 \
+    && echo "      the decoded picture is in build/browser-shot.png"
+  exit 0
+fi
+
 python3 tools/browser-shot.py "$LOG" --save build/browser-shot.png
 rc=$?
 if [ $rc -ne 0 ]; then

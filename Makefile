@@ -755,10 +755,15 @@ LLVM_CC    := $(shell for c in /opt/homebrew/opt/llvm/bin/clang \
                         command -v $$c >/dev/null 2>&1 && echo $$c && break; \
                       done)
 COV_CC     := $(LLVM_CC)
+# The same -idirafter as TEST_CFLAGS above, and for the same reason: this
+# coverage build compiles the same sources, so it needs the same way of
+# reaching <libintl.h>. It did not have it, so `make coverage` had not run
+# since M157 put libintl.c in TEST_USER_SRCS - a broken instrument nobody
+# was watching, which is the kind this project is supposed to notice.
 COV_CFLAGS := -std=c11 -g -O0 -Wall -Wextra -DLEANOS_HOST_TEST \
               -fprofile-instr-generate -fcoverage-mapping \
               -Itests -Itests/fakes -Ikernel -Isystem_api/include -Iuser_space/library \
-              $(LVGL_INCLUDES)
+              $(LVGL_INCLUDES) -idirafter user_space/libc/include
 
 $(COV_BUILD):
 	mkdir -p $@

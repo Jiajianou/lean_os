@@ -1,5 +1,6 @@
 #include "open_file.h"
 
+#include "drivers/kernel_log.h"
 #include "library/spinlock.h"
 #include "virtual_file_system.h"
 
@@ -7,6 +8,8 @@ static open_file_t table[MAX_OPEN_FILES];
 static int initialized;
 
 static spinlock_t open_file_lock;
+
+static int open_file_exhaustions;
 
 static void ensure_init(void) {
     if (initialized) {
@@ -45,7 +48,28 @@ open_file_t *open_file_alloc(int handle, int writable, const char *path, int is_
         }
     }
     spin_unlock_irqrestore(&open_file_lock, flags);
+    /* A machine-wide ceiling reached is a fact about the MACHINE, and the
+       caller only ever sees "open failed" - which looks exactly like a file
+       that is not there. M183 spent an afternoon on the far end of that:
+       Chromium's launcher opens /dev/null in the forked child before it
+       execs, gets nothing, and _exit(127)s, so every child died at birth
+       with no explanation anywhere. Reported once per boot and then every
+       64th time, because a machine at its ceiling stays at it. */
+    open_file_exhaustions++;
+    if (open_file_exhaustions == 1 || open_file_exhaustions % 64 == 0) {
+        kernel_log_puts("[openfile] the machine is at its ceiling of ");
+        kernel_log_put_dec(MAX_OPEN_FILES);
+        kernel_log_puts(" open files - refusing to open ");
+        kernel_log_puts(path ? path : "(no path)");
+        kernel_log_puts(" (");
+        kernel_log_put_dec((uint32_t)open_file_exhaustions);
+        kernel_log_puts(" refusal(s) since boot)\n");
+    }
     return 0;
+}
+
+int open_file_exhaustion_count(void) {
+    return open_file_exhaustions;
 }
 
 void open_file_reference(open_file_t *f) {

@@ -76,7 +76,7 @@ TEST(fwcfg, the_selftest_file_is_read_and_only_exactly_one_enables_them) {
     }
 }
 
-TEST(fwcfg, the_four_switches_are_read_independently_of_each_other) {
+TEST(fwcfg, every_switch_is_read_independently_of_every_other) {
     static const struct {
         const char *name;
         int (*ask)(void);
@@ -86,6 +86,16 @@ TEST(fwcfg, the_four_switches_are_read_independently_of_each_other) {
         {"opt/leanos/bootstrap", boot_bootstrap_enabled},
         {"opt/leanos/pytest",    boot_pytest_enabled},
         {"opt/leanos/pybuild",   boot_pybuild_enabled},
+        /* forksmp, browser and readbench arrived in M165, M169 and M177 and
+           this table was not grown for any of them - which is the third time
+           this row's own floor comment has had to say so, and it went unseen
+           because the coverage build had stopped compiling. Every switch in
+           fwcfg.c belongs here: they share one cache-reset in fwcfg_init and
+           a switch that read another's cached answer would be invisible to a
+           test that never asks it. */
+        {"opt/leanos/forksmp",   boot_forksmp_enabled},
+        {"opt/leanos/browser",   boot_browser_enabled},
+        {"opt/leanos/readbench", boot_readbench_enabled},
     };
     const unsigned N = sizeof(SWITCHES) / sizeof(SWITCHES[0]);
 

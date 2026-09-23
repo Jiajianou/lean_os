@@ -50,6 +50,19 @@ int tcp_send(struct tcpcb *tcb, const uint8_t *data, uint16_t length);
 
 int tcp_receive(struct tcpcb *tcb, uint8_t *out, uint16_t max);
 
+/* What is in the receive buffer, without taking it out of it.
+
+   recv(2)'s MSG_PEEK is not a convenience: net::SocketPosix asks "is this
+   connection still there" by peeking one byte at it, and a peek that
+   CONSUMES that byte takes it out of the stream for good. M183 found this
+   as a browser that could not load an https page - one byte missing from
+   the middle of a TLS stream is a record header read one byte late, which
+   is a fatal alert and a dead connection.
+
+   Nothing is acknowledged here, because nothing was taken: the window has
+   not moved, and an ACK would say what the last one already said. */
+int tcp_peek(const struct tcpcb *tcb, uint8_t *out, uint16_t max);
+
 int tcp_bytes_available(const struct tcpcb *tcb);
 int tcp_send_space(const struct tcpcb *tcb);
 tcp_state_t tcp_state(const struct tcpcb *tcb);

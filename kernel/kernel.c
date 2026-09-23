@@ -4107,29 +4107,93 @@ static void boot_selftests_system(void) {
             kernel_log_puts("[browser] done\n");
             power_shutdown(POWER_OFF);
         }
-        const char *br_argv[] = {
-            PATH_BIN_DIRECTORY "chromiumshell",
-            "--enable-logging=stderr", "--v=0",
-            "--ozone-platform=headless",
-            "--ozone-dump-file=" BROWSER_SHOT_DIRECTORY,
-            "--disable-gpu",
-            "--content-shell-host-window-size=400x300",
-            "--content-shell-hide-toolbar",
-            /* One process, and it is a measurement rather than a
-               convenience. Chromium's own browser runs here as four
-               processes - [m167] requires that and gets it - but a renderer
-               in a process of its OWN never submits a compositor frame on
-               this machine yet: every process starts, the machine goes
-               quiet, and the window keeps the one frame the browser drew
-               before the page existed. In one process the same page, the
-               same Blink, the same //cc and the same Skia produce the
-               picture below. So what is graded here is the rendering, and
-               what is not graded here is the frame crossing a process
-               boundary - which is the next rung and is named rather than
-               hidden. */
-            "--single-process",
-            BROWSER_PAGE,
-            0};
+        /* Which page, from outside the image. The compiled-in one is a
+           data: URL because it needs no network and no fonts, which is what
+           makes it the right thing to grade a rasteriser against. A page on
+           somebody else's machine is a different question - a resolver, a
+           connection, a certificate - and asking it used to mean editing this
+           constant and rebuilding a kernel, which recreates the disk and
+           takes the browser off it. The URL is a string a harness passes,
+           for the same reason QEMU_RES is. */
+        static char br_page[1024];
+        const char *br_url = BROWSER_PAGE;
+        int br_url_length = fwcfg_read_file("opt/leanos/browserurl", br_page,
+                                            sizeof(br_page) - 1);
+        if (br_url_length > 0) {
+            br_page[br_url_length] = 0;
+            br_url = br_page;
+            kernel_log_puts("[browser] page from fw_cfg: ");
+            kernel_log_puts(br_url);
+            kernel_log_puts("\n");
+        }
+
+        /* The switches that are about this MEASUREMENT rather than about this
+           machine, from outside the image for the same reason the page is.
+
+           --single-process is the default and it is a measurement rather than
+           a convenience: Chromium's own browser runs here as four processes -
+           [m167] requires that and gets it - and in one process the same page,
+           the same Blink, the same //cc and the same Skia produce the picture
+           below, with nothing crossing a process boundary to confuse what is
+           being graded. But a page fetched over the network is fetched by a
+           network service that is a process of its own on the desktop and is
+           not one here, and M183 spent an afternoon on a bug that was in
+           neither arrangement and looked like it was in both - so being able
+           to run this stage the way the desktop runs it, with every child's
+           stderr still on the serial line, is what took the process model
+           out of the list of suspects. Which arrangement is a string a
+           harness passes. */
+        static char br_switches[512];
+        static const char *br_extra[8];
+        int br_extra_count = 0;
+        int br_switch_length = fwcfg_read_file("opt/leanos/browserargs",
+                                               br_switches,
+                                               sizeof(br_switches) - 1);
+        if (br_switch_length > 0) {
+            br_switches[br_switch_length] = 0;
+            char *p = br_switches;
+            while (*p && br_extra_count < 8) {
+                while (*p == ' ') {
+                    p++;
+                }
+                if (!*p) {
+                    break;
+                }
+                br_extra[br_extra_count++] = p;
+                while (*p && *p != ' ') {
+                    p++;
+                }
+                if (*p) {
+                    *p++ = 0;
+                }
+            }
+            kernel_log_puts("[browser] switches from fw_cfg:");
+            for (int i = 0; i < br_extra_count; i++) {
+                kernel_log_putc(' ');
+                kernel_log_puts(br_extra[i]);
+            }
+            kernel_log_putc('\n');
+        } else {
+            br_extra[br_extra_count++] = "--v=0";
+            br_extra[br_extra_count++] = "--single-process";
+        }
+
+        /* Seven fixed switches, up to eight from fw_cfg, the page, and the
+           terminator. */
+        const char *br_argv[17];
+        int br_argc = 0;
+        br_argv[br_argc++] = PATH_BIN_DIRECTORY "chromiumshell";
+        br_argv[br_argc++] = "--enable-logging=stderr";
+        br_argv[br_argc++] = "--ozone-platform=headless";
+        br_argv[br_argc++] = "--ozone-dump-file=" BROWSER_SHOT_DIRECTORY;
+        br_argv[br_argc++] = "--disable-gpu";
+        br_argv[br_argc++] = "--content-shell-host-window-size=400x300";
+        br_argv[br_argc++] = "--content-shell-hide-toolbar";
+        for (int i = 0; i < br_extra_count; i++) {
+            br_argv[br_argc++] = br_extra[i];
+        }
+        br_argv[br_argc++] = br_url;
+        br_argv[br_argc] = 0;
         profile_reset();
         profile_start();
         task_t *brt = process_spawnv("chromiumshell", br_image, br_bytes,
@@ -12991,6 +13055,30 @@ static void boot_selftests_system(void) {
         kernel_log_puts("[m40] boot-task fd reset self-test passed (0x");
         kernel_log_put_hex32((uint32_t)leaked);
         kernel_log_puts(" leaked self-test fd(s) reclaimed before PID 1 inherits the table).\n\n");
+    }
+
+    {
+        /* Two ceilings, asked of the machine after everything above has run
+           on it. Both arrive at a caller as "it failed" and nothing else, so
+           the only way to know one was reached is to count - which is what
+           M183 cost an afternoon for. The battery opens toybox, python,
+           sqlite, fonts and a filesystem's worth of files; if it ever runs
+           out, the number here is the first thing anyone will want. */
+        int files = open_file_exhaustion_count();
+        if (files) {
+            kernel_log_puts("[m183] the machine refused ");
+            kernel_log_put_dec((uint32_t)files);
+            kernel_log_puts(" open(s) because its table of ");
+            kernel_log_put_dec(MAX_OPEN_FILES);
+            kernel_log_puts(" open files was full\n");
+            panic("M183 open-file ceiling: the battery exhausted the machine's open files");
+        }
+        kernel_log_puts("[m183] a peek is a question and a ceiling says so: MSG_PEEK left "
+                   "every byte where it was, and nothing this battery ran reached the "
+                   "machine's table of ");
+        kernel_log_put_dec(MAX_OPEN_FILES);
+        kernel_log_puts(" open files - a ceiling that says nothing when it is reached is "
+                   "how M183's browser died twice over - self-test passed.\n\n");
     }
 }
 

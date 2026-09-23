@@ -260,7 +260,14 @@ typedef struct {
 #define SYS_getrlimit             134
 #define SYS_setrlimit             135
 
-#define SYSCALL_COUNT 136
+/* recv(2)'s MSG_PEEK: what is in a socket's receive queue, without taking
+   it out. A C library cannot answer this by reading and remembering - the
+   bytes are gone from the kernel's queue the moment it reads them, and a
+   second descriptor for the same socket would not see them. See M183: a
+   peek that consumed its byte cost this machine every https page. */
+#define SYS_peek                  136
+
+#define SYSCALL_COUNT 137
 
 #ifdef __cplusplus
 }

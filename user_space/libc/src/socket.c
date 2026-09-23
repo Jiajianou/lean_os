@@ -214,7 +214,43 @@ ssize_t send(int fd, const void *buffer, size_t length, int flags) {
     return (ssize_t)n;
 }
 
+/* MSG_PEEK, which is a question rather than a read: what is queued, left
+   where it is. Only the kernel can answer it - a C library that read the
+   bytes and kept them would have taken them out of the socket, and the next
+   reader (or a second descriptor for the same socket) would never see them.
+
+   M183: this was forwarded to read(2) until then, so every peek ATE a byte.
+   net::SocketPosix peeks one byte to ask whether a connection is still
+   there, which Chromium does before reusing a socket, so one byte went
+   missing from the middle of every TLS stream that already had data waiting
+   - and TLS 1.3 always does, because the server sends session tickets the
+   moment the handshake ends. BoringSSL then read a record header one byte
+   late and killed the connection with a protocol_version alert. */
+static ssize_t peek(int fd, void *buffer, size_t length, int flags) {
+    long n = sys_peek(fd, buffer, (uint32_t)length, (flags & MSG_DONTWAIT) ? 1 : 0);
+    if (n == -OS_ERROR_AGAIN) {
+        errno = EAGAIN;
+        return -1;
+    }
+    if (n == -OS_ERROR_INTR) {
+        errno = EINTR;
+        return -1;
+    }
+    if (n == -OS_ERROR_INVALID) {
+        errno = EOPNOTSUPP;
+        return -1;
+    }
+    if (n < 0) {
+        errno = ENOTSOCK;
+        return -1;
+    }
+    return (ssize_t)n;
+}
+
 ssize_t recv(int fd, void *buffer, size_t length, int flags) {
+    if (flags & MSG_PEEK) {
+        return peek(fd, buffer, length, flags);
+    }
     if (flags & MSG_DONTWAIT) {
         long n = sys_receive(fd, buffer, (uint32_t)length);
         if (n < 0) {
@@ -251,7 +287,13 @@ ssize_t sendto(int fd, const void *buffer, size_t length, int flags,
 
 ssize_t recvfrom(int fd, void *buffer, size_t length, int flags,
                  struct sockaddr *from, socklen_t *fromlen) {
-    (void)flags;
+    if (flags & MSG_PEEK) {
+        /* A connected socket peeked at through recvfrom has no address to
+           report that getpeername would not give, and this kernel's
+           datagram queue is not peekable - so this is the stream case and
+           the address is left alone. */
+        return peek(fd, buffer, length, flags);
+    }
     os_sockaddr_t sa;
     memset(&sa, 0, sizeof(sa));
     long n = sys_recvfrom(fd, buffer, (uint32_t)length, &sa);
@@ -378,6 +420,24 @@ ssize_t recvmsg(int fd, struct msghdr *message, int flags) {
     if (!message) {
         errno = EFAULT;
         return -1;
+    }
+    if (flags & MSG_PEEK) {
+        /* The bytes, and no descriptors: a peek takes nothing, and handing
+           the same descriptor over twice would be two references where the
+           sender sent one. They stay queued for the recvmsg that follows. */
+        ssize_t n = -1;
+        if (message->msg_iovlen >= 1 && message->msg_iov) {
+            n = peek(fd, message->msg_iov[0].iov_base,
+                     message->msg_iov[0].iov_len, flags);
+        } else {
+            n = peek(fd, (void *)0, 0, flags);
+        }
+        if (n >= 0) {
+            message->msg_controllen = 0;
+            message->msg_namelen = 0;
+            message->msg_flags = 0;
+        }
+        return n;
     }
     int file_descriptors[OS_MESSAGE_MAX_FILE_DESCRIPTORS];
     int max_file_descriptors = 0;

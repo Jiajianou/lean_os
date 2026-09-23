@@ -50,6 +50,115 @@ TEST(unix_socket, a_pair_carries_bytes_both_ways) {
     expect_nothing_left();
 }
 
+/* The AF_UNIX half of MSG_PEEK, and the same defect M183 found on TCP: a
+   peek that consumes is not a peek. Descriptors are deliberately NOT
+   reported by one - handing the same descriptor over twice would be two
+   references to one object where the sender sent one - so what a peek shows
+   is the bytes, and the descriptors are still there for the receive after
+   it. */
+TEST(unix_socket, a_peek_shows_the_bytes_and_takes_nothing) {
+    clean();
+    struct unix_socket *a = NULL;
+    struct unix_socket *b = NULL;
+    REQUIRE(unix_socket_pair(UNIX_SOCKET_STREAM, &a, &b) == 0);
+
+    uint8_t out[64];
+    memset(out, 0, sizeof(out));
+    CHECK_EQ(unix_socket_peek(b, out, sizeof(out)), 0);
+
+    CHECK_EQ(unix_socket_send(a, (const uint8_t *)"hello", 5, NULL, 0), 5);
+    uint8_t one = 0;
+    CHECK_EQ(unix_socket_peek(b, &one, 1), 1);
+    CHECK_EQ(one, 'h');
+    CHECK_EQ(unix_socket_readable_bytes(b), 5);
+
+    CHECK_EQ(unix_socket_peek(b, out, sizeof(out)), 5);
+    CHECK_MEMEQ(out, "hello", 5);
+    CHECK_EQ(unix_socket_readable_bytes(b), 5);
+
+    int nfds = 0, flags = 0;
+    memset(out, 0, sizeof(out));
+    CHECK_EQ(unix_socket_receive(b, out, sizeof(out), NULL, 0, &nfds, &flags), 5);
+    CHECK_MEMEQ(out, "hello", 5);
+    CHECK_EQ(unix_socket_readable_bytes(b), 0);
+
+    unix_socket_unref(a);
+    unix_socket_unref(b);
+    expect_nothing_left();
+}
+
+/* A peek at a socket whose peer has gone is end of file, and a peek at a
+   live one with nothing on it is "would block" - the two different nothings
+   recv(2) has to be able to tell apart. */
+/* A datagram is the unit on a SEQPACKET socket, so a peek shows the message
+   at the head of the queue and not the one behind it - the same rule the
+   receive follows, and the reason a peek cannot just report s->count. */
+TEST(unix_socket, a_peek_at_a_message_socket_stops_at_the_first_message) {
+    clean();
+    struct unix_socket *a = NULL;
+    struct unix_socket *b = NULL;
+    REQUIRE(unix_socket_pair(UNIX_SOCKET_SEQPACKET, &a, &b) == 0);
+
+    CHECK_EQ(unix_socket_send(a, (const uint8_t *)"one", 3, NULL, 0), 3);
+    CHECK_EQ(unix_socket_send(a, (const uint8_t *)"two", 3, NULL, 0), 3);
+
+    uint8_t out[64];
+    memset(out, 0, sizeof(out));
+    CHECK_EQ(unix_socket_peek(b, out, sizeof(out)), 3);
+    CHECK_MEMEQ(out, "one", 3);
+    /* Three reported out of six queued: the peek stopped at the message
+       boundary and took neither message. */
+    CHECK_EQ(unix_socket_readable_bytes(b), 6);
+
+    int nfds = 0, flags = 0;
+    memset(out, 0, sizeof(out));
+    CHECK_EQ(unix_socket_receive(b, out, sizeof(out), NULL, 0, &nfds, &flags), 3);
+    CHECK_MEMEQ(out, "one", 3);
+    memset(out, 0, sizeof(out));
+    CHECK_EQ(unix_socket_peek(b, out, sizeof(out)), 3);
+    CHECK_MEMEQ(out, "two", 3);
+
+    unix_socket_unref(a);
+    unix_socket_unref(b);
+    expect_nothing_left();
+}
+
+/* A socket shut down for reading refuses a peek rather than answering out of
+   a queue nobody may take from. */
+TEST(unix_socket, a_peek_at_a_socket_shut_for_reading_is_refused) {
+    clean();
+    struct unix_socket *a = NULL;
+    struct unix_socket *b = NULL;
+    REQUIRE(unix_socket_pair(UNIX_SOCKET_STREAM, &a, &b) == 0);
+
+    CHECK_EQ(unix_socket_send(a, (const uint8_t *)"hello", 5, NULL, 0), 5);
+    uint8_t one = 0;
+    CHECK_EQ(unix_socket_peek(b, &one, 1), 1);
+    CHECK_EQ(unix_socket_shutdown(b, 0), 0);
+    CHECK_EQ(unix_socket_peek(b, &one, 1), -1);
+    CHECK_EQ(unix_socket_peek(NULL, &one, 1), -1);
+
+    unix_socket_unref(a);
+    unix_socket_unref(b);
+    expect_nothing_left();
+}
+
+TEST(unix_socket, a_peek_tells_an_empty_socket_from_a_finished_one) {
+    clean();
+    struct unix_socket *a = NULL;
+    struct unix_socket *b = NULL;
+    REQUIRE(unix_socket_pair(UNIX_SOCKET_STREAM, &a, &b) == 0);
+
+    uint8_t one = 0;
+    CHECK_EQ(unix_socket_peek(b, &one, 1), 0);
+    CHECK_EQ(unix_socket_shutdown(a, 1), 0);
+    CHECK_EQ(unix_socket_peek(b, &one, 1), -1);
+
+    unix_socket_unref(a);
+    unix_socket_unref(b);
+    expect_nothing_left();
+}
+
 TEST(unix_socket, a_stream_coalesces_and_a_message_does_not) {
     clean();
     struct unix_socket *a = NULL, *b = NULL;

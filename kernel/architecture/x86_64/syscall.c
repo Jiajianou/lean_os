@@ -2437,11 +2437,27 @@ static long sys_shutdown(uint64_t mode, uint64_t a2, uint64_t a3, uint64_t a4, u
     power_shutdown((int)mode);
 }
 
+static int descriptor_exhaustions;
+
+/* How many descriptors this process has no room for, which is a fact about
+   THE PROCESS where open_file_exhaustion_count() is one about the machine.
+   Both arrive at a caller as "it failed", and telling them apart by reading
+   the source is what M183 did not want to do a second time. */
 static int alloc_file_descriptor(task_t *t) {
     for (int i = 2; i < MAX_FILE_DESCRIPTORS; i++) {
         if (t->descriptor_table->slots[i].type == FILE_DESCRIPTOR_NONE) {
             return i;
         }
+    }
+    descriptor_exhaustions++;
+    if (descriptor_exhaustions == 1 || descriptor_exhaustions % 64 == 0) {
+        kernel_log_puts("[fd] ");
+        kernel_log_puts(t->name);
+        kernel_log_puts(" is at its ceiling of ");
+        kernel_log_put_dec(MAX_FILE_DESCRIPTORS);
+        kernel_log_puts(" descriptors (");
+        kernel_log_put_dec((uint32_t)descriptor_exhaustions);
+        kernel_log_puts(" refusal(s) since boot)\n");
     }
     return -1;
 }
@@ -3848,6 +3864,11 @@ static long sys_accept(uint64_t fd, uint64_t from_pointer, uint64_t a3, uint64_t
     return install_socket_file_descriptor(conn);
 }
 
+/* The staging buffer is on the stack and the call is under the network lock,
+   for the same two reasons everywhere else in this file: a static one is
+   shared by every task that is in this call at once, and tcp_send walks the
+   same state the NIC's interrupt handler does. sys_write's socket arm had
+   both right; these two had neither. */
 static long sys_send(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4; (void)a5; (void)a6;
     struct socket *s = socket_for_file_descriptor(fd);
@@ -3858,11 +3879,14 @@ static long sys_send(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4,
         }
         length = TCP_MAX_MSS;
     }
-    static uint8_t staging[TCP_MAX_MSS];
+    uint8_t staging[TCP_MAX_MSS];
     if (length && copy_from_user(staging, buffer, (size_t)length) != 0) {
         return -1;
     }
-    return tcp_send(tcb, staging, (uint16_t)length);
+    net_lock_acquire();
+    int n = tcp_send(tcb, staging, (uint16_t)length);
+    net_lock_release();
+    return n;
 }
 
 static long sys_receive(uint64_t fd, uint64_t buffer, uint64_t max, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -3875,12 +3899,109 @@ static long sys_receive(uint64_t fd, uint64_t buffer, uint64_t max, uint64_t a4,
     if (max > TCP_MAX_MSS) {
         max = TCP_MAX_MSS;
     }
-    static uint8_t staging[TCP_MAX_MSS];
+    uint8_t staging[TCP_MAX_MSS];
+    net_lock_acquire();
     int n = tcp_receive(tcb, staging, (uint16_t)max);
+    net_lock_release();
     if (n <= 0) {
         return n;
     }
     return copy_to_user(buffer, staging, (size_t)n) == 0 ? n : -1;
+}
+
+/* recv(2) with MSG_PEEK, which is not a convenience and is not something a
+   C library can do for itself.
+
+   net::SocketPosix asks "is this connection still there, and has anything
+   arrived on it" by peeking ONE byte; Chromium does that before it reuses a
+   socket. A recv that ignores MSG_PEEK and reads instead takes that byte out
+   of the stream for good, and the next reader starts one byte late. On a TLS
+   connection that is a record header read at the wrong offset - a version
+   field that is really the tail of a length - so BoringSSL sends a fatal
+   protocol_version alert and every https page on this machine failed with
+   ERR_SSL_PROTOCOL_ERROR. It only bit when data had ALREADY arrived, which
+   for TLS 1.3 is the normal case: the server sends its session tickets
+   unprompted the moment the handshake ends.
+
+   `dontwait` is MSG_DONTWAIT rather than the descriptor's own O_NONBLOCK,
+   because recv(2) takes both and a caller may pass either. */
+static long sys_peek(uint64_t fd, uint64_t buffer, uint64_t max, uint64_t dontwait,
+                     uint64_t a5, uint64_t a6) {
+    (void)a5;
+    (void)a6;
+    task_t *self = scheduler_current();
+    if (!self || fd >= MAX_FILE_DESCRIPTORS) {
+        return -1;
+    }
+    if (max && !user_range_ok(buffer, max, 1)) {
+        return -1;
+    }
+    file_descriptor_slot_t *slot = &self->descriptor_table->slots[fd];
+    int nonblock = slot->nonblock || dontwait;
+    /* recv(2) with a length of zero answers zero rather than waiting for a
+       byte it has nowhere to put. */
+    if (max == 0) {
+        return (slot->type == FILE_DESCRIPTOR_UNIX ||
+                slot->type == FILE_DESCRIPTOR_SOCKET) ? 0 : -1;
+    }
+
+    if (slot->type == FILE_DESCRIPTOR_UNIX) {
+        uint32_t want = max > UNIX_STAGING_CHUNK ? UNIX_STAGING_CHUNK : (uint32_t)max;
+        uint8_t staging[UNIX_STAGING_CHUNK];
+        for (;;) {
+            uint64_t seq = scheduler_event_sequence();
+            long n = unix_socket_peek(slot->un, staging, want);
+            if (n > 0) {
+                return copy_to_user(buffer, staging, (size_t)n) == 0 ? n : -1;
+            }
+            if (n < 0) {
+                return 0;
+            }
+            if (nonblock) {
+                return -OS_ERROR_AGAIN;
+            }
+            if (scheduler_signal_pending()) {
+                return -OS_ERROR_INTR;
+            }
+            scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, 0, seq);
+        }
+    }
+
+    if (slot->type == FILE_DESCRIPTOR_SOCKET) {
+        struct tcpcb *tcb = socket_tcb(slot->sock);
+        if (!tcb) {
+            /* A datagram socket. Its queue is a queue of MESSAGES, and
+               showing one without taking it is a different piece of
+               bookkeeping from this one; the condition for building it is a
+               caller that peeks at a datagram. Refusing is the truthful
+               answer meanwhile - the alternative, forwarding to recvfrom,
+               is exactly the silent consumption this call exists to end. */
+            return -OS_ERROR_INVALID;
+        }
+        uint16_t want = max > TCP_MAX_MSS ? TCP_MAX_MSS : (uint16_t)max;
+        uint8_t staging[TCP_MAX_MSS];
+        for (;;) {
+            uint64_t seq = scheduler_event_sequence();
+            net_lock_acquire();
+            int n = tcp_peek(tcb, staging, want);
+            net_lock_release();
+            if (n > 0) {
+                return copy_to_user(buffer, staging, (size_t)n) == 0 ? n : -1;
+            }
+            if (n < 0) {
+                return 0;
+            }
+            if (nonblock) {
+                return -OS_ERROR_AGAIN;
+            }
+            if (scheduler_signal_pending()) {
+                return -OS_ERROR_INTR;
+            }
+            scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, 0, seq);
+        }
+    }
+
+    return -1;
 }
 
 static long sys_bind(uint64_t fd, uint64_t port, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -5225,6 +5346,7 @@ static const syscall_function_t syscall_table[SYSCALL_COUNT] = {
     [SYS_sockname] = sys_sockname,
     [SYS_munmap] = sys_munmap,
     [SYS_thread_create] = sys_thread_create,
+    [SYS_peek] = sys_peek,
     [SYS_getrlimit] = sys_getrlimit,
     [SYS_setrlimit] = sys_setrlimit,
     [SYS_thread_setname] = sys_thread_setname,

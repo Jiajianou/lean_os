@@ -386,6 +386,10 @@ long sys_receive(int fd, void *data, uint32_t max) {
     return do_syscall(SYS_receive, fd, (long)data, (long)max);
 }
 
+long sys_peek(int fd, void *data, uint32_t max, int dontwait) {
+    return do_syscall6(SYS_peek, fd, (long)data, (long)max, dontwait, 0, 0);
+}
+
 long sys_bind(int fd, uint16_t port) {
     return do_syscall(SYS_bind, fd, port, 0);
 }

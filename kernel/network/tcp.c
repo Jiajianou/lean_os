@@ -483,6 +483,21 @@ int tcp_receive(struct tcpcb *t, uint8_t *out, uint16_t max) {
     return (int)n;
 }
 
+int tcp_peek(const struct tcpcb *t, uint8_t *out, uint16_t max) {
+    if (!t || !t->in_use) {
+        return -1;
+    }
+    if (t->receive_length == 0) {
+        if (t->peer_fin || t->reset || t->state == TCP_CLOSED) {
+            return -1;
+        }
+        return 0;
+    }
+    uint32_t n = t->receive_length < max ? t->receive_length : max;
+    k_memcpy(out, t->receive_buffer, n);
+    return (int)n;
+}
+
 int tcp_bytes_available(const struct tcpcb *t) {
     return (t && t->in_use) ? (int)t->receive_length : 0;
 }

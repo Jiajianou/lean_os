@@ -205,6 +205,58 @@ int main(void) {
         int srv = accept(lis, 0, 0);
         check(srv >= 0, "POSIX accept returned nothing after the handshake");
 
+        /* MSG_PEEK, which is a question and not a read. This is the exact
+           thing net::SocketPosix does before it reuses a socket - peek one
+           byte, and take EAGAIN to mean "still there and nothing on it" -
+           and until M183 this libc forwarded MSG_PEEK to read(2), so that
+           one byte left the stream for good. On a TLS connection that is a
+           record header read one byte late, which is a fatal alert, which
+           is why no https page would load in the browser. The check is that
+           the stream is still whole afterwards. */
+        {
+            static char blob[300];
+            static char back[300];
+            for (int i = 0; i < (int)sizeof(blob); i++) {
+                blob[i] = (char)(0x40 + (i * 7) % 60);
+            }
+            check(fcntl(cli, F_SETFL, O_NONBLOCK) == 0,
+                  "O_NONBLOCK could not be set before the peek checks");
+            char c = 0;
+            errno = 0;
+            check(recv(cli, &c, 1, MSG_PEEK) == -1 && errno == EAGAIN,
+                  "a peek at a live connection with nothing on it was not EAGAIN");
+            check(write(srv, blob, sizeof(blob)) == (long)sizeof(blob),
+                  "the peer could not write the bytes to peek at");
+            check(wait_until(has_pending, cli, 4000),
+                  "the bytes to peek at never arrived");
+            c = 0;
+            check(recv(cli, &c, 1, MSG_PEEK) == 1 && c == blob[0],
+                  "a peek did not report the first byte of the stream");
+            c = 0;
+            check(recv(cli, &c, 1, MSG_PEEK) == 1 && c == blob[0],
+                  "a second peek saw a different byte - the first one consumed it");
+            long got = 0;
+            long deadline = sys_uptime_ms() + 4000;
+            while (got < (long)sizeof(back) && sys_uptime_ms() < deadline) {
+                errno = 0;
+                long n = read(cli, back + got, sizeof(back) - (size_t)got);
+                if (n > 0) {
+                    got += n;
+                } else if (n < 0 && errno == EAGAIN) {
+                    sys_yield();
+                } else {
+                    break;
+                }
+            }
+            check(got == (long)sizeof(blob),
+                  "the stream was short after a peek - the peek consumed bytes (M183)");
+            check(got == (long)sizeof(blob) && memcmp(back, blob, sizeof(blob)) == 0,
+                  "the bytes after a peek were not the bytes that were sent (M183)");
+            printf("tcptest: posix: %ld bytes read back whole after two peeks\n", got);
+            check(fcntl(cli, F_SETFL, 0) == 0,
+                  "O_NONBLOCK could not be cleared after the peek checks");
+        }
+
         pthread_t peer;
         check(pthread_create(&peer, 0, posix_peer, &srv) == 0, "could not start the peer thread");
         printf("tcptest: posix: connected, waiting on a blocking read\n");
@@ -255,6 +307,11 @@ int main(void) {
     check(sys_listen(dgram) < 0, "listen on a datagram socket succeeded");
     check(sys_send(dgram, "x", 1) < 0, "send on a datagram socket succeeded");
     check(sys_receive(dgram, buffer, 1) < 0, "recv on a datagram socket succeeded");
+    errno = 0;
+    check(recv(dgram, buffer, 1, MSG_PEEK) == -1 && errno == EOPNOTSUPP,
+          "a peek at a datagram socket was not refused - the message queue "
+          "is not peekable and a silent recvfrom is what MSG_PEEK exists to "
+          "stop (M183)");
     check(sys_accept(dgram, 0) < 0, "accept on a datagram socket succeeded");
     sys_close(dgram);
 
