@@ -231,6 +231,25 @@ typedef struct task {
        number of them and their total is smaller than the live one. */
     mmap_region_t *mmaps_retired[MMAP_RETIRED_MAX];
     uint32_t mmaps_retired_count;
+    /* M181: the region table belongs to the ADDRESS SPACE - every thread
+       reaches it through scheduler_vm_owner - so the lock lives on the owner
+       and all of them contend for the one. M179 made the table safe to READ
+       while it grows and M180 made the fault path read it in one place; this
+       is what makes it safe to CHANGE while somebody reads.
+
+       Two rules. Nothing held across it may FAULT, because the page fault
+       handler takes it and a writer that faulted while holding it would wait
+       for itself - so no user memory inside, which is why sys_mincore copies
+       its answer out after letting go. kmalloc IS allowed: the heap maps its
+       pages rather than faulting them in, and scheduler_init_ap already
+       allocates under scheduler_lock for the same reason.
+
+       And the order against virtual_memory_lock is this one first, on both
+       sides: a writer unmapping takes it and then reaches
+       virtual_memory_unmap_range_free, and the fault path looks a region up
+       and then calls virtual_memory_try_map_page_in. Same order is what makes
+       it not an inversion. */
+    spinlock_t mmap_lock;
     int tgid;
     uint8_t is_thread;
     uint8_t exiting;
@@ -328,6 +347,16 @@ void scheduler_region_forget_memfd(mmap_region_t *r);
    may call them; the scheduler lock is the other way round and that ordering
    is one-way, because the heap never reaches the scheduler. */
 int scheduler_regions_reserve(task_t *t);
+
+/* M181: taken around every change to the table and around the fault handler's
+   look at it. Callers outside the scheduler go through these so that what the
+   lock protects stays one thing. See task_t::mmap_lock for the two rules. */
+uint64_t scheduler_regions_lock(task_t *t);
+void scheduler_regions_unlock(task_t *t, uint64_t flags);
+
+/* Does any region cover this page? Takes the lock itself, so the caller must
+   not already hold it. */
+int scheduler_region_covers(task_t *t, uint64_t page);
 
 /* Give the table back. Safe on a task that never mapped anything. */
 void scheduler_regions_release(task_t *t);

@@ -2797,8 +2797,7 @@ static int mmap_range_is_free(task_t *t, uint64_t base, uint64_t pages) {
     return 1;
 }
 
-static long sys_munmap(uint64_t address, uint64_t length, uint64_t a3, uint64_t a4,
-                        uint64_t a5, uint64_t a6);
+static long munmap_locked(task_t *self, uint64_t address, uint64_t end);
 
 static long sys_mmap(uint64_t address, uint64_t length, uint64_t prot, uint64_t flags,
                       uint64_t fd, uint64_t offset) {
@@ -2878,19 +2877,28 @@ have_backing:
         return -1;
     }
 
+    /* M181: one locked stretch over everything that reads or writes the table,
+       and one way out of it, because a return that skips the unlock is a
+       machine that stops. The memfd reference is dropped after the lock is
+       given back - it is not table work, and the rule for this lock is that
+       as little as possible happens underneath it. */
+    uint64_t region_flags = scheduler_regions_lock(self);
     uint64_t base = 0;
+    int failed = 0;
+    int insert_failed = 0;
+
     if (flags & MAP_FIXED) {
         if ((address & (PAGE_SIZE - 1)) != 0) {
-            return -1;
+            failed = 1;
+        } else if (address < USER_MMAP_BASE ||
+                   address + pages * PAGE_SIZE > USER_MMAP_LIMIT) {
+            failed = 1;
+        } else if (!mmap_range_is_free(self, address, pages) &&
+                   munmap_locked(self, address, address + pages * PAGE_SIZE) != 0) {
+            failed = 1;
+        } else {
+            base = address;
         }
-        if (address < USER_MMAP_BASE || address + pages * PAGE_SIZE > USER_MMAP_LIMIT) {
-            return -1;
-        }
-        if (!mmap_range_is_free(self, address, pages) &&
-            sys_munmap(address, pages * PAGE_SIZE, 0, 0, 0, 0) != 0) {
-            return -1;
-        }
-        base = address;
     } else if (address != 0) {
         uint64_t want = address & ~(PAGE_SIZE - 1);
         if (want >= USER_MMAP_BASE && want + pages * PAGE_SIZE <= USER_MMAP_LIMIT &&
@@ -2898,15 +2906,22 @@ have_backing:
             base = want;
         }
     }
-    if (base == 0) {
+    if (!failed && base == 0) {
         base = mmap_find_gap(self, (uint32_t)pages);
+        if (base == 0) {
+            failed = 1;
+        }
     }
-    if (base == 0) {
-        return -1;
-    }
-    if (mmap_slot_cmp_insert(self, base, (uint32_t)pages, (uint32_t)prot,
+    if (!failed &&
+        mmap_slot_cmp_insert(self, base, (uint32_t)pages, (uint32_t)prot,
                              handle, file_page, shared, 1, memfd_id, memfd_gen) != 0) {
-        if (memfd_id) {
+        failed = 1;
+        insert_failed = 1;
+    }
+    scheduler_regions_unlock(self, region_flags);
+
+    if (failed) {
+        if (insert_failed && memfd_id) {
             memfd_region_unref(memfd_by_tag((uint8_t)(memfd_id - 1), memfd_gen));
         }
         return -1;
@@ -2915,24 +2930,10 @@ have_backing:
     return (long)base;
 }
 
-static long sys_munmap(uint64_t address, uint64_t length, uint64_t a3, uint64_t a4,
-                        uint64_t a5, uint64_t a6) {
-    (void)a3;
-    (void)a4;
-    (void)a5;
-    (void)a6;
-    if ((address & (PAGE_SIZE - 1)) != 0 || length == 0) {
-        return -1;
-    }
-    uint64_t end = address + ((length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
-    if (end <= address) {
-        return -1;
-    }
-    if (address < USER_MMAP_BASE || end > USER_MMAP_LIMIT) {
-        return -1;
-    }
-    task_t *self = scheduler_vm_owner(scheduler_current());
-
+/* M181: the table work, with the region lock already held. sys_mmap needs this
+   for MAP_FIXED and cannot call sys_munmap to get it - a spinlock is not
+   recursive and the wrapper below would wait for the caller. */
+static long munmap_locked(task_t *self, uint64_t address, uint64_t end) {
     for (uint32_t i = 0; i < self->mmap_capacity; i++) {
         if (self->mmaps[i].pages == 0) {
             break;
@@ -2978,6 +2979,29 @@ static long sys_munmap(uint64_t address, uint64_t length, uint64_t a3, uint64_t 
     return 0;
 }
 
+static long sys_munmap(uint64_t address, uint64_t length, uint64_t a3, uint64_t a4,
+                        uint64_t a5, uint64_t a6) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if ((address & (PAGE_SIZE - 1)) != 0 || length == 0) {
+        return -1;
+    }
+    uint64_t end = address + ((length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
+    if (end <= address) {
+        return -1;
+    }
+    if (address < USER_MMAP_BASE || end > USER_MMAP_LIMIT) {
+        return -1;
+    }
+    task_t *self = scheduler_vm_owner(scheduler_current());
+    uint64_t region_flags = scheduler_regions_lock(self);
+    long result = munmap_locked(self, address, end);
+    scheduler_regions_unlock(self, region_flags);
+    return result;
+}
+
 static long sys_msync(uint64_t address, uint64_t length, uint64_t flags, uint64_t a4,
                       uint64_t a5, uint64_t a6) {
     (void)a4;
@@ -3000,18 +3024,37 @@ static long sys_msync(uint64_t address, uint64_t length, uint64_t flags, uint64_
         return -1;
     }
     task_t *self = scheduler_vm_owner(scheduler_current());
-    for (uint32_t i = 0; i < self->mmap_capacity; i++) {
-        if (self->mmaps[i].pages == 0) {
+    /* M181: file_mapping_sync writes dirty pages back to the DISK, which is
+       the last thing to hold a lock across - so the table is asked for one
+       handle at a time and let go of before each write. The table can change
+       between two of those, which msync has never promised it would not; what
+       it cannot do any more is be walked while somebody shifts its entries. */
+    uint32_t scan = 0;
+    for (;;) {
+        int handle = -1;
+        uint64_t region_flags = scheduler_regions_lock(self);
+        while (scan < self->mmap_capacity) {
+            if (self->mmaps[scan].pages == 0) {
+                scan = self->mmap_capacity;
+                break;
+            }
+            uint64_t rstart = self->mmaps[scan].base;
+            uint64_t rend = rstart + (uint64_t)self->mmaps[scan].pages * PAGE_SIZE;
+            int overlaps = !(end <= rstart || address >= rend);
+            int syncable = overlaps && self->mmaps[scan].shared &&
+                           self->mmaps[scan].handle >= 0;
+            if (syncable) {
+                handle = self->mmaps[scan].handle;
+                scan++;
+                break;
+            }
+            scan++;
+        }
+        scheduler_regions_unlock(self, region_flags);
+        if (handle < 0) {
             break;
         }
-        uint64_t rstart = self->mmaps[i].base;
-        uint64_t rend = rstart + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
-        if (end <= rstart || address >= rend) {
-            continue;
-        }
-        if (self->mmaps[i].shared && self->mmaps[i].handle >= 0) {
-            file_mapping_sync(self->mmaps[i].handle);
-        }
+        file_mapping_sync(handle);
     }
     return 0;
 }
@@ -3106,6 +3149,12 @@ static long sys_mprotect(uint64_t address, uint64_t length, uint64_t prot, uint6
             return -1;
         }
     } else {
+        /* M181: the scan, the split and the permission update are one locked
+           stretch - they were three separate walks of a table nothing was
+           holding still, and the split in the middle MOVES the entries the
+           third one then looks for. in_mmap and in_image cannot both be true,
+           so the update that used to sit outside this branch belongs in it. */
+        uint64_t region_flags = scheduler_regions_lock(self);
         uint64_t covered = 0;
         for (uint32_t i = 0; i < self->mmap_capacity; i++) {
             if (self->mmaps[i].pages == 0) {
@@ -3119,23 +3168,25 @@ static long sys_mprotect(uint64_t address, uint64_t length, uint64_t prot, uint6
                 covered += hi - lo;
             }
         }
-        if (covered != end - address) {
-            return -1;
+        int refused = (covered != end - address);
+        if (!refused && mmap_split_for(self, address, end) != 0) {
+            refused = 1;
         }
-        if (mmap_split_for(self, address, end) != 0) {
-            return -1;
+        if (!refused) {
+            for (uint32_t i = 0; i < self->mmap_capacity; i++) {
+                if (self->mmaps[i].pages == 0) {
+                    break;
+                }
+                uint64_t rstart = self->mmaps[i].base;
+                uint64_t rend = rstart + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
+                if (rstart >= address && rend <= end) {
+                    self->mmaps[i].prot = (uint32_t)prot;
+                }
+            }
         }
-    }
-    if (in_mmap) {
-        for (uint32_t i = 0; i < self->mmap_capacity; i++) {
-            if (self->mmaps[i].pages == 0) {
-                break;
-            }
-            uint64_t rstart = self->mmaps[i].base;
-            uint64_t rend = rstart + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
-            if (rstart >= address && rend <= end) {
-                self->mmaps[i].prot = (uint32_t)prot;
-            }
+        scheduler_regions_unlock(self, region_flags);
+        if (refused) {
+            return -1;
         }
     }
     uint64_t flags = VIRTUAL_MEMORY_FLAG_USER;
@@ -3184,18 +3235,13 @@ static long sys_mincore(uint64_t address, uint64_t length, uint64_t vector,
        and the page table is asked only about residency. */
     for (uint64_t i = 0; i < pages; i++) {
         uint64_t page = address + i * PAGE_SIZE;
-        int mapped = 0;
-        for (uint32_t r = 0; r < self->mmap_capacity; r++) {
-            if (self->mmaps[r].pages == 0) {
-                continue;
-            }
-            uint64_t rstart = self->mmaps[r].base;
-            uint64_t rend = rstart + (uint64_t)self->mmaps[r].pages * PAGE_SIZE;
-            if (page >= rstart && page < rend) {
-                mapped = 1;
-                break;
-            }
-        }
+        /* M181: the THIRD copy of this walk in the tree - M180 unified the two
+           in the fault path and this one was in a syscall. It asks the
+           scheduler now, which holds the lock for exactly as long as the
+           lookup and no longer: the copy_to_user below can fault, the fault
+           handler takes that same lock, and a syscall holding it while
+           faulting would wait for itself. */
+        int mapped = scheduler_region_covers(self, page);
         if (!mapped) {
             /* The program's own image, its stack and its heap are mappings
                this table does not hold, and they are as mapped as anything

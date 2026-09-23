@@ -1554,12 +1554,41 @@ static const mmap_region_t *mmap_region_for(task_t *self, uint64_t page) {
    A copy can be stale the moment it is taken. That is the same staleness a
    caller racing a writer would have had anyway; what it cannot be is torn, or
    half of one region and half of another. */
+/* M181: the fault path does NOT take mmap_lock, and that is a measurement
+   rather than an oversight. Taking it there cost six four-core browser runs
+   out of six - Chromium never drew at all, and one boot did not even reach
+   the browser. Every page fault would contend for a per-process lock, and a
+   spinlock under TCG is worse than it looks: a core that spins still burns
+   its whole slice of the one host thread the emulator gives it, so the cores
+   waiting starve the core holding it. On one core the same kernel is
+   unchanged - the graded battery took 344 s either way - which is what says
+   it is contention and not cost.
+
+   What the reader relies on instead is M179 and M180: the table is never
+   freed while somebody might be walking it, the capacity is loaded before the
+   pointer so the pair cannot tear the dangerous way, and this returns a COPY
+   so nothing is read twice. The hole left is an entry read while a writer is
+   part way through shifting it, which is narrower than what was there before
+   and is what a seqlock would close without a reader ever blocking. */
 static int mmap_region_snapshot(task_t *self, uint64_t page, mmap_region_t *out) {
     const mmap_region_t *found = mmap_region_for(self, page);
     if (found) {
         *out = *found;
     }
     return found != 0;
+}
+
+uint64_t scheduler_regions_lock(task_t *t) {
+    return spin_lock_irqsave(&t->mmap_lock);
+}
+
+void scheduler_regions_unlock(task_t *t, uint64_t flags) {
+    spin_unlock_irqrestore(&t->mmap_lock, flags);
+}
+
+int scheduler_region_covers(task_t *t, uint64_t page) {
+    mmap_region_t ignored;
+    return mmap_region_snapshot(t, page, &ignored);
 }
 
 void scheduler_region_forget_memfd(mmap_region_t *r) {
@@ -1908,6 +1937,23 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
             descriptor_table_release(fresh);
             return (task_t *)0;
         }
+        /* M181: the parent's table is copied HERE, before scheduler_lock, and
+           the two locks are never held together.
+
+           Holding scheduler_lock while waiting for this one was the first
+           version and it stalled the machine: a fork would sit on the lock
+           every CPU needs to switch tasks while waiting for a lock any thread
+           calling mmap can hold, so one writer anywhere stopped the scheduler
+           everywhere. Four-core boots hung at [m43] and three attempts of
+           fork-smp-test.sh ran to their ceiling without reaching the test.
+
+           Nothing can see the child's table yet - the child has no slot - so
+           only the parent's side needs holding still. */
+        uint64_t parent_region_flags = spin_lock_irqsave(&forking->mmap_lock);
+        for (uint32_t i = 0; i < child_capacity; i++) {
+            child_regions[i] = forking->mmaps[i];
+        }
+        spin_unlock_irqrestore(&forking->mmap_lock, parent_region_flags);
     }
 
     uint64_t flags = irq_save_disable();
@@ -2017,9 +2063,6 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     scheduler_regions_release(t);
     t->mmaps = child_regions;
     t->mmap_capacity = child_capacity;
-    for (uint32_t i = 0; i < child_capacity; i++) {
-        t->mmaps[i] = space->mmaps[i];
-    }
     scheduler_regions_retain_memfds(t);
 
     t->tgid = t->id;
