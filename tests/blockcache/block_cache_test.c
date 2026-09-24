@@ -141,3 +141,59 @@ TEST(block_cache, a_flush_of_scattered_lines_writes_each_run_once) {
     CHECK_EQ(block_device_flush(), 0);
     CHECK_EQ((int)fake_backend_write_calls(), 2);
 }
+
+void fake_backend_present(int nvme, int usb);
+void fake_backend_label_usb(int labelled);
+void fake_backend_label_primary(int labelled);
+
+/* M186. On a machine booted from a stick there is more than one disk and only
+   one of them is this OS's. Probe order alone picks the internal drive, which
+   on a laptop belongs to somebody else. */
+static void choose_with(int nvme, int usb, int nvme_labelled, int usb_labelled) {
+    fake_backend_reset(DISK_SECTORS);
+    fill_disk();
+    fake_backend_present(nvme, usb);
+    fake_backend_label_primary(nvme_labelled);
+    fake_backend_label_usb(usb_labelled);
+    block_device_init();
+}
+
+/* These tests leave the block layer pointed at whichever fake they were
+   about; every other test in this file assumes the big primary disk, and the
+   runner does not promise an order. */
+static void restore_default_disk(void) {
+    fake_backend_present(0, 0);
+    fake_backend_reset(DISK_SECTORS);
+    fill_disk();
+    block_device_init();
+}
+
+TEST(block_selection, the_stick_is_chosen_over_an_internal_disk_that_is_not_ours) {
+    choose_with(1, 1, 0, 1);
+    CHECK(strcmp(block_device_backend_name(), "usb-storage") == 0);
+    restore_default_disk();
+}
+
+TEST(block_selection, an_internal_disk_that_is_ours_is_chosen_over_a_stick_that_is_not) {
+    choose_with(1, 1, 1, 0);
+    CHECK(strcmp(block_device_backend_name(), "nvme") == 0);
+    restore_default_disk();
+}
+
+TEST(block_selection, with_no_labelled_disk_at_all_the_first_probed_is_kept) {
+    choose_with(1, 1, 0, 0);
+    CHECK(strcmp(block_device_backend_name(), "nvme") == 0);
+    restore_default_disk();
+}
+
+TEST(block_selection, a_stick_on_its_own_is_chosen_whether_or_not_it_is_labelled) {
+    choose_with(0, 1, 0, 1);
+    CHECK(strcmp(block_device_backend_name(), "usb-storage") == 0);
+    restore_default_disk();
+}
+
+TEST(block_selection, probe_order_still_decides_when_both_disks_are_ours) {
+    choose_with(1, 1, 1, 1);
+    CHECK(strcmp(block_device_backend_name(), "nvme") == 0);
+    restore_default_disk();
+}

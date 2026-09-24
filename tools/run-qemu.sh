@@ -45,6 +45,11 @@ case "${QEMU_DISK:-virtio}" in
                -drive "if=none,id=disk0,format=raw,file=$IMAGE"
                -device ide-hd,drive=disk0,bus=ahci0.0)
     ;;
+  usb)
+    DISK_ARGS=(-device qemu-xhci,id=xhci0
+               -drive "if=none,id=disk0,format=raw,file=$IMAGE"
+               -device usb-storage,bus=xhci0.0,drive=disk0)
+    ;;
   nvme)
     DISK_ARGS=(-drive "if=none,id=disk0,format=raw,file=$IMAGE"
                -device nvme,drive=disk0,serial=leanos0)

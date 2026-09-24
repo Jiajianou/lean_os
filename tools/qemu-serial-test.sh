@@ -49,6 +49,28 @@ cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_RUNTIME"
 
 QEMU_MEM=${QEMU_MEM:-4096}
 QEMU_CPUS=${QEMU_CPUS:-1}
+# An image the build has just recreated has a boot loader, a kernel and an
+# empty filesystem: every ported-software marker below will be missing and
+# none of them is a regression. That reads exactly like a broken kernel and
+# has cost this project three graded boots - the last one to a rebuild that
+# was incidental, a driver fix, rather than a deliberate build. Ask the image
+# before spending eight minutes asking the machine. Read-only on purpose:
+# a check that writes to the thing it is checking is not a check.
+if [ -f "$IMAGE" ]; then
+  if ! python3 - "$IMAGE" <<'PROBE'
+import sys
+with open(sys.argv[1], "rb") as image:
+    image.seek(16384 * 512)
+    sys.exit(0 if b"toybox" in image.read(256 * 1024 * 1024) else 1)
+PROBE
+  then
+    echo "WARNING: there is no toybox in $IMAGE, so the build has recreated it since" >&2
+    echo "         the payloads were installed. Around 60 of the markers below will be" >&2
+    echo "         missing and none of them is a regression - repopulate first. The" >&2
+    echo "         chain is in the M186 commit message." >&2
+  fi
+fi
+
 case "${QEMU_DISK:-virtio}" in
   ide)
     DISK_ARGS=(-drive "format=raw,snapshot=on,file=$IMAGE")
@@ -57,6 +79,11 @@ case "${QEMU_DISK:-virtio}" in
     DISK_ARGS=(-device ich9-ahci,id=ahci0
                -drive "if=none,id=disk0,format=raw,snapshot=on,file=$IMAGE"
                -device ide-hd,drive=disk0,bus=ahci0.0)
+    ;;
+  usb)
+    DISK_ARGS=(-device qemu-xhci,id=xhci0
+               -drive "if=none,id=disk0,format=raw,snapshot=on,file=$IMAGE"
+               -device usb-storage,bus=xhci0.0,drive=disk0)
     ;;
   nvme)
     DISK_ARGS=(-drive "if=none,id=disk0,format=raw,snapshot=on,file=$IMAGE"
@@ -67,9 +94,16 @@ case "${QEMU_DISK:-virtio}" in
                -device virtio-blk-pci,drive=disk0)
     ;;
 esac
-USB_ARGS=(-device qemu-xhci,id=xhci0
-          -device usb-kbd,bus=xhci0.0
-          -device usb-mouse,bus=xhci0.0)
+# One controller, the way a laptop has one: when the disk is a stick it is
+# already on xhci0, and the keyboard and mouse join it there.
+if [ "${QEMU_DISK:-virtio}" = "usb" ]; then
+  USB_ARGS=(-device usb-kbd,bus=xhci0.0
+            -device usb-mouse,bus=xhci0.0)
+else
+  USB_ARGS=(-device qemu-xhci,id=xhci0
+            -device usb-kbd,bus=xhci0.0
+            -device usb-mouse,bus=xhci0.0)
+fi
 if [ "${QEMU_USB:-1}" = "0" ]; then
   USB_ARGS=()
 fi
@@ -289,6 +323,7 @@ REQUIRED_MARKERS=(
   "the same file mapped MAP_SHARED twice as one piece of memory"
   "[m92] a disk worth reading:"
   "[m107] the devices a real machine has:"
+  "[m186] the disk this kernel runs from is the one carrying its own boot"
   "[m93] a filesystem that can hold a source tree:"
   "[m101] sampling profiler:"
   "[m101] per-syscall accounting:"

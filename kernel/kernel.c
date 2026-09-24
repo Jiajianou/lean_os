@@ -35,6 +35,7 @@
 #include "boot/boot_options.h"
 #include "drivers/hardware_inventory.h"
 #include "drivers/i2c_touchpad.h"
+#include "drivers/usb_storage.h"
 #include "device/fwcfg.h"
 #include "file_system/virtual_file_system.h"
 #include "inter_process_communication/pipe.h"
@@ -13769,6 +13770,50 @@ display_self_test_done:
                   "and read back byte for byte; USB: ");
         kernel_log_put_dec((uint32_t)xhci_device_count());
         kernel_log_puts(" boot-protocol HID device(s) - self-test passed.\n\n");
+    }
+
+    {
+        /* M186. A machine booted from a stick has more than one disk on it and
+           only one of them is this OS's. The block layer picks by the label in
+           the boot sector rather than by probe order, so the thing to grade is
+           that the disk it ended up on is in fact the one carrying that label -
+           on every backend, not just the USB one. */
+        static uint8_t m186_first[512];
+        int ok = 1;
+
+        if (block_device_read(0, 1, m186_first) != 0) {
+            kernel_log_puts("[m186] the chosen disk would not give up its first sector\n");
+            ok = 0;
+        } else if (!leanfs_disk_carries_this_os(m186_first)) {
+            kernel_log_puts("[m186] the chosen disk does not carry this OS's boot sector\n");
+            ok = 0;
+        }
+
+        if (ok && usb_storage_present()) {
+            /* If the stick is the disk we are on, its capacity has to be the
+               whole image rather than whatever a short read implied. */
+            if (usb_storage_sector_count() < LEANFS_START_LBA) {
+                kernel_log_puts("[m186] the USB device reports fewer sectors than the "
+                           "filesystem starts at\n");
+                ok = 0;
+            }
+        }
+
+        if (!ok) {
+            panic("M186 self-test: this kernel is running from a disk that is not its own");
+        }
+
+        kernel_log_puts("[m186] the disk this kernel runs from is the one carrying its own boot "
+                   "sector: on ");
+        kernel_log_puts(block_device_backend_name());
+        kernel_log_puts(", USB mass storage ");
+        if (usb_storage_present()) {
+            kernel_log_put_dec((uint32_t)(usb_storage_sector_count() / 2048));
+            kernel_log_puts(" MiB present");
+        } else {
+            kernel_log_puts("absent");
+        }
+        kernel_log_puts(" - self-test passed.\n\n");
     }
 
     {

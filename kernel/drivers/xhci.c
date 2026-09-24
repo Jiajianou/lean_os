@@ -85,6 +85,16 @@
 #define HID_PROTO_KEYBOARD 1
 #define HID_PROTO_MOUSE    2
 
+#define MASS_STORAGE_CLASS            8
+#define MASS_STORAGE_SUBCLASS_SCSI    6
+#define MASS_STORAGE_PROTOCOL_BULK    0x50
+
+#define ENDPOINT_TYPE_BULK_OUT 2
+#define ENDPOINT_TYPE_BULK_IN  6
+#define ENDPOINT_TYPE_INTERRUPT_IN 7
+
+#define ENDPOINT_ATTRIBUTE_BULK 2
+
 typedef struct __attribute__((packed)) {
     uint64_t base;
     uint32_t size;
@@ -92,6 +102,17 @@ typedef struct __attribute__((packed)) {
 } erst_entry_t;
 
 #define MAX_HID_DEVICES 4
+
+typedef struct {
+    int present;
+    uint8_t slot;
+    uint8_t bulk_in_dci;
+    uint8_t bulk_out_dci;
+    xhci_ring_t bulk_in;
+    xhci_ring_t bulk_out;
+    uint64_t sectors;
+    uint32_t sector_bytes;
+} storage_device_t;
 
 typedef struct {
     uint8_t slot;
@@ -122,6 +143,8 @@ static uint64_t keyboard_reports, mouse_reports;
 
 static uint8_t *enum_buffer;
 static uint64_t enum_buffer_phys;
+
+static storage_device_t storage;
 
 static uint32_t op_read(uint32_t off) { return *(volatile uint32_t *)(op_regs + off); }
 static void op_write(uint32_t off, uint32_t v) { *(volatile uint32_t *)(op_regs + off) = v; }
@@ -243,6 +266,109 @@ static int control_transfer(uint8_t slot, xhci_ring_t *ring, uint8_t bm_request_
     return -1;
 }
 
+static int bulk_transfer(uint8_t slot, uint8_t dci, xhci_ring_t *ring, uint64_t buffer_phys,
+                         uint32_t length, uint32_t *transferred_out) {
+    if (transferred_out) {
+        *transferred_out = 0;
+    }
+    xhci_ring_push(ring, buffer_phys, length, (TRB_NORMAL << TRB_TYPE_SHIFT) | TRB_IOC);
+    doorbell(slot, dci);
+
+    xhci_trb_t ev;
+    for (int tries = 0; tries < 8; tries++) {
+        if (event_wait(&ev) != 0) {
+            return -1;
+        }
+        if (((ev.control >> TRB_TYPE_SHIFT) & 0x3F) != TRB_EVENT_TRANSFER) {
+            continue;
+        }
+        uint32_t code = (ev.status >> 24) & 0xFF;
+        uint32_t residue = ev.status & 0x1FFFFFu;
+        if (transferred_out) {
+            *transferred_out = residue <= length ? length - residue : 0;
+        }
+        return (code == CC_SUCCESS || code == CC_SHORT_PACKET) ? 0 : -1;
+    }
+    return -1;
+}
+
+int xhci_bulk_in(uint64_t buffer_phys, uint32_t length, uint32_t *transferred_out) {
+    if (!storage.present) {
+        return -1;
+    }
+    return bulk_transfer(storage.slot, storage.bulk_in_dci, &storage.bulk_in, buffer_phys, length,
+                         transferred_out);
+}
+
+int xhci_bulk_out(uint64_t buffer_phys, uint32_t length, uint32_t *transferred_out) {
+    if (!storage.present) {
+        return -1;
+    }
+    return bulk_transfer(storage.slot, storage.bulk_out_dci, &storage.bulk_out, buffer_phys, length,
+                         transferred_out);
+}
+
+int xhci_storage_present(void) {
+    return storage.present;
+}
+
+static int configure_storage(uint8_t slot, xhci_ring_t *ep0, uint64_t in_context, uint32_t port,
+                             uint32_t speed, uint8_t config_value, uint8_t bulk_in_address,
+                             uint16_t bulk_in_mps, uint8_t bulk_out_address,
+                             uint16_t bulk_out_mps) {
+    if (control_transfer(slot, ep0, 0x00, USB_REQUEST_SET_CONFIGURATION, config_value, 0, 0) != 0) {
+        return 0;
+    }
+
+    if (ring_init(&storage.bulk_in) != 0 || ring_init(&storage.bulk_out) != 0) {
+        return 0;
+    }
+
+    uint8_t in_dci = (uint8_t)(2 * (bulk_in_address & 0x0F) + 1);
+    uint8_t out_dci = (uint8_t)(2 * (bulk_out_address & 0x0F));
+    uint8_t highest = in_dci > out_dci ? in_dci : out_dci;
+
+    k_memset((void *)in_context, 0, 4096);
+    uint32_t *icc = context_at((void *)in_context, 0);
+    icc[1] = 1u | (1u << in_dci) | (1u << out_dci);
+
+    uint32_t *slot_context = context_at((void *)in_context, 1);
+    slot_context[0] = ((uint32_t)highest << 27) | (speed << 20);
+    slot_context[1] = port << 16;
+
+    uint32_t *in_endpoint = context_at((void *)in_context, in_dci + 1);
+    in_endpoint[1] = (ENDPOINT_TYPE_BULK_IN << 3) | (3u << 1) | ((uint32_t)bulk_in_mps << 16);
+    *(uint64_t *)&in_endpoint[2] = storage.bulk_in.phys | 1;
+    in_endpoint[4] = bulk_in_mps;
+
+    uint32_t *out_endpoint = context_at((void *)in_context, out_dci + 1);
+    out_endpoint[1] = (ENDPOINT_TYPE_BULK_OUT << 3) | (3u << 1) | ((uint32_t)bulk_out_mps << 16);
+    *(uint64_t *)&out_endpoint[2] = storage.bulk_out.phys | 1;
+    out_endpoint[4] = bulk_out_mps;
+
+    if (command_sync(in_context, 0,
+                     (TRB_COMMAND_CONFIGURE_EP << TRB_TYPE_SHIFT) | ((uint32_t)slot << 24),
+                     0) != CC_SUCCESS) {
+        return 0;
+    }
+
+    storage.slot = slot;
+    storage.bulk_in_dci = in_dci;
+    storage.bulk_out_dci = out_dci;
+    storage.present = 1;
+
+    kernel_log_puts("[usb] bulk-only mass storage on port ");
+    kernel_log_put_dec(port);
+    kernel_log_puts(", slot ");
+    kernel_log_put_dec(slot);
+    kernel_log_puts(", endpoints in/out ");
+    kernel_log_put_dec(in_dci);
+    kernel_log_puts("/");
+    kernel_log_put_dec(out_dci);
+    kernel_log_putc('\n');
+    return 1;
+}
+
 static int enumerate_port(uint32_t port) {
     uint32_t portsc = op_read(OP_PORTSC(port));
     if (!(portsc & PORTSC_CCS)) {
@@ -339,6 +465,10 @@ static int enumerate_port(uint32_t port) {
 
     int proto = 0, interface_number = -1, ep_address = -1, ep_interval = 8;
     uint16_t ep_mps = 8;
+    int in_storage_interface = 0;
+    int bulk_in_address = -1, bulk_out_address = -1;
+    uint16_t bulk_in_mps = 0, bulk_out_mps = 0;
+
     for (uint16_t off = 0; off + 1 < total;) {
         uint8_t dlen = enum_buffer[off];
         uint8_t dtype = enum_buffer[off + 1];
@@ -346,24 +476,49 @@ static int enumerate_port(uint32_t port) {
             break;
         }
         if (dtype == 4 && off + 8 < total) {
-            if (enum_buffer[off + 5] == HID_CLASS && enum_buffer[off + 6] == HID_SUBCLASS_BOOT) {
-                proto = enum_buffer[off + 7];
+            uint8_t interface_class = enum_buffer[off + 5];
+            uint8_t interface_subclass = enum_buffer[off + 6];
+            uint8_t interface_protocol = enum_buffer[off + 7];
+
+            in_storage_interface = (interface_class == MASS_STORAGE_CLASS &&
+                                    interface_subclass == MASS_STORAGE_SUBCLASS_SCSI &&
+                                    interface_protocol == MASS_STORAGE_PROTOCOL_BULK);
+
+            if (interface_class == HID_CLASS && interface_subclass == HID_SUBCLASS_BOOT) {
+                proto = interface_protocol;
                 interface_number = enum_buffer[off + 2];
                 ep_address = -1;
             } else {
                 proto = 0;
                 interface_number = -1;
             }
-        } else if (dtype == 5 && proto != 0 && ep_address < 0 && off + 6 < total) {
+        } else if (dtype == 5 && off + 6 < total) {
             uint8_t address = enum_buffer[off + 2];
             uint8_t attribute = enum_buffer[off + 3];
-            if ((address & 0x80) && (attribute & 0x03) == 3) {
+            uint16_t max_packet = (uint16_t)(enum_buffer[off + 4] | (enum_buffer[off + 5] << 8));
+
+            if (in_storage_interface && (attribute & 0x03) == ENDPOINT_ATTRIBUTE_BULK) {
+                if ((address & 0x80) && bulk_in_address < 0) {
+                    bulk_in_address = address;
+                    bulk_in_mps = max_packet;
+                } else if (!(address & 0x80) && bulk_out_address < 0) {
+                    bulk_out_address = address;
+                    bulk_out_mps = max_packet;
+                }
+            } else if (proto != 0 && ep_address < 0 && (address & 0x80) &&
+                       (attribute & 0x03) == 3) {
                 ep_address = address;
-                ep_mps = (uint16_t)(enum_buffer[off + 4] | (enum_buffer[off + 5] << 8));
+                ep_mps = max_packet;
                 ep_interval = enum_buffer[off + 6];
             }
         }
         off = (uint16_t)(off + dlen);
+    }
+
+    if (bulk_in_address >= 0 && bulk_out_address >= 0 && !storage.present) {
+        return configure_storage(slot, &ep0, in_context, port, speed, config_value,
+                                 (uint8_t)bulk_in_address, bulk_in_mps,
+                                 (uint8_t)bulk_out_address, bulk_out_mps);
     }
 
     if (proto != HID_PROTO_KEYBOARD && proto != HID_PROTO_MOUSE) {
@@ -616,6 +771,25 @@ int xhci_init(void) {
         }
 
         started = 1;
+
+        /* Every register pointer above - the operational registers, the
+           doorbells, the device context array, both rings - is one set, for
+           one controller. Setting a second one up overwrites them, and a
+           device enumerated on the first is then addressed through the
+           second's doorbell: the slot numbers collide and the transfers go
+           nowhere. That was true before there was anything but HID on this
+           bus and it was invisible, because nothing here had two. The driver
+           takes the first controller that has something on it and says what
+           it is leaving alone; the condition for driving more than one is a
+           machine whose input and its disk are on different controllers. */
+        if (hid_count > 0 || storage.present) {
+            pci_device_t further;
+            if (pci_find_class(XHCI_CLASS, XHCI_SUBCLASS, XHCI_PROG_IF, index + 1, &further)) {
+                kernel_log_puts("[xhci] a further controller is present and is not being driven - "
+                           "this driver holds one set of registers.\n");
+            }
+            break;
+        }
     }
     return hid_count;
 }

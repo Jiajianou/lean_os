@@ -51,8 +51,74 @@ uint8_t *fake_backend_sector(uint32_t lba) {
     return disk + (uint64_t)lba * ATA_SECTOR_SIZE;
 }
 
+/* M186: the block layer now asks each disk whose boot sector it carries, so
+   the fake has to be able to be more than one disk. Which of them answers,
+   and which of them is this OS's, is what a selection test varies. */
+static int nvme_present;
+static int usb_present;
+static uint8_t usb_disk[8 * ATA_SECTOR_SIZE];
+static uint64_t usb_sectors;
+
+void fake_backend_present(int nvme, int usb);
+void fake_backend_label_usb(int labelled);
+void fake_backend_label_primary(int labelled);
+
+static void write_label(uint8_t *sector, int labelled) {
+    static const char label[8] = {'L', 'E', 'A', 'N', '_', 'O', 'S', '1'};
+    for (int i = 0; i < 8; i++) {
+        sector[0x1A0 + i] = labelled ? (uint8_t)label[i] : 0;
+    }
+    sector[510] = labelled ? 0x55 : 0;
+    sector[511] = labelled ? 0xAA : 0;
+}
+
+void fake_backend_present(int nvme, int usb) {
+    nvme_present = nvme;
+    usb_present = usb;
+    usb_sectors = sizeof(usb_disk) / ATA_SECTOR_SIZE;
+    memset(usb_disk, 0, sizeof(usb_disk));
+}
+
+void fake_backend_label_usb(int labelled) {
+    write_label(usb_disk, labelled);
+}
+
+void fake_backend_label_primary(int labelled) {
+    if (disk && disk_sectors > 0) {
+        write_label(disk, labelled);
+    }
+}
+
+int usb_storage_init(void) {
+    return usb_present;
+}
+
+int usb_storage_present(void) {
+    return usb_present;
+}
+
+uint64_t usb_storage_sector_count(void) {
+    return usb_present ? usb_sectors : 0;
+}
+
+int usb_storage_read(uint64_t lba, uint32_t count, void *buffer) {
+    if (!usb_present || lba + count > usb_sectors) {
+        return 0;
+    }
+    memcpy(buffer, usb_disk + lba * ATA_SECTOR_SIZE, (size_t)count * ATA_SECTOR_SIZE);
+    return 1;
+}
+
+int usb_storage_write(uint64_t lba, uint32_t count, const void *buffer) {
+    if (!usb_present || lba + count > usb_sectors) {
+        return 0;
+    }
+    memcpy(usb_disk + lba * ATA_SECTOR_SIZE, buffer, (size_t)count * ATA_SECTOR_SIZE);
+    return 1;
+}
+
 int nvme_init(void) {
-    return 0;
+    return nvme_present;
 }
 
 int ahci_init(void) {
@@ -64,8 +130,10 @@ int virtio_block_device_init(void) {
 }
 
 int nvme_read(uint64_t lba, uint32_t count, void *buffer) {
-    (void)lba;
-    (void)count;
+    if (nvme_present && disk && lba + count <= disk_sectors) {
+        memcpy(buffer, disk + lba * ATA_SECTOR_SIZE, (size_t)count * ATA_SECTOR_SIZE);
+        return 0;
+    }
     (void)buffer;
     return -1;
 }

@@ -354,12 +354,29 @@ make all
 tools/make-hardware-image.sh --video native   # -> build/os-image-hardware.bin
 ```
 
-**The image is a whole disk, and it must be written to the disk the
-machine will boot from.** There is no USB mass-storage driver in this
-kernel yet, so a stick this image is written to will load the kernel
-through the firmware and then have nowhere to keep a filesystem. Write
-it to the internal drive, from something else that is already running on
-that machine:
+**Write it to a USB stick and boot it.** Since M186 this kernel has a USB
+mass-storage driver, so the stick it was booted from is the disk it runs
+from - it brings up its own filesystem there and leaves every other disk
+in the machine alone:
+
+```sh
+tools/write-usb.sh /dev/diskN        # or dd, carefully
+```
+
+The machine it is put into usually has a disk of its own with somebody
+else's system on it. The block layer no longer takes whichever disk was
+probed first - on a laptop that is the internal drive. It reads the first
+sector of each disk it found and runs from the one carrying **this OS's
+own boot sector**, and says so:
+
+```
+[blk] chose the disk carrying this OS's boot sector out of 3 the probe found.
+[blk] usb-storage, 8192 KiB write-through cache
+```
+
+There is still no installer - nothing here copies the stick onto the
+internal drive. To put lean_os on a machine's own disk, write the image
+to it from something else already running on that machine:
 
 ```sh
 sudo dd if=os-image-hardware.bin of=/dev/nvme0n1 bs=4M status=progress

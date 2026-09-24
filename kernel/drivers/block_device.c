@@ -4,6 +4,8 @@
 #include "drivers/ata.h"
 #include "drivers/kernel_log.h"
 #include "drivers/nvme.h"
+#include "drivers/usb_storage.h"
+#include "file_system/leanfs_format.h"
 #include "drivers/virtio_block.h"
 #include "library/kernel_library.h"
 #include "library/spinlock.h"
@@ -37,6 +39,7 @@ typedef enum {
     BACKEND_AHCI,
     BACKEND_VIRTIO,
     BACKEND_ATA,
+    BACKEND_USB,
 } block_device_backend_t;
 
 static block_device_backend_t backend = BACKEND_ATA;
@@ -88,6 +91,13 @@ static int device_read(uint32_t lba, uint32_t count, void *buffer) {
         }
         return 0;
     }
+    if (backend == BACKEND_USB) {
+        if (!usb_storage_read(lba, count, buffer)) {
+            io_errors++;
+            return -1;
+        }
+        return 0;
+    }
     uint8_t *destination = (uint8_t *)buffer;
     while (count > 0) {
         uint32_t n = count > 255 ? 255 : count;
@@ -129,6 +139,13 @@ static int device_write(uint32_t lba, uint32_t count, const void *buffer) {
         }
         return 0;
     }
+    if (backend == BACKEND_USB) {
+        if (!usb_storage_write(lba, count, buffer)) {
+            io_errors++;
+            return -1;
+        }
+        return 0;
+    }
     const uint8_t *source = (const uint8_t *)buffer;
     while (count > 0) {
         uint32_t n = count > 255 ? 255 : count;
@@ -144,15 +161,57 @@ static int device_write(uint32_t lba, uint32_t count, const void *buffer) {
 }
 
 void block_device_init(void) {
+    /* Which disks are here, in the order they were probed before M186. The
+       order still decides ties; what it no longer decides on its own is which
+       disk this OS runs from. */
+    block_device_backend_t candidates[5];
+    uint32_t candidate_count = 0;
     if (nvme_init()) {
-        backend = BACKEND_NVME;
-    } else if (ahci_init()) {
-        backend = BACKEND_AHCI;
-    } else if (virtio_block_device_init()) {
-        backend = BACKEND_VIRTIO;
-    } else {
-        backend = BACKEND_ATA;
+        candidates[candidate_count++] = BACKEND_NVME;
     }
+    if (ahci_init()) {
+        candidates[candidate_count++] = BACKEND_AHCI;
+    }
+    if (virtio_block_device_init()) {
+        candidates[candidate_count++] = BACKEND_VIRTIO;
+    }
+    if (usb_storage_init()) {
+        candidates[candidate_count++] = BACKEND_USB;
+    }
+    candidates[candidate_count++] = BACKEND_ATA;
+
+    /* A machine booted from a stick has two disks on it and only one of them
+       is this OS's. Before M186 the answer was "whichever was probed first",
+       which on a laptop is the internal drive - somebody else's. The boot
+       sector this project writes carries a label, so ask each disk whose it
+       is rather than guessing. */
+    backend = candidates[0];
+    int found_labelled = 0;
+    for (uint32_t i = 0; i < candidate_count && !found_labelled; i++) {
+        backend = candidates[i];
+        uint8_t first[BLOCK_DEVICE_SECTOR_SIZE];
+        if (device_read(0, 1, first) != 0) {
+            continue;
+        }
+        if (leanfs_disk_carries_this_os(first)) {
+            found_labelled = 1;
+        }
+    }
+    if (!found_labelled) {
+        backend = candidates[0];
+        kernel_log_puts("[blk] no disk here carries this OS's boot sector - taking the first one "
+                   "found, which leanfs will refuse to format.\n");
+    } else if (candidate_count > 1) {
+        kernel_log_puts("[blk] chose the disk carrying this OS's boot sector out of ");
+        kernel_log_put_dec(candidate_count);
+        kernel_log_puts(" the probe found.\n");
+    }
+
+    io_errors = 0;
+    reads_issued = 0;
+    writes_issued = 0;
+    statistics.device_reads = 0;
+    statistics.device_writes = 0;
 
     cache_lines = CACHE_LINES;
     uint64_t affordable = physical_memory_free_frame_count() / 16;
@@ -199,6 +258,7 @@ const char *block_device_backend_name(void) {
     case BACKEND_NVME:   return "nvme";
     case BACKEND_AHCI:   return "ahci";
     case BACKEND_VIRTIO: return "virtio-blk";
+    case BACKEND_USB:    return "usb-storage";
     default:             return "ata-pio";
     }
 }
