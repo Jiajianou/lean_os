@@ -328,6 +328,60 @@ machine and `QEMU_DISK=ide` runs it through the ATA driver instead of
 virtio; both are configurations the harnesses are expected to pass in,
 not fallbacks.
 
+## On a real machine
+
+Everything above runs under QEMU. A physical machine asks different
+questions, and the answers are configuration rather than code, so they
+come from **outside** the image the same way `QEMU_RES` does - a file
+called `\EFI\BOOT\lean_os.cfg` in the EFI system partition, read by
+the boot loader before it picks a graphics mode:
+
+```
+video=native        # the panel's own mode, rather than the built-in 1024x768
+video=firmware      # whatever mode the firmware was already in
+video=1920x1200     # a mode by name
+interrupts=ioapic   # or pic; the default is the I/O APIC on a machine
+                    #   with no QEMU fw_cfg device, and the 8259 under QEMU
+cpus=4              # fewer processors than the MADT lists
+```
+
+`tools/make-hardware-image.sh` writes a copy of the image with that file
+in it. The QEMU image never gets one, because every coordinate in the
+input suite is measured against its 1024x768 framebuffer.
+
+```sh
+make all
+tools/make-hardware-image.sh --video native   # -> build/os-image-hardware.bin
+```
+
+**The image is a whole disk, and it must be written to the disk the
+machine will boot from.** There is no USB mass-storage driver in this
+kernel yet, so a stick this image is written to will load the kernel
+through the firmware and then have nowhere to keep a filesystem. Write
+it to the internal drive, from something else that is already running on
+that machine:
+
+```sh
+sudo dd if=os-image-hardware.bin of=/dev/nvme0n1 bs=4M status=progress
+```
+
+That destroys everything on that drive. The firmware needs **Secure Boot
+off** - `BOOTX64.EFI` here is signed by nobody - and UEFI rather than
+legacy boot.
+
+**This kernel will not format a disk that is not its own.** The boot
+sector this project writes carries an eight-byte label, and a leanfs
+mount that finds no superblock looks for it before formatting: no label,
+and the machine stops with a message instead of taking somebody else's
+disk. That is the difference between booting this on a laptop and losing
+what was on it.
+
+What the machine found is printed at boot, under `[inventory]` - the
+processor, the memory, the mode the screen came up in, which interrupt
+controller is live, whether there is a PS/2 keyboard and pointer, and
+every PCI device with its class. On a laptop with no serial port that
+print **is** the instrument: photograph it.
+
 ## Tests
 
 One command, three tiers. Each is a superset of the one above it.

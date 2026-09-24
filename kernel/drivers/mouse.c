@@ -7,63 +7,17 @@
 #include "architecture/x86_64/pic.h"
 #include "drivers/kernel_log.h"
 #include "drivers/pit.h"
+#include "drivers/ps2_controller.h"
 
 #define PS2_DATA_PORT   0x60
-#define PS2_STATUS_PORT 0x64
-#define PS2_COMMAND_PORT    0x64
-
-#define PS2_STATUS_OUTPUT_FULL 0x01u
-#define PS2_STATUS_INPUT_FULL  0x02u
 
 #define MOUSE_IRQ    12
 #define CASCADE_IRQ  2
 
-#define PS2_POLL_LIMIT 100000
+static int mouse_present;
 
-static void ps2_wait_input_clear(void) {
-    for (int timeout = PS2_POLL_LIMIT; timeout > 0; timeout--) {
-        if (!(inb(PS2_STATUS_PORT) & PS2_STATUS_INPUT_FULL)) {
-            return;
-        }
-    }
-}
-
-static void ps2_wait_output_full(void) {
-    for (int timeout = PS2_POLL_LIMIT; timeout > 0; timeout--) {
-        if (inb(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT_FULL) {
-            return;
-        }
-    }
-}
-
-static void ps2_write_command(uint8_t command) {
-    ps2_wait_input_clear();
-    outb(PS2_COMMAND_PORT, command);
-}
-
-static void ps2_write_data(uint8_t data) {
-    ps2_wait_input_clear();
-    outb(PS2_DATA_PORT, data);
-}
-
-static uint8_t ps2_read_data(void) {
-    ps2_wait_output_full();
-    return inb(PS2_DATA_PORT);
-}
-
-static void ps2_flush_output_buffer(void) {
-    for (int i = 0; i < 16; i++) {
-        if (!(inb(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT_FULL)) {
-            return;
-        }
-        (void)inb(PS2_DATA_PORT);
-    }
-}
-
-static void mouse_write(uint8_t data) {
-    ps2_write_command(0xD4);
-    ps2_write_data(data);
-    ps2_read_data();
+static int mouse_write(uint8_t data) {
+    return ps2_controller_write_aux(data);
 }
 
 #define EVENT_BUFFER_SIZE 64
@@ -131,26 +85,33 @@ void mouse_init(void) {
     buffer_tail = 0;
     packet_index = 0;
     packet_bytes = 3;
+    mouse_present = 0;
 
-    ps2_write_command(0xA8);
+    if (!(ps2_controller_ports() & PS2_AUX_PORT_PRESENT)) {
+        kernel_log_puts("[mouse] no PS/2 auxiliary port - nothing to negotiate with. A USB "
+                   "mouse reaches the same ring buffer through the xHCI driver.\n");
+        return;
+    }
 
-    mouse_write(0xF6);
+    if (!mouse_write(0xF6)) {
+        kernel_log_puts("[mouse] the auxiliary port tested good but nothing on it answered - "
+                   "IRQ12 left masked.\n");
+        return;
+    }
+    mouse_present = 1;
 
     mouse_write(0xF3); mouse_write(200);
     mouse_write(0xF3); mouse_write(100);
     mouse_write(0xF3); mouse_write(80);
-    mouse_write(0xF2);
-    uint8_t device_id = ps2_read_data();
-    packet_bytes = (device_id == 0x03) ? 4 : 3;
+
+    uint8_t device_id = 0;
+    packet_bytes = 3;
+    if (mouse_write(0xF2) && ps2_controller_read_data(&device_id) && device_id == 0x03) {
+        packet_bytes = 4;
+    }
 
     mouse_write(0xF4);
-    ps2_flush_output_buffer();
-
-    ps2_write_command(0x20);
-    uint8_t config = ps2_read_data();
-    config |= 0x02;
-    ps2_write_command(0x60);
-    ps2_write_data(config);
+    ps2_controller_flush();
 
     kernel_log_puts(packet_bytes == 4
                   ? "[mouse] IntelliMouse 4-byte protocol negotiated - wheel events enabled.\n"
@@ -159,6 +120,10 @@ void mouse_init(void) {
     irq_register_handler(MOUSE_IRQ, mouse_irq);
     irq_enable_line(CASCADE_IRQ);
     irq_enable_line(MOUSE_IRQ);
+}
+
+int mouse_is_present(void) {
+    return mouse_present;
 }
 
 void mouse_inject(int32_t dx, int32_t dy, uint8_t buttons, int32_t wheel) {

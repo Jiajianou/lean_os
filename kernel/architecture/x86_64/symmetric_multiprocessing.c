@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "acpi/acpi.h"
+#include "boot/boot_options.h"
 #include "drivers/kernel_log.h"
 #include "drivers/pit.h"
 #include "floating_point_unit.h"
@@ -225,13 +226,22 @@ void smp_init(void) {
     smp_cpus[0].online = 1;
     smp_cpu_count = 1;
 
+    int ceiling = MAX_CPUS;
+    uint32_t asked_for = boot_options_active()->cpu_limit;
+    if (asked_for > 0 && (int)asked_for < ceiling) {
+        ceiling = (int)asked_for;
+        kernel_log_puts("[smp] cpus= in \\EFI\\BOOT\\lean_os.cfg holds this boot to ");
+        kernel_log_put_dec(asked_for);
+        kernel_log_puts(" processor(s).\n");
+    }
+
     int next_cpu = 1;
     for (int i = 0; i < madt.cpu_count; i++) {
         if (madt.cpu_apic_ids[i] == bsp_apic_id) {
             continue;
         }
-        if (next_cpu >= MAX_CPUS) {
-            kernel_log_puts("[smp] MAX_CPUS reached - ignoring the remaining CPU(s) listed in the MADT.\n");
+        if (next_cpu >= ceiling) {
+            kernel_log_puts("[smp] processor ceiling reached - ignoring the remaining CPU(s) listed in the MADT.\n");
             break;
         }
         smp_cpus[next_cpu].apic_id = madt.cpu_apic_ids[i];

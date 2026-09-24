@@ -27,6 +27,7 @@ uint32_t fake_block_device_sector_count(void);
 void fake_block_device_fail_writes_after(int64_t n);
 void fake_block_device_fail_writes_silently_after(int64_t n);
 void fake_block_device_fail_reads_after(int64_t n);
+void fake_block_device_write_this_os_boot_sector(void);
 
 void fake_net_reset(void);
 int fake_net_tx_count(void);

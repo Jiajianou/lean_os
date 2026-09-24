@@ -54,6 +54,7 @@ KERNEL_SECTORS_FILE := $(BUILD)/kernel.sectors
 KERNEL_PAGES_FILE   := $(BUILD)/kernel.pages
 IMAGE      := $(BUILD)/os-image.bin
 UEFI_BOOT_OBJ := $(BUILD)/uefi_boot.obj
+UEFI_OPTIONS_OBJ := $(BUILD)/uefi_boot_options.obj
 UEFI_BOOT_EFI := $(BUILD)/BOOTX64.EFI
 
 UOBJ      := $(BUILD)/user_obj
@@ -96,7 +97,7 @@ USER_PROGRAMS += $(LVGL_PROGRAMS)
 USER_PROGRAM_ELFS := $(foreach p,$(USER_PROGRAMS),$(BUILD)/$(p).elf)
 LVGL_PROGRAM_ELFS := $(foreach p,$(LVGL_PROGRAMS),$(BUILD)/$(p).elf)
 
-KERNEL_C_SRCS := $(shell find kernel -name '*.c' -not -path 'kernel/boot/*')
+KERNEL_C_SRCS := $(shell find kernel -name '*.c' -not -path 'kernel/boot/uefi/*')
 KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' -not -path 'kernel/boot/*' -not -name 'ap_trampoline.asm')
 
 KERNEL_OBJS := $(patsubst kernel/%.asm,$(KOBJ)/%.o,$(KERNEL_ASM_SRCS)) \
@@ -215,16 +216,21 @@ $(KERNEL_ELF): $(KERNEL_OBJS) kernel/linker.ld
 	$(if $(V),,@echo "  LD      $@")
 	$(if $(V),,@)$(LD) -T kernel/linker.ld -o $@ $(KERNEL_OBJS)
 
-$(UEFI_BOOT_OBJ): kernel/boot/uefi/boot.c kernel/boot/uefi/efi.h kernel/boot/uefi/efi_proto.h $(KERNEL_BIN) | $(BUILD)
+$(UEFI_BOOT_OBJ): kernel/boot/uefi/boot.c kernel/boot/uefi/efi.h kernel/boot/uefi/efi_proto.h kernel/boot/boot_options.h $(KERNEL_BIN) | $(BUILD)
 	$(UEFI_CC) -target $(UEFI_CC_TARGET) -ffreestanding -fshort-wchar -mno-red-zone \
 	           -fno-stack-protector -std=c11 -Wall -Wextra -Werror \
 	           -DKERNEL_SECTOR_COUNT=$$(cat $(KERNEL_SECTORS_FILE)) \
 	           -DKERNEL_IMAGE_PAGES=$$(cat $(KERNEL_PAGES_FILE)) \
-	           -Ikernel/boot/uefi -c kernel/boot/uefi/boot.c -o $@
+	           -Ikernel -Ikernel/boot/uefi -c kernel/boot/uefi/boot.c -o $@
 
-$(UEFI_BOOT_EFI): $(UEFI_BOOT_OBJ)
+$(UEFI_OPTIONS_OBJ): kernel/boot/boot_options.c kernel/boot/boot_options.h | $(BUILD)
+	$(UEFI_CC) -target $(UEFI_CC_TARGET) -ffreestanding -fshort-wchar -mno-red-zone \
+	           -fno-stack-protector -std=c11 -Wall -Wextra -Werror \
+	           -Ikernel -c kernel/boot/boot_options.c -o $@
+
+$(UEFI_BOOT_EFI): $(UEFI_BOOT_OBJ) $(UEFI_OPTIONS_OBJ)
 	$(UEFI_LINK) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:X64 \
-	             /dll /dynamicbase:no /out:$@ $<
+	             /dll /dynamicbase:no /out:$@ $(UEFI_BOOT_OBJ) $(UEFI_OPTIONS_OBJ)
 
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
@@ -699,7 +705,7 @@ TEST_KERNEL_SRCS := kernel/library/kernel_library.c kernel/memory_management/hea
                     kernel/drivers/nvme_split.c kernel/drivers/pci.c \
                     kernel/inter_process_communication/eventfd.c kernel/inter_process_communication/timerfd.c kernel/inter_process_communication/epoll.c \
                     kernel/inter_process_communication/memfd.c \
-                    kernel/process/resource_limits.c
+                    kernel/process/resource_limits.c kernel/boot/boot_options.c
 
 TEST_USER_SRCS := user_space/library/symbol_table.c \
                   user_space/library/sha256.c user_space/library/os_package.c \
@@ -847,3 +853,7 @@ clean:
 
 distclean:
 	rm -rf $(BUILD)
+
+.PHONY: print-esp-start-lba
+print-esp-start-lba:
+	@echo $(ESP_START_LBA)

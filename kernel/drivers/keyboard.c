@@ -7,7 +7,9 @@
 #include "architecture/x86_64/io.h"
 #include "architecture/x86_64/interrupt_service_routines.h"
 #include "architecture/x86_64/pic.h"
+#include "drivers/kernel_log.h"
 #include "input.h"
+#include "ps2_controller.h"
 
 #define PS2_DATA_PORT 0x60
 #define KEYBOARD_IRQ  1
@@ -166,8 +168,16 @@ void keyboard_init(void) {
     alt_held = 0;
     last_read_mods = 0;
     extended_prefix = 0;
+
+    uint32_t present = ps2_controller_init();
+
     irq_register_handler(KEYBOARD_IRQ, keyboard_irq);
-    irq_enable_line(KEYBOARD_IRQ);
+    if (present & PS2_KEYBOARD_PORT_PRESENT) {
+        irq_enable_line(KEYBOARD_IRQ);
+    } else {
+        kernel_log_puts("[kbd] no PS/2 keyboard port - IRQ1 left masked. A USB keyboard "
+                   "reaches the same ring buffer through the xHCI driver.\n");
+    }
 }
 
 int keyboard_modifiers(void) {

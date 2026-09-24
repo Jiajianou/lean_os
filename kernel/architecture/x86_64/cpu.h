@@ -1,6 +1,6 @@
 #pragma once
 
-#define MAX_CPUS 8
+#define MAX_CPUS 16
 
 #define MSR_FS_BASE 0xC0000100u
 #define MSR_GS_BASE 0xC0000101u

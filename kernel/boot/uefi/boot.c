@@ -1,6 +1,8 @@
 #include "efi.h"
 #include "efi_proto.h"
 
+#include "boot/boot_options.h"
+
 #ifndef KERNEL_SECTOR_COUNT
 #define KERNEL_SECTOR_COUNT 32
 #endif
@@ -50,6 +52,77 @@ static void halt(CHAR16 *message) {
     }
 }
 
+static boot_options_t boot_options;
+
+static void read_boot_options(EFI_HANDLE image_handle) {
+    boot_options_defaults(&boot_options);
+
+    EFI_BOOT_SERVICES *bs = gST->BootServices;
+    EFI_GUID loaded_image_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+    EFI_GUID file_system_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+
+    EFI_LOADED_IMAGE_PROTOCOL *loaded_image = NULL;
+    if (EFI_ERROR(bs->HandleProtocol(image_handle, &loaded_image_guid, (void **)&loaded_image)) || !loaded_image) {
+        return;
+    }
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *file_system = NULL;
+    if (EFI_ERROR(bs->HandleProtocol(loaded_image->DeviceHandle, &file_system_guid, (void **)&file_system)) ||
+        !file_system) {
+        return;
+    }
+    EFI_FILE_PROTOCOL *root = NULL;
+    if (EFI_ERROR(file_system->OpenVolume(file_system, &root)) || !root) {
+        return;
+    }
+    EFI_FILE_PROTOCOL *file = NULL;
+    if (EFI_ERROR(root->Open(root, &file, u"\\EFI\\BOOT\\lean_os.cfg", EFI_FILE_MODE_READ, 0)) || !file) {
+        root->Close(root);
+        return;
+    }
+
+    static char text[4096];
+    UINTN size = sizeof(text);
+    EFI_STATUS status = file->Read(file, &size, text);
+    file->Close(file);
+    root->Close(root);
+    if (EFI_ERROR(status)) {
+        return;
+    }
+    if (size > sizeof(text)) {
+        size = sizeof(text);
+    }
+    boot_options_parse(text, (UINT32)size, &boot_options);
+    puts16(u"lean_os uefi: \\EFI\\BOOT\\lean_os.cfg read\r\n");
+}
+
+static INT32 choose_graphics_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop, UINT32 *out_width,
+                                  UINT32 *out_height) {
+    INT32 chosen = -1;
+    int chosen_score = 0;
+    for (UINT32 m = 0; m < gop->Mode->MaxMode; m++) {
+        UINTN info_size = 0;
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
+        if (EFI_ERROR(gop->QueryMode(gop, m, &info_size, &info)) || !info) {
+            continue;
+        }
+        if (info->PixelFormat != PixelBlueGreenRedReserved8BitPerColor) {
+            continue;
+        }
+        int score = boot_options_video_score(&boot_options, info->HorizontalResolution,
+                                             info->VerticalResolution);
+        if (score < 0) {
+            continue;
+        }
+        if (chosen < 0 || score > chosen_score) {
+            chosen = (INT32)m;
+            chosen_score = score;
+            *out_width = info->HorizontalResolution;
+            *out_height = info->VerticalResolution;
+        }
+    }
+    return chosen;
+}
+
 static void init_framebuffer(framebuffer_boot_info_t *framebuffer) {
     EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
@@ -57,25 +130,34 @@ static void init_framebuffer(framebuffer_boot_info_t *framebuffer) {
         halt(u"lean_os uefi: no Graphics Output Protocol available\r\n");
     }
 
-    INT32 best_exact = -1;
-    INT32 best_any = -1;
-    for (UINT32 m = 0; m < gop->Mode->MaxMode; m++) {
-        UINTN info_size = 0;
-        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
-        if (EFI_ERROR(gop->QueryMode(gop, m, &info_size, &info)) || !info) {
-            continue;
-        }
-        if (info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor) {
-            if (best_any < 0) {
-                best_any = (INT32)m;
-            }
-            if (info->HorizontalResolution == 1024 && info->VerticalResolution == 768) {
-                best_exact = (INT32)m;
-            }
+    UINT32 chosen_width = 0;
+    UINT32 chosen_height = 0;
+    INT32 chosen = -1;
+
+    if (boot_options.video_selection == BOOT_VIDEO_FIRMWARE) {
+        if (gop->Mode->Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor &&
+            gop->Mode->Info->HorizontalResolution > 0) {
+            chosen = (INT32)gop->Mode->Mode;
+            chosen_width = gop->Mode->Info->HorizontalResolution;
+            chosen_height = gop->Mode->Info->VerticalResolution;
+        } else {
+            puts16(u"lean_os uefi: the firmware's own mode is not one this OS can draw in - "
+                   u"taking the largest\r\n");
+            boot_options.video_selection = BOOT_VIDEO_LARGEST;
+            boot_options.unknown_keys++;
         }
     }
+    if (chosen < 0) {
+        chosen = choose_graphics_mode(gop, &chosen_width, &chosen_height);
+    }
 
-    INT32 chosen = (best_exact >= 0) ? best_exact : best_any;
+    if (chosen < 0 && boot_options.video_selection == BOOT_VIDEO_EXACT) {
+        puts16(u"lean_os uefi: the video= mode is not one this firmware has - taking the largest\r\n");
+        boot_options.video_selection = BOOT_VIDEO_LARGEST;
+        boot_options.unknown_keys++;
+        chosen = choose_graphics_mode(gop, &chosen_width, &chosen_height);
+    }
+
     if (chosen < 0) {
         halt(u"lean_os uefi: no 0x00RRGGBB (BGR8888) graphics mode found\r\n");
     }
@@ -84,6 +166,9 @@ static void init_framebuffer(framebuffer_boot_info_t *framebuffer) {
             halt(u"lean_os uefi: SetMode failed\r\n");
         }
     }
+
+    boot_options.chosen_width = chosen_width;
+    boot_options.chosen_height = chosen_height;
 
     framebuffer->phys_address = gop->Mode->FrameBufferBase;
     framebuffer->pitch = gop->Mode->Info->PixelsPerScanLine * 4;
@@ -306,6 +391,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     UINTN rsdp = find_rsdp(SystemTable);
 
+    read_boot_options(ImageHandle);
+
     static framebuffer_boot_info_t framebuffer;
     init_framebuffer(&framebuffer);
 
@@ -319,10 +406,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         "mov %0, %%rdi\n\t"
         "mov %1, %%rsi\n\t"
         "mov %3, %%rdx\n\t"
+        "mov %4, %%r8\n\t"
         "jmp *%2\n\t"
         :
-        : "r"((UINTN)e820), "r"((UINTN)&framebuffer), "r"((UINTN)KERNEL_LOAD_ADDRESS), "r"(rsdp)
-        : "rdi", "rsi", "rdx");
+        : "r"((UINTN)e820), "r"((UINTN)&framebuffer), "r"((UINTN)KERNEL_LOAD_ADDRESS), "r"(rsdp),
+          "r"((UINTN)&boot_options)
+        : "rdi", "rsi", "rdx", "r8");
 
     __builtin_unreachable();
 }

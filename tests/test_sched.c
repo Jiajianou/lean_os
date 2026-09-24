@@ -58,7 +58,7 @@ static void q13_tick(int cpu) {
 
 TEST(scheduler, the_constants_are_the_kernels_own) {
     CHECK_EQ(MAX_TASKS, 128);
-    CHECK_EQ(MAX_CPUS, 8);
+    CHECK_EQ(MAX_CPUS, 16);
     CHECK(MAX_FILE_DESCRIPTORS >= 128);
     q13_boot();
     task_t *a = q13_spawn("q-a");

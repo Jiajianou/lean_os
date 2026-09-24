@@ -27,6 +27,20 @@ uint32_t fake_block_device_sector_count(void);
 void fake_block_device_fail_writes_after(int64_t n);
 void fake_block_device_fail_writes_silently_after(int64_t n);
 void fake_block_device_fail_reads_after(int64_t n);
+void fake_block_device_write_this_os_boot_sector(void);
+
+static void write_boot_sector_label(void) {
+    static const char label[8] = {'L', 'E', 'A', 'N', '_', 'O', 'S', '1'};
+    memcpy(disk + 0x1A0, label, sizeof(label));
+    disk[510] = 0x55;
+    disk[511] = 0xAA;
+}
+
+void fake_block_device_write_this_os_boot_sector(void) {
+    if (disk) {
+        write_boot_sector_label();
+    }
+}
 
 void fake_block_device_reset(uint32_t sectors) {
     if (disk && disk_sectors == sectors) {
@@ -39,6 +53,7 @@ void fake_block_device_reset(uint32_t sectors) {
         }
         disk_sectors = sectors;
     }
+    write_boot_sector_label();
     reads = writes = read_calls = 0;
     fail_writes_after = -1;
     fail_reads_after = -1;

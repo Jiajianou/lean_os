@@ -220,3 +220,38 @@ typedef struct {
     (EFI_GUID) {                                                                       \
         0x9042a9de, 0x23dc, 0x4a38, { 0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a }  \
     }
+
+typedef struct EFI_FILE_PROTOCOL EFI_FILE_PROTOCOL;
+
+typedef EFI_STATUS(EFIAPI *EFI_FILE_OPEN)(EFI_FILE_PROTOCOL *This, EFI_FILE_PROTOCOL **NewHandle,
+                                           CHAR16 *FileName, UINT64 OpenMode, UINT64 Attributes);
+typedef EFI_STATUS(EFIAPI *EFI_FILE_CLOSE)(EFI_FILE_PROTOCOL *This);
+typedef EFI_STATUS(EFIAPI *EFI_FILE_READ)(EFI_FILE_PROTOCOL *This, UINTN *BufferSize, void *Buffer);
+
+struct EFI_FILE_PROTOCOL {
+    UINT64 Revision;
+    EFI_FILE_OPEN Open;
+    EFI_FILE_CLOSE Close;
+    void *Delete;
+    EFI_FILE_READ Read;
+    void *Write;
+    void *GetPosition;
+    void *SetPosition;
+    void *GetInfo;
+    void *SetInfo;
+    void *Flush;
+};
+
+#define EFI_FILE_MODE_READ 0x0000000000000001ULL
+
+typedef EFI_STATUS(EFIAPI *EFI_SIMPLE_FILE_SYSTEM_OPEN_VOLUME)(void *This, EFI_FILE_PROTOCOL **Root);
+
+typedef struct {
+    UINT64 Revision;
+    EFI_SIMPLE_FILE_SYSTEM_OPEN_VOLUME OpenVolume;
+} EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
+
+#define EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID                                           \
+    (EFI_GUID) {                                                                       \
+        0x964e5b22, 0x6459, 0x11d2, { 0x8e, 0x39, 0x0, 0xa0, 0xc9, 0x69, 0x72, 0x3b }   \
+    }

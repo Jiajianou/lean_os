@@ -4,6 +4,7 @@
 #include "architecture/x86_64/cpu.h"
 #include "architecture/x86_64/lapic.h"
 #include "architecture/x86_64/pic.h"
+#include "boot/boot_options.h"
 #include "device/fwcfg.h"
 #include "drivers/kernel_log.h"
 #include "library/kernel_library.h"
@@ -74,10 +75,10 @@ static acpi_ioapic_t *ioapic_for_gsi(uint32_t gsi, uint32_t *out_index) {
 }
 
 void ioapic_init(void) {
-    if (!boot_ioapic_enabled()) {
+    if (!boot_options_use_ioapic(boot_options_active(), fwcfg_present(), boot_ioapic_enabled())) {
         kernel_log_puts("[ioapic] not requested for this boot - on the 8259 PIC. "
-                   "-fw_cfg name=opt/leanos/ioapic,string=1 selects it; "
-                   "kernel/device/fwcfg.h has the numbers.\n");
+                   "-fw_cfg name=opt/leanos/ioapic,string=1 selects it, and so does "
+                   "interrupts=ioapic in \\EFI\\BOOT\\lean_os.cfg.\n");
         usable = 0;
         return;
     }
@@ -113,6 +114,20 @@ void ioapic_init(void) {
 
 int ioapic_available(void) {
     return usable;
+}
+
+void ioapic_fall_back_to_pic(void) {
+    if (!usable) {
+        return;
+    }
+    for (int i = 0; i < madt.ioapic_count; i++) {
+        acpi_ioapic_t *io = &madt.ioapics[i];
+        uint32_t count = ioapic_entries(io);
+        for (uint32_t e = 0; e < count; e++) {
+            ioapic_write(io, IOAPIC_REG_REDTBL + 2 * e, REDIR_MASKED);
+        }
+    }
+    usable = 0;
 }
 
 void ioapic_route_irq(uint8_t irq, uint8_t lapic_id) {

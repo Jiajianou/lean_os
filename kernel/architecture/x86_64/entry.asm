@@ -20,6 +20,8 @@ _start:
     jmp .zero_bss
 .zero_bss_done:
 
+    mov rcx, r8
+
     mov rax, kernel_stack_guard
     mov rbx, 0x5354414B47554152
     mov qword [rax], rbx

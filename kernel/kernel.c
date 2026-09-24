@@ -32,6 +32,8 @@
 #include "file_system/open_file.h"
 #include "device/random.h"
 #include "device/tty.h"
+#include "boot/boot_options.h"
+#include "drivers/hardware_inventory.h"
 #include "device/fwcfg.h"
 #include "file_system/virtual_file_system.h"
 #include "inter_process_communication/pipe.h"
@@ -13082,9 +13084,23 @@ static void boot_selftests_system(void) {
     }
 }
 
-void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, uint64_t rsdp_phys) {
+static int timer_interrupts_are_arriving(void) {
+    uint64_t start = pit_get_ticks();
+    for (uint64_t spins = 0; spins < 400000000ull; spins++) {
+        if (pit_get_ticks() != start) {
+            return 1;
+        }
+        __asm__ volatile("pause");
+    }
+    return 0;
+}
+
+void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, uint64_t rsdp_phys,
+                 const boot_options_t *handoff) {
     kernel_log_init();
     kernel_log_puts("lean_os kernel: hello from C!\n\n");
+
+    boot_options_set_active(handoff);
 
     fwcfg_init();
     if (boot_selftests_enabled()) {
@@ -13240,6 +13256,19 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
             if (n <= 0) {
                 panic("M58 self-test: a DISPI adapter answered the probe but offers no modes");
             }
+            int boot_mode_is_offered = 0;
+            for (int i = 0; i < n; i++) {
+                if (list[i].width == boot_w && list[i].height == boot_h) {
+                    boot_mode_is_offered = 1;
+                }
+            }
+            if (!boot_mode_is_offered) {
+                kernel_log_puts("[m58] the firmware chose a mode this adapter does not offer, so "
+                           "there is no way back to it - leaving the screen alone "
+                           "(self-test skipped).\n\n");
+                goto display_self_test_done;
+            }
+
             int pick = -1;
             for (int i = 0; i < n; i++) {
                 if (list[i].width == boot_w && list[i].height == boot_h) {
@@ -13291,6 +13320,8 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
             kernel_log_puts("[m58] display mode set and read back from the device (geometry, "
                        "device-chosen pitch and a grown mapping), then restored - self-test passed.\n\n");
         }
+display_self_test_done:
+        (void)boot_pitch;
     }
 
     console_init();
@@ -13419,6 +13450,16 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
     ioapic_init();
 
     pit_init();
+    if (!timer_interrupts_are_arriving()) {
+        kernel_log_puts("[ioapic] IRQ0 never arrived through the I/O APIC - falling back to the "
+                   "8259 PIC. interrupts=pic in \\EFI\\BOOT\\lean_os.cfg makes that the "
+                   "first choice on this machine.\n");
+        ioapic_fall_back_to_pic();
+        irq_enable_line(0);
+        if (!timer_interrupts_are_arriving()) {
+            panic("no timer interrupt through either interrupt controller");
+        }
+    }
     tsc_init();
     kernel_log_puts("[pit] channel 0 programmed for ");
     kernel_log_put_hex32(PIT_HZ);
@@ -13465,6 +13506,7 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
     kernel_log_putc('\n');
 
     mouse_init();
+    hardware_inventory_report();
     cursor_init((int32_t)(framebuffer_width() / 2), (int32_t)(framebuffer_height() / 2));
     kernel_log_puts("[mouse] IRQ12 unmasked, cursor drawn at screen center. Waiting "
                "up to 3s for test movement (QEMU monitor: 'mouse_move dx dy' "

@@ -622,3 +622,42 @@ TEST(leanfs, neighbouring_blocks_are_asked_for_in_one_request) {
     free(back);
     fake_block_device_free();
 }
+
+TEST(leanfs, a_disk_that_is_not_this_os_s_is_refused_rather_than_formatted) {
+    kernel_log_capture_reset();
+    fake_block_device_reset(DISK_SECTORS);
+
+    uint8_t *first = fake_block_device_sector(0);
+    memset(first, 0, 512);
+    memcpy(first + 0x1BE, "\x00\x20\x21\x00\x07\xFE\xFF\xFF", 8);
+    first[510] = 0x55;
+    first[511] = 0xAA;
+
+    CHECK_PANIC(leanfs_init(), "refusing to format a disk that is not this OS's");
+    CHECK(kernel_log_capture_contains("does not carry lean_os's own boot sector"));
+    CHECK(!kernel_log_capture_contains("formatting fresh"));
+    fake_block_device_free();
+}
+
+TEST(leanfs, a_boot_sector_with_the_label_but_no_signature_is_still_refused) {
+    kernel_log_capture_reset();
+    fake_block_device_reset(DISK_SECTORS);
+
+    uint8_t *first = fake_block_device_sector(0);
+    first[510] = 0;
+    first[511] = 0;
+
+    CHECK_PANIC(leanfs_init(), "refusing to format a disk that is not this OS's");
+    fake_block_device_free();
+}
+
+TEST(leanfs, this_os_s_own_disk_is_formatted_as_it_always_was) {
+    kernel_log_capture_reset();
+    fake_block_device_reset(DISK_SECTORS);
+    fake_block_device_write_this_os_boot_sector();
+
+    CHECK_NO_PANIC(leanfs_init());
+    CHECK(kernel_log_capture_contains("formatting fresh"));
+    CHECK(leanfs_is_directory("/"));
+    fake_block_device_free();
+}

@@ -5,7 +5,11 @@
 %define ESP_SECTOR_COUNT 1024
 %endif
 
-times 0x1BE db 0
+times 0x1A0 db 0
+
+db 'LEAN_OS1'
+
+times 0x1BE - ($ - $$) db 0
 
 db 0x00
 db 0xFE, 0xFF, 0xFF

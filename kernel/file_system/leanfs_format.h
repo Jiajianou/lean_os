@@ -16,6 +16,19 @@ static inline uint32_t leanfs_fnv1a(uint32_t h, const void *data, size_t length)
     return h;
 }
 
+#define LEANFS_DISK_LABEL_OFFSET 0x1A0u
+#define LEANFS_DISK_LABEL_LENGTH 8u
+
+static inline int leanfs_disk_carries_this_os(const uint8_t *first_block) {
+    static const char label[LEANFS_DISK_LABEL_LENGTH] = {'L', 'E', 'A', 'N', '_', 'O', 'S', '1'};
+    for (uint32_t i = 0; i < LEANFS_DISK_LABEL_LENGTH; i++) {
+        if (first_block[LEANFS_DISK_LABEL_OFFSET + i] != (uint8_t)label[i]) {
+            return 0;
+        }
+    }
+    return first_block[510] == 0x55 && first_block[511] == 0xAA;
+}
+
 #define LEANFS_MAGIC     0x3553464Cu
 #define LEANFS_VERSION   5u
 

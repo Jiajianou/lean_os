@@ -235,6 +235,18 @@ static void format(void) {
     save_meta();
 }
 
+static void format_if_this_disk_is_ours(void) {
+    uint8_t first_block[LEANFS_BLOCK_SIZE];
+    block_read(0, first_block);
+    if (!leanfs_disk_carries_this_os(first_block)) {
+        kernel_log_puts("[fs] the disk this kernel is reading does not carry lean_os's own boot "
+                   "sector. It belongs to some other system, and formatting it would destroy "
+                   "whatever is on it. Nothing has been written.\n");
+        panic("refusing to format a disk that is not this OS's");
+    }
+    format();
+}
+
 void leanfs_init(void) {
     inodes_alloc();
     uint8_t buffer[LEANFS_BLOCK_SIZE];
@@ -245,17 +257,17 @@ void leanfs_init(void) {
         sb.data_blocks != LEANFS_DATA_BLOCKS ||
         sb.inode_table_blocks != INODE_TABLE_BLOCKS ||
         sb.bitmap_blocks_field != BITMAP_BLOCKS) {
-        format();
+        format_if_this_disk_is_ours();
     } else if (sb.version != LEANFS_VERSION) {
         kernel_log_puts("[fs] leanfs on-disk version is not this build's - reformatting\n");
-        format();
+        format_if_this_disk_is_ours();
     } else {
         read_run(sb.inode_table_block, sb.inode_table_blocks, (uint8_t *)inodes);
         read_run(sb.bitmap_block, sb.bitmap_blocks_field, bitmap);
 
         if (inodes[ROOT_INODE].type != LEANFS_TYPE_DIRECTORY) {
             kernel_log_puts("[fs] leanfs root inode is not a directory - reformatting\n");
-            format();
+            format_if_this_disk_is_ours();
         } else if (sb.state == LEANFS_STATE_DIRTY) {
             kernel_log_puts("[fs] leanfs was not cleanly unmounted - checking\n");
             leanfs_check();

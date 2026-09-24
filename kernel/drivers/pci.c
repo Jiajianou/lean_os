@@ -36,6 +36,40 @@ static void config_write32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offs
     outl(PCI_CONFIG_DATA, value);
 }
 
+static void fill(pci_device_t *out, uint8_t bus, uint8_t slot, uint8_t func,
+                 uint16_t vendor_id, uint16_t device_id) {
+    uint32_t rev = config_read32(bus, slot, func, PCI_REG_REVISION);
+    uint32_t irq = config_read32(bus, slot, func, PCI_REG_INTERRUPT);
+    out->bus = bus;
+    out->slot = slot;
+    out->func = func;
+    out->vendor_id = vendor_id;
+    out->device_id = device_id;
+    out->irq_line = (uint8_t)(irq & 0xFF);
+    out->class_code = (uint8_t)(rev >> 24);
+    out->subclass = (uint8_t)(rev >> 16);
+    out->prog_if = (uint8_t)(rev >> 8);
+}
+
+void pci_enumerate(pci_visitor_t visit, void *context) {
+    for (uint32_t bus = 0; bus < 256; bus++) {
+        for (uint32_t slot = 0; slot < 32; slot++) {
+            for (uint32_t func = 0; func < 8; func++) {
+                uint32_t vendor_device =
+                    config_read32((uint8_t)bus, (uint8_t)slot, (uint8_t)func, PCI_REG_VENDOR_DEVICE);
+                uint16_t vid = (uint16_t)(vendor_device & 0xFFFF);
+                if (vid == 0xFFFF) {
+                    continue;
+                }
+                pci_device_t device;
+                fill(&device, (uint8_t)bus, (uint8_t)slot, (uint8_t)func, vid,
+                     (uint16_t)(vendor_device >> 16));
+                visit(&device, context);
+            }
+        }
+    }
+}
+
 int pci_find_device(uint16_t vendor_id, uint16_t device_id, pci_device_t *out) {
     for (uint32_t bus = 0; bus < 256; bus++) {
         for (uint32_t slot = 0; slot < 32; slot++) {
@@ -47,13 +81,7 @@ int pci_find_device(uint16_t vendor_id, uint16_t device_id, pci_device_t *out) {
                 }
                 uint16_t did = (uint16_t)(vendor_device >> 16);
                 if (vid == vendor_id && did == device_id) {
-                    uint32_t irq = config_read32((uint8_t)bus, (uint8_t)slot, (uint8_t)func, PCI_REG_INTERRUPT);
-                    out->bus = (uint8_t)bus;
-                    out->slot = (uint8_t)slot;
-                    out->func = (uint8_t)func;
-                    out->vendor_id = vid;
-                    out->device_id = did;
-                    out->irq_line = (uint8_t)(irq & 0xFF);
+                    fill(out, (uint8_t)bus, (uint8_t)slot, (uint8_t)func, vid, did);
                     return 1;
                 }
             }
@@ -112,13 +140,8 @@ int pci_find_class(uint8_t class_code, uint8_t subclass, uint8_t prog_if,
                 if (seen++ != index) {
                     continue;
                 }
-                uint32_t irq = config_read32((uint8_t)bus, (uint8_t)slot, (uint8_t)func, PCI_REG_INTERRUPT);
-                out->bus = (uint8_t)bus;
-                out->slot = (uint8_t)slot;
-                out->func = (uint8_t)func;
-                out->vendor_id = vid;
-                out->device_id = (uint16_t)(vendor_device >> 16);
-                out->irq_line = (uint8_t)(irq & 0xFF);
+                fill(out, (uint8_t)bus, (uint8_t)slot, (uint8_t)func, vid,
+                     (uint16_t)(vendor_device >> 16));
                 return 1;
             }
         }
@@ -203,4 +226,19 @@ uint8_t pci_find_capability(const pci_device_t *dev, uint8_t cap_id) {
         off = (uint8_t)((cap >> 8) & 0xFC);
     }
     return 0;
+}
+
+void pci_set_power_state_d0(const pci_device_t *dev) {
+    uint8_t cap = pci_find_capability(dev, PCI_CAP_ID_POWER_MANAGEMENT);
+    if (cap == 0) {
+        return;
+    }
+    uint32_t control = config_read32(dev->bus, dev->slot, dev->func, (uint8_t)(cap + 4));
+    if ((control & 0x3u) == 0) {
+        return;
+    }
+    control &= ~0x3u;
+    config_write32(dev->bus, dev->slot, dev->func, (uint8_t)(cap + 4), control);
+    for (volatile int settle = 0; settle < 100000; settle++) {
+    }
 }
