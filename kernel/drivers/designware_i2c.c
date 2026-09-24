@@ -1,0 +1,260 @@
+#include "designware_i2c.h"
+
+#include "drivers/designware_i2c_timing.h"
+#include "drivers/kernel_log.h"
+#include "drivers/pci.h"
+#include "drivers/pit.h"
+#include "memory_management/virtual_memory.h"
+
+#define REGISTER_CONTROL        0x00
+#define REGISTER_TARGET_ADDRESS 0x04
+#define REGISTER_DATA_COMMAND   0x10
+#define REGISTER_FS_SCL_HIGH    0x1C
+#define REGISTER_FS_SCL_LOW     0x20
+#define REGISTER_INTERRUPT_MASK 0x30
+#define REGISTER_RAW_INTERRUPT  0x34
+#define REGISTER_RX_THRESHOLD   0x38
+#define REGISTER_TX_THRESHOLD   0x3C
+#define REGISTER_CLEAR_INTERRUPT 0x40
+#define REGISTER_CLEAR_TX_ABORT  0x54
+#define REGISTER_ENABLE         0x6C
+#define REGISTER_STATUS         0x70
+#define REGISTER_TX_LEVEL       0x74
+#define REGISTER_RX_LEVEL       0x78
+#define REGISTER_TX_ABORT_SOURCE 0x80
+#define REGISTER_ENABLE_STATUS  0x9C
+#define REGISTER_COMPONENT_PARAM 0xF4
+#define REGISTER_COMPONENT_TYPE 0xFC
+
+#define CONTROL_MASTER_MODE   (1u << 0)
+#define CONTROL_SPEED_FAST    (2u << 1)
+#define CONTROL_RESTART_ENABLE (1u << 5)
+#define CONTROL_SLAVE_DISABLE (1u << 6)
+
+#define STATUS_ACTIVITY          (1u << 0)
+#define STATUS_TX_FIFO_NOT_FULL  (1u << 1)
+#define STATUS_RX_FIFO_NOT_EMPTY (1u << 3)
+
+#define DATA_COMMAND_READ    (1u << 8)
+#define DATA_COMMAND_STOP    (1u << 9)
+#define DATA_COMMAND_RESTART (1u << 10)
+
+#define RAW_INTERRUPT_TX_ABORT (1u << 6)
+#define RAW_INTERRUPT_STOP     (1u << 9)
+
+#define INTEL_VENDOR_ID 0x8086
+
+#define LPSS_PRIVATE_RESETS 0x204
+#define LPSS_RESET_RELEASED 0x7u
+
+#define ASSUMED_CLOCK_KHZ 216000u
+
+#define POLL_LIMIT 50000
+
+typedef struct {
+    volatile uint8_t *base;
+    uint32_t transmit_depth;
+} controller_t;
+
+static controller_t controllers[DESIGNWARE_I2C_MAX_CONTROLLERS];
+static int controller_count;
+
+#ifdef LEANOS_HOST_TEST
+/* A DesignWare register is not memory: reading the data register pops the
+   receive queue and reading the abort source clears it. The host tests hand
+   those two functions a model of the controller, which is the only way this
+   file's transfer loop is ever executed off the machine it was written for. */
+uint32_t designware_i2c_host_read(uint64_t base, uint32_t offset);
+void designware_i2c_host_write(uint64_t base, uint32_t offset, uint32_t value);
+
+static uint32_t read_register(const controller_t *c, uint32_t offset) {
+    return designware_i2c_host_read((uint64_t)(uintptr_t)c->base, offset);
+}
+
+static void write_register(const controller_t *c, uint32_t offset, uint32_t value) {
+    designware_i2c_host_write((uint64_t)(uintptr_t)c->base, offset, value);
+}
+#else
+static uint32_t read_register(const controller_t *c, uint32_t offset) {
+    return *(volatile uint32_t *)(c->base + offset);
+}
+
+static void write_register(const controller_t *c, uint32_t offset, uint32_t value) {
+    *(volatile uint32_t *)(c->base + offset) = value;
+}
+#endif
+
+static int disable_controller(const controller_t *c) {
+    write_register(c, REGISTER_ENABLE, 0);
+    for (int spins = 0; spins < POLL_LIMIT; spins++) {
+        if (!(read_register(c, REGISTER_ENABLE_STATUS) & 1u)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void configure(const controller_t *c) {
+    uint16_t high = 0;
+    uint16_t low = 0;
+    designware_i2c_counts(ASSUMED_CLOCK_KHZ, &high, &low);
+
+    write_register(c, REGISTER_CONTROL,
+                   CONTROL_MASTER_MODE | CONTROL_SPEED_FAST | CONTROL_RESTART_ENABLE |
+                       CONTROL_SLAVE_DISABLE);
+    write_register(c, REGISTER_FS_SCL_HIGH, high);
+    write_register(c, REGISTER_FS_SCL_LOW, low);
+    write_register(c, REGISTER_INTERRUPT_MASK, 0);
+    write_register(c, REGISTER_RX_THRESHOLD, 0);
+    write_register(c, REGISTER_TX_THRESHOLD, 0);
+}
+
+int designware_i2c_transfer(int controller, uint8_t address, const uint8_t *write,
+                            uint32_t write_length, uint8_t *read, uint32_t read_length) {
+    if (controller < 0 || controller >= controller_count) {
+        return 0;
+    }
+    const controller_t *c = &controllers[controller];
+
+    if (!disable_controller(c)) {
+        return 0;
+    }
+    configure(c);
+    write_register(c, REGISTER_TARGET_ADDRESS, address & 0x7Fu);
+    write_register(c, REGISTER_ENABLE, 1);
+    (void)read_register(c, REGISTER_CLEAR_INTERRUPT);
+
+    uint32_t written = 0;
+    uint32_t read_commands = 0;
+    uint32_t received = 0;
+    int spins = 0;
+
+    while (written < write_length || read_commands < read_length || received < read_length) {
+        if (read_register(c, REGISTER_RAW_INTERRUPT) & RAW_INTERRUPT_TX_ABORT) {
+            (void)read_register(c, REGISTER_CLEAR_TX_ABORT);
+            disable_controller(c);
+            return 0;
+        }
+
+        while (received < read_commands && (read_register(c, REGISTER_RX_LEVEL) > 0)) {
+            read[received++] = (uint8_t)(read_register(c, REGISTER_DATA_COMMAND) & 0xFFu);
+            spins = 0;
+        }
+
+        if (read_register(c, REGISTER_STATUS) & STATUS_TX_FIFO_NOT_FULL) {
+            if (written < write_length) {
+                uint32_t command = write[written];
+                if (written + 1 == write_length && read_length == 0) {
+                    command |= DATA_COMMAND_STOP;
+                }
+                write_register(c, REGISTER_DATA_COMMAND, command);
+                written++;
+                spins = 0;
+                continue;
+            }
+            if (read_commands < read_length) {
+                uint32_t command = DATA_COMMAND_READ;
+                if (read_commands == 0 && write_length > 0) {
+                    command |= DATA_COMMAND_RESTART;
+                }
+                if (read_commands + 1 == read_length) {
+                    command |= DATA_COMMAND_STOP;
+                }
+                write_register(c, REGISTER_DATA_COMMAND, command);
+                read_commands++;
+                spins = 0;
+                continue;
+            }
+        }
+
+        if (++spins > POLL_LIMIT) {
+            disable_controller(c);
+            return 0;
+        }
+    }
+
+    for (spins = 0; spins < POLL_LIMIT; spins++) {
+        if (!(read_register(c, REGISTER_STATUS) & STATUS_ACTIVITY)) {
+            break;
+        }
+    }
+
+    if (read_register(c, REGISTER_RAW_INTERRUPT) & RAW_INTERRUPT_TX_ABORT) {
+        (void)read_register(c, REGISTER_CLEAR_TX_ABORT);
+        disable_controller(c);
+        return 0;
+    }
+
+    disable_controller(c);
+    return 1;
+}
+
+int designware_i2c_controller_count(void) {
+    return controller_count;
+}
+
+int designware_i2c_init(void) {
+    controller_count = 0;
+
+    for (uint32_t index = 0; index < 16 && controller_count < DESIGNWARE_I2C_MAX_CONTROLLERS; index++) {
+        pci_device_t device;
+        if (!pci_find_class(0x0C, 0x80, PCI_PROG_IF_ANY, index, &device)) {
+            break;
+        }
+
+        uint64_t base = pci_bar_memory_base(&device, 0);
+        uint64_t size = pci_bar_memory_size(&device, 0);
+        if (base == 0 || size < 0x1000) {
+            continue;
+        }
+
+        pci_set_power_state_d0(&device);
+        pci_enable_device(&device);
+
+#ifndef LEANOS_HOST_TEST
+        for (uint64_t page = 0; page < size && page < 0x4000; page += 4096) {
+            virtual_memory_map_page(base + page, base + page,
+                         VIRTUAL_MEMORY_FLAG_WRITABLE | VIRTUAL_MEMORY_FLAG_NOCACHE);
+        }
+#endif
+
+        controller_t candidate;
+        candidate.base = (volatile uint8_t *)base;
+        candidate.transmit_depth = 0;
+
+        uint32_t component = read_register(&candidate, REGISTER_COMPONENT_TYPE);
+        if (component != DESIGNWARE_I2C_COMPONENT_TYPE && device.vendor_id == INTEL_VENDOR_ID &&
+            size > LPSS_PRIVATE_RESETS) {
+            /* Intel wraps the Synopsys block in a private register space whose reset is
+               held until somebody releases it - a controller still in reset identifies
+               as nothing at all. Nobody else's class-0C80 device gets written to. */
+            write_register(&candidate, LPSS_PRIVATE_RESETS, 0);
+            write_register(&candidate, LPSS_PRIVATE_RESETS, LPSS_RESET_RELEASED);
+            component = read_register(&candidate, REGISTER_COMPONENT_TYPE);
+        }
+        if (component != DESIGNWARE_I2C_COMPONENT_TYPE) {
+            continue;
+        }
+
+        uint32_t parameters = read_register(&candidate, REGISTER_COMPONENT_PARAM);
+        candidate.transmit_depth = ((parameters >> 16) & 0xFFu) + 1u;
+
+        controllers[controller_count++] = candidate;
+
+        kernel_log_puts("[i2c] DesignWare master at ");
+        kernel_log_put_hex64(base);
+        kernel_log_puts(" (");
+        kernel_log_put_hex32(device.vendor_id);
+        kernel_log_puts(":");
+        kernel_log_put_hex32(device.device_id);
+        kernel_log_puts("), transmit fifo ");
+        kernel_log_put_dec(candidate.transmit_depth);
+        kernel_log_puts(" deep.\n");
+    }
+
+    if (controller_count == 0) {
+        kernel_log_puts("[i2c] no DesignWare I2C master on this machine - nothing to probe.\n");
+    }
+
+    return controller_count;
+}

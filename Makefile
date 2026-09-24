@@ -705,7 +705,9 @@ TEST_KERNEL_SRCS := kernel/library/kernel_library.c kernel/memory_management/hea
                     kernel/drivers/nvme_split.c kernel/drivers/pci.c \
                     kernel/inter_process_communication/eventfd.c kernel/inter_process_communication/timerfd.c kernel/inter_process_communication/epoll.c \
                     kernel/inter_process_communication/memfd.c \
-                    kernel/process/resource_limits.c kernel/boot/boot_options.c
+                    kernel/process/resource_limits.c kernel/boot/boot_options.c \
+                    kernel/drivers/hid_report.c kernel/drivers/i2c_hid.c \
+                    kernel/drivers/designware_i2c_timing.c kernel/drivers/designware_i2c.c
 
 TEST_USER_SRCS := user_space/library/symbol_table.c \
                   user_space/library/sha256.c user_space/library/os_package.c \

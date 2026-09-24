@@ -6,6 +6,7 @@
 #include "architecture/x86_64/symmetric_multiprocessing.h"
 #include "boot/boot_options.h"
 #include "drivers/framebuffer.h"
+#include "drivers/i2c_touchpad.h"
 #include "drivers/kernel_log.h"
 #include "drivers/mouse.h"
 #include "drivers/pci.h"
@@ -145,6 +146,8 @@ void hardware_inventory_report(void) {
     kernel_log_puts((ports & PS2_KEYBOARD_PORT_PRESENT) ? "yes" : "no");
     kernel_log_puts(", auxiliary device ");
     kernel_log_puts(mouse_is_present() ? "yes" : "no");
+    kernel_log_puts(", I2C touchpad ");
+    kernel_log_puts(i2c_touchpad_present() ? "yes" : "no");
     kernel_log_puts(".\n");
 
     pci_enumerate(report_pci_device, 0);

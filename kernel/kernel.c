@@ -34,6 +34,7 @@
 #include "device/tty.h"
 #include "boot/boot_options.h"
 #include "drivers/hardware_inventory.h"
+#include "drivers/i2c_touchpad.h"
 #include "device/fwcfg.h"
 #include "file_system/virtual_file_system.h"
 #include "inter_process_communication/pipe.h"
@@ -13506,6 +13507,7 @@ display_self_test_done:
     kernel_log_putc('\n');
 
     mouse_init();
+    i2c_touchpad_init();
     hardware_inventory_report();
     cursor_init((int32_t)(framebuffer_width() / 2), (int32_t)(framebuffer_height() / 2));
     kernel_log_puts("[mouse] IRQ12 unmasked, cursor drawn at screen center. Waiting "
@@ -13539,6 +13541,7 @@ display_self_test_done:
 
     fpu_init_cpu();
     scheduler_init();
+    i2c_touchpad_start();
     scheduler_spawn_idle_tasks();
     kernel_log_puts("[sched] round-robin scheduler initialized (this context is task 0).\n");
     task_spawn("demo-a", demo_task, "A");
