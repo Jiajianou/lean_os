@@ -168,9 +168,10 @@ UEFI firmware
   the machine, and libjpeg's is the sharpest instrument in this tree: it
   ships the files the IJG's own encoder and decoder produced in **1995**,
   and its `make test` requires byte equality with them.
-- **A web browser.** **Chromium** - its own `content_shell`, built for
-  this machine out of Chromium's own ninja and on the desktop as
-  **Browser**: Blink laying the page out, V8 running its JavaScript, Skia
+- **A web browser.** **Chromium** - the browser itself, `//chrome`, with
+  its tab strip, its omnibox and its dropdown, the New Tab page, settings
+  and a profile - built for this machine out of Chromium's own ninja and
+  on the desktop as **Browser**: Blink laying the page out, V8 running its JavaScript, Skia
   drawing it, `//cc` and viz compositing it, `//net` and BoringSSL
   fetching it over this project's own TCP. What connects that to this
   desktop is an **ozone platform** of this project's own, six files under
@@ -183,15 +184,33 @@ UEFI firmware
   tree was patched to add the platform; `ozone_extra.gni` names it and
   `ui/ozone` generates the constructor list.
 
+  Until M187 the Browser icon ran `content_shell`, the test harness
+  Chromium ships to exercise `//content` - four buttons and an address
+  field, which is why it looked nothing like Chromium. `//chrome` builds
+  from the same checkout and the same arguments with one more patch, and
+  getting it to *run* found eleven places this machine disagreed with
+  POSIX or Linux that no smaller program had reached: permission bits of
+  zero, 128 descriptors a process, a `fork` that made shared pages
+  copy-on-write, a listening socket that reported hang-up forever, a file
+  whose inode was freed while it was still open and mapped, and more.
+
   The desktop opens it through `/bin/browser`, a first-party launcher
-  that execs `/bin/chromiumshell` with the six switches this desktop
-  needs spelled out once. It is **Chromium's own process model**: the
+  that execs `/bin/chrome` (or `/bin/chromiumshell` on an image without
+  it) with the switches this desktop needs spelled out once, plus any in
+  `/etc/chromium-flags.conf`, one per line. It is **Chromium's own process model**: the
   browser process owns the window, the **renderer runs in a process of
   its own** under the capability sandbox, and the network and storage
   services are utility processes of their own. Only the viz compositor
   stays in the browser process (`--in-process-gpu`), because this machine
   has no GPU and the window it paints into belongs to the process that
-  opened it.
+  opened it. Pages of one site share **one renderer** for now
+  (`--renderer-process-limit=1`; site isolation still gives each new
+  site a process of its own): every process that execs a 300 MB program
+  gets a private copy of it here, and a browser, its services and three
+  renderers do not fit in 4 GiB. Sharing an executable's read-only pages
+  between the processes running it is the condition for removing that -
+  and for a second tab on the New Tab page, whose WebUI renderers are what
+  ran this machine out of memory.
 
   It held `CAP_FS_WRITE | CAP_NETWORK` and nothing else when it was
   NetSurf, and it holds the same now. **Not** `CAP_FRAMEBUFFER`: two
@@ -300,9 +319,9 @@ make packages                # ...and write them into the image as /pkg/repo
 make fonts                   # DejaVu, and the /etc/fonts/fonts.conf that
                              #   says where it is - a property of the
                              #   machine rather than of one browser
-tools/build-chromium.sh content/shell:content_shell
+tools/build-chromium.sh chrome
                              # Chromium's own browser, out of Chromium's
-                             #   own ninja - most of an hour, once
+                             #   own ninja - hours the first time
 make browser                 # ...and write it into the image, with its
                              #   launcher, home page and fonts
 ```

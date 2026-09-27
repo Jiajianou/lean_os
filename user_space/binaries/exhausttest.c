@@ -5,7 +5,10 @@
 
 #include "syscall_wrappers.h"
 
-#define TRY_HARD 512
+/* Past every ceiling it is asked to find: M187 made a process's descriptor
+   table 1024 and the machine's open files 4096, and a test that stops trying
+   before the ceiling reports a resource that never ran out. */
+#define TRY_HARD 8192
 
 #define AT_LEAST_ONE(n) do { if ((n) == 0) { return 11; } } while (0)
 

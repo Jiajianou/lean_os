@@ -102,6 +102,7 @@ int *__errno_location(void);
 #define EPFNOSUPPORT 96
 #define EREMOTE      66
 #define ENOPKG       65
+#define ENONET       64
 
 #ifdef __cplusplus
 }

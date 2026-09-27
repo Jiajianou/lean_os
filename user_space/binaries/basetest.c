@@ -1462,6 +1462,17 @@ static int the_thread_local_values_are_right(void) {
     if (first < tp - span || first >= tp || last < tp - span || last >= tp) {
         return 4;
     }
+    /* M187: the block the thread pointer ends came from mmap, so it begins on
+       a page. It used to come from malloc, on a thread with no thread pointer
+       yet - and in a program whose malloc reads a thread_local (Chromium's
+       GWP-ASan does) that was a read at address zero. The malloc heap puts a
+       header in front of what it hands out, so a block that starts on a page
+       did not come from there. */
+    unsigned long pointer_align = align > 64u ? align : 64u;
+    unsigned long reserved = (span + pointer_align - 1u) & ~(pointer_align - 1u);
+    if (((tp - reserved) & 4095u) != 0) {
+        return 6;
+    }
     return 0;
 }
 
@@ -1499,6 +1510,9 @@ static int a_thread_local_is_where_the_compiler_reads_it(void) {
     /* 229 to 233 on this thread, 236 to 240 on the worker - the same five
        checks, numbered apart so a failure says which thread saw it. */
     int mine = the_thread_local_values_are_right();
+    if (mine == 6) {
+        return 243;
+    }
     if (mine != 0) {
         return 228 + mine;
     }
@@ -1510,6 +1524,9 @@ static int a_thread_local_is_where_the_compiler_reads_it(void) {
     }
     if (pthread_join(worker, (void **)0) != 0) {
         return 235;
+    }
+    if (tls_worker_result == 6) {
+        return 244;
     }
     if (tls_worker_result != 0) {
         /* 236 to 240, one per check, so the log says WHICH one moved. */

@@ -2,28 +2,50 @@
 
 #include "drivers/kernel_log.h"
 #include "library/spinlock.h"
+#include "memory_management/heap.h"
+#include "panic.h"
 #include "virtual_file_system.h"
 
-static open_file_t table[MAX_OPEN_FILES];
+/* From the kernel heap on first use rather than in the image: 4096 entries
+   of about 280 bytes is 1.1 MB, and M187 found out what that costs in BSS -
+   the loader could no longer reserve the kernel's load address and the
+   machine did not boot. */
+static open_file_t *table;
 static int initialized;
 
 static spinlock_t open_file_lock;
 
 static int open_file_exhaustions;
 
+/* Called before the lock is taken, because the heap is no place to go with
+   interrupts off; the table is built outside it and published inside it, so
+   two processors arriving together cannot both install one. */
 static void ensure_init(void) {
-    if (initialized) {
+    if (__atomic_load_n(&initialized, __ATOMIC_ACQUIRE)) {
         return;
     }
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        table[i].handle = -1;
+    open_file_t *fresh = (open_file_t *)kmalloc(sizeof(open_file_t) * MAX_OPEN_FILES);
+    if (!fresh) {
+        panic("open_file: no memory for the machine's table of open files");
     }
-    initialized = 1;
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        fresh[i].handle = -1;
+    }
+    uint64_t flags = spin_lock_irqsave(&open_file_lock);
+    if (!initialized) {
+        table = fresh;
+        fresh = 0;
+        __atomic_store_n(&initialized, 1, __ATOMIC_RELEASE);
+    }
+    spin_unlock_irqrestore(&open_file_lock, flags);
+    if (fresh) {
+        kfree(fresh);
+    }
 }
 
 open_file_t *open_file_alloc(int handle, int writable, const char *path, int is_directory) {
-    uint64_t flags = spin_lock_irqsave(&open_file_lock);
     ensure_init();
+    uint64_t flags = spin_lock_irqsave(&open_file_lock);
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (table[i].handle < 0) {
             table[i].handle = handle;
@@ -44,6 +66,9 @@ open_file_t *open_file_alloc(int handle, int writable, const char *path, int is_
                 }
             }
             spin_unlock_irqrestore(&open_file_lock, flags);
+            if (!is_directory) {
+                virtual_file_system_handle_hold(handle);
+            }
             return &table[i];
         }
     }
@@ -87,6 +112,7 @@ void open_file_unref(open_file_t *f) {
     }
     uint64_t flags = spin_lock_irqsave(&open_file_lock);
     int closing = -1;
+    int was_directory = f->is_directory;
     if (f->refcount > 0 && --f->refcount == 0) {
         closing = f->handle;
         f->handle = -1;
@@ -95,12 +121,15 @@ void open_file_unref(open_file_t *f) {
 
     if (closing >= 0) {
         virtual_file_system_handle_close(closing);
+        if (!was_directory) {
+            virtual_file_system_handle_release(closing);
+        }
     }
 }
 
 int open_file_in_use(void) {
-    uint64_t flags = spin_lock_irqsave(&open_file_lock);
     ensure_init();
+    uint64_t flags = spin_lock_irqsave(&open_file_lock);
     int n = 0;
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (table[i].handle >= 0) {

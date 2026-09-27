@@ -6,6 +6,7 @@
 #include "signal.h"
 #include "paths.h"
 #include "library/spinlock.h"
+#include "memory_management/virtual_memory.h"
 #include "architecture/x86_64/floating_point_unit.h"
 
 #include "architecture/x86_64/interrupt_service_routines.h"
@@ -42,7 +43,18 @@ typedef enum {
     FILE_DESCRIPTOR_MEMFD,
 } file_descriptor_type_t;
 
-#define MAX_FILE_DESCRIPTORS 128
+/* Descriptors per process. 128 until M187, which was enough for every
+   program this machine had run including content_shell - and not for
+   Chromium's own browser, whose browser process holds its profile's
+   databases, the sockets and pipes to each child, memfds, eventfds and an
+   epoll set, and reached 128 fifteen seconds after starting. What it looked
+   like from outside was M183's shape again: a forked child's
+   open("/dev/null") failing so every child _exit(127)ed, and memfd_create
+   failing so base fell back to /dev/shm and stopped on a FATAL about its
+   permissions. 1024 is Linux's default soft limit, which is the number
+   software written for Linux has been living inside; a slot is 16 bytes, so
+   a table is 16 KB of kernel heap per process. */
+#define MAX_FILE_DESCRIPTORS 1024
 
 /* How many regions a process may describe. It is a ceiling rather than a
    size: the table below is allocated when a process first maps something and
@@ -86,9 +98,18 @@ typedef struct {
 
 #define TASK_NAME_MAX 24
 
-#define MAX_TASKS 128
+/* Tasks on the whole machine - and a thread is a task, so this is processes
+   and threads together. 128 until M187, which Chromium's own browser crossed
+   with its browser, renderer, network, storage and utility processes and the
+   thread pools in each: a child's pthread_create failed and it stopped on a
+   CHECK in base::SimpleThread. 256 is the most PID_SLOT_BITS can name, and
+   the table comes from the page allocator rather than the image (M187: 1.1 MB
+   more BSS was enough to stop the loader reserving the kernel's address). */
+#define MAX_TASKS 256
 
 #define PID_SLOT_BITS 8
+_Static_assert(MAX_TASKS <= (1 << PID_SLOT_BITS), "a pid names its slot in PID_SLOT_BITS bits");
+_Static_assert(TASK_INFO_MAX >= MAX_TASKS, "SYS_taskinfo must be able to name every task there can be");
 #define PID_SLOT_MASK ((1 << PID_SLOT_BITS) - 1)
 #define PID_MAKE(slot, gen) (((gen) << PID_SLOT_BITS) | (slot))
 #define PID_SLOT(pid) ((pid) & PID_SLOT_MASK)
@@ -337,6 +358,11 @@ const char *scheduler_cmdline(task_t *t, uint32_t *length);
 unsigned int scheduler_set_alarm(task_t *t, unsigned int seconds);
 
 int scheduler_release_shared_range(task_t *t, uint64_t start, uint64_t end);
+
+/* The ranges of t's memfd and shared file mappings, sorted by address, in a
+   kmalloc'd array the caller frees; the count, or -1 if there was no memory
+   for the array. What fork leaves shared rather than copy-on-write. */
+int scheduler_shared_ranges(task_t *t, virtual_memory_range_t **out);
 
 void scheduler_region_forget_memfd(mmap_region_t *r);
 /* Make room for one more region, growing the table if it is full. Returns 0

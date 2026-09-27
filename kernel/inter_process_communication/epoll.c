@@ -1,5 +1,6 @@
 #include "epoll.h"
 
+#include "drivers/kernel_log.h"
 #include "library/kernel_library.h"
 #include "library/spinlock.h"
 #include "memory_management/heap.h"
@@ -22,6 +23,20 @@ typedef struct epoll {
 } epoll_t;
 
 static int live_count;
+static int refusals;
+
+/* A ceiling reached says so, once and then every 64th time, because what the
+   program sees is only "it failed" (M183's rule, met again in M187). */
+static void refused(const char *what) {
+    refusals++;
+    if (refusals == 1 || refusals % 64 == 0) {
+        kernel_log_puts("[epoll] refused: ");
+        kernel_log_puts(what);
+        kernel_log_puts(" (");
+        kernel_log_put_dec((uint32_t)refusals);
+        kernel_log_puts(" refusal(s) since boot)\n");
+    }
+}
 
 void epoll_init(void) {
     uint64_t f = spin_lock_irqsave(&epoll_lock);
@@ -33,6 +48,7 @@ struct epoll *epoll_create_set(void) {
     uint64_t f = spin_lock_irqsave(&epoll_lock);
     if (live_count >= EPOLL_MAX) {
         spin_unlock_irqrestore(&epoll_lock, f);
+        refused("the machine is at its ceiling of epoll sets");
         return (epoll_t *)0;
     }
     epoll_t *ep = (epoll_t *)kmalloc(sizeof(epoll_t));
@@ -88,11 +104,35 @@ int epoll_control_set(struct epoll *ep, int op, int fd, const void *object,
     uint64_t f = spin_lock_irqsave(&epoll_lock);
     epoll_watch_t *w = find(ep, fd);
     int rc = -1;
+    int full = 0;
+    /* A watch is kept by descriptor NUMBER, and closing a descriptor does not
+       take it out of the sets watching it - on Linux the last close of a
+       file removes it from every epoll set, and here nothing does. So a watch
+       whose object is not the one the number names now belongs to a file
+       that was closed, and the number has been handed to something else.
+
+       It used to be that watch that answered: EPOLL_CTL_ADD for the new file
+       was refused as a duplicate, the next scan discarded the old watch as
+       stale, and the new file was watched by nobody. Chromium closes and
+       opens a mojo channel socket at a time and reuses the lowest number, so
+       its browser process ended up with messages from its children readable
+       and every thread asleep - a sync call to its own GPU thread that never
+       returned, and a window that never drew (M187). The closed file's watch
+       is not a registration of this one, and this one is what is asked
+       about. */
+    if (w && object && w->object && w->object != object) {
+        if (op == EPOLL_CTL_ADD) {
+            w->used = 0;
+            w->object = (const void *)0;
+        }
+        w = (epoll_watch_t *)0;
+    }
     switch (op) {
     case EPOLL_CTL_ADD:
         if (w) {
             break;
         }
+        full = 1;
         for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
             if (!ep->w[i].used) {
                 ep->w[i].used = 1;
@@ -103,6 +143,7 @@ int epoll_control_set(struct epoll *ep, int op, int fd, const void *object,
                 ep->w[i].last = 0;
                 ep->w[i].disarmed = 0;
                 rc = 0;
+                full = 0;
                 break;
             }
         }
@@ -130,6 +171,9 @@ int epoll_control_set(struct epoll *ep, int op, int fd, const void *object,
         break;
     }
     spin_unlock_irqrestore(&epoll_lock, f);
+    if (full) {
+        refused("an epoll set is at its ceiling of watched descriptors");
+    }
     return rc;
 }
 

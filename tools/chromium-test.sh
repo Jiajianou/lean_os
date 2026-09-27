@@ -1303,6 +1303,65 @@ PROBE
     rm -rf "$SHELLWORK"
   fi
 
+  # M187. //chrome - the browser Chromium's users mean by "Chromium": tabs, an
+  # omnibox, a profile, settings. content_shell is the embedder the tree ships
+  # to test //content with; this is the product built on it, out of the same
+  # checkout, the same patch series and the same args.gn.
+  CHROMEPROGRAM="$SRC/out/$OUT_NAME/chrome"
+  if [ ! -f "$CHROMEPROGRAM" ]; then
+    echo "chromium-test: chrome has not been linked - skipping" \
+         "(tools/build-chromium.sh chrome)"
+  else
+    file "$CHROMEPROGRAM" | grep -q "ELF 64-bit LSB executable, x86-64"
+    check $? "//chrome links for this machine as an x86-64 EXEC"
+
+    "${PREFIX}readelf" -l "$CHROMEPROGRAM" | grep -q "INTERP"
+    [ $? -ne 0 ]
+    check $? "and has no interpreter, like every other program in this image"
+
+    CHROMEWORK=$(mktemp -d)
+    CHROMESYMS="$CHROMEWORK/chrome.syms"
+    "${PREFIX}nm" -C "$CHROMEPROGRAM" > "$CHROMESYMS" 2>/dev/null
+
+    # What makes it the browser a person means rather than the test shell,
+    # asked of the binary (M159's rule): a tab strip, an omnibox, and the
+    # delegate //chrome starts through.
+    grep -qE " [TtWw] .*ChromeMainDelegate::" "$CHROMESYMS"
+    check $? "and it starts through ChromeMainDelegate, not content_shell's"
+    grep -qE " [TtWw] .*TabStrip::" "$CHROMESYMS"
+    check $? "and has a tab strip in it"
+    grep -qE " [TtWw] .*OmniboxViewViews::" "$CHROMESYMS"
+    check $? "and an omnibox"
+    grep -qE " [TtWw] .*ui::CreateOzonePlatformLeanos" "$CHROMESYMS"
+    check $? "on this desktop's own ozone platform - the one content_shell uses"
+
+    # There is no crash handler here, and components/crash/core/app says so
+    # as has_crash_handler. The absence is asked of the binary: no crashpad
+    # namespace, and none of crash_reporter's crashpad entry points.
+    grep -qE " [TtWwDdBb] .*crashpad::" "$CHROMESYMS"
+    [ $? -ne 0 ]
+    check $? "and no crashpad in it, whose Linux half is ptrace and PR_SET_DUMPABLE"
+    grep -qE " [TtWw] .*crash_reporter::InitializeCrashpad" "$CHROMESYMS"
+    [ $? -ne 0 ]
+    check $? "and nothing that would start a crash handler that is not there"
+
+    # Nor a system power monitor: it CHECKs for an energy provider, and the
+    # only one on Linux is perf_event_open(2).
+    grep -qE " [TtWw] .*power_metrics::SystemPowerMonitor::" "$CHROMESYMS"
+    [ $? -ne 0 ]
+    check $? "and no power monitor, whose one Linux provider is perf_event_open"
+
+    grep -qE '\{"chrome", *CAP_APP_DEFAULT \| CAP_NETWORK\}' \
+         "$ROOT/system_api/include/capabilities.h"
+    check $? "/bin/chrome is granted what /bin/browser, the launcher that execs it, is"
+
+    for pak in resources.pak chrome_100_percent.pak locales/en-US.pak; do
+      [ -f "$SRC/out/$OUT_NAME/$pak" ]
+      check $? "and its $pak was built beside it"
+    done
+    rm -rf "$CHROMEWORK"
+  fi
+
     # M165. __cxa_thread_atexit, which is the last of M164's list and the only
     # one with a subsystem behind it rather than a definition: a thread_local
     # with a non-trivial destructor needs a per-thread list run at thread exit,

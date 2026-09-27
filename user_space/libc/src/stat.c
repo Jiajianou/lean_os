@@ -1,9 +1,26 @@
 #include <sys/stat.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "syscall_wrappers.h"
+
+/* The permission bits, which this filesystem does not store because there
+   is nothing for them to decide: one principal, and the kernel refuses that
+   principal nothing a file supports. So every object reports what is true of
+   it - its owner may read, write and execute it, and there is no group and
+   no other to grant anything to - which is 0700. A symbolic link reports
+   0777, as Linux's do, because a link's own bits are never consulted.
+
+   Until M187 this was zero, meant as "no permission model" - but POSIX reads
+   0000 as "nobody may do anything", which is the opposite of the truth, and
+   programs ask the question precisely: Chromium's ProcessSingleton requires
+   its socket directory to be exactly 0700, i.e. private to its owner, and
+   died on its first second here; Rust's Permissions::readonly() is "no write
+   bits", so every file on this machine read as read-only there. */
+#define OWNER_MAY_DO_ANYTHING 0700
+#define LINK_MODE             0777
 
 static void fill(struct stat *out, const os_stat_t *st) {
     memset(out, 0, sizeof(*out));
@@ -18,6 +35,7 @@ static void fill(struct stat *out, const os_stat_t *st) {
         default:           out->st_mode = S_IFREG; break;
         }
     }
+    out->st_mode |= st->is_link ? LINK_MODE : OWNER_MAY_DO_ANYTHING;
     out->st_size = (off_t)st->size;
     out->st_mtime = (time_t)st->mtime;
     out->st_atime = out->st_mtime;
@@ -90,12 +108,19 @@ int mkdir(const char *path, mode_t mode) {
     return 0;
 }
 
+/* chmod grants the one request that is already true - the bits stat
+   reports for that file - and refuses every other with EPERM, because
+   nothing here would enforce a different answer (M65, M98). chmod follows a
+   link, so it is the target's bits that are asked about. */
 static int mode_is_what_stat_reports(mode_t mode) {
-    return (mode & 07777) == 0;
+    return (mode & 07777) == OWNER_MAY_DO_ANYTHING;
 }
 
 int chmod(const char *path, mode_t mode) {
-    (void)path;
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return -1;
+    }
     if (mode_is_what_stat_reports(mode)) {
         return 0;
     }
@@ -104,7 +129,10 @@ int chmod(const char *path, mode_t mode) {
 }
 
 int fchmod(int fd, mode_t mode) {
-    (void)fd;
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        return -1;
+    }
     if (mode_is_what_stat_reports(mode)) {
         return 0;
     }
@@ -113,9 +141,10 @@ int fchmod(int fd, mode_t mode) {
 }
 
 int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
-    (void)dirfd;
-    (void)path;
     (void)flags;
+    if (dirfd == AT_FDCWD || (path && path[0] == '/')) {
+        return chmod(path, mode);
+    }
     if (mode_is_what_stat_reports(mode)) {
         return 0;
     }

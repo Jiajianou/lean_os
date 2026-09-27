@@ -45,11 +45,14 @@ void process_destroy_address_space(uint64_t pml4_phys) {
     virtual_memory_destroy_address_space(pml4_phys, PROCESS_OWNED, PROCESS_OWNED_COUNT);
 }
 
-uint64_t process_fork_address_space(uint64_t source_pml4_phys) {
+uint64_t process_fork_address_space(uint64_t source_pml4_phys,
+                                    const virtual_memory_range_t *shared_ranges,
+                                    int shared_count) {
     if (source_pml4_phys == 0 || source_pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return 0;
     }
-    return virtual_memory_fork_address_space(source_pml4_phys, PROCESS_OWNED, PROCESS_OWNED_COUNT);
+    return virtual_memory_fork_address_space(source_pml4_phys, PROCESS_OWNED, PROCESS_OWNED_COUNT,
+                                             shared_ranges, shared_count);
 }
 
 uint64_t process_build_address_space(const uint8_t *image, size_t image_size,

@@ -2872,7 +2872,13 @@ static long sys_mmap(uint64_t address, uint64_t length, uint64_t prot, uint64_t 
         handle = current->descriptor_table->slots[fd].file->handle;
         file_page = (uint32_t)(offset / PAGE_SIZE);
     } else {
-        if (offset != 0 || (long)fd >= 0) {
+        /* The descriptor is not looked at for an anonymous mapping - Linux's
+           rule, and what its manual says portable callers may rely on only
+           the other way round ("some implementations require fd to be -1").
+           Chromium's GWP-ASan passes 0 when it maps a PROT_NONE page over a
+           freed allocation, and refusing that stopped the browser on a PCHECK
+           (M187). */
+        if (offset != 0) {
             return -1;
         }
         if (shared) {
@@ -4794,7 +4800,25 @@ static long sys_fork(isr_regs_t *regs) {
     scheduler_release_shared_range(vm_owner, USER_MMAP_BASE, USER_MMAP_LIMIT);
     smp_tlb_shootdown();
 
-    uint64_t child_pml4 = process_fork_address_space(parent->pml4_phys);
+    /* Releasing the shared pages first was the whole answer while a process
+       forking was one thread. It is not one for a browser: between the release
+       and the copy below, a sibling on another core touches a histogram page,
+       faults it back in writable, and the copy then makes it copy-on-write -
+       so the parent's next write lands on a private copy and the memory it
+       shares with its children stops being shared. Chromium's persistent
+       histogram allocator noticed first, as "corrupt" (M187). So the copy is
+       told which ranges are shared and leaves them alone however they got
+       there. */
+    virtual_memory_range_t *shared_ranges = (virtual_memory_range_t *)0;
+    int shared_count = scheduler_shared_ranges(vm_owner, &shared_ranges);
+    if (shared_count < 0) {
+        return -1;
+    }
+    uint64_t child_pml4 = process_fork_address_space(parent->pml4_phys, shared_ranges,
+                                                     shared_count);
+    if (shared_ranges) {
+        kfree(shared_ranges);
+    }
     if (child_pml4 == 0) {
         return -1;
     }
@@ -4863,6 +4887,23 @@ static long sys_fcntl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
     case F_SETFL_COMMAND:
         self->descriptor_table->slots[fd].nonblock = (arg & OS_NONBLOCK_BIT) ? 1 : 0;
         return 0;
+    case F_DUPFD_COMMAND:
+    case F_DUPFD_CLOEXEC_COMMAND: {
+        if (arg >= MAX_FILE_DESCRIPTORS) {
+            return -1;
+        }
+        for (uint64_t i = arg; i < MAX_FILE_DESCRIPTORS; i++) {
+            if (self->descriptor_table->slots[i].type != FILE_DESCRIPTOR_NONE) {
+                continue;
+            }
+            self->descriptor_table->slots[i] = self->descriptor_table->slots[fd];
+            self->descriptor_table->slots[i].cloexec =
+                command == F_DUPFD_CLOEXEC_COMMAND ? 1 : 0;
+            file_descriptor_retain(&self->descriptor_table->slots[i]);
+            return (long)i;
+        }
+        return -1;
+    }
     case F_GETLK_COMMAND:
     case F_SETLK_COMMAND:
     case F_SETLKW_COMMAND: {

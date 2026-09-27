@@ -52,6 +52,8 @@ int virtual_file_system_handle_stat(int handle, leanfs_stat_t *out);
 int virtual_file_system_handle_truncate(int handle);
 
 void virtual_file_system_handle_close(int handle);
+void virtual_file_system_handle_hold(int handle);
+void virtual_file_system_handle_release(int handle);
 
 int virtual_file_system_handle_readable(int handle);
 

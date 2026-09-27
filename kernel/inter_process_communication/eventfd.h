@@ -2,7 +2,8 @@
 
 #include <stdint.h>
 
-#define EVENTFD_MAX 64
+/* Every Chromium message pump is woken through one (M187: 64 until then). */
+#define EVENTFD_MAX 1024
 
 #define EVENTFD_MAX_COUNT 0xFFFFFFFFFFFFFFFEULL
 

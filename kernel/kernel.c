@@ -9222,7 +9222,13 @@ static void boot_selftests_system(void) {
                   "advertises; and this program's own ELF file parsed with "
                   "this <elf.h> - the linker's e_ehsize and e_phentsize "
                   "agreeing with these struct sizes, and the entry point "
-                  "landing inside an executable PT_LOAD - self-test passed.\n\n");
+                  "landing inside an executable PT_LOAD; and execl, execlp "
+                  "and execle each re-running this program with the argument "
+                  "vector and environment they were handed; and mode bits "
+                  "of 0700, owner-private, with chmod granting only that; "
+                  "and dup and F_DUPFD past a hundred and twenty-eight "
+                  "descriptors; and an anonymous mapping that ignores its "
+                  "descriptor - self-test passed.\n\n");
     }
 
     {

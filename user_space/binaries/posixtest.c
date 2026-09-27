@@ -1,14 +1,26 @@
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
+
+#if !defined(S_IRUSR) || !defined(S_IWUSR) || !defined(S_IRGRP) || !defined(S_IROTH)
+#error "fcntl.h has to define the mode bits open(2)'s third argument is made of"
+#endif
+
+#ifndef ENONET
+#error "errno.h has to name ENONET - somebody else's error table does"
+#endif
+#include <limits.h>
 #include <link.h>
 #include <malloc.h>
 #include <stdint.h>
 #include <process.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/cdefs.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -391,7 +403,187 @@ static int a_thread_can_name_itself(void) {
     return 0;
 }
 
-int main(void) {
+#define EXEC_PROBE_REACHED 42
+
+static int exec_probe(int argc, char **argv) {
+    if (argc != 4 || strcmp(argv[0], "posixtest") != 0 ||
+        strcmp(argv[3], "last") != 0) {
+        return 1;
+    }
+    if (strcmp(argv[2], "execle") == 0) {
+        const char *value = getenv("POSIXTEST_PROBE");
+        if (!value || strcmp(value, "given") != 0) {
+            return 2;
+        }
+    }
+    return EXEC_PROBE_REACHED;
+}
+
+static int one_list_exec(const char *form) {
+    pid_t child = fork();
+    if (child < 0) {
+        return -1;
+    }
+    if (child == 0) {
+        char *const environment[] = {"POSIXTEST_PROBE=given", 0};
+        if (strcmp(form, "execl") == 0) {
+            execl(PATH_BIN_DIRECTORY "posixtest", "posixtest", "--exec-probe",
+                  form, "last", (char *)0);
+        } else if (strcmp(form, "execlp") == 0) {
+            execlp("posixtest", "posixtest", "--exec-probe", form, "last",
+                   (char *)0);
+        } else {
+            execle(PATH_BIN_DIRECTORY "posixtest", "posixtest", "--exec-probe",
+                   form, "last", (char *)0, environment);
+        }
+        _exit(97);
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status)) {
+        return -1;
+    }
+    return WEXITSTATUS(status);
+}
+
+static int the_list_forms_of_exec_reach_the_program(void) {
+    const char *forms[] = {"execl", "execlp", "execle"};
+    for (int i = 0; i < 3; i++) {
+        int got = one_list_exec(forms[i]);
+        if (got != EXEC_PROBE_REACHED) {
+            printf("[posixtest] %s came back %d, not the probe's %d\n",
+                   forms[i], got, EXEC_PROBE_REACHED);
+            return 53 + i;
+        }
+    }
+    return 0;
+}
+
+/* The question Chromium's ProcessSingleton asks before it trusts a directory
+   with its socket - "is this private to its owner", which is exactly 0700 -
+   and the rest of what a single-principal machine's mode bits should say:
+   the owner may do anything, a link's bits are 0777, and chmod grants the
+   one request that is already true and refuses the rest (M187). */
+static int mode_bits_say_the_owner_may_do_anything(void) {
+    char directory[] = "/tmp/posixtest-XXXXXX";
+    if (!mkdtemp(directory)) {
+        return 60;
+    }
+    struct stat st;
+    if (stat(directory, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        (st.st_mode & 07777) != 0700) {
+        printf("[posixtest] a directory mkdtemp made reports mode %o, not 0700\n",
+               (unsigned)(st.st_mode & 07777));
+        return 61;
+    }
+    char file[64];
+    snprintf(file, sizeof(file), "%s/file", directory);
+    int fd = open(file, O_CREAT | O_WRONLY, 0600);
+    if (fd < 0) {
+        return 62;
+    }
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        (st.st_mode & 07777) != 0700) {
+        printf("[posixtest] a file reports mode %o, not 0700\n",
+               (unsigned)(st.st_mode & 07777));
+        return 63;
+    }
+    if (fchmod(fd, 0700) != 0 || chmod(file, 0700) != 0) {
+        return 64;
+    }
+    errno = 0;
+    if (chmod(file, 0644) != -1 || errno != EPERM) {
+        printf("[posixtest] chmod to a mode nothing here would enforce was "
+               "not refused\n");
+        return 65;
+    }
+    errno = 0;
+    if (chmod("/tmp/posixtest-no-such-file", 0700) != -1 || errno != ENOENT) {
+        return 66;
+    }
+    close(fd);
+    unlink(file);
+    rmdir(directory);
+    return 0;
+}
+
+/* dup and F_DUPFD past the first 128 descriptors, which is where the library
+   used to stop looking, and F_DUPFD's "lowest at or above" taken literally
+   (M187: Chromium's browser process holds more than 128, and every dup of a
+   shared memory region there failed, so each child it launched was handed a
+   region with no token). */
+static int descriptors_duplicate_past_128(void) {
+    int fd = open("/tmp/posixtest-dup", O_CREAT | O_RDWR, 0600);
+    if (fd < 0) {
+        return 70;
+    }
+    static int copies[300];
+    int made = 0;
+    int code = 0;
+    for (; made < 300; made++) {
+        copies[made] = dup(fd);
+        if (copies[made] < 0) {
+            printf("[posixtest] dup ran out after %d copies\n", made);
+            code = 71;
+            break;
+        }
+    }
+    if (!code) {
+        int high = fcntl(fd, F_DUPFD, 500);
+        if (high != 500) {
+            printf("[posixtest] F_DUPFD 500 returned %d\n", high);
+            code = 72;
+        } else {
+            close(high);
+        }
+    }
+    if (!code) {
+        int cloexec = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+        if (cloexec < 0 || fcntl(cloexec, F_GETFD) != FD_CLOEXEC ||
+            fcntl(copies[0], F_GETFD) != 0) {
+            code = 73;
+        }
+        if (cloexec >= 0) {
+            close(cloexec);
+        }
+    }
+    for (int i = 0; i < made; i++) {
+        close(copies[i]);
+    }
+    close(fd);
+    unlink("/tmp/posixtest-dup");
+    if (!code && sysconf(_SC_OPEN_MAX) != OPEN_MAX) {
+        code = 74;
+    }
+    return code;
+}
+
+/* An anonymous mapping does not look at its descriptor, and a page can be
+   mapped over the middle of an existing region - GWP-ASan does both at once,
+   with fd 0, every time it frees a sampled allocation (M187). */
+static int anonymous_mappings_ignore_the_descriptor(void) {
+    char *region = (char *)mmap(0, 4 * 4096, PROT_READ | PROT_WRITE,
+                                MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
+    if (region == MAP_FAILED) {
+        return 80;
+    }
+    region[0] = 'a';
+    region[2 * 4096] = 'c';
+    void *over = mmap(region + 4096, 4096, PROT_NONE,
+                      MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
+    if (over != region + 4096) {
+        return 81;
+    }
+    if (region[0] != 'a' || region[2 * 4096] != 'c') {
+        return 82;
+    }
+    munmap(region, 4 * 4096);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--exec-probe") == 0) {
+        return exec_probe(argc, argv);
+    }
     int code = monotonic_clock_moves_forward();
     if (code) {
         return code;
@@ -413,6 +605,22 @@ int main(void) {
         return code;
     }
     code = a_thread_can_name_itself();
+    if (code) {
+        return code;
+    }
+    code = the_list_forms_of_exec_reach_the_program();
+    if (code) {
+        return code;
+    }
+    code = mode_bits_say_the_owner_may_do_anything();
+    if (code) {
+        return code;
+    }
+    code = descriptors_duplicate_past_128();
+    if (code) {
+        return code;
+    }
+    code = anonymous_mappings_ignore_the_descriptor();
     if (code) {
         return code;
     }

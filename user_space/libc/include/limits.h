@@ -25,7 +25,7 @@ extern "C" {
 #define ULLONG_MAX 18446744073709551615ULL
 #define SSIZE_MAX  LONG_MAX
 
-#define OPEN_MAX   128
+#define OPEN_MAX   1024
 #define NAME_MAX   255
 #define PATH_MAX   4096
 #define ARG_MAX    16384

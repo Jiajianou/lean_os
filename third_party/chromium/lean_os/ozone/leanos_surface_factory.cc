@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <string>
 
 #include "base/logging.h"
 #include "lean_os/ozone/leanos_window_manager.h"
@@ -45,11 +46,21 @@ class LeanOsCanvas : public SurfaceOzoneCanvas {
       // there is no window. Paint somewhere, and copy the part that fits.
       surface_ = SkSurfaces::Raster(info, &props);
     }
+    VLOG(1) << "leanos: canvas resized to " << viewport_size.ToString()
+            << (wrapped_ ? ", drawing straight into the window"
+                         : (buffer_ ? ", copied into a window of "
+                                          + buffer_->size().ToString()
+                                    : std::string(", with no window")));
   }
 
   SkCanvas* GetCanvas() override { return surface_->getCanvas(); }
 
   void PresentCanvas(const gfx::Rect& damage) override {
+    if (++presents_ <= 3 || presents_ % 100 == 0) {
+      VLOG(1) << "leanos: present " << presents_ << ", damage "
+              << damage.ToString()
+              << (buffer_ && buffer_->alive() ? "" : ", but no live window");
+    }
     if (!buffer_ || !buffer_->alive())
       return;
     if (!wrapped_) {
@@ -74,6 +85,7 @@ class LeanOsCanvas : public SurfaceOzoneCanvas {
   scoped_refptr<LeanOsWindowBuffer> buffer_;
   sk_sp<SkSurface> surface_;
   bool wrapped_ = false;
+  int presents_ = 0;
 };
 
 // The GPU-side objects ozone is obliged to hand out even on a platform with
@@ -137,6 +149,8 @@ GLOzone* LeanOsSurfaceFactory::GetGLOzone(
 
 std::unique_ptr<SurfaceOzoneCanvas> LeanOsSurfaceFactory::CreateCanvasForWidget(
     gfx::AcceleratedWidget widget) {
+  VLOG(1) << "leanos: canvas for window " << widget
+          << (window_manager_->GetBuffer(widget) ? "" : ", which has no buffer");
   return std::make_unique<LeanOsCanvas>(window_manager_->GetBuffer(widget));
 }
 

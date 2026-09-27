@@ -51,6 +51,36 @@ echo "install-browser: /bin/chromiumshell ($((after / 1024 / 1024)) MB, was $((b
 "$PUT" "$IMAGE" "$SHELL_PAK" /bin/content_shell.pak >/dev/null || exit 1
 echo "install-browser: /bin/content_shell.pak beside it"
 
+# M187: Chromium's own browser - //chrome, tabs and an omnibox and a profile -
+# when it has been built, beside content_shell rather than instead of it: the
+# boot battery's [m167] and [m169] run content_shell, and /bin/browser falls
+# back to it on an image without this.
+CHROME_BIN="$SRC/out/$OUT_NAME/chrome"
+if [ -f "$CHROME_BIN" ]; then
+  CHROME_STRIPPED="$ROOT/build/chrome.stripped"
+  if [ ! -f "$CHROME_STRIPPED" ] || [ "$CHROME_BIN" -nt "$CHROME_STRIPPED" ]; then
+    cp "$CHROME_BIN" "$CHROME_STRIPPED" || exit 1
+    "$CROSS_STRIP" "$CHROME_STRIPPED" || exit 1
+  fi
+  "$PUT" "$IMAGE" "$CHROME_STRIPPED" /bin/chrome >/dev/null || exit 1
+  echo "install-browser: /bin/chrome ($(( $(wc -c < "$CHROME_STRIPPED") / 1024 / 1024 )) MB, was $(( $(wc -c < "$CHROME_BIN") / 1024 / 1024 )) MB unstripped)"
+
+  # Beside the binary, which is DIR_ASSETS on Linux and where
+  # ChromeMainDelegate's resource bundle looks. One locale, because the UI
+  # here is English and a missing locale falls back to en-US anyway; the
+  # other hundred and fifty are 100 MB nobody on this machine would read.
+  for asset in resources.pak chrome_100_percent.pak chrome_200_percent.pak \
+               v8_context_snapshot.bin snapshot_blob.bin locales/en-US.pak; do
+    if [ -f "$SRC/out/$OUT_NAME/$asset" ]; then
+      "$PUT" "$IMAGE" "$SRC/out/$OUT_NAME/$asset" "/bin/$asset" >/dev/null || exit 1
+      echo "install-browser: /bin/$asset beside it"
+    fi
+  done
+else
+  echo "install-browser: no $CHROME_BIN - /bin/browser runs content_shell."
+  echo "                 tools/build-chromium.sh chrome builds the full browser."
+fi
+
 # The launcher is a USER_PROGRAM, so `make preseed` has already put it in
 # /bin/browser; this only says so, and refuses an image that lost it.
 if [ ! -f "$ROOT/build/browser.elf" ]; then

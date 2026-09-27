@@ -1,10 +1,12 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "capabilities.h"
@@ -477,6 +479,75 @@ static int test_reopen(void) {
     return 0;
 }
 
+/* M187: a MAP_SHARED page stays shared across a fork from a process with
+   more than one thread. fork released every shared page first and then copied
+   the page tables, and a sibling thread on another core that WROTE to a shared
+   page in between faulted it back in writable - so the copy made it
+   copy-on-write, and the parent's next write went to a private copy that the
+   memfd, and every other mapping of it, never saw. Chromium's browser forks
+   for every child it launches while its threads write histograms into shared
+   memory, and what it said was "corrupt".
+
+   So a thread writes to the page as fast as it can while this one forks, and
+   after every fork this one writes through one mapping and reads through a
+   second mapping of the same memfd. A write that went to a private copy is a
+   value the second mapping does not have. On one core the window cannot open
+   and this passes either way; the four-core run is where it grades. */
+static volatile int keep_touching;
+static char *volatile touched;
+
+static void *toucher(void *unused) {
+    (void)unused;
+    unsigned char n = 0;
+    while (keep_touching) {
+        touched[64] = (char)n++;
+    }
+    return (void *)0;
+}
+
+static int test_shared_across_a_threaded_fork(void) {
+    int fd = memfd_create("fork-shared", 0);
+    if (fd < 0 || ftruncate(fd, REGION) != 0) {
+        FAIL(80);
+    }
+    char *writer = (char *)mmap(0, REGION, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    char *reader = (char *)mmap(0, REGION, PROT_READ, MAP_SHARED, fd, 0);
+    if (writer == MAP_FAILED || reader == MAP_FAILED) {
+        FAIL(81);
+    }
+    touched = writer;
+    keep_touching = 1;
+    pthread_t thread;
+    if (pthread_create(&thread, (pthread_attr_t *)0, toucher, (void *)0) != 0) {
+        FAIL(82);
+    }
+    int code = 0;
+    for (int round = 1; round <= 200 && !code; round++) {
+        pid_t child = fork();
+        if (child < 0) {
+            code = 83;
+            break;
+        }
+        if (child == 0) {
+            _exit(0);
+        }
+        int status = 0;
+        waitpid(child, &status, 0);
+        writer[0] = (char)round;
+        if (reader[0] != (char)round) {
+            printf("memfdtest: after fork %d a write through one mapping did "
+                   "not reach the other - the page went copy-on-write\n", round);
+            code = 84;
+        }
+    }
+    keep_touching = 0;
+    pthread_join(thread, (void **)0);
+    munmap(writer, REGION);
+    munmap(reader, REGION);
+    close(fd);
+    return code;
+}
+
 int main(void) {
     int rc;
     if ((rc = test_basics()) != 0) return rc;
@@ -486,6 +557,7 @@ int main(void) {
     if ((rc = test_no_capabilities()) != 0) return rc;
     if ((rc = test_exhaustion()) != 0) return rc;
     if ((rc = test_reopen()) != 0) return rc;
-    printf("memfdtest: all seven sections passed\n");
+    if ((rc = test_shared_across_a_threaded_fork()) != 0) return rc;
+    printf("memfdtest: all eight sections passed\n");
     return 0;
 }

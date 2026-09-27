@@ -47,7 +47,8 @@ void virtual_memory_destroy_address_space(uint64_t pml4_phys, const virtual_memo
 
 uint64_t virtual_memory_unmap_range_free(uint64_t pml4_phys, uint64_t start, uint64_t end);
 
-uint64_t virtual_memory_fork_address_space(uint64_t source_pml4_phys, const virtual_memory_range_t *owned, int owned_count);
+uint64_t virtual_memory_fork_address_space(uint64_t source_pml4_phys, const virtual_memory_range_t *owned, int owned_count,
+                                           const virtual_memory_range_t *shared_ranges, int shared_count);
 
 uint64_t virtual_memory_rss_pages(uint64_t pml4_phys);
 uint64_t virtual_memory_rss_peak_pages(uint64_t pml4_phys);

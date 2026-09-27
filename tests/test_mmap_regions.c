@@ -243,3 +243,50 @@ TEST(mmap_regions, releasing_gives_back_every_table_the_growths_left_behind) {
        back is the heap's own accounting rather than the frame count. */
     CHECK_EQ(heap_used_bytes(), used_before);
 }
+
+/* M187: the ranges fork leaves shared. A MAP_SHARED page made copy-on-write by
+   a fork is one the parent's next write copies away from the memfd - and a
+   sibling thread on another core can fault one back in between fork's release
+   of the shared pages and its copy of the page tables. So the copy is handed
+   this list and skips it, and what is graded here is the list: every memfd
+   region and every shared FILE mapping, nothing private, sorted by address -
+   the page walk visits addresses in order and keeps one cursor, so an
+   unsorted list would skip the wrong pages. */
+TEST(mmap_regions, fork_is_told_every_shared_region_and_nothing_private) {
+    fixture();
+    virtual_memory_range_t *ranges = (virtual_memory_range_t *)0;
+    CHECK_EQ(scheduler_shared_ranges(&task, &ranges), 0);
+    CHECK(ranges == NULL);
+
+    CHECK_EQ(scheduler_regions_reserve(&task), 0);
+    /* Out of address order on purpose: private, memfd (high), shared file,
+       shared-but-anonymous (no handle, so nothing behind it to share),
+       memfd (low). */
+    task.mmaps[0] = (mmap_region_t){.base = 0xA000000000ULL, .pages = 2, .prot = 3, .handle = -1};
+    task.mmaps[1] = (mmap_region_t){.base = 0xA000900000ULL, .pages = 4, .prot = 3, .handle = -1,
+                                    .memfd_id = 7, .memfd_gen = 1};
+    task.mmaps[2] = (mmap_region_t){.base = 0xA000400000ULL, .pages = 1, .prot = 1, .handle = 3,
+                                    .shared = 1};
+    task.mmaps[3] = (mmap_region_t){.base = 0xA000600000ULL, .pages = 1, .prot = 3, .handle = -1,
+                                    .shared = 1};
+    task.mmaps[4] = (mmap_region_t){.base = 0xA000100000ULL, .pages = 3, .prot = 3, .handle = -1,
+                                    .memfd_id = 2, .memfd_gen = 5};
+
+    int n = scheduler_shared_ranges(&task, &ranges);
+    REQUIRE(n == 3);
+    REQUIRE(ranges != NULL);
+    CHECK_EQ(ranges[0].lo, 0xA000100000ULL);
+    CHECK_EQ(ranges[0].hi, 0xA000100000ULL + 3 * 4096);
+    CHECK_EQ(ranges[1].lo, 0xA000400000ULL);
+    CHECK_EQ(ranges[1].hi, 0xA000400000ULL + 4096);
+    CHECK_EQ(ranges[2].lo, 0xA000900000ULL);
+    CHECK_EQ(ranges[2].hi, 0xA000900000ULL + 4 * 4096);
+    kfree(ranges);
+
+    /* Nothing past the terminator is read, however much table there is. */
+    task.mmaps[1].pages = 0;
+    n = scheduler_shared_ranges(&task, &ranges);
+    CHECK_EQ(n, 0);
+    CHECK(ranges == NULL);
+    task.mmaps[1].pages = 4;
+}

@@ -1,0 +1,1810 @@
+//chrome - Chromium's own browser, with tabs and an omnibox - on a Linux
+family platform without Linux's kernel, D-Bus, NSS or a crash handler.
+
+content_shell is the embedder the tree ships to test //content with: four
+buttons and an address field. What people mean by Chromium is //chrome, and
+it builds from the same checkout, the same args.gn and every patch before
+this one. A -k 0 build of //chrome:chrome failed in 21 places, all crashpad;
+with crashpad gated it failed in 18 more, then linked with 7 undefined
+symbols, then with 2 relocation errors. Every one of them is a seam this
+series has drawn before, in a directory it had not reached.
+
+A CRASH HANDLER THAT IS NOT THERE
+
+content_shell met crashpad's Linux half (ptrace, PR_SET_DUMPABLE,
+/proc/<pid>/task) in patch 0058 and answered it in content/shell. //chrome
+reaches it from a dozen places, so the answer goes where the library is:
+components/crash/core/app says has_crash_handler, and a buildflag
+HAS_CRASH_HANDLER says it to the preprocessor. The library keeps its switches
+and its client interface; crashpad.cc and the handler data dependency go.
+Every caller asks the one question: chrome_main_delegate's
+InitializeCrashpad, the crash-signal socket a child is handed (-1, which
+already means "none"), the upload list (the JavaScript error log is the half
+that is left), the enterprise crash reporting context (ChromeOS already had
+no crashpad database there), SetUploadConsent, and the metrics service's
+system-profile stream.
+
+Two things follow from there being no crashpad. V8's WebAssembly trap
+handler is installed by crashpad as its first-chance handler on Linux, so
+content_renderer_client.cc lets V8 install its own - what content_shell does
+whenever no crash handler is there. And chrome/common/crash_keys.cc read a
+crashpad annotation's value back to pass it to child processes; without
+crashpad the wrapper keeps the value itself.
+
+NO D-BUS, AND FOUR FILES THAT HAD NOT HEARD
+
+use_dbus = false is in this build's args.gn (content, M165). //chrome had
+not been built that way on Linux and it shows:
+
+  - platform_util_linux.cc was compiled only with D-Bus, and its
+    ShowItemInFolder and OpenExternal were the only definitions on Linux. It
+    already falls back to xdg-open and xdg-email when neither the portal nor
+    FileManager1 answers; without a bus, that fallback is the answer.
+  - notifications: the only system bridge on Linux is the freedesktop
+    service. HAS_SYSTEM_NOTIFICATION_BRIDGE in notification_platform_bridge.h
+    says whether Create() exists; without one, every notification goes to
+    the message center - which is what Chrome falls back to when a system
+    bridge fails anyway.
+  - BlueZ: PostCreateMainMessageLoop initialised BluezDBusManager under
+    USE_DBUS and PostDestroyThreads shut it down unconditionally. The
+    Bluetooth-stack metric (BlueZ or Floss, both over D-Bus) follows
+    device/bluetooth's use_bluez default.
+  - dynamic_launcher_portal.cc is an XDG portal and has no callers; it
+    follows use_dbus the way its dependency already did.
+  - ui::GlobalAcceleratorListener::GetInstance fell off the end of a
+    function returning a value when neither ChromeOS nor D-Bus applied.
+    clang compiles that to ud2, and the browser stopped on it with SIGILL.
+
+NO NSS
+
+use_nss_* = false is in args.gn too (M162). On Linux, NSS's database IS the
+platform client-certificate store and the platform root store's user-added
+certificates:
+
+  - the certificate manager's platform-root-store half follows
+    net/cert/internal/system_trust_store.h's own condition (patch 0049 drew
+    it for services/cert_verifier) - is_platform_root_store_supported in the
+    mojom, CERTIFICATE_MANAGER_HAS_PLATFORM_ROOT_STORE in C++, and the same
+    expression in the WebUI's <if> - so the page has no "imported from your
+    operating system" section to pretend with, and keeps the Chrome Root Store
+    and user-added certificates, which need no platform store;
+  - the client-certificate half on Linux without NSS is the read-only source
+    with nothing behind it that every platform without a store gets;
+  - ProfileNetworkContextService's client cert store is the empty store,
+    wrapped the way Android's is, so the profile's and the browser's own
+    stores still apply;
+  - Firefox password import needs an NSS to decrypt with, and
+    FIREFOX_PASSWORDS_ARE_IMPORTABLE says so in the one header both the
+    importer and the importer list include - macOS was already the platform
+    with none, and importer_list.cc's own comment says why the offer must not
+    be made: "don't promise an import service that can't be delivered".
+
+LINUX'S KERNEL, ONCE MORE
+
+  - power_metrics' only Linux energy provider is perf_event_open(2), and
+    SystemPowerMonitor CHECKs that it has one, so both follow HAS_LINUX_KERNEL.
+  - discovery_network_list_posix.cc identifies a network by the hardware
+    address getifaddrs reports as AF_PACKET, and SIOCGIWESSID is a
+    wireless-extensions ioctl. Without either, each running interface is
+    reported with an empty id - ComputeNetworkId's kNetworkIdUnknown, "we
+    can't determine the set of networks" - rather than an empty list, which
+    would be kNetworkIdDisconnected and false.
+  - chrome://sandbox reports SandboxLinux's bits. None of them is here, and
+    every answer is no, which makes the page's own verdict the true one.
+  - memory_details.cc includes zygote_host_linux.h under USE_ZYGOTE and calls
+    it under a platform list; it asks USE_ZYGOTE both times now.
+  - ChromeBrowserMainExtraPartsViews refuses to run as root "so that we don't
+    destroy the profile" and because of the setuid sandbox - both Linux's.
+    A platform in the family without that kernel can have one principal,
+    uid 0 because there is no other, and no other user to ruin a profile for.
+
+THE WEAK TLS INIT FUNCTION, THIRD AND FOURTH TIME
+
+M155 (V8, patch 0033) and patch 0056 (ANGLE) found this: an extern
+thread_local read from another translation unit, with no initialiser in
+sight, is read through a weak TLS init function that the defining unit never
+emits - so the call is to absolute zero, which a PC-relative branch reaches
+only from an image near zero. This platform loads programs at 512 GiB. re2's
+hooks::context and openscreen's ScopedTraceOperation::traces_ and root_node_
+are all nullptr-initialised; constinit says so where every reader can see it.
+
+WHAT IS NOT HERE
+
+No sandbox and no crash handler arrive with any of this, and the binary is
+checked for their absence: no crashpad::, no InitializeCrashpad, no
+SystemPowerMonitor. The word lean_os appears nowhere below.
+
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+index 8a60d7061b..fb5b4afd72 100644
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -322,7 +322,13 @@ if (!is_android && !is_mac) {
+         "//chrome/common:buildflags",
+       ]
+ 
+-      data_deps += [ "//components/crash/core/app:chrome_crashpad_handler" ]
++      # A DATA dependency, which nothing links and ninja builds anyway - so it
++      # has to follow //components/crash/core/app's own has_crash_handler
++      # rather than rely on nothing calling it.
++      if (has_linux_kernel) {
++        data_deps +=
++            [ "//components/crash/core/app:chrome_crashpad_handler" ]
++      }
+ 
+       ldflags = []
+ 
+diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
+index 09a13524a6..e26909857f 100644
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -170,6 +170,7 @@
+ 
+ #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID) || \
+     BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#include "components/crash/core/app/buildflags.h"
+ #include "components/crash/core/app/crashpad.h"
+ #endif
+ 
+@@ -1614,7 +1615,7 @@ void ChromeMainDelegate::PreSandboxStartup() {
+     } else {
+       base::android::InitJavaExceptionReporterForChildProcess();
+     }
+-#else
++#elif BUILDFLAG(HAS_CRASH_HANDLER)
+     crash_reporter::InitializeCrashpad(process_type.empty(), process_type);
+     crash_reporter::SetFirstChanceExceptionHandler(
+         v8::TryHandleWebAssemblyTrapPosix);
+@@ -1769,9 +1770,11 @@ void ChromeMainDelegate::ZygoteForked() {
+       base::CommandLine::ForCurrentProcess();
+   std::string process_type =
+       command_line->GetSwitchValueASCII(switches::kProcessType);
++#if BUILDFLAG(HAS_CRASH_HANDLER)
+   crash_reporter::InitializeCrashpad(false, process_type);
+   crash_reporter::SetFirstChanceExceptionHandler(
+       v8::TryHandleWebAssemblyTrapPosix);
++#endif
+ 
+   // Reset the command line for the newly spawned process.
+   crash_keys::SetCrashKeysFromCommandLine(*command_line);
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 7d9990c9a6..3b1974b018 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1628,11 +1628,14 @@ source_set("core") {
+       "//ui/linux:display_server_utils",
+     ]
+ 
++    # platform_util_linux.cc prefers the XDG portal and FileManager1, which are
++    # D-Bus, and falls back to xdg-open - which is not - so it is built either
++    # way and asks USE_DBUS which half it has.
++    sources += [ "platform_util_linux.cc" ]
+     if (use_dbus) {
+       sources += [
+         "dbus_memory_pressure_evaluator_linux.cc",
+         "dbus_memory_pressure_evaluator_linux.h",
+-        "platform_util_linux.cc",
+       ]
+       deps += [
+         "//chrome/common:chrome_features",
+diff --git a/chrome/browser/browser_process_impl.cc b/chrome/browser/browser_process_impl.cc
+index 6d97e22bba..a8dc3cfe2d 100644
+--- a/chrome/browser/browser_process_impl.cc
++++ b/chrome/browser/browser_process_impl.cc
+@@ -1768,7 +1768,9 @@ void BrowserProcessImpl::CreateIconManager() {
+ 
+ void BrowserProcessImpl::CreateNotificationPlatformBridge() {
+   DCHECK(!notification_bridge_);
++#if HAS_SYSTEM_NOTIFICATION_BRIDGE
+   notification_bridge_ = NotificationPlatformBridge::Create();
++#endif
+   created_notification_bridge_ = true;
+ }
+ 
+diff --git a/chrome/browser/chrome_browser_main_linux.cc b/chrome/browser/chrome_browser_main_linux.cc
+index eaa01f7c56..ea58569708 100644
+--- a/chrome/browser/chrome_browser_main_linux.cc
++++ b/chrome/browser/chrome_browser_main_linux.cc
+@@ -114,8 +114,10 @@ void ChromeBrowserMainPartsLinux::PostDestroyThreads() {
+ #else
+ #if BUILDFLAG(USE_DBUS)
+   session_end_listener_.reset();
+-#endif
++  // Shut down under the same condition PostCreateMainMessageLoop initialised
++  // it under: BlueZ is reached over the system bus.
+   bluez::BluezDBusManager::Shutdown();
++#endif
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
+   ChromeBrowserMainPartsPosix::PostDestroyThreads();
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 9b0c7ed9c1..cef0af5aed 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -636,6 +636,7 @@
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#include "components/crash/core/app/buildflags.h"
+ #include "components/crash/core/app/crash_switches.h"
+ #include "components/crash/core/app/crashpad.h"
+ #endif
+@@ -1108,8 +1109,13 @@ int GetCrashSignalFD(const base::CommandLine& command_line) {
+ }
+ #elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+ int GetCrashSignalFD(const base::CommandLine& command_line) {
++#if BUILDFLAG(HAS_CRASH_HANDLER)
+   int fd;
+   return crash_reporter::GetHandlerSocket(&fd, nullptr) ? fd : -1;
++#else
++  // No crash handler, so no socket to hand a child - which -1 already means.
++  return -1;
++#endif
+ }
+ #endif  // BUILDFLAG(IS_ANDROID)
+ 
+@@ -2902,7 +2908,7 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+                                     client_info->client_id);
+   }
+ #elif BUILDFLAG(IS_POSIX)
+-#if !BUILDFLAG(IS_ANDROID)
++#if !BUILDFLAG(IS_ANDROID) && BUILDFLAG(HAS_CRASH_HANDLER)
+   pid_t pid;
+   if (crash_reporter::GetHandlerSocket(nullptr, &pid)) {
+     command_line->AppendSwitchASCII(
+diff --git a/chrome/browser/crash_upload_list/crash_upload_list.cc b/chrome/browser/crash_upload_list/crash_upload_list.cc
+index e19d98a322..a3e6b17eb9 100644
+--- a/chrome/browser/crash_upload_list/crash_upload_list.cc
++++ b/chrome/browser/crash_upload_list/crash_upload_list.cc
+@@ -17,7 +17,9 @@
+ #include "chrome/browser/crash_upload_list/crash_upload_list_android.h"
+ #endif
+ 
+-#if !BUILDFLAG(IS_CHROMEOS)
++#include "components/crash/core/app/buildflags.h"
++
++#if !BUILDFLAG(IS_CHROMEOS) && BUILDFLAG(HAS_CRASH_HANDLER)
+ #include "components/crash/core/browser/crash_upload_list_crashpad.h"
+ #endif
+ 
+@@ -41,6 +43,10 @@ scoped_refptr<UploadList> CreateCrashUploadList() {
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+   return base::MakeRefCounted<CrashUploadListChromeOS>(upload_log_path);
++#elif !BUILDFLAG(HAS_CRASH_HANDLER)
++  // No crash handler means no crashpad database of C++ crashes to list. The
++  // JavaScript error reporter's text log is the half that is left.
++  return base::MakeRefCounted<TextLogUploadList>(upload_log_path);
+ #else
+   // Crashpad keeps the records of C++ crashes (segfaults, etc) in its
+   // internal database. The JavaScript error reporter writes JS error upload
+diff --git a/chrome/browser/enterprise/connectors/reporting/BUILD.gn b/chrome/browser/enterprise/connectors/reporting/BUILD.gn
+index 1da4752b08..0af51d21fd 100644
+--- a/chrome/browser/enterprise/connectors/reporting/BUILD.gn
++++ b/chrome/browser/enterprise/connectors/reporting/BUILD.gn
+@@ -46,12 +46,15 @@ source_set("reporting") {
+ 
+   deps = [
+     "//base",
++    "//components/crash/core/app:buildflags",
+     "//components/device_signals/core/browser",
+     "//components/enterprise",
+     "//components/policy/core/common",
+     "//components/safe_browsing/core/common/proto:csd_proto",
+-    "//third_party/crashpad/crashpad/client",
+   ]
++  if (!is_linux || has_linux_kernel) {
++    deps += [ "//third_party/crashpad/crashpad/client" ]
++  }
+ 
+   if (enterprise_cloud_content_analysis && enable_extensions_core) {
+     public_deps += [
+diff --git a/chrome/browser/enterprise/connectors/reporting/browser_crash_event_router.cc b/chrome/browser/enterprise/connectors/reporting/browser_crash_event_router.cc
+index 8a75e504f7..831d415859 100644
+--- a/chrome/browser/enterprise/connectors/reporting/browser_crash_event_router.cc
++++ b/chrome/browser/enterprise/connectors/reporting/browser_crash_event_router.cc
+@@ -13,7 +13,7 @@ namespace enterprise_connectors {
+ 
+ BrowserCrashEventRouter::BrowserCrashEventRouter(
+     content::BrowserContext* context) {
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if ENTERPRISE_CRASH_REPORTING_HAS_A_DATABASE
+   CrashReportingContext* crash_reporting_context =
+       CrashReportingContext::GetInstance();
+   Profile* profile = Profile::FromBrowserContext(context);
+@@ -23,7 +23,7 @@ BrowserCrashEventRouter::BrowserCrashEventRouter(
+ }
+ 
+ BrowserCrashEventRouter::~BrowserCrashEventRouter() {
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if ENTERPRISE_CRASH_REPORTING_HAS_A_DATABASE
+   CrashReportingContext* crash_reporting_context =
+       CrashReportingContext::GetInstance();
+   crash_reporting_context->RemoveProfile(this);
+diff --git a/chrome/browser/enterprise/connectors/reporting/crash_reporting_context.cc b/chrome/browser/enterprise/connectors/reporting/crash_reporting_context.cc
+index 3ee405e160..6aa8cc52bd 100644
+--- a/chrome/browser/enterprise/connectors/reporting/crash_reporting_context.cc
++++ b/chrome/browser/enterprise/connectors/reporting/crash_reporting_context.cc
+@@ -14,7 +14,6 @@
+ #include "chrome/browser/policy/chrome_browser_policy_connector.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/common/channel_info.h"
+-#include "components/crash/core/app/crashpad.h"
+ #include "components/enterprise/common/proto/synced_from_google3/chrome_reporting_entity.pb.h"
+ #include "components/enterprise/connectors/core/connectors_prefs.h"
+ #include "components/enterprise/connectors/core/realtime_reporting_client_base.h"
+@@ -28,9 +27,13 @@
+ #include "components/enterprise/connectors/core/features.h"
+ #endif
+ 
++#if ENTERPRISE_CRASH_REPORTING_HAS_A_DATABASE
++#include "components/crash/core/app/crashpad.h"
++#endif
++
+ namespace enterprise_connectors {
+ 
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if ENTERPRISE_CRASH_REPORTING_HAS_A_DATABASE
+ 
+ namespace {
+ 
+@@ -263,7 +266,7 @@ void CrashReportingContext::RemoveProfile(BrowserCrashEventRouter* router) {
+   }
+ }
+ 
+-#endif  // !BUILDFLAG(IS_CHROMEOS)
++#endif  // ENTERPRISE_CRASH_REPORTING_HAS_A_DATABASE
+ 
+ CrashReportingContext::~CrashReportingContext() = default;
+ 
+diff --git a/chrome/browser/enterprise/connectors/reporting/crash_reporting_context.h b/chrome/browser/enterprise/connectors/reporting/crash_reporting_context.h
+index f2a32439cf..a83db987a8 100644
+--- a/chrome/browser/enterprise/connectors/reporting/crash_reporting_context.h
++++ b/chrome/browser/enterprise/connectors/reporting/crash_reporting_context.h
+@@ -9,9 +9,19 @@
+ #include "base/memory/singleton.h"
+ #include "base/timer/timer.h"
+ #include "chrome/browser/enterprise/connectors/reporting/browser_crash_event_router.h"
++#include "components/crash/core/app/buildflags.h"
+ #include "components/enterprise/browser/controller/chrome_browser_cloud_management_controller.h"
+ 
+-#if !BUILDFLAG(IS_CHROMEOS)
++// Whether there is a crash database here for this to read. ChromeOS is the
++// platform that already had none; a platform with no crash handler at all is
++// the second, for the same reason - nothing writes one.
++#if !BUILDFLAG(IS_CHROMEOS) && BUILDFLAG(HAS_CRASH_HANDLER)
++#define ENTERPRISE_CRASH_REPORTING_HAS_A_DATABASE 1
++#else
++#define ENTERPRISE_CRASH_REPORTING_HAS_A_DATABASE 0
++#endif
++
++#if ENTERPRISE_CRASH_REPORTING_HAS_A_DATABASE
+ #include "third_party/crashpad/crashpad/client/crash_report_database.h"
+ #endif
+ 
+@@ -30,7 +40,7 @@ class CrashReportingContext
+   CrashReportingContext operator=(CrashReportingContext&&) = delete;
+   ~CrashReportingContext() override;
+ 
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if ENTERPRISE_CRASH_REPORTING_HAS_A_DATABASE
+   static CrashReportingContext* GetInstance();
+ 
+   void AddProfile(BrowserCrashEventRouter* router, Profile* profile);
+@@ -54,7 +64,7 @@ class CrashReportingContext
+ #endif
+ };
+ 
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if ENTERPRISE_CRASH_REPORTING_HAS_A_DATABASE
+ 
+ // Utility function to parse reports from a crash database that were
+ // created past a given timestamp. Included in header for testing.
+diff --git a/chrome/browser/importer/importer_list.cc b/chrome/browser/importer/importer_list.cc
+index 62546b572b..17fecc1942 100644
+--- a/chrome/browser/importer/importer_list.cc
++++ b/chrome/browser/importer/importer_list.cc
+@@ -146,7 +146,7 @@ void DetectFirefoxProfiles(
+     firefox.services_supported = user_data_importer::HISTORY |
+                                  user_data_importer::FAVORITES |
+                                  user_data_importer::AUTOFILL_FORM_DATA;
+-#if !BUILDFLAG(IS_MAC)
++#if FIREFOX_PASSWORDS_ARE_IMPORTABLE
+     // Passwords are imported by loading the NSS DLLs into the Chromium process.
+     // Restrictive code signing prevents that from ever working again in modern
+     // macOSes, so don't promise an import service that can't be delivered.
+diff --git a/chrome/browser/media/router/discovery/BUILD.gn b/chrome/browser/media/router/discovery/BUILD.gn
+index 3be64b9683..aaca1d52f5 100644
+--- a/chrome/browser/media/router/discovery/BUILD.gn
++++ b/chrome/browser/media/router/discovery/BUILD.gn
+@@ -82,7 +82,8 @@ static_library("discovery") {
+   ]
+   configs += [ "//build/config/compiler:wexit_time_destructors" ]
+ 
+-  if (is_linux || is_chromeos) {
++  # SIOCGIWESSID is a wireless-extensions ioctl, which is Linux's kernel.
++  if ((is_linux && has_linux_kernel) || is_chromeos) {
+     sources += [ "discovery_network_list_wifi_linux.cc" ]
+   }
+ 
+diff --git a/chrome/browser/media/router/discovery/discovery_network_list_posix.cc b/chrome/browser/media/router/discovery/discovery_network_list_posix.cc
+index 259b4d17bb..2c1852bbf6 100644
+--- a/chrome/browser/media/router/discovery/discovery_network_list_posix.cc
++++ b/chrome/browser/media/router/discovery/discovery_network_list_posix.cc
+@@ -6,7 +6,6 @@
+ 
+ #include <ifaddrs.h>
+ #include <net/if.h>
+-#include <net/if_arp.h>
+ #include <netinet/in.h>
+ #include <sys/socket.h>
+ #include <sys/types.h>
+@@ -17,6 +16,20 @@
+ #include "base/strings/string_number_conversions.h"
+ #include "build/build_config.h"
+ 
++// Whether getifaddrs(3) reports each interface's link-layer address - an
++// AF_PACKET entry carrying a sockaddr_ll on Linux's kernel, an AF_LINK one
++// carrying a sockaddr_dl on the BSDs. A platform in the Linux family without
++// Linux's kernel reports the interfaces and their IPv4 addresses and no link
++// layer at all, so there is no hardware address to identify a network by.
++#if BUILDFLAG(IS_LINUX) && !BUILDFLAG(HAS_LINUX_KERNEL)
++#define DISCOVERY_HAS_LINK_LAYER_ADDRESSES 0
++#else
++#define DISCOVERY_HAS_LINK_LAYER_ADDRESSES 1
++#endif
++
++#if DISCOVERY_HAS_LINK_LAYER_ADDRESSES
++#include <net/if_arp.h>
++
+ #if !BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/media/router/discovery/discovery_network_list_wifi.h"
+ #endif
+@@ -26,10 +39,45 @@
+ #else
+ #include <net/if_dl.h>
+ #endif
++#endif  // DISCOVERY_HAS_LINK_LAYER_ADDRESSES
+ 
+ namespace media_router {
+ namespace {
+ 
++#if !DISCOVERY_HAS_LINK_LAYER_ADDRESSES
++
++// Each running interface is reported with an EMPTY network id, which is what
++// ComputeNetworkId turns into kNetworkIdUnknown - "we can't determine the
++// set of networks". That is the truth here. An empty list would be
++// kNetworkIdDisconnected, which is not: the machine is on a network, it just
++// cannot say which one.
++void GetDiscoveryNetworkInfoListImpl(
++    const struct ifaddrs* if_list,
++    std::vector<DiscoveryNetworkInfo>* network_info_list) {
++  for (; if_list != nullptr; if_list = if_list->ifa_next) {
++    if ((if_list->ifa_flags & IFF_RUNNING) == 0 ||
++        (if_list->ifa_flags & IFF_UP) == 0 ||
++        (if_list->ifa_flags & IFF_LOOPBACK) != 0) {
++      continue;
++    }
++    if (if_list->ifa_addr == nullptr ||
++        if_list->ifa_addr->sa_family != AF_INET) {
++      continue;
++    }
++    std::string name(if_list->ifa_name);
++    if (name.empty() ||
++        std::ranges::any_of(*network_info_list,
++                            [&name](const DiscoveryNetworkInfo& info) {
++                              return info.name == name;
++                            })) {
++      continue;
++    }
++    network_info_list->push_back({name, std::string()});
++  }
++}
++
++#else  // DISCOVERY_HAS_LINK_LAYER_ADDRESSES
++
+ #if !BUILDFLAG(IS_MAC)
+ using sll = struct sockaddr_ll;
+ #define SOCKET_ARP_TYPE(s) ((s)->sll_hatype)
+@@ -100,6 +148,8 @@ void GetDiscoveryNetworkInfoListImpl(
+   }
+ }
+ 
++#endif  // DISCOVERY_HAS_LINK_LAYER_ADDRESSES
++
+ }  // namespace
+ 
+ std::vector<DiscoveryNetworkInfo> GetDiscoveryNetworkInfoList() {
+diff --git a/chrome/browser/memory_details.cc b/chrome/browser/memory_details.cc
+index db0023d74a..bbbd4736ec 100644
+--- a/chrome/browser/memory_details.cc
++++ b/chrome/browser/memory_details.cc
+@@ -339,7 +339,7 @@ void MemoryDetails::CollectChildInfoOnUIThread() {
+           });
+     }
+ 
+-#if BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(USE_ZYGOTE)
+     if (content::ZygoteHost::GetInstance()->IsZygotePid(process.pid)) {
+       process.process_type = content::PROCESS_TYPE_ZYGOTE;
+     }
+diff --git a/chrome/browser/metrics/BUILD.gn b/chrome/browser/metrics/BUILD.gn
+index 34da8786ae..8492e9208c 100644
+--- a/chrome/browser/metrics/BUILD.gn
++++ b/chrome/browser/metrics/BUILD.gn
+@@ -2,6 +2,7 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
++import("//build/config/features.gni")
+ import("//components/metrics/generate_expired_histograms_array.gni")
+ import("//extensions/buildflags/buildflags.gni")
+ import("//pdf/features.gni")
+@@ -216,7 +217,10 @@ source_set("metrics") {
+     ]
+   }
+ 
+-  if (is_linux || is_chromeos) {
++  # It reports whether the Bluetooth stack is BlueZ or Floss, and both are
++  # reached over D-Bus - device/bluetooth's use_bluez default, spelt here
++  # because that declare_args() is not importable.
++  if ((is_linux && use_dbus) || is_chromeos) {
+     public += [ "bluetooth_metrics_provider.h" ]
+   }
+ 
+@@ -227,7 +231,10 @@ source_set("metrics") {
+     ]
+   }
+ 
+-  if (is_win || is_android || is_linux) {
++  # It hands the system profile to crashpad, and where there is no crash
++  # handler (components/crash/core/app's has_crash_handler) there is nothing
++  # to hand it to.
++  if (is_win || is_android || (is_linux && has_linux_kernel)) {
+     public += [ "chrome_metrics_service_crash_reporter.h" ]
+   }
+ 
+@@ -491,7 +498,7 @@ source_set("impl") {
+     sources += [ "structured/chrome_structured_metrics_delegate.cc" ]
+   }
+ 
+-  if (is_linux || is_chromeos) {
++  if ((is_linux && use_dbus) || is_chromeos) {
+     sources += [ "bluetooth_metrics_provider.cc" ]
+   }
+ 
+@@ -506,7 +513,7 @@ source_set("impl") {
+     deps += [ "//chrome/browser/updates:update_metrics" ]
+   }
+ 
+-  if (is_win || is_android || is_linux) {
++  if (is_win || is_android || (is_linux && has_linux_kernel)) {
+     sources += [ "chrome_metrics_service_crash_reporter.cc" ]
+   }
+ 
+diff --git a/chrome/browser/metrics/chrome_browser_main_extra_parts_metrics.cc b/chrome/browser/metrics/chrome_browser_main_extra_parts_metrics.cc
+index b5727472c2..0a622ed217 100644
+--- a/chrome/browser/metrics/chrome_browser_main_extra_parts_metrics.cc
++++ b/chrome/browser/metrics/chrome_browser_main_extra_parts_metrics.cc
+@@ -116,7 +116,8 @@
+ #include "components/user_manager/user_manager.h"
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
+-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if BUILDFLAG(IS_WIN) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)) || BUILDFLAG(IS_CHROMEOS)
+ #include "components/power_metrics/system_power_monitor.h"
+ #endif
+ 
+@@ -1214,7 +1215,8 @@ void ChromeBrowserMainExtraPartsMetrics::PostBrowserStart() {
+   pressure_metrics_reporter_ = std::make_unique<PressureMetricsReporter>();
+ #endif  // BUILDFLAG(IS_LINUX)
+ 
+-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if BUILDFLAG(IS_WIN) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)) || BUILDFLAG(IS_CHROMEOS)
+   power_metrics::SystemPowerMonitor::Initialize();
+ #endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+ 
+diff --git a/chrome/browser/metrics/chrome_metrics_service_client.cc b/chrome/browser/metrics/chrome_metrics_service_client.cc
+index 2ba2503503..66a36899cf 100644
+--- a/chrome/browser/metrics/chrome_metrics_service_client.cc
++++ b/chrome/browser/metrics/chrome_metrics_service_client.cc
+@@ -212,13 +212,18 @@
+ #include "components/metrics/motherboard_metrics_provider.h"
+ #endif
+ 
+-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#include "components/crash/core/app/buildflags.h"
++
++#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_CRASH_HANDLER))
+ #include "chrome/browser/metrics/chrome_metrics_service_crash_reporter.h"
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#include "build/config/linux/dbus/buildflags.h"
++
++#if (BUILDFLAG(IS_LINUX) && BUILDFLAG(USE_DBUS)) || BUILDFLAG(IS_CHROMEOS)
+ #include "chrome/browser/metrics/bluetooth_metrics_provider.h"
+-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#endif
+ 
+ #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+ #include "chrome/browser/updates/update_metrics_provider.h"
+@@ -239,12 +244,13 @@ const int kMaxHistogramGatheringWaitDuration = 60000;  // 60 seconds.
+ // Needs to be kept in sync with the writer in
+ // third_party/crashpad/crashpad/handler/handler_main.cc.
+ const char kCrashpadHistogramAllocatorName[] = "CrashpadMetrics";
+-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_CRASH_HANDLER))
+ ChromeMetricsServiceCrashReporter& GetCrashReporter() {
+   static base::NoDestructor<ChromeMetricsServiceCrashReporter> crash_reporter;
+   return *crash_reporter;
+ }
+-#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#endif
+ 
+ #if BUILDFLAG(IS_WIN)
+ // Needs to be kept in sync with the writer in PlatformExperienceHelper.
+@@ -683,9 +689,10 @@ void ChromeMetricsServiceClient::OnEnvironmentUpdate(std::string* environment) {
+   // TODO(crbug.com/514425492): The old SystemProfile to crashpad sharing
+   // flow is deprecated and will be removed once
+   // `kSharedMemorySystemProfileMinidump` is fully launched.
+-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_CRASH_HANDLER))
+   GetCrashReporter().OnEnvironmentUpdate(*environment);
+-#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
++#endif
+ }
+ 
+ void ChromeMetricsServiceClient::MergeSubprocessHistograms() {
+@@ -896,7 +903,7 @@ void ChromeMetricsServiceClient::RegisterMetricsServiceProviders() {
+         std::make_unique<safe_browsing::BundledSettingsMetricsProvider>());
+   }
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) && BUILDFLAG(USE_DBUS)) || BUILDFLAG(IS_CHROMEOS)
+   metrics_service_->RegisterMetricsProvider(
+       std::make_unique<metrics::BluetoothMetricsProvider>());
+ #endif
+diff --git a/chrome/browser/net/profile_network_context_service.cc b/chrome/browser/net/profile_network_context_service.cc
+index 67be696b30..18f5ce43b0 100644
+--- a/chrome/browser/net/profile_network_context_service.cc
++++ b/chrome/browser/net/profile_network_context_service.cc
+@@ -138,9 +138,10 @@
+ #include "net/ssl/client_cert_store_mac.h"
+ #endif  // BUILDFLAG(IS_MAC)
+ 
+-#if BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(IS_ANDROID) || \
++    (BUILDFLAG(IS_LINUX) && !BUILDFLAG(USE_NSS_CLIENT_CERTS))
+ #include "net/ssl/client_cert_store_empty.h"
+-#endif  // BUILDFLAG(IS_ANDROID)
++#endif
+ 
+ #if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+ #include "extensions/common/constants.h"
+@@ -1303,6 +1304,13 @@ ProfileNetworkContextService::CreateClientCertStore() {
+ #elif BUILDFLAG(IS_MAC)
+   return GetWrappedCertStore(profile_,
+                              std::make_unique<net::ClientCertStoreMac>());
++#elif BUILDFLAG(IS_LINUX)
++  // A Linux build without NSS has no platform client certificate store at
++  // all - NSS's database IS that store on Linux. The profile and browser
++  // stores still apply, so the empty platform store is wrapped the way
++  // Android's is below.
++  return GetWrappedCertStore(profile_,
++                             std::make_unique<net::ClientCertStoreEmpty>());
+ #elif BUILDFLAG(IS_ANDROID)
+   // On Android client we don't use a platform client cert store, but we still
+   // need to use Chrome profile and browser level stores, so we wrap the empty
+diff --git a/chrome/browser/notifications/notification_platform_bridge.h b/chrome/browser/notifications/notification_platform_bridge.h
+index 5646953eee..0749c7a0c5 100644
+--- a/chrome/browser/notifications/notification_platform_bridge.h
++++ b/chrome/browser/notifications/notification_platform_bridge.h
+@@ -11,10 +11,24 @@
+ 
+ #include "base/files/file_path.h"
+ #include "base/functional/callback_forward.h"
++#include "build/build_config.h"
++#include "build/config/linux/dbus/buildflags.h"
+ #include "chrome/browser/notifications/displayed_notifications_dispatch_callback.h"
+ #include "chrome/browser/notifications/notification_common.h"
+ #include "chrome/browser/notifications/notification_handler.h"
+ 
++// Whether this platform has a system notification bridge at all - that is,
++// whether Create() and CanHandleType() below are defined. On Linux the only
++// one is the freedesktop Notifications service, which is a D-Bus interface,
++// so a Linux build without D-Bus has none and every notification goes to the
++// message center, which is Chrome's own and what it falls back to whenever a
++// system bridge fails to initialise.
++#if BUILDFLAG(IS_LINUX) && !BUILDFLAG(USE_DBUS)
++#define HAS_SYSTEM_NOTIFICATION_BRIDGE 0
++#else
++#define HAS_SYSTEM_NOTIFICATION_BRIDGE 1
++#endif
++
+ namespace message_center {
+ class Notification;
+ }
+diff --git a/chrome/browser/notifications/notification_platform_bridge_delegator.cc b/chrome/browser/notifications/notification_platform_bridge_delegator.cc
+index d28134cf02..a6917d149d 100644
+--- a/chrome/browser/notifications/notification_platform_bridge_delegator.cc
++++ b/chrome/browser/notifications/notification_platform_bridge_delegator.cc
+@@ -54,6 +54,8 @@ bool SystemNotificationsEnabled(Profile* profile) {
+   return true;
+ #elif BUILDFLAG(IS_WIN)
+   return NotificationPlatformBridgeWin::SystemNotificationEnabled();
++#elif !HAS_SYSTEM_NOTIFICATION_BRIDGE
++  return false;
+ #else
+ #if BUILDFLAG(IS_LINUX)
+   if (profile) {
+@@ -164,8 +166,10 @@ NotificationPlatformBridge*
+ NotificationPlatformBridgeDelegator::GetBridgeForType(
+     NotificationHandler::Type type) {
+   // Prefer the system bridge if available and it can handle |type|.
++#if HAS_SYSTEM_NOTIFICATION_BRIDGE
+   if (system_bridge_ && NotificationPlatformBridge::CanHandleType(type))
+     return system_bridge_;
++#endif
+   return message_center_bridge_;
+ }
+ 
+diff --git a/chrome/browser/platform_util_linux.cc b/chrome/browser/platform_util_linux.cc
+index 08bc693b19..2ef07ca378 100644
+--- a/chrome/browser/platform_util_linux.cc
++++ b/chrome/browser/platform_util_linux.cc
+@@ -32,16 +32,20 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/thread_pool.h"
+ #include "base/types/expected.h"
++#include "build/config/linux/dbus/buildflags.h"
+ #include "chrome/browser/platform_util_internal.h"
++#include "content/public/browser/browser_thread.h"
++#include "net/base/filename_util.h"
++#include "url/gurl.h"
++
++#if BUILDFLAG(USE_DBUS)
+ #include "components/dbus/thread_linux/dbus_thread_linux.h"
+ #include "components/dbus/utils/call_method.h"
+ #include "components/dbus/utils/check_for_service_and_start.h"
+ #include "components/dbus/xdg/request.h"
+-#include "content/public/browser/browser_thread.h"
+ #include "dbus/bus.h"
+ #include "dbus/object_proxy.h"
+-#include "net/base/filename_util.h"
+-#include "url/gurl.h"
++#endif
+ 
+ using content::BrowserThread;
+ 
+@@ -49,6 +53,7 @@ namespace platform_util {
+ 
+ namespace {
+ 
++#if BUILDFLAG(USE_DBUS)
+ const char kFreedesktopFileManagerName[] = "org.freedesktop.FileManager1";
+ const char kFreedesktopFileManagerPath[] = "/org/freedesktop/FileManager1";
+ const char kMethodShowItems[] = "ShowItems";
+@@ -60,6 +65,7 @@ const char kMethodOpenDirectory[] = "OpenDirectory";
+ const char kMethodOpenURI[] = "OpenURI";
+ const char kMethodOpenFile[] = "OpenFile";
+ const char kActivationTokenKey[] = "activation_token";
++#endif  // BUILDFLAG(USE_DBUS)
+ 
+ void OnLaunchOptionsCreated(const std::string& command,
+                             const base::FilePath& working_directory,
+@@ -107,6 +113,7 @@ void XDGEmail(const std::string& email) {
+   RunCommand("xdg-email", base::FilePath(), email);
+ }
+ 
++#if BUILDFLAG(USE_DBUS)
+ class PortalHelper {
+  public:
+   static PortalHelper& GetInstance() {
+@@ -473,6 +480,7 @@ class PortalHelper {
+   base::flat_set<std::unique_ptr<dbus_xdg::Request>, base::UniquePtrComparator>
+       requests_;
+ };
++#endif  // BUILDFLAG(USE_DBUS)
+ 
+ }  // namespace
+ 
+@@ -504,14 +512,39 @@ void PlatformOpenVerifiedItem(const base::FilePath& path, OpenItemType type) {
+ 
+ }  // namespace internal
+ 
++// Without a session bus there is no portal and no FileManager1 to ask, so
++// what is left is what PortalHelper falls back to when neither answers:
++// xdg-open on the containing folder, and xdg-open or xdg-email on a URL. Those
++// are ordinary programs found on PATH - the freedesktop interface every Linux
++// program uses to hand something to the desktop - and a desktop that does not
++// ship them gets a launch that fails, which is the truth about that desktop.
+ void ShowItemInFolder(Profile*, const base::FilePath& full_path) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++#if BUILDFLAG(USE_DBUS)
+   PortalHelper::GetInstance().ShowItemInFolder(full_path);
++#else
++  if (!internal::AreShellOperationsAllowed()) {
++    return;
++  }
++  OpenItem(/*profile=*/nullptr, full_path.DirName(), OPEN_FOLDER,
++           OpenOperationCallback());
++#endif
+ }
+ 
+ void OpenExternal(const GURL& url) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++#if BUILDFLAG(USE_DBUS)
+   PortalHelper::GetInstance().OpenExternal(url);
++#else
++  if (!internal::AreShellOperationsAllowed()) {
++    return;
++  }
++  if (url.SchemeIs("mailto")) {
++    XDGEmail(url.spec());
++  } else {
++    XDGOpen(base::FilePath(), url.spec());
++  }
++#endif
+ }
+ 
+ }  // namespace platform_util
+diff --git a/chrome/browser/resources/certificate_manager/BUILD.gn b/chrome/browser/resources/certificate_manager/BUILD.gn
+index 04e6ccc924..650c8eee08 100644
+--- a/chrome/browser/resources/certificate_manager/BUILD.gn
++++ b/chrome/browser/resources/certificate_manager/BUILD.gn
+@@ -13,6 +13,20 @@ mojom("mojom") {
+   sources = [ "certificate_manager.mojom" ]
+   public_deps = [ "//mojo/public/mojom/base" ]
+   webui_module_path = "/"
++
++  # The page's "imported from your operating system" half is the user-added
++  # certificates of the PLATFORM's trust store, and //net only knows how to
++  # read one where
++  #
++  #   USE_NSS_SERVER_CERTS || IS_MAC || IS_WIN || IS_ANDROID
++  #
++  # (net/cert/internal/system_trust_store.h). ChromeOS is the platform that
++  # already had no such half; a Linux build without NSS is the second, and
++  # //services/cert_verifier/public/mojom asks the same question.
++  if (!is_chromeos &&
++      (use_nss_server_certs || is_mac || is_win || is_android)) {
++    enabled_features = [ "is_platform_root_store_supported" ]
++  }
+ }
+ 
+ build_webui("build") {
+diff --git a/chrome/browser/resources/certificate_manager/certificate_manager.html.ts b/chrome/browser/resources/certificate_manager/certificate_manager.html.ts
+index dc270e8654..f32ed6fb4f 100644
+--- a/chrome/browser/resources/certificate_manager/certificate_manager.html.ts
++++ b/chrome/browser/resources/certificate_manager/certificate_manager.html.ts
+@@ -114,7 +114,7 @@ export function getHtml(this: CertificateManagerElement) {
+         .subpageCertLists="${this.enterpriseSubpageLists_}">
+     </certificate-subpage>
+ 
+-    <if expr="not is_chromeos">
++    <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+       <certificate-subpage id="platformCertsSection"
+           path="${Page.PLATFORM_CERTS}"
+           class="cr-centered-card-container"
+diff --git a/chrome/browser/resources/certificate_manager/certificate_manager.mojom b/chrome/browser/resources/certificate_manager/certificate_manager.mojom
+index 355b22a3cf..9ed6c19aa8 100644
+--- a/chrome/browser/resources/certificate_manager/certificate_manager.mojom
++++ b/chrome/browser/resources/certificate_manager/certificate_manager.mojom
+@@ -46,15 +46,15 @@ enum CertificateSource {
+   kEnterpriseDistrustedCerts,
+ 
+   // Trusted certs from platform (user-added).
+-  [EnableIfNot=is_chromeos]
++  [EnableIf=is_platform_root_store_supported]
+   kPlatformUserTrustedCerts,
+ 
+   // Intermediate certs from platform (user-added).
+-  [EnableIfNot=is_chromeos]
++  [EnableIf=is_platform_root_store_supported]
+   kPlatformUserIntermediateCerts,
+ 
+   // Distrusted certs from platform (user-added).
+-  [EnableIfNot=is_chromeos]
++  [EnableIf=is_platform_root_store_supported]
+   kPlatformUserDistrustedCerts,
+ 
+   // Enterprise provisioned client certificates. Only enabled on platforms
+@@ -76,16 +76,16 @@ enum CertificateSource {
+ 
+ struct CertManagementMetadata {
+   // If true, user-added certs are imported from the system.
+-  [EnableIfNot=is_chromeos]
++  [EnableIf=is_platform_root_store_supported]
+   bool include_system_trust_store;
+ 
+   // Number of user-added certs that could be imported from the system.
+-  [EnableIfNot=is_chromeos]
++  [EnableIf=is_platform_root_store_supported]
+   uint8 num_user_added_system_certs;
+ 
+   // If true, an enterprise policy controls whether user-added certs are
+   // imported from the system.
+-  [EnableIfNot=is_chromeos]
++  [EnableIf=is_platform_root_store_supported]
+   bool is_include_system_trust_store_managed;
+ 
+   // Number of certificates added via enterprise policy.
+@@ -154,7 +154,7 @@ interface CertificateManagerPageHandler {
+   ShowNativeManageCertificates();
+ 
+   // Set whether to use the OS imported certs or not.
+-  [EnableIfNot=is_chromeos]
++  [EnableIf=is_platform_root_store_supported]
+   SetIncludeSystemTrustStore(bool include);
+ };
+ 
+diff --git a/chrome/browser/resources/certificate_manager/certificate_manager.ts b/chrome/browser/resources/certificate_manager/certificate_manager.ts
+index ae4ab5203d..2c005aeb64 100644
+--- a/chrome/browser/resources/certificate_manager/certificate_manager.ts
++++ b/chrome/browser/resources/certificate_manager/certificate_manager.ts
+@@ -88,7 +88,7 @@ export interface CertificateManagerElement {
+     crsCertSection: CrsSectionElement,
+     adminCertsSection: CertificateSubpageElement,
+     userCertsSection: CertificateSubpageElement,
+-    // <if expr="not is_chromeos">
++    // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+     platformCertsSection: CertificateSubpageElement,
+     // </if>
+     platformClientCertsSection: CertificateSubpageElement,
+@@ -114,7 +114,7 @@ export class CertificateManagerElement extends CertificateManagerElementBase {
+       selectedPage_: {type: String},
+       clientPlatformSubpageLists_: {type: Array},
+       enterpriseSubpageLists_: {type: Array},
+-      // <if expr="not is_chromeos">
++      // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+       platformSubpageLists_: {type: Array},
+       // </if>
+ 
+@@ -220,7 +220,7 @@ export class CertificateManagerElement extends CertificateManagerElementBase {
+     },
+   ];
+ 
+-  // <if expr="not is_chromeos">
++  // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+   protected accessor platformSubpageLists_: SubpageCertificateList[] = [
+     {
+       headerText:
+@@ -352,7 +352,7 @@ export class CertificateManagerElement extends CertificateManagerElementBase {
+         case Page.ADMIN_CERTS:
+           this.$.adminCertsSection.setInitialFocus();
+           break;
+-        // <if expr="not is_chromeos">
++        // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+         case Page.PLATFORM_CERTS:
+           this.$.platformCertsSection.setInitialFocus();
+           break;
+@@ -375,7 +375,7 @@ export class CertificateManagerElement extends CertificateManagerElementBase {
+             this.$.localCertSection.setFocusToLinkRow(oldRoute.page);
+           }
+           break;
+-        // <if expr="not is_chromeos">
++        // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+         case Page.PLATFORM_CERTS:
+           if (route.page === Page.LOCAL_CERTS) {
+             this.$.localCertSection.setFocusToLinkRow(oldRoute.page);
+@@ -406,7 +406,7 @@ export class CertificateManagerElement extends CertificateManagerElementBase {
+ 
+   protected getSelectedTopLevelHref_(): string {
+     switch (this.selectedPage_) {
+-      // <if expr="not is_chromeos">
++      // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+       case Page.PLATFORM_CERTS:
+       // </if>
+       case Page.ADMIN_CERTS:
+diff --git a/chrome/browser/resources/certificate_manager/local_certs_section.html.ts b/chrome/browser/resources/certificate_manager/local_certs_section.html.ts
+index a5b399f86b..259c3c3080 100644
+--- a/chrome/browser/resources/certificate_manager/local_certs_section.html.ts
++++ b/chrome/browser/resources/certificate_manager/local_certs_section.html.ts
+@@ -13,7 +13,7 @@ export function getHtml(this: LocalCertsSectionElement) {
+   <h2 class="page-title">$i18n{certificateManagerV2LocalCerts}</h2>
+   $i18n{certificateManagerV2LocalCertsDescription}
+ 
+-  <if expr="not is_chromeos">
++  <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+     <h3 class="section-title">$i18n{certificateManagerV2Platform}</h3>
+     <div class="card">
+       <div class="cr-row first">
+diff --git a/chrome/browser/resources/certificate_manager/local_certs_section.ts b/chrome/browser/resources/certificate_manager/local_certs_section.ts
+index eebe5ad121..ee95d69f62 100644
+--- a/chrome/browser/resources/certificate_manager/local_certs_section.ts
++++ b/chrome/browser/resources/certificate_manager/local_certs_section.ts
+@@ -14,7 +14,7 @@ import '//resources/cr_elements/cr_icon/cr_icon.js';
+ import '//resources/cr_elements/cr_link_row/cr_link_row.js';
+ import '//resources/cr_elements/cr_toggle/cr_toggle.js';
+ 
+-// <if expr="not is_chromeos">
++// <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+ import type {CrToggleElement} from '//resources/cr_elements/cr_toggle/cr_toggle.js';
+ // </if>
+ import {assert, assertNotReached} from '//resources/js/assert.js';
+@@ -35,7 +35,7 @@ export interface LocalCertsSectionElement {
+     manageOsImportedCerts: HTMLElement,
+     // </if>
+ 
+-    // <if expr="not is_chromeos">
++    // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+     importOsCerts: CrToggleElement,
+     importOsCertsManagedIcon: HTMLElement,
+     viewOsImportedCerts: HTMLElement,
+@@ -62,7 +62,7 @@ export class LocalCertsSectionElement extends CrLitElement {
+       numPolicyCertsString_: {type: String},
+       numUserCertsString_: {type: String},
+       certManagementMetadata_: {type: Object},
+-      // <if expr="not is_chromeos">
++      // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+       numSystemCertsString_: {type: String},
+       // </if>
+     };
+@@ -72,7 +72,7 @@ export class LocalCertsSectionElement extends CrLitElement {
+   protected accessor numUserCertsString_: string = '';
+   protected accessor certManagementMetadata_: CertManagementMetadata|null =
+       null;
+-  // <if expr="not is_chromeos">
++  // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+   protected accessor numSystemCertsString_: string = '';
+   // </if>
+ 
+@@ -101,7 +101,7 @@ export class LocalCertsSectionElement extends CrLitElement {
+         assert(adminLinkRow);
+         focusWithoutInk(adminLinkRow);
+         break;
+-      // <if expr="not is_chromeos">
++      // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+       case Page.PLATFORM_CERTS:
+         focusWithoutInk(this.$.viewOsImportedCerts);
+         break;
+@@ -120,7 +120,7 @@ export class LocalCertsSectionElement extends CrLitElement {
+   private updateNumCertsStrings_() {
+     if (!this.certManagementMetadata_) {
+       this.numPolicyCertsString_ = '';
+-      // <if expr="not is_chromeos">
++      // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+       this.numSystemCertsString_ = '';
+       // </if>
+       this.numUserCertsString_ = '';
+@@ -132,7 +132,7 @@ export class LocalCertsSectionElement extends CrLitElement {
+           .then(label => {
+             this.numPolicyCertsString_ = label;
+           });
+-      // <if expr="not is_chromeos">
++      // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+       PluralStringProxyImpl.getInstance()
+           .getPluralString(
+               'certificateManagerV2NumCerts',
+@@ -151,7 +151,7 @@ export class LocalCertsSectionElement extends CrLitElement {
+     }
+   }
+ 
+-  // <if expr="not is_chromeos">
++  // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+   protected onPlatformCertsLinkRowClick_(e: Event) {
+     e.preventDefault();
+     Router.getInstance().navigateTo(Page.PLATFORM_CERTS);
+@@ -168,7 +168,7 @@ export class LocalCertsSectionElement extends CrLitElement {
+     Router.getInstance().navigateTo(Page.USER_CERTS);
+   }
+ 
+-  // <if expr="not is_chromeos">
++  // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+   protected importOsCertsEnabled_(): boolean {
+     return !!this.certManagementMetadata_?.includeSystemTrustStore;
+   }
+@@ -207,7 +207,7 @@ export class LocalCertsSectionElement extends CrLitElement {
+   }
+   // </if>
+ 
+-  // <if expr="not is_chromeos">
++  // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+   protected onOsCertsToggleChange_(e: CustomEvent<boolean>) {
+     const proxy = CertificatesBrowserProxy.getInstance();
+     proxy.handler.setIncludeSystemTrustStore(e.detail);
+diff --git a/chrome/browser/resources/certificate_manager/navigation.ts b/chrome/browser/resources/certificate_manager/navigation.ts
+index d045889b89..e753120ea4 100644
+--- a/chrome/browser/resources/certificate_manager/navigation.ts
++++ b/chrome/browser/resources/certificate_manager/navigation.ts
+@@ -18,7 +18,7 @@ export enum Page {
+   CRS_CERTS = 'crscerts',
+   // Sub-pages
+   ADMIN_CERTS = 'localcerts/admincerts',
+-  // <if expr="not is_chromeos">
++  // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+   PLATFORM_CERTS = 'localcerts/platformcerts',
+   // </if>
+   USER_CERTS = 'localcerts/usercerts',
+@@ -39,7 +39,7 @@ export class Route {
+   isSubpage(): boolean {
+     switch (this.page) {
+       case Page.ADMIN_CERTS:
+-      // <if expr="not is_chromeos">
++      // <if expr="not is_chromeos and (use_nss_certs or not is_linux)">
+       case Page.PLATFORM_CERTS:
+       // </if>
+       case Page.PLATFORM_CLIENT_CERTS:
+diff --git a/chrome/browser/ui/views/chrome_browser_main_extra_parts_views.cc b/chrome/browser/ui/views/chrome_browser_main_extra_parts_views.cc
+index 154a2af1cd..3dd79ba56e 100644
+--- a/chrome/browser/ui/views/chrome_browser_main_extra_parts_views.cc
++++ b/chrome/browser/ui/views/chrome_browser_main_extra_parts_views.cc
+@@ -139,10 +139,17 @@ void ChromeBrowserMainExtraPartsViews::PreProfileInit() {
+         return controller;
+       }));
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)
+   // On the Linux desktop, we want to prevent the user from logging in as root,
+   // so that we don't destroy the profile. Now that we have some minimal ui
+   // initialized, check to see if we're running as root and bail if we are.
++  //
++  // Both halves of that are about Linux's kernel: a profile root wrote is one
++  // the real user's uid later cannot, and the setuid sandbox the --no-sandbox
++  // escape below refers to is Linux's. A platform in the Linux family without
++  // Linux's kernel can have one principal, whose uid is 0 because there is no
++  // other to be, and no other user for a profile to be ruined for - so
++  // refusing it would refuse every run the platform has.
+   if (geteuid() != 0) {
+     return;
+   }
+diff --git a/chrome/browser/ui/webui/certificate_manager/BUILD.gn b/chrome/browser/ui/webui/certificate_manager/BUILD.gn
+index 1ea57cae42..314eb67473 100644
+--- a/chrome/browser/ui/webui/certificate_manager/BUILD.gn
++++ b/chrome/browser/ui/webui/certificate_manager/BUILD.gn
+@@ -3,6 +3,7 @@
+ # found in the LICENSE file.
+ 
+ import("//chrome/common/features.gni")
++import("//crypto/features.gni")
+ 
+ if (chrome_root_store_cert_management_ui) {
+   source_set("certificate_manager") {
+@@ -58,7 +59,10 @@ if (chrome_root_store_cert_management_ui) {
+       "//ui/webui",
+     ]
+ 
+-    if (!is_chromeos) {
++    # CERTIFICATE_MANAGER_HAS_PLATFORM_ROOT_STORE in
++    # certificate_manager_handler.h, spelt for GN.
++    if (!is_chromeos &&
++        (use_nss_server_certs || is_mac || is_win || is_android)) {
+       sources += [ "platform_cert_sources.cc" ]
+       public += [ "platform_cert_sources.h" ]
+     }
+diff --git a/chrome/browser/ui/webui/certificate_manager/certificate_manager_handler.cc b/chrome/browser/ui/webui/certificate_manager/certificate_manager_handler.cc
+index 8bc398d57a..face2de849 100644
+--- a/chrome/browser/ui/webui/certificate_manager/certificate_manager_handler.cc
++++ b/chrome/browser/ui/webui/certificate_manager/certificate_manager_handler.cc
+@@ -27,7 +27,7 @@
+ #include "content/public/browser/network_service_instance.h"
+ #include "content/public/browser/web_contents.h"
+ 
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if CERTIFICATE_MANAGER_HAS_PLATFORM_ROOT_STORE
+ #include "chrome/browser/ui/webui/certificate_manager/platform_cert_sources.h"
+ #endif
+ 
+@@ -49,14 +49,14 @@ void GetCertManagementMetadataAsync(
+     ProfileNetworkContextService::CertificatePoliciesForView policies,
+     CertificateManagerPageHandler::GetCertManagementMetadataCallback callback,
+     base::WeakPtr<Profile> profile
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if CERTIFICATE_MANAGER_HAS_PLATFORM_ROOT_STORE
+     ,
+     cert_verifier::mojom::PlatformRootStoreInfoPtr info
+ #endif
+ ) {
+   certificate_manager::mojom::CertManagementMetadataPtr metadata =
+       certificate_manager::mojom::CertManagementMetadata::New();
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if CERTIFICATE_MANAGER_HAS_PLATFORM_ROOT_STORE
+   metadata->include_system_trust_store =
+       policies.certificate_policies->include_system_trust_store;
+   metadata->is_include_system_trust_store_managed =
+@@ -175,7 +175,7 @@ CertificateManagerPageHandler::GetCertSource(
+           kEnterpriseDistrustedCerts:
+         source_ptr = std::make_unique<EnterpriseDistrustedCertSource>(profile_);
+         break;
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if CERTIFICATE_MANAGER_HAS_PLATFORM_ROOT_STORE
+       case certificate_manager::mojom::CertificateSource::
+           kPlatformUserTrustedCerts:
+         source_ptr = std::make_unique<PlatformCertSource>(
+@@ -238,7 +238,7 @@ void CertificateManagerPageHandler::GetCertManagementMetadata(
+       ProfileNetworkContextServiceFactory::GetForContext(profile_);
+   ProfileNetworkContextService::CertificatePoliciesForView policies =
+       service->GetCertificatePolicyForView();
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if CERTIFICATE_MANAGER_HAS_PLATFORM_ROOT_STORE
+   content::GetCertVerifierServiceFactory()->GetPlatformRootStoreInfo(
+       base::BindOnce(&GetCertManagementMetadataAsync, std::move(policies),
+                      std::move(callback), profile_->GetWeakPtr()));
+@@ -255,7 +255,7 @@ void CertificateManagerPageHandler::ShowNativeManageCertificates() {
+ }
+ #endif
+ 
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if CERTIFICATE_MANAGER_HAS_PLATFORM_ROOT_STORE
+ void CertificateManagerPageHandler::SetIncludeSystemTrustStore(bool include) {
+   auto* prefs = profile_->GetPrefs();
+   prefs->SetBoolean(prefs::kCAPlatformIntegrationEnabled, include);
+diff --git a/chrome/browser/ui/webui/certificate_manager/certificate_manager_handler.h b/chrome/browser/ui/webui/certificate_manager/certificate_manager_handler.h
+index 4196b68774..71f9bc5834 100644
+--- a/chrome/browser/ui/webui/certificate_manager/certificate_manager_handler.h
++++ b/chrome/browser/ui/webui/certificate_manager/certificate_manager_handler.h
+@@ -11,9 +11,23 @@
+ #include "build/build_config.h"
+ #include "chrome/browser/resources/certificate_manager/certificate_manager.mojom.h"
+ #include "components/pref_registry/pref_registry_syncable.h"
++#include "crypto/crypto_buildflags.h"
+ #include "mojo/public/cpp/bindings/receiver.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+ 
++// Whether the page has an "imported from your operating system" half: the
++// user-added certificates of the platform's trust store, which //net can read
++// only where net/cert/internal/system_trust_store.h says it can. The same
++// condition is is_platform_root_store_supported in certificate_manager.mojom
++// and in //services/cert_verifier/public/mojom.
++#if !BUILDFLAG(IS_CHROMEOS) &&                                      \
++    (BUILDFLAG(USE_NSS_SERVER_CERTS) || BUILDFLAG(IS_MAC) ||         \
++     BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID))
++#define CERTIFICATE_MANAGER_HAS_PLATFORM_ROOT_STORE 1
++#else
++#define CERTIFICATE_MANAGER_HAS_PLATFORM_ROOT_STORE 0
++#endif
++
+ class Profile;
+ namespace content {
+ class WebContents;
+@@ -85,7 +99,7 @@ class CertificateManagerPageHandler
+   void ShowNativeManageCertificates() override;
+ #endif
+ 
+-#if !BUILDFLAG(IS_CHROMEOS)
++#if CERTIFICATE_MANAGER_HAS_PLATFORM_ROOT_STORE
+   void SetIncludeSystemTrustStore(bool include) override;
+ #endif
+ 
+diff --git a/chrome/browser/ui/webui/certificate_manager/client_cert_sources.cc b/chrome/browser/ui/webui/certificate_manager/client_cert_sources.cc
+index b5f8f4e76f..ae4a83eb4b 100644
+--- a/chrome/browser/ui/webui/certificate_manager/client_cert_sources.cc
++++ b/chrome/browser/ui/webui/certificate_manager/client_cert_sources.cc
+@@ -37,6 +37,17 @@
+ #include "ui/shell_dialogs/select_file_dialog.h"
+ #include "ui/shell_dialogs/selected_file_info.h"
+ 
++// Whether the platform's client certificate store is one this page can write
++// to. On Linux that store IS NSS's database, so a Linux build without NSS has
++// no platform client certificate store at all, and gets the read-only source
++// with nothing behind it that every other platform without one gets.
++#if BUILDFLAG(IS_CHROMEOS) || \
++    (BUILDFLAG(IS_LINUX) && BUILDFLAG(USE_NSS_CLIENT_CERTS))
++#define PLATFORM_CLIENT_CERTS_ARE_WRITABLE 1
++#else
++#define PLATFORM_CLIENT_CERTS_ARE_WRITABLE 0
++#endif
++
+ #if BUILDFLAG(USE_NSS_CLIENT_CERTS)
+ #include "chrome/browser/net/nss_service.h"
+ #include "chrome/browser/net/nss_service_factory.h"
+@@ -129,7 +140,7 @@ class ClientCertStoreLoader {
+       active_requests_;
+ };
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) && BUILDFLAG(USE_NSS_CLIENT_CERTS)
+ class ClientCertStoreFactoryNSS : public ClientCertStoreFactory {
+  public:
+   std::unique_ptr<net::ClientCertStore> CreateClientCertStore() override {
+@@ -154,7 +165,7 @@ class ClientCertStoreFactoryMac : public ClientCertStoreFactory {
+ };
+ #endif
+ 
+-#if !BUILDFLAG(IS_CHROMEOS) && !BUILDFLAG(IS_LINUX)
++#if !PLATFORM_CLIENT_CERTS_ARE_WRITABLE
+ std::unique_ptr<ClientCertStoreLoader> CreatePlatformClientCertLoader(
+     Profile* profile) {
+ #if BUILDFLAG(IS_WIN)
+@@ -325,7 +336,7 @@ class ClientCertSource : public CertificateManagerPageHandler::CertSource {
+   std::optional<net::CertificateList> certs_;
+ };
+ 
+-#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)
++#if PLATFORM_CLIENT_CERTS_ARE_WRITABLE
+ // ChromeOS currently can use either Kcer or NSS for listing client certs, and
+ // Linux uses NSS only. This interface provides an abstraction to hide that
+ // from WritableClientCertSource. Currently this class only handles reading
+@@ -1047,7 +1058,7 @@ CreatePlatformClientCertSource(
+     mojo::Remote<certificate_manager::mojom::CertificateManagerPage>*
+         remote_client,
+     Profile* profile) {
+-#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)
++#if PLATFORM_CLIENT_CERTS_ARE_WRITABLE
+   return std::make_unique<WritableClientCertSource>(remote_client, profile);
+ #else
+   return std::make_unique<ClientCertSource>(
+diff --git a/chrome/browser/ui/webui/sandbox/sandbox_internals_ui.cc b/chrome/browser/ui/webui/sandbox/sandbox_internals_ui.cc
+index 1174a704b8..fd18f1cdb1 100644
+--- a/chrome/browser/ui/webui/sandbox/sandbox_internals_ui.cc
++++ b/chrome/browser/ui/webui/sandbox/sandbox_internals_ui.cc
+@@ -26,14 +26,28 @@
+ #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)) || \
++    BUILDFLAG(IS_CHROMEOS)
+ #include "content/public/browser/zygote_host/zygote_host_linux.h"
+ #include "sandbox/policy/sandbox.h"
+ #endif
+ 
+ namespace {
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if BUILDFLAG(IS_LINUX) && !BUILDFLAG(HAS_LINUX_KERNEL)
++// The page's Linux half asks about the setuid helper, namespaces, seccomp-bpf
++// and Yama, and a platform in the Linux family without Linux's kernel has
++// none of them - so every answer is no, and the page's own evaluation of that
++// is the true one. Whatever confines a renderer there is not something this
++// page knows how to ask about.
++static void SetSandboxStatusData(content::WebUIDataSource* source) {
++  for (const char* name :
++       {"suid", "userNs", "pidNs", "netNs", "seccompBpf", "seccompTsync",
++        "yamaBroker", "yamaNonbroker", "sandboxGood"}) {
++    source->AddBoolean(name, false);
++  }
++}
++#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+ static void SetSandboxStatusData(content::WebUIDataSource* source) {
+   // Get expected sandboxing status of renderers.
+   const int status =
+diff --git a/chrome/browser/web_applications/BUILD.gn b/chrome/browser/web_applications/BUILD.gn
+index 6afe04f5f3..a0c20e5c9f 100644
+--- a/chrome/browser/web_applications/BUILD.gn
++++ b/chrome/browser/web_applications/BUILD.gn
+@@ -456,13 +456,21 @@ source_set("web_applications") {
+   if (is_linux) {
+     # Desktop linux, doesn't count ChromeOS.
+     sources += [
+-      "os_integration/dynamic_launcher_portal.cc",
+-      "os_integration/dynamic_launcher_portal.h",
+       "os_integration/web_app_file_handler_registration_linux.cc",
+       "os_integration/web_app_run_on_os_login_linux.cc",
+       "os_integration/web_app_shortcut_linux.cc",
+       "os_integration/web_app_shortcut_linux.h",
+     ]
++
++    # The XDG DynamicLauncher portal is a D-Bus interface, and //components/dbus
++    # is added below only when use_dbus is. A Linux build without a bus has
++    # the rest of the shortcut integration and not this.
++    if (use_dbus) {
++      sources += [
++        "os_integration/dynamic_launcher_portal.cc",
++        "os_integration/dynamic_launcher_portal.h",
++      ]
++    }
+   }
+ 
+   if (is_mac) {
+diff --git a/chrome/common/crash_keys.cc b/chrome/common/crash_keys.cc
+index 4c8063b363..0835da6782 100644
+--- a/chrome/common/crash_keys.cc
++++ b/chrome/common/crash_keys.cc
+@@ -56,12 +56,31 @@ class CrashKeyWithName {
+   ~CrashKeyWithName() = delete;
+ 
+   std::string_view Name() const { return name_; }
++#if BUILDFLAG(USE_CRASHPAD_ANNOTATION)
+   std::string_view Value() const { return crash_key_.value(); }
+   void Clear() { crash_key_.Clear(); }
+   void Set(std::string_view value) { crash_key_.Set(value); }
++#else
++  // Only a crashpad annotation can hand its own value back, and this one is
++  // read to pass the annotation on to child processes - which is wanted
++  // whether or not a crash reporter is listening. So without crashpad the
++  // wrapper keeps the value it was given, cut to the key's own length.
++  std::string_view Value() const { return value_; }
++  void Clear() {
++    value_.clear();
++    crash_key_.Clear();
++  }
++  void Set(std::string_view value) {
++    value_ = std::string(value.substr(0, 64));
++    crash_key_.Set(value);
++  }
++#endif
+ 
+  private:
+   std::string name_;
++#if !BUILDFLAG(USE_CRASHPAD_ANNOTATION)
++  std::string value_;
++#endif
+   crash_reporter::CrashKeyString<64> crash_key_;
+ };
+ 
+diff --git a/chrome/common/importer/firefox_importer_utils.h b/chrome/common/importer/firefox_importer_utils.h
+index 64b6a040ba..4924fe2535 100644
+--- a/chrome/common/importer/firefox_importer_utils.h
++++ b/chrome/common/importer/firefox_importer_utils.h
+@@ -11,9 +11,21 @@
+ #include "base/files/file_path.h"
+ #include "base/values.h"
+ #include "build/build_config.h"
++#include "crypto/crypto_buildflags.h"
+ 
+ class GURL;
+ 
++// Firefox keeps saved passwords encrypted by NSS, so importing them needs an
++// NSS to decrypt with: the one Firefox ships on Windows, or the system's where
++// Chromium is built against it (chrome/utility/importer/nss_decryptor.h makes
++// the same dispatch). macOS is the platform that already had neither, and a
++// Linux build without NSS is the second.
++#if BUILDFLAG(IS_WIN) || BUILDFLAG(USE_NSS_CERTS)
++#define FIREFOX_PASSWORDS_ARE_IMPORTABLE 1
++#else
++#define FIREFOX_PASSWORDS_ARE_IMPORTABLE 0
++#endif
++
+ #if BUILDFLAG(IS_WIN)
+ // Detects which version of Firefox is installed from registry. Returns its
+ // major version, and drops the minor version. Returns 0 if failed. If there are
+diff --git a/chrome/installer/util/google_update_settings_posix.cc b/chrome/installer/util/google_update_settings_posix.cc
+index 5d4a9de300..c3aa4293eb 100644
+--- a/chrome/installer/util/google_update_settings_posix.cc
++++ b/chrome/installer/util/google_update_settings_posix.cc
+@@ -7,6 +7,7 @@
+ #include "base/task/lazy_thread_pool_task_runner.h"
+ #include "build/build_config.h"
+ #include "chrome/installer/util/client_id_backup_file_manager.h"
++#include "components/crash/core/app/buildflags.h"
+ #include "components/crash/core/app/crashpad.h"
+ 
+ namespace {
+@@ -36,7 +37,7 @@ bool GoogleUpdateSettings::GetCollectStatsConsent() {
+ 
+ // static
+ bool GoogleUpdateSettings::SetCollectStatsConsent(bool consented) {
+-#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
++#if (BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)) && BUILDFLAG(HAS_CRASH_HANDLER)
+   crash_reporter::SetUploadConsent(consented);
+ #endif
+ 
+diff --git a/chrome/utility/BUILD.gn b/chrome/utility/BUILD.gn
+index b3fa5a032c..859ced4a46 100644
+--- a/chrome/utility/BUILD.gn
++++ b/chrome/utility/BUILD.gn
+@@ -118,9 +118,10 @@ static_library("utility") {
+         "importer/safari_importer.mm",
+       ]
+     }
+-    if (!is_mac && !is_chromeos) {
++    if (is_win || (use_nss_certs && !is_chromeos)) {
+       # NSS decryptor is not needed on ChromeOS. Additionally, it depends on
+-      # system NSS that is unavailable on MacOS/Fuchsia.
++      # system NSS that is unavailable on MacOS/Fuchsia - and on a Linux build
++      # without NSS (FIREFOX_PASSWORDS_ARE_IMPORTABLE).
+       sources += [
+         "importer/nss_decryptor.cc",
+         "importer/nss_decryptor.h",
+diff --git a/chrome/utility/importer/firefox_importer.cc b/chrome/utility/importer/firefox_importer.cc
+index 3bfda2481a..20977bd5ae 100644
+--- a/chrome/utility/importer/firefox_importer.cc
++++ b/chrome/utility/importer/firefox_importer.cc
+@@ -32,9 +32,9 @@
+ #include "sql/statement.h"
+ #include "url/gurl.h"
+ 
+-#if !BUILDFLAG(IS_MAC)
++#if FIREFOX_PASSWORDS_ARE_IMPORTABLE
+ #include "chrome/utility/importer/nss_decryptor.h"
+-#endif  // !BUILDFLAG(IS_MAC)
++#endif  // FIREFOX_PASSWORDS_ARE_IMPORTABLE
+ 
+ namespace {
+ 
+@@ -154,13 +154,13 @@ void FirefoxImporter::StartImport(
+ }
+ 
+ void FirefoxImporter::ImportRemainingItems() {
+-#if !BUILDFLAG(IS_MAC)
++#if FIREFOX_PASSWORDS_ARE_IMPORTABLE
+   if ((items_ & user_data_importer::PASSWORDS) && !cancelled()) {
+     bridge_->NotifyItemStarted(user_data_importer::PASSWORDS);
+     ImportPasswords();
+     bridge_->NotifyItemEnded(user_data_importer::PASSWORDS);
+   }
+-#endif  // !BUILDFLAG(IS_MAC)
++#endif  // FIREFOX_PASSWORDS_ARE_IMPORTABLE
+   if ((items_ & user_data_importer::AUTOFILL_FORM_DATA) && !cancelled()) {
+     bridge_->NotifyItemStarted(user_data_importer::AUTOFILL_FORM_DATA);
+     ImportAutofillFormData();
+@@ -454,7 +454,7 @@ void FirefoxImporter::OnDefaultBookmarksParsed(
+   ImportRemainingItems();
+ }
+ 
+-#if !BUILDFLAG(IS_MAC)
++#if FIREFOX_PASSWORDS_ARE_IMPORTABLE
+ void FirefoxImporter::ImportPasswords() {
+   // Initializes NSS3.
+   NSSDecryptor decryptor;
+@@ -480,7 +480,7 @@ void FirefoxImporter::ImportPasswords() {
+     }
+   }
+ }
+-#endif  // !BUILDFLAG(IS_MAC)
++#endif  // FIREFOX_PASSWORDS_ARE_IMPORTABLE
+ 
+ void FirefoxImporter::ImportHomepage() {
+   GURL home_page = GetHomepage(source_path_);
+diff --git a/chrome/utility/importer/firefox_importer.h b/chrome/utility/importer/firefox_importer.h
+index 838c01f39b..2acccbe59d 100644
+--- a/chrome/utility/importer/firefox_importer.h
++++ b/chrome/utility/importer/firefox_importer.h
+@@ -20,6 +20,7 @@
+ #include "base/gtest_prod_util.h"
+ #include "base/memory/weak_ptr.h"
+ #include "build/build_config.h"
++#include "chrome/common/importer/firefox_importer_utils.h"
+ #include "chrome/utility/importer/importer.h"
+ #include "components/favicon_base/favicon_usage_data.h"
+ #include "components/user_data_importer/common/imported_bookmark_entry.h"
+@@ -76,7 +77,7 @@ class FirefoxImporter : public Importer {
+   void ImportBookmarks();
+   void ImportRemainingItems();
+ 
+-#if !BUILDFLAG(IS_MAC)
++#if FIREFOX_PASSWORDS_ARE_IMPORTABLE
+   void ImportPasswords();
+ #endif
+   void ImportHistory();
+diff --git a/components/crash/core/app/BUILD.gn b/components/crash/core/app/BUILD.gn
+index 4234878aa5..0f8c3bb64b 100644
+--- a/components/crash/core/app/BUILD.gn
++++ b/components/crash/core/app/BUILD.gn
+@@ -6,6 +6,7 @@
+ assert(!is_fuchsia)
+ 
+ import("//base/debug/debug.gni")
++import("//build/buildflag_header.gni")
+ import("//components/gwp_asan/buildflags/buildflags.gni")
+ 
+ if (is_android) {
+@@ -52,6 +53,23 @@ if (!is_ios) {
+   }
+ }
+ 
++# Whether there is a crash handler behind this library at all. Fuchsia is the
++# platform Chromium already had in this position, and it answers by not
++# building the directory (the assert above). A platform in the Linux family
++# with none of Linux's kernel is in the same position for the same reasons:
++# crashpad's Linux half is ptrace(2), PR_SET_DUMPABLE, /proc/<pid>/task and
++# rt_tgsigqueueinfo, and there is no crash reporting service for a report to
++# reach. What is left is the client interface and the switches, which callers
++# consult whether or not anything is listening.
++has_crash_handler = !is_linux || has_linux_kernel
++
++# The same answer for the preprocessor, so a caller asks one question rather
++# than restating the platform condition and drifting from it.
++buildflag_header("buildflags") {
++  header = "buildflags.h"
++  flags = [ "HAS_CRASH_HANDLER=$has_crash_handler" ]
++}
++
+ static_library("app") {
+   sources = [
+     "client_upload_info.cc",
+@@ -59,11 +77,15 @@ static_library("app") {
+     "crash_export_thunks.h",
+     "crash_switches.cc",
+     "crash_switches.h",
+-    "crashpad.cc",
+-    "crashpad.h",
+-    "shared_memory_user_stream_data_source.cc",
+-    "shared_memory_user_stream_data_source.h",
+   ]
++  if (has_crash_handler) {
++    sources += [
++      "crashpad.cc",
++      "crashpad.h",
++      "shared_memory_user_stream_data_source.cc",
++      "shared_memory_user_stream_data_source.h",
++    ]
++  }
+ 
+   if (is_castos) {
+     sources += [
+@@ -76,7 +98,10 @@ static_library("app") {
+ 
+   defines = [ "CRASH_IMPLEMENTATION" ]
+ 
+-  public_deps = [ ":lib" ]
++  public_deps = [
++    ":buildflags",
++    ":lib",
++  ]
+   deps = [
+     "//base",
+     "//build:branding_buildflags",
+@@ -84,13 +109,17 @@ static_library("app") {
+     "//components/crash/core/common:crash_key",
+     "//components/crash/core/common:shared_memory_user_stream",
+     "//content/public/common:content_descriptors",
+-    "//third_party/crashpad/crashpad/client",
+-    "//third_party/crashpad/crashpad/handler:common",
+-    "//third_party/crashpad/crashpad/minidump",
+-    "//third_party/crashpad/crashpad/util",
+   ]
++  if (has_crash_handler) {
++    deps += [
++      "//third_party/crashpad/crashpad/client",
++      "//third_party/crashpad/crashpad/handler:common",
++      "//third_party/crashpad/crashpad/minidump",
++      "//third_party/crashpad/crashpad/util",
++    ]
++  }
+ 
+-  if (is_linux || is_chromeos) {
++  if ((is_linux && has_linux_kernel) || is_chromeos) {
+     sources += [ "crashpad_linux.cc" ]
+     data_deps = [ ":chrome_crashpad_handler" ]
+   }
+diff --git a/components/crash/core/browser/BUILD.gn b/components/crash/core/browser/BUILD.gn
+index 5415708c4f..1a338b2a7e 100644
+--- a/components/crash/core/browser/BUILD.gn
++++ b/components/crash/core/browser/BUILD.gn
+@@ -14,7 +14,9 @@ static_library("browser") {
+     "//components/upload_list",
+   ]
+ 
+-  if (!is_chromeos && !is_fuchsia) {
++  # The list is read out of crashpad's own database, so it exists where
++  # components/crash/core/app has a crash handler (has_crash_handler there).
++  if (!is_chromeos && !is_fuchsia && (!is_linux || has_linux_kernel)) {
+     sources += [
+       "crash_upload_list_crashpad.cc",
+       "crash_upload_list_crashpad.h",
+diff --git a/components/power_metrics/BUILD.gn b/components/power_metrics/BUILD.gn
+index ddcc4237b7..40ac4405af 100644
+--- a/components/power_metrics/BUILD.gn
++++ b/components/power_metrics/BUILD.gn
+@@ -41,14 +41,17 @@ static_library("power_metrics") {
+     ldflags = [ "/DELAYLOAD:setupapi.dll" ]
+   }
+ 
+-  if (is_linux || is_chromeos) {
++  # perf_event_open(2) and the RAPL counters under it are Linux's kernel.
++  if ((is_linux && has_linux_kernel) || is_chromeos) {
+     sources += [
+       "energy_metrics_provider_linux.cc",
+       "energy_metrics_provider_linux.h",
+     ]
+   }
+ 
+-  if (is_win || is_linux || is_chromeos) {
++  # The monitor CHECKs that it has an energy provider, so it exists only
++  # where one does.
++  if (is_win || (is_linux && has_linux_kernel) || is_chromeos) {
+     sources += [
+       "system_power_monitor.cc",
+       "system_power_monitor.h",
+diff --git a/components/power_metrics/energy_metrics_provider.cc b/components/power_metrics/energy_metrics_provider.cc
+index 29683e05ff..718e431816 100644
+--- a/components/power_metrics/energy_metrics_provider.cc
++++ b/components/power_metrics/energy_metrics_provider.cc
+@@ -7,7 +7,7 @@
+ #include "build/build_config.h"
+ #if BUILDFLAG(IS_WIN)
+ #include "components/power_metrics/energy_metrics_provider_win.h"
+-#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#elif (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)) || BUILDFLAG(IS_CHROMEOS)
+ #include "components/power_metrics/energy_metrics_provider_linux.h"
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+@@ -20,7 +20,7 @@ EnergyMetricsProvider::~EnergyMetricsProvider() = default;
+ std::unique_ptr<EnergyMetricsProvider> EnergyMetricsProvider::Create() {
+ #if BUILDFLAG(IS_WIN)
+   return EnergyMetricsProviderWin::Create();
+-#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#elif (BUILDFLAG(IS_LINUX) && BUILDFLAG(HAS_LINUX_KERNEL)) || BUILDFLAG(IS_CHROMEOS)
+   return EnergyMetricsProviderLinux::Create();
+ #else
+   return nullptr;
+diff --git a/content/public/renderer/content_renderer_client.cc b/content/public/renderer/content_renderer_client.cc
+index ed752891d1..27f34ee545 100644
+--- a/content/public/renderer/content_renderer_client.cc
++++ b/content/public/renderer/content_renderer_client.cc
+@@ -34,6 +34,12 @@ void ContentRendererClient::SetUpWebAssemblyTrapHandler() {
+       // process, we ask V8 to install its own signal handler to deal with
+       // WebAssembly traps.
+       true
++#elif BUILDFLAG(IS_LINUX) && !BUILDFLAG(HAS_LINUX_KERNEL)
++      // A platform in the Linux family without Linux's kernel has no Crashpad
++      // (components/crash/core/app's has_crash_handler), so nothing would
++      // forward a trap to V8 as a first-chance handler. V8 installs its own,
++      // which is what content_shell does whenever no crash handler is there.
++      true
+ #else
+       // The trap handler is set as the first chance handler for Crashpad's
+       // signal handler.
+diff --git a/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener_ozone.cc b/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener_ozone.cc
+index 94acc1dc03..e8e7eaf8f2 100644
+--- a/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener_ozone.cc
++++ b/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener_ozone.cc
+@@ -69,6 +69,12 @@ GlobalAcceleratorListener* GlobalAcceleratorListener::GetInstance() {
+     return linux_instance;
+   }
+   return nullptr;
++#else
++  // No platform listener and no portal to ask for one - the D-Bus branch's
++  // own answer when it decides not to create one. Without this a Linux build
++  // with use_dbus=false falls off the end of a function that returns a value,
++  // which clang compiles to ud2.
++  return nullptr;
+ #endif
+ }
+ 
+diff --git a/third_party/re2/src/re2/re2.cc b/third_party/re2/src/re2/re2.cc
+index 2e00d22..08b06f4 100644
+--- a/third_party/re2/src/re2/re2.cc
++++ b/third_party/re2/src/re2/re2.cc
+@@ -1318,7 +1318,7 @@ bool Parse(const char* str, size_t n, unsigned long long* dest, int radix) {
+ namespace hooks {
+ 
+ #ifdef RE2_HAVE_THREAD_LOCAL
+-thread_local const RE2* context = NULL;
++constinit thread_local const RE2* context = NULL;
+ #endif
+ 
+ template <typename T>
+diff --git a/third_party/re2/src/re2/re2.h b/third_party/re2/src/re2/re2.h
+index eed332d..013e7e3 100644
+--- a/third_party/re2/src/re2/re2.h
++++ b/third_party/re2/src/re2/re2.h
+@@ -1042,7 +1042,7 @@ namespace hooks {
+ // could result in infinite mutual recursion. To discourage that possibility,
+ // RE2 will not maintain the context pointer correctly when used in that way.
+ #ifdef RE2_HAVE_THREAD_LOCAL
+-extern thread_local const RE2* context;
++extern constinit thread_local const RE2* context;
+ #endif
+ 
+ struct DFAStateCacheReset {
+diff --git a/third_party/openscreen/src/util/trace_logging/scoped_trace_operations.cc b/third_party/openscreen/src/util/trace_logging/scoped_trace_operations.cc
+index f7e6848..81743ff 100644
+--- a/third_party/openscreen/src/util/trace_logging/scoped_trace_operations.cc
++++ b/third_party/openscreen/src/util/trace_logging/scoped_trace_operations.cc
+@@ -94,11 +94,11 @@ ScopedTraceOperation::~ScopedTraceOperation() {
+ }
+ 
+ // static
+-thread_local ScopedTraceOperation::TraceStack* ScopedTraceOperation::traces_ =
++constinit thread_local ScopedTraceOperation::TraceStack* ScopedTraceOperation::traces_ =
+     nullptr;
+ 
+ // static
+-thread_local ScopedTraceOperation* ScopedTraceOperation::root_node_ = nullptr;
++constinit thread_local ScopedTraceOperation* ScopedTraceOperation::root_node_ = nullptr;
+ 
+ // static
+ std::atomic<std::uint64_t> ScopedTraceOperation::trace_id_counter_{
+diff --git a/third_party/openscreen/src/util/trace_logging/scoped_trace_operations.h b/third_party/openscreen/src/util/trace_logging/scoped_trace_operations.h
+index e94198d..3a4d9ae 100644
+--- a/third_party/openscreen/src/util/trace_logging/scoped_trace_operations.h
++++ b/third_party/openscreen/src/util/trace_logging/scoped_trace_operations.h
+@@ -117,8 +117,8 @@ class ScopedTraceOperation {
+ 
+   // The LIFO stack of TraceLoggers currently being watched by this
+   // thread.
+-  static thread_local TraceStack* traces_;
+-  static thread_local ScopedTraceOperation* root_node_;
++  static constinit thread_local TraceStack* traces_;
++  static constinit thread_local ScopedTraceOperation* root_node_;
+ };
+ 
+ // The class which does actual trace logging.

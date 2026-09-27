@@ -474,9 +474,8 @@ int main(void) {
             }
             munmap(hinted, 4096);
         }
-        if (mmap(0, 4096, PROT_READ | PROT_WRITE,
-                  MAP_ANONYMOUS | MAP_PRIVATE, 3, 0) != MAP_FAILED) {
-            fail("mmap accepted a file descriptor it cannot honour");
+        if (mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE, -1, 0) != MAP_FAILED) {
+            fail("mmap mapped a file through a descriptor that names none");
         }
     }
 

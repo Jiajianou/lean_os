@@ -17,7 +17,10 @@
 #define UNIX_MAX_FILE_DESCRIPTORS OS_MESSAGE_MAX_FILE_DESCRIPTORS
 
 #define UNIX_BACKLOG     8
-#define UNIX_MAX_SOCKETS 64
+/* Every mojo channel between two processes is a pair (M187: 64 until then).
+   Each carries its UNIX_BUFFER_SIZE ring inline, so this is 32 MB of kernel
+   heap if every one is in use at once. */
+#define UNIX_MAX_SOCKETS 512
 
 #define UNIX_MAX_NAMES 16
 

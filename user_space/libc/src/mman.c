@@ -9,7 +9,7 @@ void *mmap(void *address, size_t length, int prot, int flags, int fd, off_t offs
     long r = sys_mmap(address, (unsigned long)length, prot, flags, fd,
                       (unsigned long)offset);
     if (r < 0) {
-        errno = (fd >= 0) ? EACCES : ENOMEM;
+        errno = (fd >= 0 && !(flags & MAP_ANONYMOUS)) ? EACCES : ENOMEM;
         return MAP_FAILED;
     }
     return (void *)(unsigned long)r;

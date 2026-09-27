@@ -1,6 +1,7 @@
 #include "leanfs.h"
 
 #include "drivers/block_device.h"
+#include "memory_management/heap.h"
 #include "memory_management/physical_memory.h"
 #include "panic.h"
 #include "drivers/kernel_log.h"
@@ -8,6 +9,8 @@
 #include "library/kernel_library.h"
 
 #include "leanfs_format.h"
+
+static void leanfs_forget_holds(void);
 
 static leanfs_superblock_t sb;
 
@@ -248,6 +251,7 @@ static void format_if_this_disk_is_ours(void) {
 }
 
 void leanfs_init(void) {
+    leanfs_forget_holds();
     inodes_alloc();
     uint8_t buffer[LEANFS_BLOCK_SIZE];
     block_read(LEANFS_START_BLOCK, buffer);
@@ -1273,6 +1277,104 @@ int leanfs_utime(const char *path, uint32_t mtime) {
     return 0;
 }
 
+/* Orphans. A file that is unlinked - or replaced by a rename - while it is
+   still open loses its NAME at once and its inode and blocks only when the
+   last holder lets go, which is what POSIX says and what every program that
+   writes a temporary file and deletes it while holding it relies on.
+
+   This filesystem freed the inode on the spot. Chromium maps its persistent
+   histogram file MAP_SHARED, shares it with its children and unlinks it while
+   it is still mapped and open; the next fault in the mapping read an inode
+   that was no longer there, which the fault path reported as out of memory
+   and killed the browser for (M187). sqlite's journals and base's temporary
+   files are the same shape.
+
+   A hold is an open file on this filesystem: open_file_alloc takes one and
+   the last open_file_unref gives it back. The counts are in memory, so an
+   orphan a power cut leaves on disk is an inode with nlink 0 and no name -
+   which nothing creates any other way, every inode being made with nlink 1.
+   Reclaiming those at mount is the condition for making an orphan survive a
+   crash cleanly, and it waits for a crash that leaves one. */
+static uint16_t *holds;
+static uint8_t *orphaned;
+
+static int holds_ready(void) {
+    if (holds && orphaned) {
+        return 1;
+    }
+    uint16_t *h = (uint16_t *)kmalloc(sizeof(uint16_t) * LEANFS_MAX_INODES);
+    uint8_t *o = (uint8_t *)kmalloc(LEANFS_MAX_INODES);
+    if (!h || !o) {
+        if (h) {
+            kfree(h);
+        }
+        if (o) {
+            kfree(o);
+        }
+        return 0;
+    }
+    k_memset(h, 0, sizeof(uint16_t) * LEANFS_MAX_INODES);
+    k_memset(o, 0, LEANFS_MAX_INODES);
+    holds = h;
+    orphaned = o;
+    return 1;
+}
+
+/* A remount is a different set of inodes; a count kept across it would be
+   about an inode that may not exist on this disk. */
+static void leanfs_forget_holds(void) {
+    if (holds) {
+        k_memset(holds, 0, sizeof(uint16_t) * LEANFS_MAX_INODES);
+    }
+    if (orphaned) {
+        k_memset(orphaned, 0, LEANFS_MAX_INODES);
+    }
+}
+
+static int inode_is_held(int idx) {
+    return holds && idx >= 0 && (uint32_t)idx < LEANFS_MAX_INODES && holds[idx] > 0;
+}
+
+static void orphan_inode(int idx) {
+    inodes[idx].nlink = 0;
+    mark_inode(idx);
+    orphaned[idx] = 1;
+}
+
+static void release_inode(int idx) {
+    free_inode_blocks(idx);
+    k_memset(&inodes[idx], 0, sizeof(inodes[idx]));
+    mark_inode(idx);
+}
+
+void leanfs_handle_hold(int handle) {
+    if (!inode_valid(handle) || inodes[handle].type != LEANFS_TYPE_FILE) {
+        return;
+    }
+    if (!holds_ready() || holds[handle] == 0xFFFFu) {
+        return;
+    }
+    holds[handle]++;
+}
+
+void leanfs_handle_release(int handle) {
+    if (!inode_is_held(handle)) {
+        return;
+    }
+    if (--holds[handle] > 0 || !orphaned[handle]) {
+        return;
+    }
+    orphaned[handle] = 0;
+    io_begin();
+    release_inode(handle);
+    save_meta();
+}
+
+int leanfs_handle_orphaned(int handle) {
+    return holds && handle >= 0 && (uint32_t)handle < LEANFS_MAX_INODES &&
+           orphaned[handle];
+}
+
 int leanfs_unlink(const char *path) {
     int parent;
     char leaf[LEANFS_MAX_NAME + 1];
@@ -1293,9 +1395,11 @@ int leanfs_unlink(const char *path) {
         save_meta();
         return 0;
     }
-    free_inode_blocks(idx);
-    k_memset(&inodes[idx], 0, sizeof(inodes[idx]));
-    mark_inode(idx);
+    if (inode_is_held(idx)) {
+        orphan_inode(idx);
+    } else {
+        release_inode(idx);
+    }
     if (directory_remove(parent, leaf) < 0) {
         return -1;
     }
@@ -1422,10 +1526,14 @@ int leanfs_rename_replace(const char *old_path, const char *new_path) {
             return -1;
         }
     } else if (inode_valid(victim)) {
-        free_inode_blocks(victim);
-        inodes[victim].type = LEANFS_TYPE_FREE;
-        inodes[victim].size = 0;
-        mark_inode(victim);
+        if (inode_is_held(victim)) {
+            orphan_inode(victim);
+        } else {
+            free_inode_blocks(victim);
+            inodes[victim].type = LEANFS_TYPE_FREE;
+            inodes[victim].size = 0;
+            mark_inode(victim);
+        }
     }
     if (directory_remove(old_parent, old_leaf) < 0) {
         return -1;

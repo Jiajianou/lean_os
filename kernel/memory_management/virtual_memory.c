@@ -585,7 +585,20 @@ uint64_t virtual_memory_unmap_range_free(uint64_t pml4_phys, uint64_t start, uin
     return freed;
 }
 
-uint64_t virtual_memory_fork_address_space(uint64_t source_pml4_phys, const virtual_memory_range_t *owned, int owned_count) {
+/* The ranges a fork must leave alone - memfd and shared file mappings - are
+   sorted and the page walk visits addresses in order, so one cursor that only
+   moves forward answers "is this page shared" for the whole walk. */
+static int address_in_sorted(uint64_t virt, const virtual_memory_range_t *ranges,
+                             int count, int *cursor) {
+    while (*cursor < count && ranges[*cursor].hi <= virt) {
+        (*cursor)++;
+    }
+    return *cursor < count && virt >= ranges[*cursor].lo;
+}
+
+uint64_t virtual_memory_fork_address_space(uint64_t source_pml4_phys, const virtual_memory_range_t *owned, int owned_count,
+                                           const virtual_memory_range_t *shared_ranges, int shared_count) {
+    int shared_cursor = 0;
     uint64_t irq_flags = spin_lock_irqsave(&virtual_memory_lock);
     uint64_t *source = phys_to_table(source_pml4_phys);
 
@@ -623,6 +636,18 @@ uint64_t virtual_memory_fork_address_space(uint64_t source_pml4_phys, const virt
                     }
                     uint64_t virt = (i << 39) | (j << 30) | (k << 21) | (l << 12);
                     if (!address_in_owned(virt, owned, owned_count)) {
+                        continue;
+                    }
+                    /* A MAP_SHARED page stays shared across a fork, which is
+                       what POSIX says and what copy-on-write would break: the
+                       parent's next write would copy the frame, and from then
+                       on it writes to a page the memfd - and every other
+                       process mapping it - no longer sees. So the parent's
+                       entry is left exactly as it is and the child gets none,
+                       and faults the page in from its own copy of the region
+                       table, which names the same memfd or file page. */
+                    if (address_in_sorted(virt, shared_ranges, shared_count,
+                                          &shared_cursor)) {
                         continue;
                     }
                     uint64_t phys = s_pt[l] & PTE_ADDRESS_MASK;

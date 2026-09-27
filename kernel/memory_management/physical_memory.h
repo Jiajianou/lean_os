@@ -24,6 +24,7 @@ uint64_t physical_memory_alloc_frame_above(uint64_t min_phys);
 uint64_t physical_memory_alloc_contiguous(uint64_t count);
 
 uint64_t physical_memory_try_alloc_contiguous(uint64_t count);
+uint64_t physical_memory_try_alloc_contiguous_anywhere(uint64_t count);
 void physical_memory_free_contiguous(uint64_t phys_address, uint64_t count);
 
 void physical_memory_frame_reference(uint64_t phys_address);

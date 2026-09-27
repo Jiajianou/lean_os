@@ -13,12 +13,13 @@
    font for a run of text and crashed in the diagnostic it calls before
    giving up. Two unrelated-looking deaths, one table.
  
-   512 is four full descriptor tables (MAX_FILE_DESCRIPTORS is 128), which is
-   the browser's four processes with the desktop's beside them, and it costs
-   139 KB. The condition for raising it again is a program that reaches it
-   and is not leaking - which is a question [m183] now answers on every boot
-   rather than one that has to be guessed at. */
-#define MAX_OPEN_FILES 512
+   512 was four full descriptor tables when a table was 128. M187 made a
+   table 1024, because Chromium's browser process alone needed more than
+   128, and a machine-wide table smaller than one process's is the starvation
+   M183 wrote down - so this is four full tables again, 4096, at about 1.1 MB.
+   The condition for raising it again is unchanged: a program that reaches it
+   and is not leaking, which [m183] answers on every boot. */
+#define MAX_OPEN_FILES 4096
 
 #define OPEN_FILE_PATH_MAX 256
 

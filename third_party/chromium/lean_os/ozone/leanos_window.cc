@@ -210,10 +210,14 @@ LeanOsWindow::LeanOsWindow(PlatformWindowDelegate* delegate,
                << " window - is the desktop running?";
   }
 
+  VLOG(1) << "leanos: window " << widget_ << " created, type "
+          << static_cast<int>(properties.type) << ", " << bounds_.ToString()
+          << (connection_ ? ", connected" : ", not connected");
   delegate_->OnAcceleratedWidgetAvailable(widget_);
 }
 
 LeanOsWindow::~LeanOsWindow() {
+  VLOG(1) << "leanos: window " << widget_ << " destroyed";
   event_watcher_.reset();
   if (buffer_) {
     buffer_->Retire();
@@ -226,6 +230,8 @@ LeanOsWindow::~LeanOsWindow() {
 }
 
 void LeanOsWindow::Show(bool inactive) {
+  VLOG(1) << "leanos: window " << widget_ << " shown"
+          << (inactive ? " inactive" : "");
   visible_ = true;
   if (!connection_)
     return;
@@ -240,10 +246,12 @@ void LeanOsWindow::Show(bool inactive) {
 }
 
 void LeanOsWindow::Hide() {
+  VLOG(1) << "leanos: window " << widget_ << " hidden";
   visible_ = false;
 }
 
 void LeanOsWindow::Close() {
+  VLOG(1) << "leanos: window " << widget_ << " closed";
   delegate_->OnClosed();
 }
 

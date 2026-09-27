@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include "syscall_wrappers.h"
 #include "process.h"
@@ -34,16 +35,11 @@ size_t __lean_tls_alignment(void) {
     return value;
 }
 
-void *__lean_tls_setup(void) {
-    unsigned long existing = 0;
-    if (sys_arch_prctl(ARCH_GET_FS, (unsigned long)&existing) == 0 &&
-        existing != 0) {
-        return 0;
-    }
-
+/* The block's size, the same every time for a given program, so the release
+   below can be handed a pointer and nothing else. */
+static size_t tls_block_bytes(void) {
     size_t align = __lean_tls_alignment();
     size_t total = __lean_tls_total_size();
-    size_t init = __lean_tls_init_size();
 
     /* The size the COMPILER uses, which is the segment rounded up to the
        segment's own alignment - not the segment's size. The two are the same
@@ -57,13 +53,37 @@ void *__lean_tls_setup(void) {
        is what this held before and what keeps one thread's block off the end
        of another's. */
     size_t pointer_align = align > 64u ? align : 64u;
-    size_t bytes = span + pointer_align + 64u;
+    return span + pointer_align + 64u;
+}
 
-    char *block = (char *)malloc(bytes);
-    if (!block) {
+/* The block comes from mmap and not from malloc, and M187 is why. This runs
+   on a new thread BEFORE its thread pointer exists - that is what it is for -
+   and a program is entitled to replace malloc. Chromium does: its allocator
+   shim puts PartitionAlloc behind malloc and GWP-ASan in front of it, and
+   GWP-ASan's first act is to read a thread_local. On a thread whose FS base
+   was still zero that read was at address zero, and the thread died in
+   gwp_asan::AllocFn before its start routine ran. A system call is the one
+   allocator nothing can interpose, and its pages arrive zeroed. */
+void *__lean_tls_setup(void) {
+    unsigned long existing = 0;
+    if (sys_arch_prctl(ARCH_GET_FS, (unsigned long)&existing) == 0 &&
+        existing != 0) {
         return 0;
     }
-    memset(block, 0, bytes);
+
+    size_t align = __lean_tls_alignment();
+    size_t total = __lean_tls_total_size();
+    size_t init = __lean_tls_init_size();
+    size_t span = (total + align - 1u) & ~(align - 1u);
+    size_t pointer_align = align > 64u ? align : 64u;
+    size_t bytes = tls_block_bytes();
+
+    void *mapped = mmap(0, bytes, PROT_READ | PROT_WRITE,
+                        MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (mapped == MAP_FAILED) {
+        return 0;
+    }
+    char *block = (char *)mapped;
 
     /* tp is aligned, and span is a multiple of the segment alignment, so
        tp - span is aligned too - which is what every variable's offset from
@@ -77,8 +97,14 @@ void *__lean_tls_setup(void) {
     *(void **)tp = tp;
 
     if (sys_arch_prctl(ARCH_SET_FS, (unsigned long)tp) != 0) {
-        free(block);
+        munmap(block, bytes);
         return 0;
     }
     return block;
+}
+
+void __lean_tls_release(void *block) {
+    if (block) {
+        munmap(block, tls_block_bytes());
+    }
 }

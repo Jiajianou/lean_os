@@ -661,3 +661,56 @@ TEST(leanfs, this_os_s_own_disk_is_formatted_as_it_always_was) {
     CHECK(leanfs_is_directory("/"));
     fake_block_device_free();
 }
+
+/* M187: a file unlinked while it is open is an orphan - its name goes at
+   once, its contents stay readable through the handle, and its inode is
+   freed when the last holder lets go. This filesystem used to free the inode
+   on the spot, and Chromium, which unlinks its histogram file while it is
+   still mapped, faulted on an inode that was not there. */
+TEST(leanfs, a_file_unlinked_while_open_is_an_orphan_until_it_is_released) {
+    fs_fixture();
+    CHECK_EQ(leanfs_write("/held", "still here", 10), 0);
+    int handle = leanfs_open("/held", 0);
+    REQUIRE(handle >= 0);
+    leanfs_handle_hold(handle);
+
+    CHECK_EQ(leanfs_unlink("/held"), 0);
+    CHECK(!leanfs_exists("/held"));
+    CHECK(leanfs_handle_orphaned(handle));
+    char back[16] = {0};
+    CHECK_EQ(leanfs_handle_read(handle, back, 10, 0), 10);
+    CHECK_MEMEQ(back, "still here", 10);
+
+    /* A new file with the same name is a different file. */
+    CHECK_EQ(leanfs_write("/held", "new", 3), 0);
+    CHECK(leanfs_open("/held", 0) != handle);
+
+    leanfs_handle_release(handle);
+    CHECK(!leanfs_handle_orphaned(handle));
+    CHECK_EQ(leanfs_handle_read(handle, back, 10, 0), -1);
+
+    /* And a file nobody holds is freed at the unlink, as before. */
+    int other = leanfs_open("/held", 0);
+    REQUIRE(other >= 0);
+    CHECK_EQ(leanfs_unlink("/held"), 0);
+    CHECK_EQ(leanfs_handle_read(other, back, 3, 0), -1);
+}
+
+/* The same for a file a rename replaces - which is how an atomic write is
+   done, and how Chromium writes every preferences file it has. */
+TEST(leanfs, a_file_a_rename_replaces_while_open_is_an_orphan_too) {
+    fs_fixture();
+    CHECK_EQ(leanfs_write("/state", "old", 3), 0);
+    CHECK_EQ(leanfs_write("/state.tmp", "newer", 5), 0);
+    int handle = leanfs_open("/state", 0);
+    REQUIRE(handle >= 0);
+    leanfs_handle_hold(handle);
+    CHECK_EQ(leanfs_rename_replace("/state.tmp", "/state"), 0);
+    char back[8] = {0};
+    CHECK_EQ(leanfs_handle_read(handle, back, 3, 0), 3);
+    CHECK_MEMEQ(back, "old", 3);
+    CHECK_EQ(leanfs_read("/state", back, 5), 5);
+    CHECK_MEMEQ(back, "newer", 5);
+    leanfs_handle_release(handle);
+    CHECK_EQ(leanfs_handle_read(handle, back, 3, 0), -1);
+}

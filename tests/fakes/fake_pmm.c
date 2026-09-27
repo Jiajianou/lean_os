@@ -6,7 +6,7 @@
 
 void panic(const char *message);
 
-#define MAX_FRAMES 8192
+#define MAX_FRAMES 16384
 #define FRAME_SIZE 4096
 
 typedef struct {
@@ -162,6 +162,10 @@ uint64_t physical_memory_try_alloc_contiguous(uint64_t count) {
         return 0;
     }
     return alloc_contiguous(count, 1);
+}
+
+uint64_t physical_memory_try_alloc_contiguous_anywhere(uint64_t count) {
+    return physical_memory_try_alloc_contiguous(count);
 }
 
 void physical_memory_init(const uint32_t *e820_map) { (void)e820_map; }

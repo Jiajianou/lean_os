@@ -3,6 +3,7 @@
 #include <profile.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 
 static int failures;
 
@@ -52,8 +53,23 @@ int main(void) {
     check(sys_profile(PROFILE_OP_SAMPLES, (void *)0, 8) == -1,
           "SAMPLES accepted a null buffer");
 
-    check(sys_profile(PROFILE_OP_SAMPLES, samples, 2048) == -1,
-          "SAMPLES accepted a count its buffer cannot hold");
+    /* A buffer that ends where mapped memory does, so a count that runs past
+       it runs into a page that is not there. This used to be `samples` and
+       whatever followed it in .bss, which was unmapped until the C library
+       grew its thread registry (M187) - and then the test was asking about
+       the layout of this program rather than about the kernel. */
+    {
+        char *two = (char *)mmap(0, 8192, PROT_READ | PROT_WRITE,
+                                 MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        check(two != (char *)MAP_FAILED, "could not map two pages to test with");
+        if (two != (char *)MAP_FAILED) {
+            munmap(two + 4096, 4096);
+            prof_sample_t *edge = (prof_sample_t *)(two + 4096) - 8;
+            check(sys_profile(PROFILE_OP_SAMPLES, edge, 2048) == -1,
+                  "SAMPLES accepted a count its buffer cannot hold");
+            munmap(two, 4096);
+        }
+    }
 
     check(sys_profile(PROFILE_OP_SYSCALLS, (void *)A_KERNEL_ADDRESS, 8) == -1,
           "SYSCALLS filled a kernel address");

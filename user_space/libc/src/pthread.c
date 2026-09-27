@@ -21,6 +21,7 @@ typedef struct {
 } thread_block_t;
 
 extern void *__lean_tls_setup(void);
+extern void __lean_tls_release(void *block);
 extern void __lean_run_thread_destructors(void);
 
 /* As many threads as this machine has task slots, because that is the real
@@ -31,7 +32,7 @@ extern void __lean_run_thread_destructors(void);
    that many. Chromium in one process wants more than thirty-two before it
    has finished starting, and what that looks like from outside is
    "pthread_create: EAGAIN" three seconds in. */
-#define MAX_THREADS 128
+#define MAX_THREADS 256
 
 static struct {
     pthread_t tid;
@@ -762,7 +763,7 @@ int pthread_join(pthread_t thread, void **retval) {
     registry[slot].tid = 0;
     pthread_mutex_unlock(&registry_lock);
 
-    free(tls);
+    __lean_tls_release(tls);
     munmap(base, bytes);
     return 0;
 }

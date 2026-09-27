@@ -1,5 +1,7 @@
 #include "unix_socket.h"
 
+#include "drivers/kernel_log.h"
+
 #include "library/kernel_library.h"
 #include "library/spinlock.h"
 #include "memory_management/heap.h"
@@ -58,6 +60,8 @@ void unix_socket_init(void) {
     spin_unlock_irqrestore(&unix_lock, f);
 }
 
+static int unix_refusals;
+
 static void unix_wake(void) {
     scheduler_wake_all(SCHEDULER_POLL_CHAN);
 }
@@ -67,6 +71,14 @@ static unix_socket_t *unix_new(int type) {
         return (unix_socket_t *)0;
     }
     if (live_count >= UNIX_MAX_SOCKETS) {
+        unix_refusals++;
+        if (unix_refusals == 1 || unix_refusals % 64 == 0) {
+            kernel_log_puts("[unix] the machine is at its ceiling of ");
+            kernel_log_put_dec(UNIX_MAX_SOCKETS);
+            kernel_log_puts(" sockets (");
+            kernel_log_put_dec((uint32_t)unix_refusals);
+            kernel_log_puts(" refusal(s) since boot)\n");
+        }
         return (unix_socket_t *)0;
     }
     unix_socket_t *s = (unix_socket_t *)kmalloc(sizeof(unix_socket_t));
@@ -545,7 +557,11 @@ int unix_socket_writable(const struct unix_socket *s) {
     }
     uint64_t f = spin_lock_irqsave(&unix_lock);
     int w;
-    if (!s->peer || s->shut_wr || s->peer->shut_rd) {
+    if (s->listening) {
+        /* Nothing can be written to a listener; Linux never reports one
+           writable. */
+        w = 0;
+    } else if (!s->peer || s->shut_wr || s->peer->shut_rd) {
         w = 1;
     } else {
         unix_socket_t *d = s->peer;
@@ -564,7 +580,16 @@ int unix_socket_hup(const struct unix_socket *s) {
         return 1;
     }
     uint64_t f = spin_lock_irqsave(&unix_lock);
-    int hup = (!s->peer || s->peer->shut_wr || s->shut_rd) && s->count == 0 &&
+    /* A LISTENING socket has no peer and never will, and that is not a
+       hang-up: on Linux a listener reports nothing until a connection is
+       queued, and then only that it is readable. Reporting HUP made every
+       listener look ready forever, and Chromium's ProcessSingleton answers
+       "ready" on its listener with an accept() that is blocking - it makes
+       the socket non-blocking inside a DCHECK, which a release build does not
+       evaluate - so the browser's IO thread sat in accept() with nothing to
+       accept, and no IO task ran in the browser again (M187). */
+    int hup = !s->listening &&
+              (!s->peer || s->peer->shut_wr || s->shut_rd) && s->count == 0 &&
               s->seg_count == 0;
     spin_unlock_irqrestore(&unix_lock, f);
     return hup;
@@ -575,7 +600,7 @@ int unix_socket_rdhup(const struct unix_socket *s) {
         return 1;
     }
     uint64_t f = spin_lock_irqsave(&unix_lock);
-    int rd = (!s->peer || s->peer->shut_wr);
+    int rd = !s->listening && (!s->peer || s->peer->shut_wr);
     spin_unlock_irqrestore(&unix_lock, f);
     return rd;
 }

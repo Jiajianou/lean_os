@@ -42,7 +42,7 @@ static void scheduler_deliver_pending_signal(void);
 
 extern void context_switch(uint64_t *old_rsp_out, uint64_t new_rsp);
 
-static task_t tasks[MAX_TASKS];
+static task_t *tasks;
 static int task_count;
 
 static task_t *current_task[MAX_CPUS];
@@ -339,8 +339,17 @@ static void scheduler_tick(void) {
 }
 
 void scheduler_init(void) {
-    /* M175: a free slot must not look bound to cpu 0. The table is static, so
-       every field starts at zero, and zero is a real CPU number. */
+    /* Page-aligned, because a task carries its FPU state and that is aligned;
+       zeroed, because every field of a free slot is expected to start at
+       zero the way the static table's did. */
+    uint64_t table_pages = (sizeof(task_t) * MAX_TASKS + 4095) / 4096;
+    tasks = (task_t *)(uintptr_t)physical_memory_try_alloc_contiguous_anywhere(table_pages);
+    if (!tasks) {
+        panic("scheduler: no memory for the task table");
+    }
+    k_memset(tasks, 0, table_pages * 4096);
+    /* M175: a free slot must not look bound to cpu 0. Every field starts at
+       zero, and zero is a real CPU number. */
     for (int i = 0; i < MAX_TASKS; i++) {
         tasks[i].home_cpu = -1;
     }
@@ -468,7 +477,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
                                   uint64_t heap_start, uint64_t shared_memory_base, task_t *thread_of) {
     _Static_assert(TASK_STACK_SIZE % 4096 == 0, "a kernel stack must be a whole number of frames");
     release_finished_leaders();
-    uint8_t *stack_base = (uint8_t *)(uintptr_t)physical_memory_try_alloc_contiguous(TASK_STACK_SIZE / 4096);
+    uint8_t *stack_base = (uint8_t *)(uintptr_t)physical_memory_try_alloc_contiguous_anywhere(TASK_STACK_SIZE / 4096);
     if (!stack_base) {
         return (task_t *)0;
     }
@@ -623,6 +632,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     irq_restore(flags);
     return t;
 }
+
 
 task_t *task_spawn(const char *name, void (*entry)(void *arg), void *arg) {
     return task_spawn_common(name, virtual_memory_kernel_pml4_phys(), entry, arg, 0, 0, (task_t *)0);
@@ -1765,6 +1775,73 @@ void scheduler_regions_retain_memfds(task_t *t) {
     }
 }
 
+static int region_is_shared(const mmap_region_t *r) {
+    return r->memfd_id != 0 || (r->shared && r->handle >= 0);
+}
+
+/* Taken under mmap_lock so it is a list of whole regions rather than of
+   half-shifted ones, and the heap is not touched with the lock held: count,
+   allocate, fill, and start again if a region appeared in between. */
+int scheduler_shared_ranges(task_t *t, virtual_memory_range_t **out) {
+    *out = (virtual_memory_range_t *)0;
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&t->mmap_lock);
+        int count = 0;
+        for (uint32_t i = 0; i < t->mmap_capacity; i++) {
+            if (t->mmaps[i].pages == 0) {
+                break;
+            }
+            if (region_is_shared(&t->mmaps[i])) {
+                count++;
+            }
+        }
+        spin_unlock_irqrestore(&t->mmap_lock, flags);
+        if (count == 0) {
+            return 0;
+        }
+
+        virtual_memory_range_t *ranges =
+            (virtual_memory_range_t *)kmalloc(sizeof(virtual_memory_range_t) * (size_t)count);
+        if (!ranges) {
+            return -1;
+        }
+        int n = 0;
+        int fits = 1;
+        flags = spin_lock_irqsave(&t->mmap_lock);
+        for (uint32_t i = 0; i < t->mmap_capacity; i++) {
+            if (t->mmaps[i].pages == 0) {
+                break;
+            }
+            if (!region_is_shared(&t->mmaps[i])) {
+                continue;
+            }
+            if (n == count) {
+                fits = 0;
+                break;
+            }
+            ranges[n].lo = t->mmaps[i].base;
+            ranges[n].hi = t->mmaps[i].base + (uint64_t)t->mmaps[i].pages * PAGE_SIZE;
+            n++;
+        }
+        spin_unlock_irqrestore(&t->mmap_lock, flags);
+        if (!fits) {
+            kfree(ranges);
+            continue;
+        }
+        for (int i = 1; i < n; i++) {
+            virtual_memory_range_t key = ranges[i];
+            int j = i - 1;
+            while (j >= 0 && ranges[j].lo > key.lo) {
+                ranges[j + 1] = ranges[j];
+                j--;
+            }
+            ranges[j + 1] = key;
+        }
+        *out = ranges;
+        return n;
+    }
+}
+
 int scheduler_release_shared_range(task_t *t, uint64_t start, uint64_t end) {
     int dropped = 0;
     for (uint32_t i = 0; i < t->mmap_capacity; i++) {
@@ -1977,7 +2054,7 @@ void scheduler_prefault_range(uint64_t address, uint64_t length, int for_write) 
 
 task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     _Static_assert(TASK_STACK_SIZE % 4096 == 0, "a kernel stack must be a whole number of frames");
-    uint8_t *stack_base = (uint8_t *)(uintptr_t)physical_memory_try_alloc_contiguous(TASK_STACK_SIZE / 4096);
+    uint8_t *stack_base = (uint8_t *)(uintptr_t)physical_memory_try_alloc_contiguous_anywhere(TASK_STACK_SIZE / 4096);
     if (!stack_base) {
         return (task_t *)0;
     }

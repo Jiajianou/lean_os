@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <stdarg.h>
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <termios.h>
@@ -291,28 +292,23 @@ int fcntl(int fd, int command, ...) {
         __builtin_va_start(ap, command);
         int lowest = __builtin_va_arg(ap, int);
         __builtin_va_end(ap);
-        if (lowest < 0) {
+        if (lowest < 0 || lowest >= OPEN_MAX) {
             errno = EINVAL;
             return -1;
         }
-        for (int i = lowest; i < OPEN_MAX; i++) {
-            if (i == fd) {
-                continue;
-            }
-            if (sys_fcntl(i, F_GETFD_COMMAND, 0) >= 0) {
-                continue;
-            }
-            int copy = dup2(fd, i);
-            if (copy < 0) {
-                return -1;
-            }
-            if (command == F_DUPFD_CLOEXEC) {
-                sys_fcntl(copy, F_SETFD_COMMAND, FD_CLOEXEC);
-            }
-            return copy;
+        if (sys_fcntl(fd, F_GETFD_COMMAND, 0) < 0) {
+            errno = EBADF;
+            return -1;
         }
-        errno = EMFILE;
-        return -1;
+        long copy = sys_fcntl(fd, command == F_DUPFD_CLOEXEC
+                                      ? F_DUPFD_CLOEXEC_COMMAND
+                                      : F_DUPFD_COMMAND,
+                              (long)lowest);
+        if (copy < 0) {
+            errno = EMFILE;
+            return -1;
+        }
+        return (int)copy;
     }
     case F_GETFD:
         return (int)sys_fcntl(fd, F_GETFD_COMMAND, 0);
@@ -457,6 +453,75 @@ int execvp(const char *file, char *const argv[]) {
         }
     }
     return -1;
+}
+
+static size_t exec_list_length(const char *arg, va_list list) {
+    size_t count = 1;
+    if (!arg) {
+        return count;
+    }
+    while (va_arg(list, const char *)) {
+        count++;
+    }
+    return count + 1;
+}
+
+static void exec_list_collect(const char **vector, const char *arg, va_list list) {
+    size_t at = 0;
+    vector[at++] = arg;
+    if (!arg) {
+        return;
+    }
+    const char *next;
+    while ((next = va_arg(list, const char *)) != 0) {
+        vector[at++] = next;
+    }
+    vector[at] = 0;
+}
+
+int execl(const char *path, const char *arg, ...) {
+    va_list list;
+    va_start(list, arg);
+    size_t count = exec_list_length(arg, list);
+    va_end(list);
+    const char *vector[count];
+    va_start(list, arg);
+    exec_list_collect(vector, arg, list);
+    va_end(list);
+    return execv(path, (char *const *)vector);
+}
+
+int execlp(const char *file, const char *arg, ...) {
+    va_list list;
+    va_start(list, arg);
+    size_t count = exec_list_length(arg, list);
+    va_end(list);
+    const char *vector[count];
+    va_start(list, arg);
+    exec_list_collect(vector, arg, list);
+    va_end(list);
+    return execvp(file, (char *const *)vector);
+}
+
+int execle(const char *path, const char *arg, ...) {
+    va_list list;
+    va_start(list, arg);
+    size_t count = exec_list_length(arg, list);
+    va_end(list);
+    const char *vector[count];
+    va_start(list, arg);
+    size_t at = 0;
+    vector[at++] = arg;
+    if (arg) {
+        const char *next;
+        while ((next = va_arg(list, const char *)) != 0) {
+            vector[at++] = next;
+        }
+        vector[at] = 0;
+    }
+    char *const *envp = va_arg(list, char *const *);
+    va_end(list);
+    return execve(path, (char *const *)vector, envp);
 }
 
 pid_t waitpid(pid_t pid, int *status, int options) {
@@ -627,8 +692,15 @@ long sysconf(int name) {
     switch (name) {
     case _SC_PAGESIZE:
         return 4096;
-    case _SC_OPEN_MAX:
-        return 128;
+    case _SC_OPEN_MAX: {
+        /* The kernel's number, asked rather than restated, so the two cannot
+           disagree the way they did when the table grew in M187. */
+        struct rlimit limit;
+        if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+            return OPEN_MAX;
+        }
+        return (long)limit.rlim_cur;
+    }
     case _SC_CLK_TCK:
         return 100;
     case _SC_NPROCESSORS_ONLN:
@@ -812,7 +884,7 @@ long sysconf(int name) {
     case _SC_THREAD_STACK_MIN:
         return 4096;
     case _SC_THREAD_THREADS_MAX:
-        return 128;
+        return 256;
     case _SC_GETPW_R_SIZE_MAX:
     case _SC_GETGR_R_SIZE_MAX:
         return 256;
@@ -878,16 +950,7 @@ int dup(int oldfd) {
         errno = EBADF;
         return -1;
     }
-    for (int i = 0; i < OPEN_MAX; i++) {
-        if (i == oldfd) {
-            continue;
-        }
-        if (sys_fcntl(i, F_GETFD_COMMAND, 0) < 0) {
-            return dup2(oldfd, i);
-        }
-    }
-    errno = EMFILE;
-    return -1;
+    return fcntl(oldfd, F_DUPFD, 0);
 }
 
 int fchdir(int fd) {

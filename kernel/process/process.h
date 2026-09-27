@@ -1,5 +1,7 @@
 #pragma once
 
+#include "memory_management/virtual_memory.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -40,7 +42,9 @@
 
 void process_destroy_address_space(uint64_t pml4_phys);
 
-uint64_t process_fork_address_space(uint64_t source_pml4_phys);
+uint64_t process_fork_address_space(uint64_t source_pml4_phys,
+                                    const virtual_memory_range_t *shared_ranges,
+                                    int shared_count);
 
 uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
                                      const char *const *argv,

@@ -4,6 +4,7 @@
 #include "architecture/x86_64/symmetric_multiprocessing.h"
 
 #include "drivers/pit.h"
+#include "drivers/kernel_log.h"
 #include "library/kernel_library.h"
 #include "memory_management/heap.h"
 #include "memory_management/physical_memory.h"
@@ -382,6 +383,13 @@ static int process_open(const char *rel, int create) {
             return i;
         }
     }
+    /* Sixteen /proc files open at once for the whole machine; reaching that
+       says so, because the program only sees "open failed" (M183's rule). */
+    kernel_log_puts("[procfs] all ");
+    kernel_log_put_dec(PROCESS_MAX_OPEN);
+    kernel_log_puts(" /proc files are open - refusing ");
+    kernel_log_puts(rel);
+    kernel_log_puts("\n");
     return -1;
 }
 

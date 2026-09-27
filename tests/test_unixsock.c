@@ -361,6 +361,46 @@ TEST(unix_socket, a_socket_passed_over_a_socket_is_released_too) {
     expect_nothing_left();
 }
 
+/* M187: a listener is ready only when a connection is queued. It has no peer
+   and never will, and reporting that as a hang-up made every listener look
+   ready forever - which Chromium's ProcessSingleton answers with a blocking
+   accept(), and the browser's IO thread never came back. */
+TEST(unix_socket, a_listener_reports_nothing_until_a_connection_is_queued) {
+    clean();
+    struct unix_socket *srv = unix_socket_alloc(UNIX_SOCKET_STREAM);
+    REQUIRE(srv != NULL);
+    CHECK_EQ(unix_socket_bind(srv, "/tmp/singleton", 14), 0);
+    CHECK_EQ(unix_socket_listen(srv), 0);
+
+    CHECK_EQ(unix_socket_pending(srv), 0);
+    CHECK_EQ(unix_socket_hup(srv), 0);
+    CHECK_EQ(unix_socket_rdhup(srv), 0);
+    CHECK_EQ(unix_socket_writable(srv), 0);
+
+    struct unix_socket *cli = unix_socket_alloc(UNIX_SOCKET_STREAM);
+    REQUIRE(cli != NULL);
+    CHECK_EQ(unix_socket_connect(cli, "/tmp/singleton", 14), 0);
+    CHECK_EQ(unix_socket_pending(srv), 1);
+    CHECK_EQ(unix_socket_hup(srv), 0);
+
+    struct unix_socket *conn = unix_socket_accept(srv);
+    REQUIRE(conn != NULL);
+    CHECK_EQ(unix_socket_pending(srv), 0);
+    CHECK_EQ(unix_socket_hup(srv), 0);
+
+    /* An unconnected, non-listening socket is still a hang-up, as Linux's
+       is. */
+    struct unix_socket *lonely = unix_socket_alloc(UNIX_SOCKET_STREAM);
+    REQUIRE(lonely != NULL);
+    CHECK_EQ(unix_socket_hup(lonely), 1);
+
+    unix_socket_unref(lonely);
+    unix_socket_unref(conn);
+    unix_socket_unref(cli);
+    unix_socket_unref(srv);
+    expect_nothing_left();
+}
+
 TEST(unix_socket, bind_connect_accept_and_the_names_that_are_refused) {
     clean();
     struct unix_socket *srv = unix_socket_alloc(UNIX_SOCKET_STREAM);

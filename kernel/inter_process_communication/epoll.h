@@ -2,8 +2,16 @@
 
 #include <stdint.h>
 
-#define EPOLL_MAX       32
-#define EPOLL_MAX_WATCH 32
+/* Epoll sets on the machine, and descriptors in one set. 32 of each until
+   M187: every Chromium thread with an IO or UI message pump owns a set, in
+   every process, and the browser's IO thread watches a descriptor per child
+   and more - and an EPOLL_CTL_ADD refused because a set is full is a
+   descriptor nobody watches, which is a message that arrives and wakes
+   nobody. The watch array is inline and sys_epoll_wait copies up to a set's
+   worth of events onto its kernel stack, which is what keeps the second
+   number where it is. */
+#define EPOLL_MAX       1024
+#define EPOLL_MAX_WATCH 128
 
 #define EPOLLIN        0x001u
 #define EPOLLPRI       0x002u

@@ -88,7 +88,7 @@ int main(void) {
         return 9;
     }
     munmap(guard, PAGE);
-    if (mmap(0, PAGE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, 3, 0) != MAP_FAILED) {
+    if (mmap(0, PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE, -1, 0) != MAP_FAILED) {
         return 8;
     }
     if (munmap((void *)&main, PAGE) == 0) {

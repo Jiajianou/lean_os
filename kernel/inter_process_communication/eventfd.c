@@ -1,5 +1,7 @@
 #include "eventfd.h"
 
+#include "drivers/kernel_log.h"
+
 #include "library/kernel_library.h"
 #include "library/spinlock.h"
 #include "memory_management/heap.h"
@@ -14,6 +16,7 @@ typedef struct eventfd {
 } eventfd_t;
 
 static int live_count;
+static int refusals;
 
 void eventfd_init(void) {
     uint64_t f = spin_lock_irqsave(&eventfd_lock);
@@ -28,6 +31,14 @@ struct eventfd *eventfd_create(uint64_t initval, int semaphore) {
     uint64_t f = spin_lock_irqsave(&eventfd_lock);
     if (live_count >= EVENTFD_MAX) {
         spin_unlock_irqrestore(&eventfd_lock, f);
+        refusals++;
+        if (refusals == 1 || refusals % 64 == 0) {
+            kernel_log_puts("[eventfd] the machine is at its ceiling of ");
+            kernel_log_put_dec(EVENTFD_MAX);
+            kernel_log_puts(" eventfds (");
+            kernel_log_put_dec((uint32_t)refusals);
+            kernel_log_puts(" refusal(s) since boot)\n");
+        }
         return (eventfd_t *)0;
     }
     eventfd_t *e = (eventfd_t *)kmalloc(sizeof(eventfd_t));

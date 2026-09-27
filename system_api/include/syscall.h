@@ -151,6 +151,13 @@ extern "C" {
 #define F_SETLK_COMMAND  5
 #define F_SETLKW_COMMAND 6
 #define F_SETFL_COMMAND  7
+/* F_DUPFD in the kernel rather than in the library: the lowest free slot at or
+   above the argument, found and filled in one step. The library used to find
+   one and then dup2 onto it, which a second thread opening a descriptor in
+   between turned into a silent close of that thread's new descriptor - and it
+   only ever looked at the first 128 slots (M187). */
+#define F_DUPFD_COMMAND         8
+#define F_DUPFD_CLOEXEC_COMMAND 9
 #define OS_NONBLOCK_BIT 0x800
 #define SYS_fcntl      85
 

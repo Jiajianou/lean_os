@@ -519,11 +519,14 @@ def _screens_differ(a, b, at_least):
 def test_double_click_launches_every_icon(m):
     boot(m)
     for i, (name, _program, y, x) in enumerate(ICONS):
-        m.double_click(x, y)
         timeout = 45.0 if name == "Browser" else 12.0
         want = min(i + 1, TASKBAR_MAX_SLOTS)
         beyond_taskbar = i >= TASKBAR_MAX_SLOTS
+        # Before the click, not after it: a window that opens inside the
+        # time a screendump takes is already in an "after the click" shot,
+        # and the change it is supposed to prove is then compared away.
         before = m.screenshot() if beyond_taskbar else None
+        m.double_click(x, y)
         wait_for_windows(m, want, timeout=timeout)
         if beyond_taskbar:
             after = wait_for(m, lambda s: _screens_differ(before, s, 20000),
@@ -1838,17 +1841,48 @@ def test_browser_renders_a_page(m):
           "only %d dark pixels between white ones - freetype rasterised no "
           "text onto the page" % text)
 
-# content_shell's address bar is a views Textfield to the right of its four
-# buttons, in the first row of the window's client area. A click in it puts
-# the caret at the click rather than at the end, so the whole field is
-# selected before the address is typed - which is also how a person does it.
-URL_BAR = (750, 104)
+# The Browser is //chrome since M187, and Ctrl+L is how a person reaches its
+# omnibox: it focuses the field and selects what is in it, so what is typed
+# next replaces the address. No coordinate in it, which is the point - the
+# tab strip and the toolbar put the omnibox somewhere content_shell's
+# address bar was not. It takes the omnibox a moment under TCG to take
+# focus: with 0.4 s after Ctrl+L the first key went to the page, and
+# "ttp://10.0.2.100:7778/" was searched for on Google.
+#
+# Not while a page is still loading, though: the tab's throbber and the stop
+# button are up until the load finishes, and a finishing load puts its own
+# address back in an omnibox nobody has committed an edit to - so an address
+# typed into the home page while it was still loading was lost, and the test
+# timed out looking at the home page. The tab strip and the reload button
+# hold still once nothing is loading; the omnibox itself is left out, because
+# a focused one has a caret that blinks.
+def _toolbar_pixels(s):
+    return (tuple(s.px(x, y) for y in range(88, 126, 3)
+                  for x in range(180, s.width, 3)) +
+            tuple(s.px(x, y) for y in range(130, 166, 3)
+                  for x in range(180, 296, 3)))
 
 def _focus_url_bar(m):
-    m.click(*URL_BAR)
-    time.sleep(0.3)
-    m.sendkey("ctrl-a")
-    time.sleep(0.2)
+    deadline = time.time() + 45.0
+    last = None
+    still = 0
+    while time.time() < deadline and still < 3:
+        now = _toolbar_pixels(m.screenshot())
+        still = still + 1 if now == last else 0
+        last = now
+        time.sleep(0.5)
+    m.sendkey("ctrl-l")
+    time.sleep(2.0)
+
+# The omnibox reruns autocomplete on every key, and under TCG that takes
+# longer than the 30 ms type_text leaves between keys: typed at that rate,
+# "file:///usr/share/browser/flex.html" arrived as "l/". A quarter of a
+# second a key is what a person gives it.
+def _type_address(m, text):
+    for ch in text:
+        m.sendkey(qemu_input._qemu_keyname(ch))
+        time.sleep(0.25)
+    time.sleep(1.0)
 
 def test_browser_loads_a_page_from_another_machine(m):
     boot(m)
@@ -1860,14 +1894,21 @@ def test_browser_loads_a_page_from_another_machine(m):
              timeout=45.0)
 
     _focus_url_bar(m)
-    m.type_text(qemu_input.NET_PAGE_URL)
+    _type_address(m, qemu_input.NET_PAGE_URL)
     started = time.time()
     m.sendkey("ret")
 
     def block_on_screen(s):
         return s.count_color(qemu_input.NET_PAGE_BLOCK, 180, 160, 820, 560) > 20000
 
-    BUDGET_S = 10.0
+    # Ten seconds from M116 to M186. //chrome keeps Chromium's site isolation,
+    # so leaving the file:// home page for 10.0.2.100 starts a renderer for the
+    # new site whatever --renderer-process-limit says - and starting one here
+    # is exec'ing a 306 MB program, copied page by page: about three of these
+    # seconds (M187, measured alone at 10.5, 11.2 and 11.4 s). The condition
+    # for ten again is an exec that shares a program's text rather than
+    # copying it.
+    BUDGET_S = 15.0
     wait_for(m, block_on_screen,
              "the page from 10.0.2.100 was not fully on screen within %.0f s of "
              "pressing Enter - the network, TCP or the browser's fetch loop "
@@ -1919,7 +1960,7 @@ def test_browser_survives_an_empty_flex_container(m):
              "the browser never finished showing its own start page",
              timeout=45.0)
     _focus_url_bar(m)
-    m.type_text("file:///usr/share/browser/flex.html")
+    _type_address(m, "file:///usr/share/browser/flex.html")
     m.sendkey("ret")
     wait_for(m, lambda s: s.count_color(0xE02020, 180, 160, 820, 560) > 20000,
              "the block after an empty flex container never appeared - the "

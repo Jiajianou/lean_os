@@ -284,6 +284,9 @@ pid_t fork(void);
 int execve(const char *path, char *const argv[], char *const envp[]);
 int execv(const char *path, char *const argv[]);
 int execvp(const char *file, char *const argv[]);
+int execl(const char *path, const char *arg, ...);
+int execlp(const char *file, const char *arg, ...);
+int execle(const char *path, const char *arg, ...);
 
 long spawnv(const char *path, char *const argv[]);
 long spawnve(const char *path, char *const argv[], char *const envp[]);

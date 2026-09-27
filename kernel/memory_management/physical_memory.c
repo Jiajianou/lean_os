@@ -311,6 +311,48 @@ uint64_t physical_memory_try_alloc_contiguous(uint64_t count) {
     return 0;
 }
 
+/* A contiguous run ANYWHERE, searched from the top of memory down, for
+   memory only the kernel touches - a task's kernel stack, the task table -
+   which needs to be contiguous and nothing else: the identity map covers
+   every frame, so a stack above 4 GiB is as reachable as one below it.
+
+   The search above stops at 4 GiB because its other callers are devices that
+   DMA into what they get. Ordinary frames are claimed from the bottom up, so
+   the region below 4 GiB is the one that fragments first, and a machine with
+   most of its free memory above that line refused a 32 KB kernel stack with
+   940 MB free: a Chromium renderer's pthread_create said EAGAIN and it
+   stopped on a CHECK (M187). Searching from the top also leaves the low
+   region to the devices that need it. */
+uint64_t physical_memory_try_alloc_contiguous_anywhere(uint64_t count) {
+    if (count == 0) {
+        return 0;
+    }
+    uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
+    uint64_t run_length = 0;
+    for (uint64_t f = total_frames; f-- > 0;) {
+        if (bitmap_test(f)) {
+            run_length = 0;
+            continue;
+        }
+        run_length++;
+        if (run_length == count) {
+            uint64_t run_start = f;
+            for (uint64_t i = 0; i < count; i++) {
+                bitmap_set(run_start + i);
+                frame_refs[run_start + i] = 1;
+            }
+            free_frames -= count;
+            if (run_start <= search_hint && search_hint < run_start + count) {
+                search_hint = run_start + count;
+            }
+            spin_unlock_irqrestore(&physical_memory_lock, irq_flags);
+            return run_start * PAGE_SIZE;
+        }
+    }
+    spin_unlock_irqrestore(&physical_memory_lock, irq_flags);
+    return 0;
+}
+
 uint64_t physical_memory_alloc_contiguous(uint64_t count) {
     uint64_t phys = physical_memory_try_alloc_contiguous(count);
     if (!phys) {

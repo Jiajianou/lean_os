@@ -205,3 +205,70 @@ TEST(pci, a_capability_pointer_into_the_header_is_refused) {
     REQUIRE(pci_find_class(0x01, 0x08, 0x02, 0, &dev) == 1);
     CHECK_EQ(pci_find_capability(&dev, PCI_CAP_ID_MSIX), 0);
 }
+
+typedef struct {
+    int count;
+    pci_device_t seen[4];
+} visit_log_t;
+
+static void remember(const pci_device_t *device, void *context) {
+    visit_log_t *log = (visit_log_t *)context;
+    if (log->count < 4) {
+        log->seen[log->count] = *device;
+    }
+    log->count++;
+}
+
+TEST(pci, enumeration_visits_every_function_in_order_with_its_class) {
+    reset();
+    fake_pci_add(1, 0, 0, 0x3333, 0x0003, 0x0C, 0x03, 0x30);
+    fake_pci_add(0, 5, 2, 0x2222, 0x0002, 0x02, 0x00, 0x00);
+    fake_pci_add(0, 2, 0, 0x1111, 0x0001, AHCI_CLASS, AHCI_SUB, AHCI_PROG);
+
+    visit_log_t log = {0};
+    pci_enumerate(remember, &log);
+    REQUIRE(log.count == 3);
+    CHECK_EQ(log.seen[0].vendor_id, 0x1111);
+    CHECK_EQ(log.seen[0].class_code, AHCI_CLASS);
+    CHECK_EQ(log.seen[0].subclass, AHCI_SUB);
+    CHECK_EQ(log.seen[0].prog_if, AHCI_PROG);
+    CHECK_EQ(log.seen[1].vendor_id, 0x2222);
+    CHECK_EQ(log.seen[1].slot, 5);
+    CHECK_EQ(log.seen[1].func, 2);
+    CHECK_EQ(log.seen[2].vendor_id, 0x3333);
+    CHECK_EQ(log.seen[2].bus, 1);
+    CHECK_EQ(log.seen[2].device_id, 0x0003);
+    CHECK_EQ(log.seen[2].prog_if, 0x30);
+}
+
+TEST(pci, enumeration_of_an_empty_bus_visits_nothing) {
+    reset();
+    visit_log_t log = {0};
+    pci_enumerate(remember, &log);
+    CHECK_EQ(log.count, 0);
+}
+
+TEST(pci, a_device_in_d3_is_brought_to_d0_and_keeps_its_other_bits) {
+    reset();
+    int h = fake_pci_add(0, 21, 0, 0x8086, 0xA0E8, 0x0C, 0x80, 0x00);
+    fake_pci_set_config(h, 0x04, (1u << 4) << 16);
+    fake_pci_set_config(h, 0x34, 0x40);
+    fake_pci_set_config(h, 0x40, 0x00000001u);
+    fake_pci_set_config(h, 0x44, 0x00000103u);
+
+    pci_device_t dev;
+    REQUIRE(pci_find_device(0x8086, 0xA0E8, &dev) == 1);
+    pci_set_power_state_d0(&dev);
+    CHECK_EQ(fake_pci_get_config(h, 0x44), 0x00000100u);
+}
+
+TEST(pci, a_device_without_power_management_is_left_alone) {
+    reset();
+    int h = fake_pci_add(0, 21, 0, 0x8086, 0xA0E8, 0x0C, 0x80, 0x00);
+    fake_pci_set_config(h, 0x44, 0x00000003u);
+
+    pci_device_t dev;
+    REQUIRE(pci_find_device(0x8086, 0xA0E8, &dev) == 1);
+    pci_set_power_state_d0(&dev);
+    CHECK_EQ(fake_pci_get_config(h, 0x44), 0x00000003u);
+}

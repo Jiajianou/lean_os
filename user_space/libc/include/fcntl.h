@@ -21,6 +21,26 @@ extern "C" {
 
 #define O_ACCMODE  (OPEN_READ | OPEN_WRITE)
 
+/* POSIX has <fcntl.h> define the file mode bits as well as <sys/stat.h>,
+   because open(2)'s third argument is one and a caller including only this
+   header is entitled to spell it. The values are sys/stat.h's; an identical
+   redefinition is not an error, so either header may come first. */
+#define S_IRWXU 0700
+#define S_IRUSR 0400
+#define S_IWUSR 0200
+#define S_IXUSR 0100
+#define S_IRWXG 0070
+#define S_IRGRP 0040
+#define S_IWGRP 0020
+#define S_IXGRP 0010
+#define S_IRWXO 0007
+#define S_IROTH 0004
+#define S_IWOTH 0002
+#define S_IXOTH 0001
+#define S_ISUID 04000
+#define S_ISGID 02000
+#define S_ISVTX 01000
+
 #define O_DIRECTORY 0
 #define O_NOCTTY    0
 #define O_LARGEFILE 0

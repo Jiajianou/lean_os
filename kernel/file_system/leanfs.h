@@ -77,6 +77,10 @@ int leanfs_utime(const char *path, uint32_t mtime);
 
 int leanfs_unlink(const char *path);
 
+void leanfs_handle_hold(int handle);
+void leanfs_handle_release(int handle);
+int leanfs_handle_orphaned(int handle);
+
 int leanfs_rename(const char *old_path, const char *new_path);
 
 size_t leanfs_list(const char *path, char *buffer, size_t maxlen);

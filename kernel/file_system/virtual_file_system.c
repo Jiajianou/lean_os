@@ -489,6 +489,27 @@ struct tty *virtual_file_system_handle_tty(int handle, int *pty_number) {
     return (struct tty *)0;
 }
 
+/* An open file on this machine's own filesystem holds its inode, so that an
+   unlink while it is open leaves an orphan rather than a hole (leanfs.c).
+   Other mounts have their own open and close. */
+void virtual_file_system_handle_hold(int handle) {
+    if (handle < 0 || VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle) != 0) {
+        return;
+    }
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    leanfs_handle_hold(handle);
+    spin_unlock_irqrestore(&fs_lock, f);
+}
+
+void virtual_file_system_handle_release(int handle) {
+    if (handle < 0 || VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle) != 0) {
+        return;
+    }
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    leanfs_handle_release(handle);
+    spin_unlock_irqrestore(&fs_lock, f);
+}
+
 void virtual_file_system_handle_close(int handle) {
     uint32_t m = VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle);
     if (m > 0 && m <= (uint32_t)mount_count && mounts[m - 1].ops->close) {

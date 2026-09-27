@@ -335,6 +335,37 @@ TEST(epoll, a_stale_registration_is_dropped_rather_than_reported) {
     CHECK_EQ(epoll_in_use(), 0);
 }
 
+/* M187: a watch left behind by a closed descriptor does not refuse the next
+   file given the same number. Linux takes a file out of every epoll set when
+   its last descriptor closes; this kernel keeps the watch by number, so the
+   question is answered at the next EPOLL_CTL_ADD instead - and it used to be
+   answered "already there", which left Chromium's new mojo channel socket
+   watched by nobody. */
+TEST(epoll, a_watch_left_by_a_closed_descriptor_does_not_refuse_its_number) {
+    script_reset();
+    struct epoll *ep = epoll_create_set();
+    REQUIRE(ep != NULL);
+    const void *closed_file = (const void *)(uintptr_t)0x9000;
+    const void *new_file = (const void *)(uintptr_t)0x9100;
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 5, closed_file, EPOLLIN, 0xDEAD), 0);
+
+    /* The number is somebody else's now: modifying it is modifying a
+       registration that does not exist, and adding it succeeds. */
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_MOD, 5, new_file, EPOLLIN, 1), -1);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 5, new_file, EPOLLIN, 0xBEEF), 0);
+    CHECK_EQ(epoll_watch_count(ep), 1);
+
+    scripted[5] = EPOLLIN;
+    epoll_ev_t out[4];
+    CHECK_EQ(epoll_scan(ep, script_mask, NULL, out, 4), 1);
+    CHECK_EQ(out[0].data, 0xBEEF);
+
+    /* And the same file added twice is still a duplicate. */
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 5, new_file, EPOLLIN, 2), -1);
+    epoll_unref(ep);
+    CHECK_EQ(epoll_in_use(), 0);
+}
+
 TEST(epoll, add_mod_and_del_refuse_what_they_should) {
     script_reset();
     struct epoll *ep = epoll_create_set();
