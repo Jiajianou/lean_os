@@ -3,10 +3,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-IMAGE="build/os-image.bin"
+# The hardware image, not build/os-image.bin: only the copy
+# tools/make-hardware-image.sh makes carries lean_os.cfg - the panel's own
+# mode, and the log= line that says where \LOGS\LEANOS.LOG is. Writing the
+# QEMU image put a machine at 1024x768 with no log, silently.
+IMAGE="${2:-build/os-image-hardware.bin}"
 
-if [ $# -ne 1 ]; then
-  echo "Usage: $0 <target-device>" >&2
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+  echo "Usage: $0 <target-device> [image]   (image defaults to $IMAGE)" >&2
   echo "Run this with no argument first is not supported on purpose -" >&2
   echo "see the device listing commands below to find the right one." >&2
   echo >&2
@@ -20,7 +24,12 @@ fi
 TARGET="$1"
 
 if [ ! -f "$IMAGE" ]; then
-  echo "No image at $IMAGE yet - run 'make' first." >&2
+  echo "No image at $IMAGE yet - run 'make all' and then tools/make-hardware-image.sh." >&2
+  exit 1
+fi
+if [ $# -eq 1 ] && [ build/os-image.bin -nt "$IMAGE" ]; then
+  echo "$IMAGE is older than build/os-image.bin, so it is missing whatever was built" >&2
+  echo "or installed since - run tools/make-hardware-image.sh again first." >&2
   exit 1
 fi
 
