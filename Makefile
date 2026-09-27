@@ -258,10 +258,14 @@ FS_INODE_BLOCKS  := 4096
 FS_BITMAP_BLOCKS := 16
 FS_DATA_BLOCKS   := 524288
 FS_TOTAL_SECTORS := $(shell echo $$(( (1 + $(FS_INODE_BLOCKS) + $(FS_BITMAP_BLOCKS) + $(FS_DATA_BLOCKS)) * 8 )))
-IMAGE_SECTORS    := $(shell echo $$(( $(FS_START_LBA) + $(FS_TOTAL_SECTORS) + 2048 )))
 
+# 32 MiB rather than the 512 KiB BOOTX64.EFI needs, because the ESP is the one
+# partition every other operating system can open: tools/make-hardware-image.sh
+# puts a 24 MiB \LOGS\LEANOS.LOG in it that the kernel writes its log into
+# (M189), so a machine with no serial port can be read on the next computer.
 ESP_START_LBA    := $(shell echo $$(( $(FS_START_LBA) + $(FS_TOTAL_SECTORS) )))
-ESP_SECTOR_COUNT := 1024
+ESP_SECTOR_COUNT := 65536
+IMAGE_SECTORS    := $(shell echo $$(( $(ESP_START_LBA) + $(ESP_SECTOR_COUNT) + 1024 )))
 
 $(IMAGE): $(MBR_BIN) $(KERNEL_BIN) $(UEFI_BOOT_EFI)
 	@boot_sectors=$$(( ($$(stat -f%z $(MBR_BIN)) + $$(stat -f%z $(KERNEL_BIN))) / 512 )); \
@@ -708,7 +712,7 @@ TEST_KERNEL_SRCS := kernel/library/kernel_library.c kernel/memory_management/hea
                     kernel/process/resource_limits.c kernel/boot/boot_options.c \
                     kernel/drivers/hid_report.c kernel/drivers/i2c_hid.c \
                     kernel/drivers/designware_i2c_timing.c kernel/drivers/designware_i2c.c \
-                    kernel/drivers/usb_storage_protocol.c
+                    kernel/drivers/usb_storage_protocol.c kernel/drivers/disk_log_area.c
 
 TEST_USER_SRCS := user_space/library/symbol_table.c \
                   user_space/library/sha256.c user_space/library/os_package.c \
@@ -857,6 +861,9 @@ clean:
 distclean:
 	rm -rf $(BUILD)
 
-.PHONY: print-esp-start-lba
+.PHONY: print-esp-start-lba print-esp-sector-count
 print-esp-start-lba:
 	@echo $(ESP_START_LBA)
+
+print-esp-sector-count:
+	@echo $(ESP_SECTOR_COUNT)

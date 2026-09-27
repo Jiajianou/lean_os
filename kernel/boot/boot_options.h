@@ -27,6 +27,8 @@ typedef struct __attribute__((packed)) {
     uint32_t chosen_height;
     uint32_t offered_count;
     uint32_t offered[BOOT_OFFERED_MODES_MAX][2];
+    uint32_t log_lba;
+    uint32_t log_sectors;
 } boot_options_t;
 
 void boot_options_defaults(boot_options_t *options);

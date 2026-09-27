@@ -35,6 +35,7 @@
 #include "boot/boot_options.h"
 #include "drivers/hardware_inventory.h"
 #include "drivers/i2c_touchpad.h"
+#include "drivers/disk_log.h"
 #include "drivers/usb_storage.h"
 #include "device/fwcfg.h"
 #include "file_system/virtual_file_system.h"
@@ -13674,6 +13675,7 @@ display_self_test_done:
     kernel_log_puts(").\n\n");
 
     block_device_init();
+    disk_log_start();
 
     virtual_file_system_init();
     {

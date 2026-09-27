@@ -168,6 +168,9 @@ else
   run_stage "Chromium drawing a page, graded as pixels" \
     ./tools/browser-test.sh
 
+  run_stage "the log a machine with no serial port leaves on its stick" \
+    ./tools/usb-log-test.sh
+
   if [ "$TIER" = "full" ]; then
     run_stage "the same battery, through the I/O APIC" \
       bash -c 'LEANOS_IOAPIC=1 ./tools/qemu-serial-test.sh 1500'

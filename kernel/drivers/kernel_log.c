@@ -64,7 +64,7 @@ void kernel_log_enter_panic(void) {
     kernel_log_panicking = 1;
 }
 
-#define KERNEL_LOG_RING_SIZE 65536u
+#define KERNEL_LOG_RING_SIZE 262144u
 
 static char kernel_log_ring[KERNEL_LOG_RING_SIZE];
 static uint64_t kernel_log_written;

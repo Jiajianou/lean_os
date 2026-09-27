@@ -49,6 +49,8 @@ void boot_options_defaults(boot_options_t *options) {
     options->chosen_width = 0;
     options->chosen_height = 0;
     options->offered_count = 0;
+    options->log_lba = 0;
+    options->log_sectors = 0;
 }
 
 static void apply_video(const char *text, uint32_t start, uint32_t end, boot_options_t *options) {
@@ -104,6 +106,24 @@ static void apply_cpus(const char *text, uint32_t start, uint32_t end, boot_opti
     options->cpu_limit = value;
 }
 
+static void apply_log(const char *text, uint32_t start, uint32_t end, boot_options_t *options) {
+    uint32_t cursor = start;
+    uint32_t lba = parse_number(text, &cursor, end);
+    if (cursor == start || cursor >= end || text[cursor] != '+') {
+        options->unknown_keys++;
+        return;
+    }
+    cursor++;
+    uint32_t sectors_start = cursor;
+    uint32_t sectors = parse_number(text, &cursor, end);
+    if (cursor == sectors_start || cursor != end || lba == 0 || sectors < 2) {
+        options->unknown_keys++;
+        return;
+    }
+    options->log_lba = lba;
+    options->log_sectors = sectors;
+}
+
 static void apply_pair(const char *text, uint32_t key_start, uint32_t key_end,
                        uint32_t value_start, uint32_t value_end, boot_options_t *options) {
     if (token_equals(text, key_start, key_end, "video")) {
@@ -116,6 +136,10 @@ static void apply_pair(const char *text, uint32_t key_start, uint32_t key_end,
     }
     if (token_equals(text, key_start, key_end, "cpus")) {
         apply_cpus(text, value_start, value_end, options);
+        return;
+    }
+    if (token_equals(text, key_start, key_end, "log")) {
+        apply_log(text, value_start, value_end, options);
         return;
     }
     options->unknown_keys++;
@@ -227,6 +251,8 @@ void boot_options_set_active(const boot_options_t *handoff) {
     active_options.chosen_width = handoff->chosen_width;
     active_options.chosen_height = handoff->chosen_height;
     active_options.offered_count = handoff->offered_count;
+    active_options.log_lba = handoff->log_lba;
+    active_options.log_sectors = handoff->log_sectors;
     if (active_options.offered_count > BOOT_OFFERED_MODES_MAX) {
         active_options.offered_count = BOOT_OFFERED_MODES_MAX;
     }
