@@ -1323,7 +1323,6 @@ static long sys_fsync(uint64_t fd, uint64_t a2, uint64_t a3,
         return -1;
     }
     virtual_file_system_sync();
-    block_device_flush();
     return 0;
 }
 

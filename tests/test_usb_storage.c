@@ -145,3 +145,35 @@ TEST(usb_storage, a_capacity_answer_that_cannot_be_true_is_refused) {
 
     CHECK_EQ(usb_storage_parse_read_capacity10(zero_size, 7, &sectors, &sector_bytes), 0);
 }
+
+TEST(usb_storage, a_superspeed_stick_is_given_a_megabyte_a_command) {
+    CHECK_EQ(usb_storage_transfer_sectors(1) * 512u, 1024u * 1024u);
+    CHECK_EQ(usb_storage_transfer_sectors(0), 240u);
+    CHECK(usb_storage_transfer_sectors(0) <= 0xFFFFu);
+    CHECK(usb_storage_transfer_sectors(1) <= 0xFFFFu);
+}
+
+TEST(usb_storage, a_data_phase_is_divided_at_every_64k_boundary_and_nowhere_else) {
+    CHECK_EQ(usb_storage_next_piece(0x100000, 1024u * 1024u), 65536u);
+    CHECK_EQ(usb_storage_next_piece(0x100000, 4096u), 4096u);
+    CHECK_EQ(usb_storage_next_piece(0x100000, 65536u), 65536u);
+    CHECK_EQ(usb_storage_next_piece(0x10F000, 65536u), 4096u);
+    CHECK_EQ(usb_storage_next_piece(0x10FE00, 512u), 512u);
+    CHECK_EQ(usb_storage_next_piece(0x10FFFF, 2u), 1u);
+
+    uint32_t transfer = 240u * 512u;
+    uint64_t phys = 0x200000;
+    uint32_t done = 0, pieces = 0;
+    while (done < transfer) {
+        uint32_t piece = usb_storage_next_piece(phys + done, transfer - done);
+        CHECK(piece > 0);
+        CHECK_EQ((phys + done) / 65536u, (phys + done + piece - 1) / 65536u);
+        if (done + piece < transfer) {
+            CHECK_EQ(piece % 1024u, 0u);
+        }
+        done += piece;
+        pieces++;
+    }
+    CHECK_EQ(done, transfer);
+    CHECK_EQ(pieces, 2u);
+}

@@ -11,12 +11,12 @@
 #include "library/spinlock.h"
 #include "drivers/pit.h"
 #include "memory_management/physical_memory.h"
+#include "panic.h"
 
 #define BLOCK_DEVICE_PER_LINE 8
 #define LINE_BYTES   (BLOCK_DEVICE_PER_LINE * BLOCK_DEVICE_SECTOR_SIZE)
 
-#define CACHE_LINES 2048
-#define SCRATCH_LINES 16
+#define SCRATCH_LINES 256
 
 typedef struct {
     uint32_t line_no;
@@ -27,9 +27,10 @@ typedef struct {
 
 #define BLOCK_DEVICE_FLUSH_DEADLINE_MS 5000
 
-static cache_tag_t tags[CACHE_LINES];
-static uint8_t *line_pointer[CACHE_LINES];
+static cache_tag_t *tags;
+static uint8_t **line_pointer;
 static uint32_t cache_lines;
+static uint32_t allocated_lines;
 static uint64_t oldest_dirty_ms;
 static uint8_t *scratch;
 static uint32_t scratch_lines;
@@ -160,6 +161,29 @@ static int device_write(uint32_t lba, uint32_t count, const void *buffer) {
     return 0;
 }
 
+/* Until M191 this was 2048 lines - 8 MiB - whatever the machine. Chromium's
+   executable is 306 MB and every process it starts execs it again, so on a
+   laptop with 18 GB and a USB stick each renderer read the whole thing off the
+   stick: twenty seconds apiece. A machine with memory to spare spends a
+   sixteenth of it here, which holds that binary; a smaller one spends a
+   sixty-fourth, because a browser under QEMU's 4 GiB has none to spare. The
+   old size is the floor either way. */
+uint32_t block_device_cache_lines_for(uint64_t free_frames) {
+    uint64_t lines = free_frames >= BLOCK_DEVICE_LARGE_MACHINE_FRAMES ? free_frames / 16
+                                                                     : free_frames / 64;
+    uint64_t floor = free_frames / 16 < 2048 ? free_frames / 16 : 2048;
+    if (lines < floor) {
+        lines = floor;
+    }
+    if (lines > BLOCK_DEVICE_MAX_CACHE_LINES) {
+        lines = BLOCK_DEVICE_MAX_CACHE_LINES;
+    }
+    if (lines < 64) {
+        lines = 64;
+    }
+    return (uint32_t)lines;
+}
+
 void block_device_init(void) {
     /* Which disks are here, in the order they were probed before M186. The
        order still decides ties; what it no longer decides on its own is which
@@ -213,39 +237,47 @@ void block_device_init(void) {
     statistics.device_reads = 0;
     statistics.device_writes = 0;
 
-    cache_lines = CACHE_LINES;
-    uint64_t affordable = physical_memory_free_frame_count() / 16;
-    if (affordable < cache_lines) {
-        cache_lines = (uint32_t)affordable;
-    }
-    if (cache_lines < 64) {
-        cache_lines = 64;
-    }
-
-    uint32_t got = 0;
-    for (uint32_t i = 0; i < cache_lines; i++) {
-        uint64_t frame = physical_memory_try_alloc_frame();
-        if (!frame) {
-            break;
+    uint32_t wanted = block_device_cache_lines_for(physical_memory_free_frame_count());
+    if (!tags) {
+        uint64_t tag_pages = ((uint64_t)wanted * sizeof(cache_tag_t) + 4095) / 4096;
+        uint64_t pointer_pages = ((uint64_t)wanted * sizeof(uint8_t *) + 4095) / 4096;
+        uint64_t tag_frames = physical_memory_try_alloc_contiguous(tag_pages);
+        uint64_t pointer_frames = physical_memory_try_alloc_contiguous(pointer_pages);
+        if (!tag_frames || !pointer_frames) {
+            panic("block_device_init: no memory for the cache's own tables");
         }
-        line_pointer[i] = (uint8_t *)(uintptr_t)frame;
-        tags[i].valid = 0;
-        got++;
+        tags = (cache_tag_t *)(uintptr_t)tag_frames;
+        line_pointer = (uint8_t **)(uintptr_t)pointer_frames;
+        for (uint32_t i = 0; i < wanted; i++) {
+            uint64_t frame = physical_memory_try_alloc_frame();
+            if (!frame) {
+                break;
+            }
+            line_pointer[i] = (uint8_t *)(uintptr_t)frame;
+            allocated_lines++;
+        }
     }
-    cache_lines = got;
+    cache_lines = allocated_lines;
+    for (uint32_t i = 0; i < cache_lines; i++) {
+        tags[i].valid = 0;
+        tags[i].dirty = 0;
+    }
     statistics.capacity = cache_lines;
 
-    scratch_lines = 0;
-    uint64_t scratch_frame = physical_memory_try_alloc_contiguous(SCRATCH_LINES);
-    if (scratch_frame) {
-        scratch = (uint8_t *)(uintptr_t)scratch_frame;
-        scratch_lines = SCRATCH_LINES;
+    if (!scratch) {
+        uint64_t scratch_frame = physical_memory_try_alloc_contiguous(SCRATCH_LINES);
+        if (scratch_frame) {
+            scratch = (uint8_t *)(uintptr_t)scratch_frame;
+            scratch_lines = SCRATCH_LINES;
+        }
     }
+    statistics.resident = 0;
+    statistics.dirty = 0;
 
     kernel_log_puts("[blk] ");
     kernel_log_puts(block_device_backend_name());
     kernel_log_puts(", ");
-    kernel_log_put_dec((cache_lines * LINE_BYTES) / 1024);
+    kernel_log_put_dec((uint32_t)(((uint64_t)cache_lines * LINE_BYTES) / 1024));
     kernel_log_puts(" KiB write-through cache in ");
     kernel_log_put_dec(cache_lines);
     kernel_log_puts(" lines of ");
@@ -376,26 +408,35 @@ int block_device_read(uint32_t lba, uint32_t count, void *buffer) {
         }
     }
 
-    if (sequential && readahead_lines > 0) {
-        for (uint32_t k = 0; k < readahead_lines; k++) {
-            uint32_t ln = last_line + 1 + k;
+    /* One request for the whole window. Asking for it a line at a time made
+       readahead slower than none over USB, where every request is three
+       round trips before a byte moves. */
+    if (sequential && readahead_lines > 0 && scratch) {
+        uint32_t window = readahead_lines < scratch_lines ? readahead_lines : scratch_lines;
+        uint32_t run = 0;
+        while (run < window) {
+            uint32_t ln = last_line + 1 + run;
             uint32_t s = slot_of(ln);
-            if (tags[s].valid && tags[s].line_no == ln) {
-                continue;
-            }
-            if (tags[s].dirty) {
+            if ((tags[s].valid && tags[s].line_no == ln) || tags[s].dirty) {
                 break;
             }
-            if (device_read(ln * BLOCK_DEVICE_PER_LINE, BLOCK_DEVICE_PER_LINE, line_pointer[s]) != 0) {
-                break;
+            run++;
+        }
+        if (run > 0 &&
+            device_read((last_line + 1) * BLOCK_DEVICE_PER_LINE, run * BLOCK_DEVICE_PER_LINE,
+                        scratch) == 0) {
+            for (uint32_t k = 0; k < run; k++) {
+                uint32_t ln = last_line + 1 + k;
+                uint32_t s = slot_of(ln);
+                k_memcpy(line_pointer[s], scratch + (uint64_t)k * LINE_BYTES, LINE_BYTES);
+                if (!tags[s].valid) {
+                    statistics.resident++;
+                }
+                tags[s].line_no = ln;
+                tags[s].valid = 1;
+                tags[s].dirty = 0;
+                statistics.readaheads++;
             }
-            if (!tags[s].valid) {
-                statistics.resident++;
-            }
-            tags[s].line_no = ln;
-            tags[s].valid = 1;
-            tags[s].dirty = 0;
-            statistics.readaheads++;
         }
     }
     spin_unlock_irqrestore(&block_device_lock, irq);

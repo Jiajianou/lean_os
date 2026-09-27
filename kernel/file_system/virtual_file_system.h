@@ -64,6 +64,8 @@ int virtual_file_system_handle_truncate_to(int handle, uint32_t length);
 
 void virtual_file_system_sync(void);
 
+void virtual_file_system_unmount_clean(void);
+
 int virtual_file_system_rename_replace(const char *old_path, const char *new_path);
 
 int virtual_file_system_check(void);

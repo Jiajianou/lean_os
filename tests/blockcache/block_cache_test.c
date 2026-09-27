@@ -197,3 +197,50 @@ TEST(block_selection, probe_order_still_decides_when_both_disks_are_ours) {
     CHECK(strcmp(block_device_backend_name(), "nvme") == 0);
     restore_default_disk();
 }
+
+/* M191. Frames are 4 KiB, so a count of frames is a count of bytes / 4096. */
+#define GIB_OF_FRAMES(n) ((uint64_t)(n) * 1024 * 1024 * 1024 / 4096)
+
+TEST(block_cache_size, a_laptop_holds_a_whole_browser_executable) {
+    uint32_t lines = block_device_cache_lines_for(GIB_OF_FRAMES(16));
+    CHECK((uint64_t)lines * 4096 >= 512ull * 1024 * 1024);
+    CHECK_EQ(lines, BLOCK_DEVICE_MAX_CACHE_LINES);
+    CHECK_EQ(block_device_cache_lines_for(GIB_OF_FRAMES(64)), BLOCK_DEVICE_MAX_CACHE_LINES);
+}
+
+TEST(block_cache_size, a_small_machine_keeps_what_it_had_before) {
+    CHECK_EQ(block_device_cache_lines_for(GIB_OF_FRAMES(4)), (uint32_t)(GIB_OF_FRAMES(4) / 64));
+    CHECK_EQ(block_device_cache_lines_for(32768), 2048u);
+    CHECK_EQ(block_device_cache_lines_for(16384), 1024u);
+    CHECK_EQ(block_device_cache_lines_for(0), 64u);
+}
+
+TEST(block_cache_size, more_memory_never_means_a_smaller_cache) {
+    uint32_t previous = 0;
+    for (uint64_t frames = 0; frames <= GIB_OF_FRAMES(32); frames += GIB_OF_FRAMES(1) / 8) {
+        uint32_t lines = block_device_cache_lines_for(frames);
+        CHECK(lines >= previous);
+        previous = lines;
+    }
+}
+
+TEST(block_cache, readahead_fetches_its_whole_window_in_one_request) {
+    setup();
+    block_device_set_readahead(16);
+    uint8_t line[SECTORS_PER_LINE * BLOCK_DEVICE_SECTOR_SIZE];
+    CHECK_EQ(block_device_read(200 * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+    CHECK_EQ(block_device_read(0, SECTORS_PER_LINE, line), 0);
+    fake_backend_reset_counters();
+    CHECK_EQ(block_device_read(SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+    expect_sector(line, SECTORS_PER_LINE);
+    CHECK_EQ((int)fake_backend_read_calls(), 2);
+
+    fake_backend_reset_counters();
+    for (uint32_t k = 2; k < 2 + 16; k++) {
+        CHECK_EQ(block_device_read(k * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+        expect_sector(line, k * SECTORS_PER_LINE);
+        expect_sector(line + 7 * BLOCK_DEVICE_SECTOR_SIZE, k * SECTORS_PER_LINE + 7);
+    }
+    CHECK_EQ((int)fake_backend_read_calls(), 0);
+    block_device_set_readahead(0);
+}

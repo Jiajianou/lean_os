@@ -126,6 +126,8 @@ uint32_t leanfs_check(void);
 
 void leanfs_sync(void);
 
+void leanfs_unmount_clean(void);
+
 int leanfs_rename_replace(const char *old_path, const char *new_path);
 
 void leanfs_debug_orphan(const char *path);

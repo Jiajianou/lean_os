@@ -125,3 +125,13 @@ int usb_storage_parse_read_capacity10(const uint8_t *in, uint32_t length, uint64
     *sector_bytes_out = sector_bytes;
     return 1;
 }
+
+uint32_t usb_storage_transfer_sectors(int superspeed) {
+    return superspeed ? USB_STORAGE_SUPERSPEED_TRANSFER_SECTORS
+                      : USB_STORAGE_HIGH_SPEED_TRANSFER_SECTORS;
+}
+
+uint32_t usb_storage_next_piece(uint64_t buffer_phys, uint32_t remaining) {
+    uint64_t to_boundary = USB_STORAGE_PIECE_BYTES - (buffer_phys & (USB_STORAGE_PIECE_BYTES - 1));
+    return remaining < to_boundary ? remaining : (uint32_t)to_boundary;
+}

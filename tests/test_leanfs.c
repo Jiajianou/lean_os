@@ -1,6 +1,7 @@
 #include "check.h"
 #include "fakes/fakes.h"
 #include "file_system/leanfs.h"
+#include "file_system/leanfs_format.h"
 #include "library/kernel_library.h"
 
 #include <stdint.h>
@@ -713,4 +714,24 @@ TEST(leanfs, a_file_a_rename_replaces_while_open_is_an_orphan_too) {
     CHECK_MEMEQ(back, "newer", 5);
     leanfs_handle_release(handle);
     CHECK_EQ(leanfs_handle_read(handle, back, 3, 0), -1);
+}
+
+static uint32_t superblock_state_on_disk(void) {
+    leanfs_superblock_t on_disk;
+    memcpy(&on_disk, fake_block_device_sector(LEANFS_START_BLOCK * LEANFS_SECTORS_PER_BLOCK),
+           sizeof(on_disk));
+    return on_disk.state;
+}
+
+TEST(leanfs, an_fsync_leaves_a_mounted_filesystem_marked_in_use) {
+    fs_fixture();
+    CHECK_EQ(superblock_state_on_disk(), LEANFS_STATE_DIRTY);
+    CHECK_EQ(leanfs_write("/synced", "x", 1), 0);
+    fake_block_device_reset_counters();
+    leanfs_sync();
+    CHECK_EQ(superblock_state_on_disk(), LEANFS_STATE_DIRTY);
+
+    leanfs_unmount_clean();
+    CHECK_EQ(superblock_state_on_disk(), LEANFS_STATE_CLEAN);
+    fake_block_device_free();
 }

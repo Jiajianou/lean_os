@@ -21,6 +21,19 @@
 #define SCSI_READ10          0x28
 #define SCSI_WRITE10         0x2A
 
+/* One command's worth of data. A SuperSpeed stick is given a megabyte, which
+   is what Linux gives one; anything slower gets Linux's 240 sectors, because
+   older devices are known to fail larger requests. Flash erases in blocks far
+   larger than the four kilobytes this driver asked for until M191, so a small
+   write costs nearly what a big one does - 36 seconds a megabyte on the first
+   laptop it met. */
+#define USB_STORAGE_SUPERSPEED_TRANSFER_SECTORS 2048
+#define USB_STORAGE_HIGH_SPEED_TRANSFER_SECTORS 240
+
+/* A transfer TRB's buffer may not cross a 64 KiB boundary, so the data phase
+   is issued as a run of transfers of at most this size. */
+#define USB_STORAGE_PIECE_BYTES 65536u
+
 #define SCSI_INQUIRY_LENGTH        36
 #define SCSI_READ_CAPACITY10_LENGTH 8
 
@@ -43,3 +56,7 @@ uint32_t usb_storage_build_write10(uint8_t *out, uint32_t lba, uint16_t blocks);
 
 int usb_storage_parse_read_capacity10(const uint8_t *in, uint32_t length, uint64_t *sectors_out,
                                       uint32_t *sector_bytes_out);
+
+uint32_t usb_storage_transfer_sectors(int superspeed);
+
+uint32_t usb_storage_next_piece(uint64_t buffer_phys, uint32_t remaining);

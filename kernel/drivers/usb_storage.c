@@ -9,13 +9,14 @@
 
 #define SECTOR_BYTES 512
 
-#define MAX_TRANSFER_SECTORS 8
+#define MAX_TRANSFER_SECTORS USB_STORAGE_SUPERSPEED_TRANSFER_SECTORS
 
 #define READY_ATTEMPTS 16
 
 static int present;
 static uint64_t sectors;
 static uint32_t next_tag = 1;
+static uint32_t transfer_sectors;
 
 static uint8_t *wrapper_buffer;
 static uint64_t wrapper_buffer_phys;
@@ -38,15 +39,21 @@ static int run_command(const uint8_t *command, uint8_t command_length, uint8_t d
         return 0;
     }
 
-    if (transfer_length > 0) {
-        if (direction == USB_STORAGE_DIRECTION_IN) {
-            if (xhci_bulk_in(data_buffer_phys, transfer_length, &moved) != 0) {
-                return 0;
-            }
-        } else {
-            if (xhci_bulk_out(data_buffer_phys, transfer_length, &moved) != 0) {
-                return 0;
-            }
+    /* The device sees one stream of packets however the host divides it, and
+       every piece but the last is a whole number of packets. A short piece
+       means the device had no more to give, and the status wrapper is next. */
+    uint32_t done = 0;
+    while (done < transfer_length) {
+        uint32_t piece = usb_storage_next_piece(data_buffer_phys + done, transfer_length - done);
+        int failed = direction == USB_STORAGE_DIRECTION_IN
+                         ? xhci_bulk_in(data_buffer_phys + done, piece, &moved)
+                         : xhci_bulk_out(data_buffer_phys + done, piece, &moved);
+        if (failed != 0) {
+            return 0;
+        }
+        done += moved;
+        if (moved < piece) {
+            break;
         }
     }
 
@@ -71,7 +78,7 @@ int usb_storage_read(uint64_t lba, uint32_t count, void *buffer) {
     }
     uint8_t *out = (uint8_t *)buffer;
     while (count > 0) {
-        uint32_t chunk = count > MAX_TRANSFER_SECTORS ? MAX_TRANSFER_SECTORS : count;
+        uint32_t chunk = count > transfer_sectors ? transfer_sectors : count;
         if (lba + chunk > sectors) {
             return 0;
         }
@@ -96,7 +103,7 @@ int usb_storage_write(uint64_t lba, uint32_t count, const void *buffer) {
     }
     const uint8_t *in = (const uint8_t *)buffer;
     while (count > 0) {
-        uint32_t chunk = count > MAX_TRANSFER_SECTORS ? MAX_TRANSFER_SECTORS : count;
+        uint32_t chunk = count > transfer_sectors ? transfer_sectors : count;
         if (lba + chunk > sectors) {
             return 0;
         }
@@ -123,15 +130,20 @@ int usb_storage_init(void) {
         return 0;
     }
 
+    transfer_sectors = usb_storage_transfer_sectors(xhci_storage_superspeed());
+
+    /* Aligned to a piece so that every piece but the last is a full one. */
+    uint64_t piece_pages = USB_STORAGE_PIECE_BYTES / 4096;
     uint64_t wrapper_page = physical_memory_alloc_contiguous(1);
-    uint64_t data_pages = physical_memory_alloc_contiguous(MAX_TRANSFER_SECTORS * SECTOR_BYTES / 4096);
+    uint64_t data_pages =
+        physical_memory_alloc_contiguous(MAX_TRANSFER_SECTORS * SECTOR_BYTES / 4096 + piece_pages);
     if (!wrapper_page || !data_pages) {
         return 0;
     }
     wrapper_buffer = (uint8_t *)(uintptr_t)wrapper_page;
     wrapper_buffer_phys = wrapper_page;
-    data_buffer = (uint8_t *)(uintptr_t)data_pages;
-    data_buffer_phys = data_pages;
+    data_buffer_phys = (data_pages + USB_STORAGE_PIECE_BYTES - 1) & ~(uint64_t)(USB_STORAGE_PIECE_BYTES - 1);
+    data_buffer = (uint8_t *)(uintptr_t)data_buffer_phys;
 
     uint8_t command[10];
     uint32_t command_length = usb_storage_build_inquiry(command);
@@ -187,6 +199,9 @@ int usb_storage_init(void) {
     kernel_log_put_dec((uint32_t)sectors);
     kernel_log_puts(" sectors of ");
     kernel_log_put_dec(sector_bytes);
-    kernel_log_puts(" bytes.\n");
+    kernel_log_puts(" bytes, ");
+    kernel_log_put_dec(transfer_sectors / 2);
+    kernel_log_puts(xhci_storage_superspeed() ? " KiB a command (SuperSpeed).\n"
+                                              : " KiB a command.\n");
     return 1;
 }

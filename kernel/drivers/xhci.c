@@ -1,5 +1,6 @@
 #include "xhci.h"
 
+#include "architecture/x86_64/timestamp_counter.h"
 #include "drivers/keyboard.h"
 #include "drivers/kernel_log.h"
 #include "drivers/mouse.h"
@@ -80,6 +81,7 @@
 #define USB_HID_SET_IDLE          0x0A
 #define USB_DESCRIPTOR_DEVICE 1
 #define USB_DESCRIPTOR_CONFIG 2
+#define USB_DESCRIPTOR_SUPERSPEED_COMPANION 0x30
 
 #define HID_CLASS          3
 #define HID_SUBCLASS_BOOT  1
@@ -113,6 +115,7 @@ typedef struct {
     xhci_ring_t bulk_out;
     uint64_t sectors;
     uint32_t sector_bytes;
+    uint32_t speed;
 } storage_device_t;
 
 typedef struct {
@@ -319,6 +322,27 @@ static int control_transfer(uint8_t slot, xhci_ring_t *ring, uint8_t bm_request_
     return -1;
 }
 
+/* SPIN_LIMIT is a count of polls, and how long that is depends on the
+   machine. A megabyte written to a cheap stick that has chosen this moment to
+   erase a block can take well over a second, and a write reported as failed
+   because the host stopped listening is a filesystem error that never
+   happened. The deadline is time. With no calibrated clock it is one
+   SPIN_LIMIT, as it always was. */
+#define BULK_DEADLINE_US 10000000ull
+
+static int bulk_event_wait(xhci_trb_t *out) {
+    uint64_t start = tsc_read();
+    for (;;) {
+        if (event_wait(out) == 0) {
+            return 0;
+        }
+        uint64_t waited = tsc_to_us(tsc_read() - start);
+        if (waited == 0 || waited >= BULK_DEADLINE_US) {
+            return -1;
+        }
+    }
+}
+
 static int bulk_transfer(uint8_t slot, uint8_t dci, xhci_ring_t *ring, uint64_t buffer_phys,
                          uint32_t length, uint32_t *transferred_out) {
     if (transferred_out) {
@@ -329,7 +353,7 @@ static int bulk_transfer(uint8_t slot, uint8_t dci, xhci_ring_t *ring, uint64_t 
 
     xhci_trb_t ev;
     for (int tries = 0; tries < 8; tries++) {
-        if (event_wait(&ev) != 0) {
+        if (bulk_event_wait(&ev) != 0) {
             return -1;
         }
         if (((ev.control >> TRB_TYPE_SHIFT) & 0x3F) != TRB_EVENT_TRANSFER) {
@@ -361,14 +385,19 @@ int xhci_bulk_out(uint64_t buffer_phys, uint32_t length, uint32_t *transferred_o
                          transferred_out);
 }
 
+int xhci_storage_superspeed(void) {
+    return storage.present && storage.speed >= SPEED_SUPER;
+}
+
 int xhci_storage_present(void) {
     return storage.present;
 }
 
 static int configure_storage(uint8_t slot, xhci_ring_t *ep0, uint64_t in_context, uint32_t port,
                              uint32_t speed, uint8_t config_value, uint8_t bulk_in_address,
-                             uint16_t bulk_in_mps, uint8_t bulk_out_address,
-                             uint16_t bulk_out_mps) {
+                             uint16_t bulk_in_mps, uint8_t bulk_in_burst,
+                             uint8_t bulk_out_address, uint16_t bulk_out_mps,
+                             uint8_t bulk_out_burst) {
     if (control_transfer(slot, ep0, 0x00, USB_REQUEST_SET_CONFIGURATION, config_value, 0, 0) != 0) {
         return 0;
     }
@@ -390,12 +419,17 @@ static int configure_storage(uint8_t slot, xhci_ring_t *ep0, uint64_t in_context
     slot_context[1] = port << 16;
 
     uint32_t *in_endpoint = context_at((void *)in_context, in_dci + 1);
-    in_endpoint[1] = (ENDPOINT_TYPE_BULK_IN << 3) | (3u << 1) | ((uint32_t)bulk_in_mps << 16);
+    /* Max Burst is how many packets the device takes before it must answer.
+       Left at zero a SuperSpeed stick is acknowledged one 1024-byte packet at
+       a time, which is most of what makes USB 3 faster than USB 2. */
+    in_endpoint[1] = (ENDPOINT_TYPE_BULK_IN << 3) | (3u << 1) | ((uint32_t)bulk_in_burst << 8) |
+                     ((uint32_t)bulk_in_mps << 16);
     *(uint64_t *)&in_endpoint[2] = storage.bulk_in.phys | 1;
     in_endpoint[4] = bulk_in_mps;
 
     uint32_t *out_endpoint = context_at((void *)in_context, out_dci + 1);
-    out_endpoint[1] = (ENDPOINT_TYPE_BULK_OUT << 3) | (3u << 1) | ((uint32_t)bulk_out_mps << 16);
+    out_endpoint[1] = (ENDPOINT_TYPE_BULK_OUT << 3) | (3u << 1) | ((uint32_t)bulk_out_burst << 8) |
+                      ((uint32_t)bulk_out_mps << 16);
     *(uint64_t *)&out_endpoint[2] = storage.bulk_out.phys | 1;
     out_endpoint[4] = bulk_out_mps;
 
@@ -406,6 +440,7 @@ static int configure_storage(uint8_t slot, xhci_ring_t *ep0, uint64_t in_context
     }
 
     storage.slot = slot;
+    storage.speed = speed;
     storage.bulk_in_dci = in_dci;
     storage.bulk_out_dci = out_dci;
     storage.present = 1;
@@ -521,6 +556,8 @@ static int enumerate_port(uint32_t port) {
     int in_storage_interface = 0;
     int bulk_in_address = -1, bulk_out_address = -1;
     uint16_t bulk_in_mps = 0, bulk_out_mps = 0;
+    uint8_t bulk_in_burst = 0, bulk_out_burst = 0;
+    int last_bulk_endpoint = 0;
 
     for (uint16_t off = 0; off + 1 < total;) {
         uint8_t dlen = enum_buffer[off];
@@ -550,13 +587,16 @@ static int enumerate_port(uint32_t port) {
             uint8_t attribute = enum_buffer[off + 3];
             uint16_t max_packet = (uint16_t)(enum_buffer[off + 4] | (enum_buffer[off + 5] << 8));
 
+            last_bulk_endpoint = 0;
             if (in_storage_interface && (attribute & 0x03) == ENDPOINT_ATTRIBUTE_BULK) {
                 if ((address & 0x80) && bulk_in_address < 0) {
                     bulk_in_address = address;
                     bulk_in_mps = max_packet;
+                    last_bulk_endpoint = 1;
                 } else if (!(address & 0x80) && bulk_out_address < 0) {
                     bulk_out_address = address;
                     bulk_out_mps = max_packet;
+                    last_bulk_endpoint = 2;
                 }
             } else if (proto != 0 && ep_address < 0 && (address & 0x80) &&
                        (attribute & 0x03) == 3) {
@@ -564,14 +604,22 @@ static int enumerate_port(uint32_t port) {
                 ep_mps = max_packet;
                 ep_interval = enum_buffer[off + 6];
             }
+        } else if (dtype == USB_DESCRIPTOR_SUPERSPEED_COMPANION && off + 2 < total) {
+            uint8_t burst = enum_buffer[off + 2] & 0x0F;
+            if (last_bulk_endpoint == 1) {
+                bulk_in_burst = burst;
+            } else if (last_bulk_endpoint == 2) {
+                bulk_out_burst = burst;
+            }
+            last_bulk_endpoint = 0;
         }
         off = (uint16_t)(off + dlen);
     }
 
     if (bulk_in_address >= 0 && bulk_out_address >= 0 && !storage.present) {
         return configure_storage(slot, &ep0, in_context, port, speed, config_value,
-                                 (uint8_t)bulk_in_address, bulk_in_mps,
-                                 (uint8_t)bulk_out_address, bulk_out_mps);
+                                 (uint8_t)bulk_in_address, bulk_in_mps, bulk_in_burst,
+                                 (uint8_t)bulk_out_address, bulk_out_mps, bulk_out_burst);
     }
 
     if (proto != HID_PROTO_KEYBOARD && proto != HID_PROTO_MOUSE) {

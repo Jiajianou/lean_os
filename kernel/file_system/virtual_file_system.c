@@ -9,6 +9,8 @@
 
 static spinlock_t fs_lock;
 
+#define VIRTUAL_FILE_SYSTEM_READ_CHUNK (4u * 1024 * 1024)
+
 #define VIRTUAL_FILE_SYSTEM_MAX_MOUNTS 3
 
 typedef struct {
@@ -88,9 +90,45 @@ int64_t virtual_file_system_read(const char *path, void *buffer, size_t maxlen) 
         return n;
     }
     uint64_t f = spin_lock_irqsave(&fs_lock);
-    int64_t r = leanfs_read(path, buffer, maxlen);
+    if (maxlen <= VIRTUAL_FILE_SYSTEM_READ_CHUNK) {
+        int64_t r = leanfs_read(path, buffer, maxlen);
+        spin_unlock_irqrestore(&fs_lock, f);
+        return r;
+    }
+
+    /* fs_lock is held with interrupts off, and an exec reads the whole program
+       under it: 306 MB of browser off a USB stick was twenty seconds in which
+       the processor doing it took no timer tick, no keystroke and no other
+       task. A big read gives the lock back between pieces. The inode is held
+       across the gaps so an unlink in one cannot free the blocks the next
+       piece reads. */
+    leanfs_stat_t st;
+    int handle = leanfs_open(path, 0);
+    if (handle < 0 || leanfs_stat(path, &st) != 0 || st.is_directory) {
+        spin_unlock_irqrestore(&fs_lock, f);
+        return -1;
+    }
+    leanfs_handle_hold(handle);
+    size_t wanted = maxlen < st.size ? maxlen : st.size;
+    size_t done = 0;
+    int64_t result = st.size;
+    while (done < wanted) {
+        size_t piece = wanted - done;
+        if (piece > VIRTUAL_FILE_SYSTEM_READ_CHUNK) {
+            piece = VIRTUAL_FILE_SYSTEM_READ_CHUNK;
+        }
+        int64_t n = leanfs_handle_read(handle, (uint8_t *)buffer + done, piece, (uint32_t)done);
+        if (n <= 0) {
+            result = -1;
+            break;
+        }
+        done += (size_t)n;
+        spin_unlock_irqrestore(&fs_lock, f);
+        f = spin_lock_irqsave(&fs_lock);
+    }
+    leanfs_handle_release(handle);
     spin_unlock_irqrestore(&fs_lock, f);
-    return r;
+    return result;
 }
 
 int virtual_file_system_write(const char *path, const void *buffer, size_t length) {
@@ -266,6 +304,12 @@ size_t virtual_file_system_list(const char *path, char *buffer, size_t maxlen) {
 void virtual_file_system_sync(void) {
     uint64_t f = spin_lock_irqsave(&fs_lock);
     leanfs_sync();
+    spin_unlock_irqrestore(&fs_lock, f);
+}
+
+void virtual_file_system_unmount_clean(void) {
+    uint64_t f = spin_lock_irqsave(&fs_lock);
+    leanfs_unmount_clean();
     spin_unlock_irqrestore(&fs_lock, f);
     kernel_log_puts("[vfs] sync: leanfs is write-through; superblock marked cleanly unmounted.\n");
 }

@@ -180,7 +180,7 @@ void power_shutdown(int mode) {
     kernel_log_put_hex32((uint32_t)killed);
     kernel_log_puts(" task(s) needed SIGKILL after the grace period).\n");
 
-    virtual_file_system_sync();
+    virtual_file_system_unmount_clean();
 
     smp_halt_other_cpus();
 

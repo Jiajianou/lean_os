@@ -4,6 +4,11 @@
 
 #define BLOCK_DEVICE_SECTOR_SIZE 512
 
+#define BLOCK_DEVICE_LARGE_MACHINE_FRAMES (8ull * 1024 * 1024 * 1024 / 4096)
+#define BLOCK_DEVICE_MAX_CACHE_LINES      262144u
+
+uint32_t block_device_cache_lines_for(uint64_t free_frames);
+
 void block_device_init(void);
 
 const char *block_device_backend_name(void);

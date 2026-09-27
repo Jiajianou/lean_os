@@ -1492,7 +1492,17 @@ void leanfs_debug_orphan(const char *path) {
     save_meta();
 }
 
+/* fsync(2) and sync(2) promise that what was written is on the disk, and
+   nothing more. Until M191 they also marked the filesystem cleanly unmounted -
+   on a filesystem that stayed mounted and went on changing, so a crash after
+   any program's fsync skipped the mount check - and wrote the superblock
+   through to the device to say so. Chromium starting up fsyncs about three
+   hundred times, and on a USB stick each of those was a flash erase. */
 void leanfs_sync(void) {
+    block_device_flush();
+}
+
+void leanfs_unmount_clean(void) {
     block_device_flush();
     sb.state = LEANFS_STATE_CLEAN;
     save_superblock();
