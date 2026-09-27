@@ -242,3 +242,79 @@ void pci_set_power_state_d0(const pci_device_t *dev) {
     for (volatile int settle = 0; settle < 100000; settle++) {
     }
 }
+
+typedef struct {
+    uint64_t highest_end;
+} occupied_t;
+
+static uint64_t window_end(uint32_t limit_bits, uint32_t upper) {
+    return ((((uint64_t)upper << 32) | ((uint64_t)(limit_bits & 0xFFF0u) << 16)) | 0xFFFFFu) + 1;
+}
+
+static void note_occupied(const pci_device_t *device, void *context) {
+    occupied_t *occupied = (occupied_t *)context;
+    uint32_t header = (config_read32(device->bus, device->slot, device->func, PCI_REG_HEADER_TYPE) >> 16) & 0x7F;
+    uint8_t bars = header == 1 ? 2 : (header == 0 ? 6 : 0);
+
+    uint32_t command = config_read32(device->bus, device->slot, device->func, PCI_REG_COMMAND);
+    config_write32(device->bus, device->slot, device->func, PCI_REG_COMMAND, command & ~(1u << 1));
+    for (uint8_t index = 0; index < bars; index++) {
+        uint64_t base = pci_bar_memory_base(device, index);
+        if (base == 0) {
+            continue;
+        }
+        uint64_t end = base + pci_bar_memory_size(device, index);
+        if (end > occupied->highest_end) {
+            occupied->highest_end = end;
+        }
+    }
+    config_write32(device->bus, device->slot, device->func, PCI_REG_COMMAND, command);
+
+    if (header == 1) {
+        uint32_t memory = config_read32(device->bus, device->slot, device->func, 0x20);
+        uint64_t memory_base = (uint64_t)(memory & 0xFFF0u) << 16;
+        uint64_t memory_end = window_end(memory >> 16, 0);
+        if (memory_end - 1 >= memory_base && memory_end > occupied->highest_end) {
+            occupied->highest_end = memory_end;
+        }
+        uint32_t prefetchable = config_read32(device->bus, device->slot, device->func, 0x24);
+        uint32_t base_upper = config_read32(device->bus, device->slot, device->func, 0x28);
+        uint32_t limit_upper = config_read32(device->bus, device->slot, device->func, 0x2C);
+        uint64_t prefetchable_base = ((uint64_t)base_upper << 32) | ((uint64_t)(prefetchable & 0xFFF0u) << 16);
+        uint64_t prefetchable_end = window_end(prefetchable >> 16, limit_upper);
+        if (prefetchable_end - 1 >= prefetchable_base && prefetchable_end > occupied->highest_end) {
+            occupied->highest_end = prefetchable_end;
+        }
+    }
+}
+
+uint64_t pci_assign_memory_bar(const pci_device_t *dev, uint8_t index, uint64_t address_limit) {
+    uint64_t existing = pci_bar_memory_base(dev, index);
+    if (existing != 0) {
+        return existing;
+    }
+    uint8_t off = (uint8_t)(PCI_REG_BAR0 + index * 4);
+    uint32_t low = config_read32(dev->bus, dev->slot, dev->func, off);
+    if ((low & PCI_BAR_IO) || (low & PCI_BAR_TYPE_MASK) != PCI_BAR_TYPE_64) {
+        return 0;
+    }
+    uint64_t size = pci_bar_memory_size(dev, index);
+    if (size == 0) {
+        return 0;
+    }
+
+    occupied_t occupied = {0};
+    pci_enumerate(note_occupied, &occupied);
+    if (occupied.highest_end <= 0x100000000ULL) {
+        return 0;
+    }
+    uint64_t alignment = size < 0x100000 ? 0x100000 : size;
+    uint64_t place = (occupied.highest_end + alignment - 1) & ~(alignment - 1);
+    if (place + size > address_limit || place + size < place) {
+        return 0;
+    }
+
+    config_write32(dev->bus, dev->slot, dev->func, off, (uint32_t)place | (low & 0x0Fu));
+    config_write32(dev->bus, dev->slot, dev->func, (uint8_t)(off + 4), (uint32_t)(place >> 32));
+    return pci_bar_memory_base(dev, index);
+}

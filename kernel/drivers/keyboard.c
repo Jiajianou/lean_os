@@ -10,6 +10,7 @@
 #include "drivers/kernel_log.h"
 #include "input.h"
 #include "ps2_controller.h"
+#include "scheduler/scheduler_diagnostics.h"
 
 #define PS2_DATA_PORT 0x60
 #define KEYBOARD_IRQ  1
@@ -18,6 +19,7 @@
 #define SCANCODE_RSHIFT       0x36
 #define SCANCODE_LCTRL        0x1D
 #define SCANCODE_LALT         0x38
+#define SCANCODE_D            0x20
 #define SCANCODE_RELEASE_BIT  0x80
 
 #define SCANCODE_F1  0x3B
@@ -151,6 +153,12 @@ static void keyboard_irq(isr_regs_t *regs) {
     }
 
     if (released || code >= sizeof(unshifted_table)) {
+        return;
+    }
+    /* Answered here, in the interrupt, rather than by any program: on a machine
+       with no serial port it is the only way to ask a frozen desktop what it is doing. */
+    if (code == SCANCODE_D && ctrl_held && alt_held) {
+        scheduler_diagnostics_toggle();
         return;
     }
 

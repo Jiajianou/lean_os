@@ -135,6 +135,15 @@ void hardware_inventory_report(void) {
                                                                         : "the built-in default"));
     kernel_log_puts(".\n");
 
+    kernel_log_puts("[inventory] modes the firmware offers:");
+    for (uint32_t i = 0; i < options->offered_count; i++) {
+        kernel_log_puts(" ");
+        kernel_log_put_dec(options->offered[i][0]);
+        kernel_log_puts("x");
+        kernel_log_put_dec(options->offered[i][1]);
+    }
+    kernel_log_puts(options->offered_count ? ".\n" : " none recorded.\n");
+
     kernel_log_puts("[inventory] interrupts: ");
     kernel_log_puts(ioapic_available() ? "I/O APIC" : "8259 PIC");
     kernel_log_puts(".\n");

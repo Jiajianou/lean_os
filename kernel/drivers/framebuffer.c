@@ -8,18 +8,24 @@
 
 #define PAGE_SIZE 4096ULL
 
+#define FRAMEBUFFER_WINDOW_BYTES (256ULL * 1024 * 1024)
+
 static uint64_t framebuffer_base;
+static uint64_t framebuffer_virtual;
 static uint32_t framebuffer_pitch;
 static uint32_t framebuffer_w;
 static uint32_t framebuffer_h;
 static uint64_t framebuffer_mapped;
 
 static uint64_t map_through(uint64_t bytes) {
+    if (bytes > FRAMEBUFFER_WINDOW_BYTES) {
+        panic("fb: a mode larger than the framebuffer's virtual window");
+    }
     uint64_t pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
     uint64_t have = framebuffer_mapped / PAGE_SIZE;
     for (uint64_t i = have; i < pages; i++) {
-        uint64_t address = framebuffer_base + i * PAGE_SIZE;
-        virtual_memory_map_page(address, address, VIRTUAL_MEMORY_FLAG_WRITABLE);
+        virtual_memory_map_page(framebuffer_virtual + i * PAGE_SIZE, framebuffer_base + i * PAGE_SIZE,
+                                VIRTUAL_MEMORY_FLAG_WRITABLE | VIRTUAL_MEMORY_FLAG_WRITE_COMBINING);
     }
     if (pages * PAGE_SIZE > framebuffer_mapped) {
         framebuffer_mapped = pages * PAGE_SIZE;
@@ -36,6 +42,12 @@ void framebuffer_init(const framebuffer_boot_info_t *info) {
     }
 
     framebuffer_base = info->phys_address;
+    /* Not virtual-equals-physical: a GOP framebuffer can sit anywhere in the
+       physical address space, including on top of the heap's virtual range. */
+    framebuffer_virtual = virtual_memory_reserve_mmio(FRAMEBUFFER_WINDOW_BYTES);
+    if (framebuffer_virtual == 0) {
+        panic("fb_init: no room in the MMIO window for the framebuffer");
+    }
     framebuffer_pitch = info->pitch;
     framebuffer_w = info->width;
     framebuffer_h = info->height;
@@ -98,7 +110,7 @@ uint64_t framebuffer_phys_address(void) {
 }
 
 static inline volatile uint32_t *pixel_address(uint32_t x, uint32_t y) {
-    return (volatile uint32_t *)(framebuffer_base + (uint64_t)y * framebuffer_pitch + (uint64_t)x * 4);
+    return (volatile uint32_t *)(framebuffer_virtual + (uint64_t)y * framebuffer_pitch + (uint64_t)x * 4);
 }
 
 void framebuffer_put_pixel(uint32_t x, uint32_t y, uint32_t rgb) {

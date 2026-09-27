@@ -11,6 +11,8 @@
 #define BOOT_INTERRUPTS_PIC    1
 #define BOOT_INTERRUPTS_IOAPIC 2
 
+#define BOOT_OFFERED_MODES_MAX 16
+
 #define BOOT_OPTIONS_MAGIC 0x4C4E4F5054424FULL
 
 typedef struct __attribute__((packed)) {
@@ -23,6 +25,8 @@ typedef struct __attribute__((packed)) {
     uint32_t unknown_keys;
     uint32_t chosen_width;
     uint32_t chosen_height;
+    uint32_t offered_count;
+    uint32_t offered[BOOT_OFFERED_MODES_MAX][2];
 } boot_options_t;
 
 void boot_options_defaults(boot_options_t *options);

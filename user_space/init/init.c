@@ -68,7 +68,7 @@ int main(int argc, char **argv) {
             }
             long until = sys_uptime_ms() + 250;
             while (sys_uptime_ms() < until) {
-                sys_yield();
+                sys_waitfds((const int *)0, 0, (int)(until - sys_uptime_ms()));
             }
         }
 

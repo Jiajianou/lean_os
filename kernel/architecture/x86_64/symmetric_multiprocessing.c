@@ -66,6 +66,7 @@ void ap_main(uint32_t cpu_id) {
     idt_load_ap();
     fpu_init_cpu();
     virtual_memory_enable_nx_this_cpu();
+    virtual_memory_enable_pat_this_cpu();
     lapic_init_this_cpu();
     verify_cpu_identity(cpu_id);
     scheduler_init_ap((int)cpu_id);

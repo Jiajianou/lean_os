@@ -8,6 +8,7 @@
 #include "pc_speaker.h"
 #include "profile/sampler.h"
 #include "xhci.h"
+#include "scheduler/scheduler_diagnostics.h"
 
 #define PIT_CHANNEL0_DATA 0x40
 #define PIT_COMMAND       0x43
@@ -30,6 +31,7 @@ static void pit_irq(isr_regs_t *regs) {
     if (tick_hook) {
         tick_hook();
     }
+    scheduler_diagnostics_tick(ticks);
 }
 
 void pit_init(void) {

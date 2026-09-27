@@ -18,6 +18,7 @@ static void virtual_memory_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64
 #define PTE_PRESENT   (1ULL << 0)
 #define PTE_WRITABLE  (1ULL << 1)
 #define PTE_USER      (1ULL << 2)
+#define PTE_PWT       (1ULL << 3)
 #define PTE_PCD       (1ULL << 4)
 #define PTE_HUGE      (1ULL << 7)
 #define PTE_COW       (1ULL << 9)
@@ -56,12 +57,31 @@ void virtual_memory_enable_nx_this_cpu(void) {
     __asm__ volatile("wrmsr" : : "a"(lo), "d"(hi), "c"(0xC0000080u));
 }
 
+/* PAT entry 1 is write-through at reset and nothing here asked for write-through,
+   so it becomes write-combining, and a page with PWT set and PCD clear gets it. A
+   framebuffer is the reason: firmware leaves its range uncached in the MTRRs, and
+   uncached means one bus transaction per pixel - a 3840x2400 panel drew its cursor
+   a frame at a time. Every CPU must hold the same table, so the APs load it too. */
+#define PAT_MSR 0x277u
+#define PAT_WITH_WRITE_COMBINING_AT_1 0x0007040600070106ULL
+
+void virtual_memory_enable_pat_this_cpu(void) {
+    __asm__ volatile("wbinvd" : : : "memory");
+    uint32_t lo = (uint32_t)PAT_WITH_WRITE_COMBINING_AT_1;
+    uint32_t hi = (uint32_t)(PAT_WITH_WRITE_COMBINING_AT_1 >> 32);
+    __asm__ volatile("wrmsr" : : "a"(lo), "d"(hi), "c"(PAT_MSR));
+    __asm__ volatile("wbinvd" : : : "memory");
+}
+
 int virtual_memory_nx_enabled(void) {
     return nx_enabled;
 }
 
 static uint64_t leaf_flags(uint64_t flags) {
     uint64_t e = (flags & (PTE_WRITABLE | PTE_USER | PTE_PCD)) | PTE_PRESENT;
+    if ((flags & VIRTUAL_MEMORY_FLAG_WRITE_COMBINING) && !(flags & PTE_PCD)) {
+        e |= PTE_PWT;
+    }
     if (nx_enabled && !(flags & VIRTUAL_MEMORY_FLAG_EXEC)) {
         e |= PTE_NX;
     }
@@ -198,6 +218,7 @@ static void identity_map_block(uint64_t phys_2m) {
 void virtual_memory_init(const uint32_t *e820_map) {
     nx_enabled = cpu_has_nx();
     virtual_memory_enable_nx_this_cpu();
+    virtual_memory_enable_pat_this_cpu();
 
     uint64_t pml4_phys = try_alloc_table();
     if (!pml4_phys) {
@@ -257,13 +278,38 @@ int virtual_memory_identity_covers(uint64_t phys, uint64_t length) {
     for (uint64_t p = phys & ~(HUGE_PAGE_SIZE - 1); p < end; p += HUGE_PAGE_SIZE) {
         uint64_t *pdpt = table_walk(kernel_pml4, PML4_INDEX(p), 0, 0);
         uint64_t *pd = pdpt ? table_walk(pdpt, PDPT_INDEX(p), 0, 0) : (uint64_t *)0;
-        if (!pd || !(pd[PD_INDEX(p)] & PTE_PRESENT) || !(pd[PD_INDEX(p)] & PTE_HUGE)) {
+        if (!pd || !(pd[PD_INDEX(p)] & PTE_PRESENT)) {
             ok = 0;
+            break;
+        }
+        if (pd[PD_INDEX(p)] & PTE_HUGE) {
+            continue;
+        }
+        uint64_t *pt = phys_to_table(pd[PD_INDEX(p)] & PTE_ADDRESS_MASK);
+        uint64_t first = (p < phys) ? (phys & ~(PAGE_SIZE - 1)) : p;
+        uint64_t last = (end < p + HUGE_PAGE_SIZE) ? end : p + HUGE_PAGE_SIZE;
+        for (uint64_t page = first; page < last; page += PAGE_SIZE) {
+            uint64_t e = pt[PT_INDEX(page)];
+            if (!(e & PTE_PRESENT) || (e & PTE_ADDRESS_MASK) != page) {
+                ok = 0;
+                break;
+            }
+        }
+        if (!ok) {
             break;
         }
     }
     spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
     return ok;
+}
+
+int virtual_memory_identity_is_huge(uint64_t phys) {
+    uint64_t irq_flags = spin_lock_irqsave(&virtual_memory_lock);
+    uint64_t *pdpt = table_walk(kernel_pml4, PML4_INDEX(phys), 0, 0);
+    uint64_t *pd = pdpt ? table_walk(pdpt, PDPT_INDEX(phys), 0, 0) : (uint64_t *)0;
+    int huge = pd && (pd[PD_INDEX(phys)] & PTE_PRESENT) && (pd[PD_INDEX(phys)] & PTE_HUGE);
+    spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
+    return huge;
 }
 
 uint64_t virtual_memory_kernel_pml4_phys(void) {
@@ -317,6 +363,25 @@ uint64_t virtual_memory_unmap_page_take(uint64_t pml4_phys, uint64_t virt) {
     return phys;
 }
 
+static int split_huge_entry(uint64_t *pd, uint64_t index, uint64_t virt_base) {
+    uint64_t entry = pd[index];
+    uint64_t table_phys = try_alloc_table();
+    if (!table_phys) {
+        return -1;
+    }
+    uint64_t *pt = phys_to_table(table_phys);
+    uint64_t base = entry & PTE_ADDRESS_MASK & ~(HUGE_PAGE_SIZE - 1);
+    uint64_t keep = entry & ~PTE_ADDRESS_MASK & ~PTE_HUGE;
+    for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++) {
+        pt[i] = (base + i * PAGE_SIZE) | keep;
+    }
+    pd[index] = table_phys | PTE_PRESENT | PTE_WRITABLE | (entry & PTE_USER);
+    for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++) {
+        __asm__ volatile("invlpg (%0)" : : "r"(virt_base + i * PAGE_SIZE) : "memory");
+    }
+    return 0;
+}
+
 int virtual_memory_try_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t irq_flags = spin_lock_irqsave(&virtual_memory_lock);
     uint64_t *pml4 = phys_to_table(pml4_phys);
@@ -328,8 +393,9 @@ int virtual_memory_try_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t p
         spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
         return -1;
     }
-    if (pd[PD_INDEX(virt)] & PTE_HUGE) {
-        panic("vmm_map_page_in: address falls inside a 2 MiB huge-mapped range");
+    if ((pd[PD_INDEX(virt)] & PTE_HUGE) && split_huge_entry(pd, PD_INDEX(virt), virt & ~(HUGE_PAGE_SIZE - 1)) != 0) {
+        spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
+        return -1;
     }
     uint64_t *pt = table_walk(pd, PD_INDEX(virt), 1, extra);
     if (!pt) {
@@ -384,10 +450,34 @@ uint64_t virtual_memory_protect_range_in(uint64_t pml4_phys, uint64_t start, uin
 }
 
 void virtual_memory_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
+    /* The identity map is PML4 entry 0, and so is the heap at 256 GiB and the
+       MMIO window at 384 GiB. A device mapped virtual-equals-physical up there
+       lands on top of one of them - a laptop put its framebuffer at exactly
+       0x4000000000 and the console drew text over the heap. */
+    if (virt == phys && virt >= KERNEL_HEAP_VIRT_BASE) {
+        panic("vmm_map_page: an identity mapping at or above the heap window - use virtual_memory_map_mmio");
+    }
     virtual_memory_map_page_in(kernel_pml4_phys, virt, phys, flags);
 }
 
 static uint64_t mmio_next = KERNEL_MMIO_VIRT_BASE;
+
+uint64_t virtual_memory_reserve_mmio(uint64_t length) {
+    uint64_t span = (length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    if (span == 0 || span < length) {
+        return 0;
+    }
+    uint64_t irq = spin_lock_irqsave(&mmio_lock);
+    if (span > KERNEL_MMIO_VIRT_SIZE ||
+        mmio_next - KERNEL_MMIO_VIRT_BASE > KERNEL_MMIO_VIRT_SIZE - span) {
+        spin_unlock_irqrestore(&mmio_lock, irq);
+        return 0;
+    }
+    uint64_t virt = mmio_next;
+    mmio_next += span;
+    spin_unlock_irqrestore(&mmio_lock, irq);
+    return virt;
+}
 
 void *virtual_memory_map_mmio(uint64_t phys, uint64_t length) {
     if (length == 0) {
@@ -401,15 +491,10 @@ void *virtual_memory_map_mmio(uint64_t phys, uint64_t length) {
     }
     uint64_t span = end - start;
 
-    uint64_t irq = spin_lock_irqsave(&mmio_lock);
-    if (span > KERNEL_MMIO_VIRT_SIZE ||
-        mmio_next - KERNEL_MMIO_VIRT_BASE > KERNEL_MMIO_VIRT_SIZE - span) {
-        spin_unlock_irqrestore(&mmio_lock, irq);
+    uint64_t virt = virtual_memory_reserve_mmio(span);
+    if (virt == 0) {
         return (void *)0;
     }
-    uint64_t virt = mmio_next;
-    mmio_next += span;
-    spin_unlock_irqrestore(&mmio_lock, irq);
 
     for (uint64_t i = 0; i < span; i += PAGE_SIZE) {
         if (virtual_memory_try_map_page_in(kernel_pml4_phys, virt + i, start + i,

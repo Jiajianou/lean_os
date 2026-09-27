@@ -2039,7 +2039,8 @@ static long sys_framebuffer_map(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t 
     for (uint64_t i = 0; i < pages; i++) {
         if (virtual_memory_try_map_page_in(current->pml4_phys, USER_FRAMEBUFFER_BASE + i * PAGE_SIZE,
                                 phys_base + i * PAGE_SIZE,
-                                VIRTUAL_MEMORY_FLAG_WRITABLE | VIRTUAL_MEMORY_FLAG_USER) != 0) {
+                                VIRTUAL_MEMORY_FLAG_WRITABLE | VIRTUAL_MEMORY_FLAG_USER |
+                                VIRTUAL_MEMORY_FLAG_WRITE_COMBINING) != 0) {
             return (long)(uint64_t)-1;
         }
     }

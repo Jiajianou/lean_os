@@ -34,6 +34,8 @@ uint64_t pci_bar_memory_base(const pci_device_t *dev, uint8_t index);
 
 uint64_t pci_bar_memory_size(const pci_device_t *dev, uint8_t index);
 
+uint64_t pci_assign_memory_bar(const pci_device_t *dev, uint8_t index, uint64_t address_limit);
+
 #define PCI_CAP_ID_MSI  0x05
 #define PCI_CAP_ID_MSIX 0x11
 #define PCI_CAP_ID_POWER_MANAGEMENT 0x01

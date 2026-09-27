@@ -13228,6 +13228,37 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
                   "correctly reported as not mapped.\n\n");
     }
 
+    {
+        uint64_t frame = physical_memory_alloc_frame_above(0x200000ULL);
+        if (frame == 0) {
+            panic("[m188] no frame to split the identity map around");
+        }
+        uint64_t block = frame & ~0x1FFFFFULL;
+        if (!virtual_memory_identity_is_huge(frame)) {
+            panic("[m188] the frame's 2 MiB block was not a huge page to begin with");
+        }
+        volatile uint64_t *first = (volatile uint64_t *)(uintptr_t)block;
+        volatile uint64_t *last = (volatile uint64_t *)(uintptr_t)(block + 0x200000ULL - 8);
+        uint64_t first_before = *first;
+        uint64_t last_before = *last;
+        volatile uint64_t *probe = (volatile uint64_t *)(uintptr_t)frame;
+        probe[0] = 0x0188018801880188ULL;
+        virtual_memory_map_page(frame, frame, VIRTUAL_MEMORY_FLAG_WRITABLE | VIRTUAL_MEMORY_FLAG_NOCACHE);
+        if (virtual_memory_identity_is_huge(frame)) {
+            panic("[m188] a 4 KiB mapping inside a huge page left the huge page in place");
+        }
+        if (!virtual_memory_identity_covers(block, 0x200000ULL)) {
+            panic("[m188] splitting a huge page lost part of the identity map");
+        }
+        if (probe[0] != 0x0188018801880188ULL || *first != first_before || *last != last_before) {
+            panic("[m188] a split huge page reads back different memory");
+        }
+        virtual_memory_map_page(frame, frame, VIRTUAL_MEMORY_FLAG_WRITABLE);
+        physical_memory_free_frame(frame);
+        kernel_log_puts("[m188] a 4 KiB mapping inside a 2 MiB identity page split it into 512 "
+                  "rather than stopping the machine, and all 512 still reach the same memory.\n\n");
+    }
+
     framebuffer_init(framebuffer_info);
     dispi_init();
     rtc_init();

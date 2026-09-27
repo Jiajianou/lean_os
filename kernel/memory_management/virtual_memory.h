@@ -7,14 +7,17 @@
 #define VIRTUAL_MEMORY_FLAG_EXEC     (1ULL << 3)
 
 #define VIRTUAL_MEMORY_FLAG_NOCACHE  (1ULL << 4)
+#define VIRTUAL_MEMORY_FLAG_WRITE_COMBINING (1ULL << 5)
 
 #define KERNEL_HEAP_VIRT_BASE 0x0000004000000000ULL
 
 void virtual_memory_init(const uint32_t *e820_map);
 
 int virtual_memory_identity_covers(uint64_t phys, uint64_t length);
+int virtual_memory_identity_is_huge(uint64_t phys);
 
 void virtual_memory_enable_nx_this_cpu(void);
+void virtual_memory_enable_pat_this_cpu(void);
 int virtual_memory_nx_enabled(void);
 
 uint64_t virtual_memory_protect_range_in(uint64_t pml4_phys, uint64_t start, uint64_t end,
@@ -25,6 +28,7 @@ void virtual_memory_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
 #define KERNEL_MMIO_VIRT_BASE 0x0000006000000000ULL
 #define KERNEL_MMIO_VIRT_SIZE 0x0000002000000000ULL
 void *virtual_memory_map_mmio(uint64_t phys, uint64_t length);
+uint64_t virtual_memory_reserve_mmio(uint64_t length);
 void virtual_memory_unmap_page(uint64_t virt);
 uint64_t virtual_memory_kernel_pml4_phys(void);
 

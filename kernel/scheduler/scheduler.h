@@ -432,6 +432,9 @@ int scheduler_file_descriptor_high_water(int *which_task_out);
 
 void scheduler_reap_slot(task_t *t);
 void scheduler_dump_cpus(void);
+int scheduler_task_slot_count(void);
+task_t *scheduler_task_slot(int index);
+task_t *scheduler_cpu_current(int cpu);
 void scheduler_dump_stack_owner(uint64_t address);
 
 void scheduler_reset_file_descriptors_to_std(task_t *t);

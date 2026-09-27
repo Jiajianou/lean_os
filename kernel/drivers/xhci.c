@@ -7,6 +7,7 @@
 #include "drivers/usb_hid.h"
 #include "drivers/xhci_ring.h"
 #include "library/kernel_library.h"
+#include "library/spinlock.h"
 #include "memory_management/physical_memory.h"
 #include "memory_management/virtual_memory.h"
 
@@ -177,19 +178,71 @@ static void doorbell(uint32_t slot, uint32_t target) {
 
 #define SPIN_LIMIT 40000000u
 
+/* One consumer for the event ring. The timer's xhci_poll and a thread waiting
+   for its own transfer both read it, and without this the timer drained the
+   stick's completions and threw them away as not-HID - the waiter then spun to
+   its limit and the read failed. QEMU completes a transfer before a tick can
+   land, so only real hardware ever lost one: every large program on a USB boot
+   was "No such program". HID events are handled wherever they are found; every
+   other event is queued for whoever is waiting on it. */
+#define PENDING_EVENTS 16
+
+static spinlock_t event_lock;
+static xhci_trb_t pending_events[PENDING_EVENTS];
+static uint32_t pending_head;
+static uint32_t pending_count;
+
+static void handle_hid_transfer(const xhci_trb_t *ev);
+
+static void consume_events_locked(void) {
+    for (int drained = 0; drained < XHCI_RING_TRBS; drained++) {
+        xhci_trb_t *e = &event_ring.trb[event_ring.index];
+        if ((e->control & TRB_CYCLE) != event_ring.cycle) {
+            return;
+        }
+        xhci_trb_t ev = *e;
+        event_ring.index++;
+        if (event_ring.index == XHCI_RING_TRBS) {
+            event_ring.index = 0;
+            event_ring.cycle ^= 1;
+        }
+        rt_write64(RT_ERDP, (event_ring.phys + event_ring.index * sizeof(xhci_trb_t)) | 8);
+
+        uint32_t type = (ev.control >> TRB_TYPE_SHIFT) & 0x3F;
+        if (type == TRB_EVENT_TRANSFER) {
+            uint8_t slot = (uint8_t)((ev.control >> 24) & 0xFF);
+            uint8_t dci = (uint8_t)((ev.control >> 16) & 0x1F);
+            int is_hid = 0;
+            for (int i = 0; i < hid_count; i++) {
+                if (hid_devices[i].slot == slot && hid_devices[i].ep_dci == dci) {
+                    is_hid = 1;
+                    break;
+                }
+            }
+            if (is_hid) {
+                handle_hid_transfer(&ev);
+                continue;
+            }
+        }
+        if (pending_count < PENDING_EVENTS) {
+            pending_events[(pending_head + pending_count) % PENDING_EVENTS] = ev;
+            pending_count++;
+        }
+    }
+}
+
 static int event_wait(xhci_trb_t *out) {
     for (uint32_t i = 0; i < SPIN_LIMIT; i++) {
-        xhci_trb_t *e = &event_ring.trb[event_ring.index];
-        if ((e->control & TRB_CYCLE) == event_ring.cycle) {
-            *out = *e;
-            event_ring.index++;
-            if (event_ring.index == XHCI_RING_TRBS) {
-                event_ring.index = 0;
-                event_ring.cycle ^= 1;
-            }
-            rt_write64(RT_ERDP, (event_ring.phys + event_ring.index * sizeof(xhci_trb_t)) | 8);
+        uint64_t flags = spin_lock_irqsave(&event_lock);
+        consume_events_locked();
+        if (pending_count > 0) {
+            *out = pending_events[pending_head];
+            pending_head = (pending_head + 1) % PENDING_EVENTS;
+            pending_count--;
+            spin_unlock_irqrestore(&event_lock, flags);
             return 0;
         }
+        spin_unlock_irqrestore(&event_lock, flags);
         __asm__ volatile("pause");
     }
     return -1;
@@ -816,47 +869,39 @@ static void deliver_mouse(hid_device_t *d) {
     mouse_reports++;
 }
 
+static void handle_hid_transfer(const xhci_trb_t *ev) {
+    uint8_t slot = (uint8_t)((ev->control >> 24) & 0xFF);
+    uint8_t dci = (uint8_t)((ev->control >> 16) & 0x1F);
+    uint32_t code = (ev->status >> 24) & 0xFF;
+    for (int i = 0; i < hid_count; i++) {
+        hid_device_t *d = &hid_devices[i];
+        if (d->slot != slot || d->ep_dci != dci) {
+            continue;
+        }
+        if (code == CC_SUCCESS || code == CC_SHORT_PACKET) {
+            if (d->proto == HID_PROTO_KEYBOARD) {
+                deliver_keyboard(d);
+            } else {
+                deliver_mouse(d);
+            }
+        }
+        k_memset(d->report, 0, 8);
+        xhci_ring_push(&d->ring, d->report_phys, d->report_length,
+                  (TRB_NORMAL << TRB_TYPE_SHIFT) | TRB_IOC);
+        doorbell(d->slot, d->ep_dci);
+        return;
+    }
+}
+
 void xhci_poll(void) {
     if (!started) {
         return;
     }
-    for (int drained = 0; drained < XHCI_RING_TRBS; drained++) {
-        xhci_trb_t *e = &event_ring.trb[event_ring.index];
-        if ((e->control & TRB_CYCLE) != event_ring.cycle) {
-            return;
-        }
-        uint32_t type = (e->control >> TRB_TYPE_SHIFT) & 0x3F;
-        uint8_t slot = (uint8_t)((e->control >> 24) & 0xFF);
-        uint8_t dci = (uint8_t)((e->control >> 16) & 0x1F);
-        uint32_t code = (e->status >> 24) & 0xFF;
-
-        event_ring.index++;
-        if (event_ring.index == XHCI_RING_TRBS) {
-            event_ring.index = 0;
-            event_ring.cycle ^= 1;
-        }
-        rt_write64(RT_ERDP, (erdp_phys + event_ring.index * sizeof(xhci_trb_t)) | 8);
-
-        if (type != TRB_EVENT_TRANSFER) {
-            continue;
-        }
-        for (int i = 0; i < hid_count; i++) {
-            hid_device_t *d = &hid_devices[i];
-            if (d->slot != slot || d->ep_dci != dci) {
-                continue;
-            }
-            if (code == CC_SUCCESS || code == CC_SHORT_PACKET) {
-                if (d->proto == HID_PROTO_KEYBOARD) {
-                    deliver_keyboard(d);
-                } else {
-                    deliver_mouse(d);
-                }
-            }
-            k_memset(d->report, 0, 8);
-            xhci_ring_push(&d->ring, d->report_phys, d->report_length,
-                      (TRB_NORMAL << TRB_TYPE_SHIFT) | TRB_IOC);
-            doorbell(d->slot, d->ep_dci);
-            break;
-        }
+    /* From the timer interrupt: a waiter holding the lock is already draining
+       the ring, so there is nothing to do here that it will not do. */
+    if (__atomic_exchange_n(&event_lock.locked, 1, __ATOMIC_ACQUIRE)) {
+        return;
     }
+    consume_events_locked();
+    spin_unlock(&event_lock);
 }

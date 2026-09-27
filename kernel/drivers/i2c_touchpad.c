@@ -58,31 +58,51 @@ static int send_command(uint8_t opcode, uint8_t argument) {
     return designware_i2c_transfer(found_controller, found_address, command, length, 0, 0);
 }
 
+static i2c_touchpad_statistics_t statistics;
+
+void i2c_touchpad_statistics(i2c_touchpad_statistics_t *out) {
+    *out = statistics;
+    out->report_id = layout.report_id;
+}
+
+/* A plain read, with no register written first. That is how HID over I2C
+   hands over an input report and what Linux's i2c-hid does; writing the input
+   register's address and then reading is a different transaction, and the
+   first real touchpad this ran against answered it with nothing usable. */
 static void poll_once(void) {
     uint32_t want = descriptor.max_input_length;
     if (want > sizeof(input_buffer)) {
         want = sizeof(input_buffer);
     }
-    if (!read_at_register(found_controller, found_address, descriptor.input_register, input_buffer,
-                          want)) {
+    statistics.polls++;
+    if (!designware_i2c_transfer(found_controller, found_address, 0, 0, input_buffer, want)) {
+        statistics.read_failures++;
         return;
     }
 
     uint16_t length = i2c_hid_input_length(input_buffer, want);
+    statistics.last_length = length;
+    for (uint32_t i = 0; i < sizeof(statistics.last_bytes); i++) {
+        statistics.last_bytes[i] = i < want ? input_buffer[i] : 0;
+    }
     if (length <= 2 || length > want) {
+        statistics.empty++;
         return;
     }
 
     hid_mouse_report_t report;
     if (!hid_mouse_decode(&layout, input_buffer + 2, (uint32_t)(length - 2), &report)) {
+        statistics.wrong_report++;
         return;
     }
+    statistics.reports++;
 
     if (report.dx == 0 && report.dy == 0 && report.wheel == 0 && report.buttons == last_buttons) {
         return;
     }
     last_buttons = report.buttons;
-    mouse_inject(report.dx, -report.dy, report.buttons, report.wheel);
+    statistics.injected++;
+    mouse_inject(report.dx, report.dy, report.buttons, report.wheel);
 }
 
 static void poll_task(void *argument) {
@@ -176,5 +196,11 @@ void i2c_touchpad_start(void) {
     if (!present) {
         return;
     }
-    task_spawn("i2c_touchpad", poll_task, 0);
+    /* Nobody's child. Spawned from the boot task, it would be the one child the
+       SYS_wait self-test drains and never gets back - it hung the first boot
+       that had a touchpad, which was the first boot on real hardware. */
+    task_t *poller = task_spawn("i2c_touchpad", poll_task, 0);
+    if (poller) {
+        poller->parent_id = -1;
+    }
 }

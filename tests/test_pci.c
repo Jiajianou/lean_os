@@ -272,3 +272,111 @@ TEST(pci, a_device_without_power_management_is_left_alone) {
     pci_set_power_state_d0(&dev);
     CHECK_EQ(fake_pci_get_config(h, 0x44), 0x00000003u);
 }
+
+static int add_unplaced_i2c(void) {
+    int h = fake_pci_add(0, 0x15, 0, 0x8086, 0xA0E8, 0x0C, 0x80, 0x00);
+    fake_pci_set_bar(h, 0, 0x00000004u, 0xFFFFF000u);
+    return h;
+}
+
+static int add_graphics_aperture(void) {
+    int h = fake_pci_add(0, 2, 0, 0x8086, 0x9A49, 0x03, 0x00, 0x00);
+    fake_pci_set_bar(h, 0, 0x0000000Cu, 0xF000000Cu);
+    fake_pci_set_config(h, 0x14, 0x00000040u);
+    fake_pci_set_config(h, 0x04, 0x00000007u);
+    return h;
+}
+
+TEST(pci, an_unplaced_bar_goes_just_past_the_highest_one_already_placed) {
+    reset();
+    add_graphics_aperture();
+    int i2c = add_unplaced_i2c();
+
+    pci_device_t dev;
+    REQUIRE(pci_find_device(0x8086, 0xA0E8, &dev) == 1);
+    CHECK_EQ(pci_bar_memory_base(&dev, 0), 0ULL);
+    CHECK_EQ(pci_assign_memory_bar(&dev, 0, 1ULL << 39), 0x4010000000ULL);
+    CHECK_EQ(pci_bar_memory_base(&dev, 0), 0x4010000000ULL);
+    CHECK_EQ(fake_pci_get_config(i2c, 0x10), 0x10000004u);
+    CHECK_EQ(fake_pci_get_config(i2c, 0x14), 0x00000040u);
+}
+
+TEST(pci, a_bridge_window_above_every_bar_is_respected) {
+    reset();
+    add_graphics_aperture();
+    int bridge = fake_pci_add(0, 7, 0, 0x8086, 0x9A25, 0x06, 0x04, 0x00);
+    fake_pci_set_config(bridge, 0x0C, 0x00010000u);
+    fake_pci_set_config(bridge, 0x20, 0x0000FFF0u);
+    fake_pci_set_config(bridge, 0x24, 0x1BF10001u);
+    fake_pci_set_config(bridge, 0x28, 0x00000060u);
+    fake_pci_set_config(bridge, 0x2C, 0x00000060u);
+    add_unplaced_i2c();
+
+    pci_device_t dev;
+    REQUIRE(pci_find_device(0x8086, 0xA0E8, &dev) == 1);
+    CHECK_EQ(pci_assign_memory_bar(&dev, 0, 1ULL << 39), 0x601C000000ULL);
+}
+
+TEST(pci, a_closed_bridge_window_claims_nothing) {
+    reset();
+    add_graphics_aperture();
+    int bridge = fake_pci_add(0, 7, 0, 0x8086, 0x9A25, 0x06, 0x04, 0x00);
+    fake_pci_set_config(bridge, 0x0C, 0x00010000u);
+    fake_pci_set_config(bridge, 0x20, 0x0000FFF0u);
+    fake_pci_set_config(bridge, 0x24, 0x0001FFF1u);
+    fake_pci_set_config(bridge, 0x28, 0x000000FFu);
+    fake_pci_set_config(bridge, 0x2C, 0x00000000u);
+    add_unplaced_i2c();
+
+    pci_device_t dev;
+    REQUIRE(pci_find_device(0x8086, 0xA0E8, &dev) == 1);
+    CHECK_EQ(pci_assign_memory_bar(&dev, 0, 1ULL << 39), 0x4010000000ULL);
+}
+
+TEST(pci, no_bar_above_four_gigabytes_means_no_window_to_guess_at) {
+    reset();
+    int ahci = fake_pci_add(0, 3, 0, 0x8086, 0x2922, AHCI_CLASS, AHCI_SUB, AHCI_PROG);
+    fake_pci_set_bar(ahci, 5, 0xFEBF0000u, 0xFFFFF000u);
+    int i2c = add_unplaced_i2c();
+
+    pci_device_t dev;
+    REQUIRE(pci_find_device(0x8086, 0xA0E8, &dev) == 1);
+    CHECK_EQ(pci_assign_memory_bar(&dev, 0, 1ULL << 39), 0ULL);
+    CHECK_EQ(fake_pci_get_config(i2c, 0x10), 0x00000004u);
+}
+
+TEST(pci, a_placement_past_the_address_limit_is_refused) {
+    reset();
+    add_graphics_aperture();
+    int i2c = add_unplaced_i2c();
+
+    pci_device_t dev;
+    REQUIRE(pci_find_device(0x8086, 0xA0E8, &dev) == 1);
+    CHECK_EQ(pci_assign_memory_bar(&dev, 0, 0x4010000800ULL), 0ULL);
+    CHECK_EQ(fake_pci_get_config(i2c, 0x10), 0x00000004u);
+}
+
+TEST(pci, a_bar_already_placed_is_left_where_it_is) {
+    reset();
+    add_graphics_aperture();
+    int i2c = add_unplaced_i2c();
+    fake_pci_set_config(i2c, 0x10, 0xFE010004u);
+
+    pci_device_t dev;
+    REQUIRE(pci_find_device(0x8086, 0xA0E8, &dev) == 1);
+    CHECK_EQ(pci_assign_memory_bar(&dev, 0, 1ULL << 39), 0xFE010000ULL);
+    CHECK_EQ(fake_pci_get_config(i2c, 0x10), 0xFE010004u);
+}
+
+TEST(pci, the_scan_gives_every_device_its_decode_back) {
+    reset();
+    int graphics = add_graphics_aperture();
+    add_unplaced_i2c();
+
+    pci_device_t dev;
+    REQUIRE(pci_find_device(0x8086, 0xA0E8, &dev) == 1);
+    pci_assign_memory_bar(&dev, 0, 1ULL << 39);
+    CHECK_EQ(fake_pci_get_config(graphics, 0x04), 0x00000007u);
+    CHECK_EQ(fake_pci_get_config(graphics, 0x10), 0x0000000Cu);
+    CHECK_EQ(fake_pci_get_config(graphics, 0x14), 0x00000040u);
+}

@@ -1064,6 +1064,18 @@ void scheduler_dump_stack_owner(uint64_t address) {
                "or never a stack at all\n");
 }
 
+int scheduler_task_slot_count(void) {
+    return task_count;
+}
+
+task_t *scheduler_task_slot(int index) {
+    return (index >= 0 && index < task_count) ? &tasks[index] : (task_t *)0;
+}
+
+task_t *scheduler_cpu_current(int cpu) {
+    return (cpu >= 0 && cpu < MAX_CPUS) ? current_task[cpu] : (task_t *)0;
+}
+
 void scheduler_dump_cpus(void) {
     for (int c = 0; c < MAX_CPUS; c++) {
         task_t *t = current_task[c];

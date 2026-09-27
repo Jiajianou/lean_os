@@ -38,6 +38,26 @@ static uint64_t read_cr2(void) {
     return value;
 }
 
+static uint32_t detail_append(char *buffer, uint32_t at, uint32_t size, const char *text) {
+    while (*text && at + 1 < size) {
+        buffer[at++] = *text++;
+    }
+    buffer[at] = 0;
+    return at;
+}
+
+static uint32_t detail_append_hex(char *buffer, uint32_t at, uint32_t size, uint64_t value) {
+    static const char digits[] = "0123456789ABCDEF";
+    char text[19];
+    text[0] = '0';
+    text[1] = 'x';
+    for (int i = 0; i < 16; i++) {
+        text[2 + i] = digits[(value >> (60 - 4 * i)) & 0xF];
+    }
+    text[18] = 0;
+    return detail_append(buffer, at, size, text);
+}
+
 /* The x87 status word and MXCSR each carry one bit per exception, and the
    order below is the order the hardware reports them in when more than one is
    pending - invalid first, because it is the one that makes the others
@@ -263,7 +283,22 @@ void isr_handler(isr_regs_t *r) {
     kernel_log_puts(" ***\n");
     dump_regs(r);
     kernel_log_end(message);
-    panic("unrecoverable CPU exception");
+    static char detail[256];
+    task_t *current = scheduler_current();
+    uint32_t at = detail_append(detail, 0, sizeof(detail), exception_name(r->vector));
+    at = detail_append(detail, at, sizeof(detail), " error=");
+    at = detail_append_hex(detail, at, sizeof(detail), r->error_code);
+    at = detail_append(detail, at, sizeof(detail), " rip=");
+    at = detail_append_hex(detail, at, sizeof(detail), r->rip);
+    at = detail_append(detail, at, sizeof(detail), " rsp=");
+    at = detail_append_hex(detail, at, sizeof(detail), r->rsp);
+    if (r->vector == PAGE_FAULT_VECTOR) {
+        at = detail_append(detail, at, sizeof(detail), " cr2=");
+        at = detail_append_hex(detail, at, sizeof(detail), read_cr2());
+    }
+    at = detail_append(detail, at, sizeof(detail), " task=");
+    detail_append(detail, at, sizeof(detail), current && current->name[0] ? current->name : "(none)");
+    panic_with_detail("unrecoverable CPU exception", detail);
 }
 
 static irq_handler_function irq_handlers[16];

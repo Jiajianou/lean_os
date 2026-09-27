@@ -99,6 +99,7 @@ static INT32 choose_graphics_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop, UINT32 *out
                                   UINT32 *out_height) {
     INT32 chosen = -1;
     int chosen_score = 0;
+    boot_options.offered_count = 0;
     for (UINT32 m = 0; m < gop->Mode->MaxMode; m++) {
         UINTN info_size = 0;
         EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
@@ -107,6 +108,11 @@ static INT32 choose_graphics_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop, UINT32 *out
         }
         if (info->PixelFormat != PixelBlueGreenRedReserved8BitPerColor) {
             continue;
+        }
+        if (boot_options.offered_count < BOOT_OFFERED_MODES_MAX) {
+            boot_options.offered[boot_options.offered_count][0] = info->HorizontalResolution;
+            boot_options.offered[boot_options.offered_count][1] = info->VerticalResolution;
+            boot_options.offered_count++;
         }
         int score = boot_options_video_score(&boot_options, info->HorizontalResolution,
                                              info->VerticalResolution);

@@ -48,6 +48,7 @@ void boot_options_defaults(boot_options_t *options) {
     options->unknown_keys = 0;
     options->chosen_width = 0;
     options->chosen_height = 0;
+    options->offered_count = 0;
 }
 
 static void apply_video(const char *text, uint32_t start, uint32_t end, boot_options_t *options) {
@@ -225,6 +226,14 @@ void boot_options_set_active(const boot_options_t *handoff) {
     active_options.unknown_keys = handoff->unknown_keys;
     active_options.chosen_width = handoff->chosen_width;
     active_options.chosen_height = handoff->chosen_height;
+    active_options.offered_count = handoff->offered_count;
+    if (active_options.offered_count > BOOT_OFFERED_MODES_MAX) {
+        active_options.offered_count = BOOT_OFFERED_MODES_MAX;
+    }
+    for (uint32_t i = 0; i < active_options.offered_count; i++) {
+        active_options.offered[i][0] = handoff->offered[i][0];
+        active_options.offered[i][1] = handoff->offered[i][1];
+    }
 }
 
 const boot_options_t *boot_options_active(void) {

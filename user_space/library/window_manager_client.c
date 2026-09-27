@@ -72,6 +72,16 @@ static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h
                 break;
             }
             got_response = (response.client_pid == request.client_pid);
+            /* Every client shares this pipe, so the reply just read may be
+               another's. Dropping it left that client waiting on an answer
+               that had already been taken, and whichever of desktop_icons and
+               desktop_shell lost the race - a boot slow enough for them to
+               overlap, a USB stick on real hardware - had no window at all.
+               It goes back for its owner unless its owner is gone. */
+            if (!got_response && sys_task_alive(response.client_pid) > 0) {
+                sys_write(response_file_descriptors[1], &response, sizeof(response));
+                sys_yield();
+            }
         }
     }
     if (!got_response || response.shared_memory_id < 0) {

@@ -5,6 +5,10 @@
 #include "drivers/pci.h"
 #include "drivers/pit.h"
 #include "memory_management/virtual_memory.h"
+#ifndef LEANOS_HOST_TEST
+#include "architecture/x86_64/io.h"
+#include "architecture/x86_64/timestamp_counter.h"
+#endif
 
 #define REGISTER_CONTROL        0x00
 #define REGISTER_TARGET_ADDRESS 0x04
@@ -193,6 +197,20 @@ int designware_i2c_controller_count(void) {
     return controller_count;
 }
 
+static uint64_t physical_address_limit(void) {
+#ifdef LEANOS_HOST_TEST
+    return 1ULL << 39;
+#else
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0x80000000u));
+    if (eax < 0x80000008u) {
+        return 1ULL << 36;
+    }
+    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0x80000008u));
+    return 1ULL << (eax & 0xFF);
+#endif
+}
+
 int designware_i2c_init(void) {
     controller_count = 0;
 
@@ -204,25 +222,61 @@ int designware_i2c_init(void) {
 
         uint64_t base = pci_bar_memory_base(&device, 0);
         uint64_t size = pci_bar_memory_size(&device, 0);
+        kernel_log_puts("[i2c] class 0C80 at ");
+        kernel_log_put_hex32(device.vendor_id);
+        kernel_log_puts(":");
+        kernel_log_put_hex32(device.device_id);
+        kernel_log_puts(" BAR0 ");
+        kernel_log_put_hex64(base);
+        kernel_log_puts(" size ");
+        kernel_log_put_hex64(size);
+        if (base == 0 && size >= 0x1000) {
+            /* Tiger Lake firmware leaves the LPSS I2C controllers unplaced and
+               expects the operating system to assign them, which Linux does. */
+#ifndef LEANOS_HOST_TEST
+            /* Sizing every other device's BARs briefly moves them; nothing may
+               touch a device - the xHCI poll runs from the timer - meanwhile. */
+            uint64_t flags = irq_save_disable();
+            base = pci_assign_memory_bar(&device, 0, physical_address_limit());
+            irq_restore(flags);
+#else
+            base = pci_assign_memory_bar(&device, 0, physical_address_limit());
+#endif
+            kernel_log_puts(base ? " - unassigned, placed at " : " - unassigned, and no room to place it");
+            if (base) {
+                kernel_log_put_hex64(base);
+            }
+        }
         if (base == 0 || size < 0x1000) {
+            kernel_log_puts(" - no usable BAR, skipped.\n");
             continue;
         }
 
         pci_set_power_state_d0(&device);
+#ifndef LEANOS_HOST_TEST
+        /* PCI allows a function 10 ms to come out of D3hot, and real silicon takes it. */
+        uint64_t settle_start = tsc_read();
+        while (tsc_to_us(tsc_read() - settle_start) < 10000) {
+            __asm__ volatile("pause");
+        }
+#endif
         pci_enable_device(&device);
 
+        volatile uint8_t *registers = (volatile uint8_t *)base;
 #ifndef LEANOS_HOST_TEST
-        for (uint64_t page = 0; page < size && page < 0x4000; page += 4096) {
-            virtual_memory_map_page(base + page, base + page,
-                         VIRTUAL_MEMORY_FLAG_WRITABLE | VIRTUAL_MEMORY_FLAG_NOCACHE);
+        registers = (volatile uint8_t *)virtual_memory_map_mmio(base, size < 0x4000 ? size : 0x4000);
+        if (!registers) {
+            continue;
         }
 #endif
 
         controller_t candidate;
-        candidate.base = (volatile uint8_t *)base;
+        candidate.base = registers;
         candidate.transmit_depth = 0;
 
         uint32_t component = read_register(&candidate, REGISTER_COMPONENT_TYPE);
+        kernel_log_puts(", component ");
+        kernel_log_put_hex32(component);
         if (component != DESIGNWARE_I2C_COMPONENT_TYPE && device.vendor_id == INTEL_VENDOR_ID &&
             size > LPSS_PRIVATE_RESETS) {
             /* Intel wraps the Synopsys block in a private register space whose reset is
@@ -231,10 +285,14 @@ int designware_i2c_init(void) {
             write_register(&candidate, LPSS_PRIVATE_RESETS, 0);
             write_register(&candidate, LPSS_PRIVATE_RESETS, LPSS_RESET_RELEASED);
             component = read_register(&candidate, REGISTER_COMPONENT_TYPE);
+            kernel_log_puts(", after releasing reset ");
+            kernel_log_put_hex32(component);
         }
         if (component != DESIGNWARE_I2C_COMPONENT_TYPE) {
+            kernel_log_puts(" - not a DesignWare I2C block.\n");
             continue;
         }
+        kernel_log_puts(".\n");
 
         uint32_t parameters = read_register(&candidate, REGISTER_COMPONENT_PARAM);
         candidate.transmit_depth = ((parameters >> 16) & 0xFFu) + 1u;
