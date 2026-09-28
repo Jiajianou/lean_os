@@ -244,3 +244,214 @@ TEST(block_cache, readahead_fetches_its_whole_window_in_one_request) {
     CHECK_EQ((int)fake_backend_read_calls(), 0);
     block_device_set_readahead(0);
 }
+
+/* M194: the journal, over the same fake disk. The filesystem is lines
+   0..255 and the journal the 128 blocks after it; a crash is losing
+   everything in memory - the transaction and the cache - and attaching
+   again, which is what a power cut and a boot are. */
+#include "file_system/leanfs_format.h"
+
+#define J_FS_LBA 0u
+#define J_FS_SECTORS (256u * SECTORS_PER_LINE)
+#define J_LBA (256u * SECTORS_PER_LINE)
+#define J_BLOCKS 128u
+
+static int journal_attach(void) {
+    return block_device_journal_attach(J_FS_LBA, J_FS_SECTORS, J_LBA, J_BLOCKS);
+}
+
+static void journal_setup(void) {
+    setup();
+    block_device_journal_forget();
+    memset(fake_backend_sector(J_LBA), 0, BLOCK_DEVICE_SECTOR_SIZE);
+    CHECK_EQ(journal_attach(), 0);
+    fake_backend_reset_counters();
+}
+
+static void journal_crash(void) {
+    block_device_journal_forget();
+    block_device_init();
+}
+
+static void journal_teardown(void) {
+    block_device_journal_forget();
+}
+
+static void fill_line(uint8_t *line, uint8_t value) {
+    memset(line, value, SECTORS_PER_LINE * BLOCK_DEVICE_SECTOR_SIZE);
+}
+
+static int line_on_disk_is(uint32_t line_no, uint8_t value) {
+    for (uint32_t k = 0; k < SECTORS_PER_LINE; k++) {
+        const uint8_t *sector = fake_backend_sector(line_no * SECTORS_PER_LINE + k);
+        for (uint32_t i = 0; i < BLOCK_DEVICE_SECTOR_SIZE; i++) {
+            if (sector[i] != value) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+TEST(journal, a_write_reaches_the_disk_only_through_a_commit) {
+    journal_setup();
+    uint8_t line[SECTORS_PER_LINE * BLOCK_DEVICE_SECTOR_SIZE];
+    fill_line(line, 0xA1);
+    CHECK_EQ(block_device_write(10 * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+    CHECK_EQ(block_device_flush(), 0);
+    CHECK_EQ((int)fake_backend_write_calls(), 0);
+
+    uint8_t back[sizeof(line)];
+    CHECK_EQ(block_device_read(10 * SECTORS_PER_LINE, SECTORS_PER_LINE, back), 0);
+    CHECK_EQ(back[0], 0xA1);
+    CHECK_EQ(back[sizeof(back) - 1], 0xA1);
+
+    CHECK_EQ(block_device_commit(), 0);
+    CHECK(fake_backend_write_calls() > 0);
+    CHECK(!line_on_disk_is(10, 0xA1));
+    CHECK_EQ(block_device_checkpoint(), 0);
+    CHECK(line_on_disk_is(10, 0xA1));
+    journal_teardown();
+}
+
+TEST(journal, a_committed_transaction_survives_the_power_going) {
+    journal_setup();
+    uint8_t line[SECTORS_PER_LINE * BLOCK_DEVICE_SECTOR_SIZE];
+    fill_line(line, 0xB2);
+    CHECK_EQ(block_device_write(11 * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+    CHECK_EQ(block_device_write(50 * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+    CHECK_EQ(block_device_commit(), 0);
+    journal_crash();
+    CHECK(!line_on_disk_is(11, 0xB2));
+    CHECK_EQ(journal_attach(), 1);
+    CHECK(line_on_disk_is(11, 0xB2));
+    CHECK(line_on_disk_is(50, 0xB2));
+    CHECK_EQ(journal_attach(), 0);
+    journal_teardown();
+}
+
+TEST(journal, an_uncommitted_transaction_is_lost_whole_and_the_one_before_it_is_not) {
+    journal_setup();
+    uint8_t line[SECTORS_PER_LINE * BLOCK_DEVICE_SECTOR_SIZE];
+    fill_line(line, 0xC3);
+    CHECK_EQ(block_device_write(12 * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+    CHECK_EQ(block_device_commit(), 0);
+    fill_line(line, 0xC4);
+    CHECK_EQ(block_device_write(13 * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+    CHECK_EQ(block_device_write(12 * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+    journal_crash();
+    CHECK_EQ(journal_attach(), 1);
+    CHECK(line_on_disk_is(12, 0xC3));
+    CHECK(!line_on_disk_is(13, 0xC4));
+    CHECK(!line_on_disk_is(12, 0xC4));
+    journal_teardown();
+}
+
+TEST(journal, a_torn_transaction_is_not_replayed) {
+    journal_setup();
+    uint8_t line[SECTORS_PER_LINE * BLOCK_DEVICE_SECTOR_SIZE];
+    fill_line(line, 0xD5);
+    CHECK_EQ(block_device_write(14 * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+    CHECK_EQ(block_device_write(15 * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+    CHECK_EQ(block_device_commit(), 0);
+    /* Block 1 is the descriptor, 2 and 3 the two lines: one byte of the
+       second line never made it. */
+    fake_backend_sector(J_LBA + 3 * SECTORS_PER_LINE + 5)[17] ^= 0x40;
+    journal_crash();
+    CHECK_EQ(journal_attach(), 0);
+    CHECK(!line_on_disk_is(14, 0xD5));
+    CHECK(!line_on_disk_is(15, 0xD5));
+    journal_teardown();
+}
+
+TEST(journal, the_later_of_two_transactions_is_what_a_replay_leaves) {
+    journal_setup();
+    uint8_t line[SECTORS_PER_LINE * BLOCK_DEVICE_SECTOR_SIZE];
+    fill_line(line, 0x11);
+    CHECK_EQ(block_device_write(16 * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+    CHECK_EQ(block_device_commit(), 0);
+    fill_line(line, 0x22);
+    CHECK_EQ(block_device_write(16 * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+    CHECK_EQ(block_device_commit(), 0);
+    journal_crash();
+    CHECK_EQ(journal_attach(), 2);
+    CHECK(line_on_disk_is(16, 0x22));
+    journal_teardown();
+}
+
+TEST(journal, commits_past_the_end_of_the_journal_checkpoint_and_lose_nothing) {
+    journal_setup();
+    uint8_t line[SECTORS_PER_LINE * BLOCK_DEVICE_SECTOR_SIZE];
+    for (uint32_t round = 0; round < 40; round++) {
+        for (uint32_t k = 0; k < 5; k++) {
+            fill_line(line, (uint8_t)(round + k));
+            CHECK_EQ(block_device_write((100 + k) * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+        }
+        CHECK_EQ(block_device_commit(), 0);
+    }
+    block_device_statistics_t stats;
+    block_device_statistics(&stats);
+    CHECK(stats.journal_checkpoints > 0);
+    journal_crash();
+    CHECK(journal_attach() >= 0);
+    for (uint32_t k = 0; k < 5; k++) {
+        CHECK(line_on_disk_is(100 + k, (uint8_t)(39 + k)));
+    }
+    journal_teardown();
+}
+
+TEST(journal, a_hundred_updates_to_the_same_blocks_are_one_commit_of_them) {
+    journal_setup();
+    uint8_t line[SECTORS_PER_LINE * BLOCK_DEVICE_SECTOR_SIZE];
+    for (uint32_t op = 0; op < 100; op++) {
+        for (uint32_t k = 0; k < 3; k++) {
+            fill_line(line, (uint8_t)op);
+            CHECK_EQ(block_device_write((20 + k * 7) * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+        }
+    }
+    CHECK_EQ((int)fake_backend_write_calls(), 0);
+    CHECK_EQ(block_device_commit(), 0);
+    /* The header, one sequential run of descriptor and three blocks, and the
+       commit block - where M104's barriers issued three hundred. */
+    CHECK((int)fake_backend_write_calls() <= 3);
+    journal_teardown();
+}
+
+TEST(journal, a_disk_without_a_journal_is_not_written_by_attaching) {
+    setup();
+    block_device_journal_forget();
+    memset(fake_backend_sector(J_LBA), 0, BLOCK_DEVICE_SECTOR_SIZE);
+    fake_backend_reset_counters();
+    CHECK_EQ(journal_attach(), 0);
+    CHECK_EQ((int)fake_backend_write_calls(), 0);
+    journal_teardown();
+}
+
+TEST(journal, one_sector_of_a_block_is_journaled_with_the_rest_of_its_block) {
+    journal_setup();
+    uint8_t sector[BLOCK_DEVICE_SECTOR_SIZE];
+    memset(sector, 0xE7, sizeof(sector));
+    CHECK_EQ(block_device_write(30 * SECTORS_PER_LINE + 3, 1, sector), 0);
+    CHECK_EQ(block_device_commit(), 0);
+    journal_crash();
+    CHECK_EQ(journal_attach(), 1);
+    CHECK_EQ(fake_backend_sector(30 * SECTORS_PER_LINE + 3)[0], 0xE7);
+    CHECK_EQ(fake_backend_sector(30 * SECTORS_PER_LINE + 2)[0], (uint8_t)((30 * SECTORS_PER_LINE + 2) & 0xff));
+    CHECK_EQ(fake_backend_sector(30 * SECTORS_PER_LINE + 4)[0], (uint8_t)((30 * SECTORS_PER_LINE + 4) & 0xff));
+    journal_teardown();
+}
+
+TEST(journal, a_write_outside_the_filesystem_is_not_journaled) {
+    journal_setup();
+    block_device_statistics_t before, after;
+    block_device_statistics(&before);
+    uint8_t line[SECTORS_PER_LINE * BLOCK_DEVICE_SECTOR_SIZE];
+    fill_line(line, 0x5A);
+    CHECK_EQ(block_device_write(450 * SECTORS_PER_LINE, SECTORS_PER_LINE, line), 0);
+    CHECK_EQ(block_device_commit(), 0);
+    CHECK_EQ(block_device_flush(), 0);
+    CHECK(line_on_disk_is(450, 0x5A));
+    block_device_statistics(&after);
+    CHECK_EQ((int)(after.journal_commits - before.journal_commits), 0);
+    journal_teardown();
+}

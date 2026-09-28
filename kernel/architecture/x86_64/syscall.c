@@ -1347,8 +1347,11 @@ static long sys_fsync(uint64_t fd, uint64_t a2, uint64_t a3,
     if (scheduler_current()->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_FILE) {
         return -1;
     }
-    virtual_file_system_sync();
-    return 0;
+    /* M194: with a journal a write lands in memory and the disk's answer
+       comes at the commit, so this is where a failed disk has to be reported
+       - which is what fsync is for, and what it did not do: it returned 0
+       whatever happened. */
+    return virtual_file_system_sync();
 }
 
 static long sys_alarm(uint64_t seconds, uint64_t a2, uint64_t a3,
@@ -1389,8 +1392,7 @@ static long sys_sync(uint64_t a1, uint64_t a2, uint64_t a3,
     (void)a4;
     (void)a5;
     (void)a6;
-    virtual_file_system_sync();
-    return 0;
+    return virtual_file_system_sync();
 }
 
 static long sys_arch_prctl(uint64_t code, uint64_t address, uint64_t a3,

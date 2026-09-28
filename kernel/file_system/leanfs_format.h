@@ -73,3 +73,59 @@ _Static_assert(LEANFS_BLOCK_SIZE % sizeof(leanfs_inode_t) == 0, "an inode must n
 
 _Static_assert(sizeof(leanfs_dirent_t) == LEANFS_DIRENT_HEADER, "leanfs_dirent_t header must stay 8 bytes");
 _Static_assert(LEANFS_DIRENT_NEED(LEANFS_MAX_NAME) <= LEANFS_BLOCK_SIZE, "the longest name must still fit in one block");
+
+/* M194: the journal. It sits on the disk directly after the filesystem, and
+   the ESP moved out by its size. Everything leanfs writes goes into a
+   transaction in memory; a commit writes the transaction here as one
+   sequential run - descriptor blocks naming where each block belongs, the
+   blocks, then a commit block whose checksum covers them - and only later
+   does a checkpoint write the blocks home. A mount replays every committed
+   transaction the header's start points at, so what reaches the disk is
+   always a state that existed between two operations, whatever the power
+   does. A journal area of zeros is an empty journal, which is what every
+   image the build writes starts with. */
+#define LEANFS_JOURNAL_BLOCKS 8192u
+#define LEANFS_JOURNAL_VERSION 1u
+#define LEANFS_JOURNAL_HEADER_MAGIC 0x4C4E524Au
+#define LEANFS_JOURNAL_DESCRIPTOR_MAGIC 0x5344524Au
+#define LEANFS_JOURNAL_COMMIT_MAGIC 0x4D43524Au
+#define LEANFS_JOURNAL_TARGETS_PER_DESCRIPTOR 1018u
+
+#define LEANFS_TOTAL_BLOCKS (1u + INODE_TABLE_BLOCKS + BITMAP_BLOCKS + LEANFS_DATA_BLOCKS)
+#define LEANFS_JOURNAL_START_LBA (LEANFS_START_LBA + LEANFS_TOTAL_BLOCKS * LEANFS_SECTORS_PER_BLOCK)
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t start_block;
+    uint32_t journal_blocks;
+    uint64_t start_sequence;
+    uint32_t checksum;
+} leanfs_journal_header_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t index;
+    uint64_t sequence;
+    uint32_t count;
+    uint32_t reserved;
+    uint32_t targets[LEANFS_JOURNAL_TARGETS_PER_DESCRIPTOR];
+} leanfs_journal_descriptor_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t count;
+    uint64_t sequence;
+    uint32_t checksum;
+} leanfs_journal_commit_t;
+
+_Static_assert(sizeof(leanfs_journal_descriptor_t) == LEANFS_BLOCK_SIZE,
+               "a journal descriptor is exactly one block");
+
+static inline uint32_t leanfs_journal_descriptor_blocks(uint32_t count) {
+    return (count + LEANFS_JOURNAL_TARGETS_PER_DESCRIPTOR - 1) / LEANFS_JOURNAL_TARGETS_PER_DESCRIPTOR;
+}
+
+static inline uint32_t leanfs_journal_header_checksum(const leanfs_journal_header_t *h) {
+    return leanfs_fnv1a(LEANFS_FNV1A_INIT, h, offsetof(leanfs_journal_header_t, checksum));
+}

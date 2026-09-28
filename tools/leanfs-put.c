@@ -727,11 +727,102 @@ static void save_all(void) {
     pwrite_at(block_bytes(sb.bitmap_block), bitmap, sizeof(bitmap));
 }
 
+/* M194: an image whose machine stopped without shutting down can have
+   committed transactions in its journal that never reached home. Writing into
+   it here and leaving them would let the next boot's replay write them over
+   what this tool put there, so they are replayed first, the same way the
+   kernel does, and the journal is left empty. An image with no journal header
+   has nothing to replay and is not written. */
+static void journal_replay_into_image(void) {
+    static uint8_t block[LEANFS_BLOCK_SIZE];
+    static uint8_t descriptor[LEANFS_BLOCK_SIZE];
+    uint64_t journal_bytes = (uint64_t)LEANFS_JOURNAL_START_LBA * LEANFS_SECTOR_SIZE;
+    pread_at(journal_bytes, block, LEANFS_BLOCK_SIZE);
+    leanfs_journal_header_t header;
+    memcpy(&header, block, sizeof(header));
+    if (header.magic != LEANFS_JOURNAL_HEADER_MAGIC || header.version != LEANFS_JOURNAL_VERSION ||
+        header.checksum != leanfs_journal_header_checksum(&header) ||
+        header.journal_blocks != LEANFS_JOURNAL_BLOCKS || header.start_block == 0 ||
+        header.start_block >= LEANFS_JOURNAL_BLOCKS) {
+        return;
+    }
+    uint32_t at = header.start_block;
+    uint64_t sequence = header.start_sequence;
+    uint32_t replayed = 0;
+    for (;;) {
+        if (at + 2 >= LEANFS_JOURNAL_BLOCKS) {
+            break;
+        }
+        pread_at(journal_bytes + (uint64_t)at * LEANFS_BLOCK_SIZE, descriptor, LEANFS_BLOCK_SIZE);
+        const leanfs_journal_descriptor_t *d = (const leanfs_journal_descriptor_t *)descriptor;
+        if (d->magic != LEANFS_JOURNAL_DESCRIPTOR_MAGIC || d->index != 0 || d->sequence != sequence ||
+            d->count == 0 || d->count > LEANFS_JOURNAL_BLOCKS) {
+            break;
+        }
+        uint32_t count = d->count;
+        uint32_t descriptors = leanfs_journal_descriptor_blocks(count);
+        if (at + descriptors + count + 1 > LEANFS_JOURNAL_BLOCKS) {
+            break;
+        }
+        uint32_t checksum = LEANFS_FNV1A_INIT;
+        int intact = 1;
+        for (uint32_t item = 0; item < descriptors + count; item++) {
+            pread_at(journal_bytes + (uint64_t)(at + item) * LEANFS_BLOCK_SIZE, block, LEANFS_BLOCK_SIZE);
+            if (item < descriptors) {
+                const leanfs_journal_descriptor_t *dd = (const leanfs_journal_descriptor_t *)block;
+                if (dd->magic != LEANFS_JOURNAL_DESCRIPTOR_MAGIC || dd->index != item ||
+                    dd->sequence != sequence || dd->count != count) {
+                    intact = 0;
+                    break;
+                }
+            }
+            checksum = leanfs_fnv1a(checksum, block, LEANFS_BLOCK_SIZE);
+        }
+        pread_at(journal_bytes + (uint64_t)(at + descriptors + count) * LEANFS_BLOCK_SIZE, block,
+                 LEANFS_BLOCK_SIZE);
+        const leanfs_journal_commit_t *c = (const leanfs_journal_commit_t *)block;
+        if (!intact || c->magic != LEANFS_JOURNAL_COMMIT_MAGIC || c->sequence != sequence ||
+            c->count != count || c->checksum != checksum) {
+            break;
+        }
+        for (uint32_t item = 0; item < count; item++) {
+            if (item % LEANFS_JOURNAL_TARGETS_PER_DESCRIPTOR == 0) {
+                pread_at(journal_bytes +
+                             (uint64_t)(at + item / LEANFS_JOURNAL_TARGETS_PER_DESCRIPTOR) * LEANFS_BLOCK_SIZE,
+                         descriptor, LEANFS_BLOCK_SIZE);
+            }
+            uint32_t target = ((const leanfs_journal_descriptor_t *)descriptor)
+                                  ->targets[item % LEANFS_JOURNAL_TARGETS_PER_DESCRIPTOR];
+            if ((uint64_t)target * LEANFS_SECTORS_PER_BLOCK < LEANFS_START_LBA ||
+                (uint64_t)target * LEANFS_SECTORS_PER_BLOCK >= LEANFS_JOURNAL_START_LBA) {
+                die("a committed journal transaction names a block outside the filesystem");
+            }
+            pread_at(journal_bytes + (uint64_t)(at + descriptors + item) * LEANFS_BLOCK_SIZE, block,
+                     LEANFS_BLOCK_SIZE);
+            pwrite_at((uint64_t)target * LEANFS_BLOCK_SIZE, block, LEANFS_BLOCK_SIZE);
+        }
+        replayed++;
+        at += descriptors + count + 1;
+        sequence++;
+    }
+    memset(block, 0, sizeof(block));
+    header.start_block = 1;
+    header.start_sequence = sequence;
+    header.checksum = leanfs_journal_header_checksum(&header);
+    memcpy(block, &header, sizeof(header));
+    pwrite_at(journal_bytes, block, LEANFS_SECTOR_SIZE);
+    if (replayed) {
+        fprintf(stderr, "leanfs-put: replayed %u committed journal transaction(s) left by a machine "
+                        "that did not shut down\n", replayed);
+    }
+}
+
 static void image_open(const char *image_path) {
     img = fopen(image_path, "r+b");
     if (!img) {
         die("could not open disk-image for read/write - run `make all` first");
     }
+    journal_replay_into_image();
 
     uint8_t sb_buffer[LEANFS_BLOCK_SIZE];
     pread_at(block_bytes(LEANFS_START_BLOCK), sb_buffer, sizeof(sb_buffer));

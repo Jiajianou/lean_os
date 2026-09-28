@@ -124,9 +124,13 @@ uint32_t leanfs_meta_writes(void);
 
 uint32_t leanfs_check(void);
 
-void leanfs_sync(void);
+int leanfs_sync(void);
 
 void leanfs_unmount_clean(void);
+
+void leanfs_transaction_boundary(void);
+
+int leanfs_journal_active(void);
 
 int leanfs_rename_replace(const char *old_path, const char *new_path);
 

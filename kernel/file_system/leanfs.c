@@ -24,6 +24,14 @@ static void block_read(uint32_t block, void *destination);
 static void block_write(uint32_t block, const void *source);
 static void block_write_meta(uint32_t block, const void *source);
 
+/* M194: with the journal attached, what reaches the disk is a transaction
+   the block layer commits whole, so the barrier after every metadata block
+   that M71 and M104 ordered the disk with is not needed - and on a USB stick
+   it was most of what a browser spent starting. Without one (a device too
+   small for it, or the host tests' fake disk) the barriers are exactly as
+   they were. */
+static int journal_active;
+
 static void inodes_alloc(void) {
     uint64_t frames = (sizeof(leanfs_inode_t) * (uint64_t)LEANFS_MAX_INODES) / 4096;
     if (!inodes) {
@@ -148,7 +156,7 @@ static void block_write_meta(uint32_t block, const void *source) {
     if (block_device_write(block * LEANFS_SECTORS_PER_BLOCK, LEANFS_SECTORS_PER_BLOCK, source) != 0) {
         io_error = 1;
     }
-    if (block_device_flush() != 0) {
+    if (!journal_active && block_device_flush() != 0) {
         io_error = 1;
     }
 }
@@ -168,7 +176,9 @@ static void read_run(uint32_t block, size_t blocks, uint8_t *destination) {
 }
 
 static void save_meta(void) {
-    block_device_flush();
+    if (!journal_active) {
+        block_device_flush();
+    }
 
     const uint8_t *inode_bytes = (const uint8_t *)inodes;
 
@@ -203,7 +213,9 @@ static void save_meta(void) {
         meta_writes += (uint32_t)run;
         i += run;
     }
-    block_device_flush();
+    if (!journal_active) {
+        block_device_flush();
+    }
 }
 
 uint32_t leanfs_meta_writes(void) {
@@ -236,6 +248,10 @@ static void format(void) {
     mark_all_inodes();
     mark_all_blocks();
     save_meta();
+    if (journal_active) {
+        block_device_journal_reset();
+        block_device_checkpoint();
+    }
 }
 
 static void format_if_this_disk_is_ours(void) {
@@ -253,6 +269,17 @@ static void format_if_this_disk_is_ours(void) {
 void leanfs_init(void) {
     leanfs_forget_holds();
     inodes_alloc();
+    /* Replay before anything is read: the superblock itself may be in a
+       committed transaction that never reached home. */
+    int replayed = block_device_journal_attach(LEANFS_START_LBA,
+                                               LEANFS_TOTAL_BLOCKS * LEANFS_SECTORS_PER_BLOCK,
+                                               LEANFS_JOURNAL_START_LBA, LEANFS_JOURNAL_BLOCKS);
+    journal_active = replayed >= 0;
+    if (replayed > 0) {
+        kernel_log_puts("[fs] journal: ");
+        kernel_log_put_dec((uint32_t)replayed);
+        kernel_log_puts(" committed transaction(s) replayed\n");
+    }
     uint8_t buffer[LEANFS_BLOCK_SIZE];
     block_read(LEANFS_START_BLOCK, buffer);
     k_memcpy(&sb, buffer, sizeof(sb));
@@ -1145,6 +1172,12 @@ int leanfs_exists(const char *path) {
 }
 
 uint32_t leanfs_free_scratch_lba(uint32_t blocks) {
+    /* With a journal, free data blocks are no longer free to scribble on
+       behind the filesystem's back - the write would join a transaction. The
+       journal's own area is, just after a checkpoint has emptied it. */
+    if (journal_active) {
+        return blocks == 0 ? 0 : block_device_journal_scratch_lba(blocks);
+    }
     if (blocks == 0 || blocks >= sb.data_blocks) {
         return 0;
     }
@@ -1498,15 +1531,37 @@ void leanfs_debug_orphan(const char *path) {
    any program's fsync skipped the mount check - and wrote the superblock
    through to the device to say so. Chromium starting up fsyncs about three
    hundred times, and on a USB stick each of those was a flash erase. */
-void leanfs_sync(void) {
-    block_device_flush();
+int leanfs_sync(void) {
+    int failed = 0;
+    if (journal_active && block_device_commit() != 0) {
+        failed = 1;
+    }
+    if (block_device_flush() != 0) {
+        failed = 1;
+    }
+    return failed ? -1 : 0;
 }
 
 void leanfs_unmount_clean(void) {
     block_device_flush();
     sb.state = LEANFS_STATE_CLEAN;
     save_superblock();
+    if (journal_active) {
+        block_device_checkpoint();
+    }
     block_device_flush();
+}
+
+/* Called between operations, where the filesystem is consistent: the only
+   place a commit may cut the stream of writes. */
+void leanfs_transaction_boundary(void) {
+    if (journal_active) {
+        block_device_commit_if_due();
+    }
+}
+
+int leanfs_journal_active(void) {
+    return journal_active;
 }
 
 int leanfs_rename_replace(const char *old_path, const char *new_path) {

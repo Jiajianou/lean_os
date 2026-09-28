@@ -11174,13 +11174,20 @@ static void boot_selftests_system(void) {
         }
 
         if (all_ok) {
+            /* M194: with the journal the write itself lands in memory, and the
+               refusal arrives when it is committed - so the claim is that the
+               write or the fsync after it says so, which is the promise every
+               write-back filesystem makes. */
             block_device_fault_inject(-1, 0);
             k_memset(q16_buffer, 'b', sizeof(q16_buffer));
             int rc = virtual_file_system_write("/tmp/q16-during", q16_buffer, sizeof(q16_buffer));
+            if (rc == 0) {
+                rc = virtual_file_system_sync();
+            }
             block_device_fault_inject(-1, -1);
 
             if (rc == 0) {
-                kernel_log_puts("[q16] a write to a disk that refuses every write reported success\n");
+                kernel_log_puts("[q16] a write and its fsync to a disk that refuses every write both reported success\n");
                 all_ok = 0;
             }
             if (all_ok && block_device_error_count() <= errors_before) {
@@ -11251,8 +11258,8 @@ static void boot_selftests_system(void) {
         if (!all_ok) {
             panic("Q16 self-test: this machine does not survive a disk that fails");
         }
-        kernel_log_puts("[q16] devices that fail, and a machine that keeps running: a write to a "
-                   "disk that refuses every write reported an error and was counted, a file "
+        kernel_log_puts("[q16] devices that fail, and a machine that keeps running: a write and its "
+                   "fsync to a disk that refuses every write reported an error and was counted, a file "
                    "written before it survived, the next write after it succeeded, a failed "
                    "read reported an error and left zeros rather than stale bytes at the "
                    "block layer and an error at the filesystem, and the "

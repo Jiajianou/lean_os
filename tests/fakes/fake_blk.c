@@ -160,3 +160,24 @@ uint64_t block_device_error_count(void) {
 void block_device_set_readahead(uint32_t lines) {
     (void)lines;
 }
+
+/* M194: the host leanfs tests run on a disk with no journal, which is the
+   mode that keeps M104's barriers - so what they grade is unchanged. The
+   journal itself is graded in tests/blockcache against the real block layer. */
+int block_device_journal_attach(uint32_t fs_first_lba, uint32_t fs_sectors, uint32_t journal_first_lba,
+                                uint32_t blocks) {
+    (void)fs_first_lba;
+    (void)fs_sectors;
+    (void)journal_first_lba;
+    (void)blocks;
+    return -1;
+}
+void block_device_journal_forget(void) {}
+int block_device_journal_reset(void) { return -1; }
+int block_device_commit(void) { return 0; }
+int block_device_checkpoint(void) { return 0; }
+void block_device_commit_if_due(void) {}
+uint32_t block_device_journal_scratch_lba(uint32_t blocks) {
+    (void)blocks;
+    return 0;
+}

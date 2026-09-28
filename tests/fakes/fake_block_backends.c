@@ -183,12 +183,44 @@ int ata_read_sectors(uint32_t lba, uint8_t count, void *buffer) {
     return 0;
 }
 
+/* M194: a power cut, sector-granular. After the budget runs out a write keeps
+   only the sectors that fit and fails, and every write after it is lost -
+   which is what a disk does when the power goes in the middle of a command. */
+static int64_t cut_budget = -1;
+static int cut_happened;
+
+void fake_backend_power_cut_after_sectors(int64_t sectors);
+int fake_backend_power_was_cut(void);
+uint64_t fake_backend_sectors_written(void);
+static uint64_t sectors_written;
+
+void fake_backend_power_cut_after_sectors(int64_t sectors) {
+    cut_budget = sectors;
+    cut_happened = 0;
+    sectors_written = 0;
+}
+
+int fake_backend_power_was_cut(void) {
+    return cut_happened;
+}
+
+uint64_t fake_backend_sectors_written(void) {
+    return sectors_written;
+}
+
 int ata_write_sectors(uint32_t lba, uint8_t count, const void *buffer) {
     if ((uint64_t)lba + count > disk_sectors) {
         return -1;
     }
     write_calls++;
-    memcpy(disk + (uint64_t)lba * ATA_SECTOR_SIZE, buffer,
-           (uint64_t)count * ATA_SECTOR_SIZE);
-    return 0;
+    uint32_t keep = count;
+    if (cut_budget >= 0) {
+        if (cut_happened || (int64_t)sectors_written + count > cut_budget) {
+            keep = cut_happened ? 0 : (uint32_t)(cut_budget - (int64_t)sectors_written);
+            cut_happened = 1;
+        }
+    }
+    memcpy(disk + (uint64_t)lba * ATA_SECTOR_SIZE, buffer, (uint64_t)keep * ATA_SECTOR_SIZE);
+    sectors_written += keep;
+    return keep == count ? 0 : -1;
 }

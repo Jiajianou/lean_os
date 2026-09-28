@@ -248,6 +248,24 @@ def build_snapshot(painted, boot_timeout=300, quiet=False):
             raise RuntimeError("the snapshot guest never finished painting - see %s"
                                % m.save_log("snapshot-never-painted"))
         time.sleep(2.0)
+        # M194: "painted" is the README icon's tile, and the Browser's is the
+        # last one the desktop draws. Once the boot stopped waiting six
+        # seconds for a keypress nobody sends (M193), the snapshot could be
+        # taken with that icon still being drawn, and every test restored from
+        # it saw the rest of the paint as a disturbance - which
+        # launching_an_app_does_not_disturb_the_rest_of_the_screen duly
+        # reported. A snapshot is of a desktop that has stopped drawing: two
+        # screens a second apart, identical above the taskbar, whose clock
+        # ticks.
+        deadline = time.time() + 30
+        previous = None
+        while time.time() < deadline:
+            shot = m.screenshot()
+            above_taskbar = shot._pixels[:shot.width * 3 * min(shot.height, 720)]
+            if above_taskbar == previous:
+                break
+            previous = above_taskbar
+            time.sleep(1.0)
         said = m.savevm(SNAPSHOT_TAG, timeout=180)
     finally:
         m.kill()

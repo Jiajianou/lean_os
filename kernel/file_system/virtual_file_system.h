@@ -62,7 +62,7 @@ struct tty *virtual_file_system_handle_tty(int handle, int *pty_number);
 
 int virtual_file_system_handle_truncate_to(int handle, uint32_t length);
 
-void virtual_file_system_sync(void);
+int virtual_file_system_sync(void);
 
 void virtual_file_system_unmount_clean(void);
 

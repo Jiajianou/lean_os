@@ -63,6 +63,17 @@ UEFI firmware
   a stack that grows when it is touched. A virtio block driver with the
   ATA one kept as the fallback, and a cache in front of both: the same
   megabyte costs 95 ms through PIO, 5.6 ms through DMA and 2.5 ms warm.
+- **A filesystem with a journal.** Everything leanfs writes goes into a
+  transaction in memory; a commit writes it to a 32 MiB journal as one
+  sequential run with a checksummed commit block, and a checkpoint
+  writes it home later. A mount replays whatever was committed, so the
+  disk is only ever found in a state that existed between two
+  operations - and a USB stick, which charges about 17 ms a command
+  whatever its size, is asked for a few large writes instead of
+  thousands of small ones: a browser's first page, at the stick's own
+  rates under QEMU, went from 113 s to 40. A host test cuts the power at
+  any sector of any write and requires the disk to come back as the last
+  commit that finished.
 - **A terminal that is a device.** A line discipline with canonical
   and raw modes, sessions, process groups and job control - and
   **pseudo-terminals**: `/dev/ptmx`, `/dev/pts/<n>`, `openpty` and

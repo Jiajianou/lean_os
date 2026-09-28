@@ -263,7 +263,12 @@ FS_TOTAL_SECTORS := $(shell echo $$(( (1 + $(FS_INODE_BLOCKS) + $(FS_BITMAP_BLOC
 # partition every other operating system can open: tools/make-hardware-image.sh
 # puts a 24 MiB \LOGS\LEANOS.LOG in it that the kernel writes its log into
 # (M189), so a machine with no serial port can be read on the next computer.
-ESP_START_LBA    := $(shell echo $$(( $(FS_START_LBA) + $(FS_TOTAL_SECTORS) )))
+# M194: the journal sits between the filesystem and the ESP - LEANFS_JOURNAL_BLOCKS
+# blocks of it, in kernel/file_system/leanfs_format.h, which is what the kernel
+# computes its start from.
+FS_JOURNAL_BLOCKS  := 8192
+FS_JOURNAL_SECTORS := $(shell echo $$(( $(FS_JOURNAL_BLOCKS) * 8 )))
+ESP_START_LBA    := $(shell echo $$(( $(FS_START_LBA) + $(FS_TOTAL_SECTORS) + $(FS_JOURNAL_SECTORS) )))
 ESP_SECTOR_COUNT := 65536
 IMAGE_SECTORS    := $(shell echo $$(( $(ESP_START_LBA) + $(ESP_SECTOR_COUNT) + 1024 )))
 
@@ -273,7 +278,12 @@ $(IMAGE): $(MBR_BIN) $(KERNEL_BIN) $(UEFI_BOOT_EFI)
 		echo "error: boot image ($$boot_sectors sectors) has grown into the filesystem's start (LBA $(FS_START_LBA)) - move FS_START_LBA out further here and in kernel/file_system/leanfs.c's LEANFS_START_LBA" >&2; \
 		exit 1; \
 	fi; \
-	fs_end=$$(( $(FS_START_LBA) + $(FS_TOTAL_SECTORS) )); \
+	journal_blocks=$$(awk '$$1 == "#define" && $$2 == "LEANFS_JOURNAL_BLOCKS" { sub(/u$$/, "", $$3); print $$3 }' kernel/file_system/leanfs_format.h); \
+	if [ "$$journal_blocks" != "$(FS_JOURNAL_BLOCKS)" ]; then \
+		echo "error: FS_JOURNAL_BLOCKS here is $(FS_JOURNAL_BLOCKS) and LEANFS_JOURNAL_BLOCKS in leanfs_format.h is $$journal_blocks - the kernel would journal into the ESP." >&2; \
+		exit 1; \
+	fi; \
+	fs_end=$$(( $(FS_START_LBA) + $(FS_TOTAL_SECTORS) + $(FS_JOURNAL_SECTORS) )); \
 	if [ $$fs_end -gt $(ESP_START_LBA) ]; then \
 		echo "error: the filesystem ends at LBA $$fs_end, past the ESP's start ($(ESP_START_LBA)) - they overlap. Move ESP_START_LBA out and IMAGE_SECTORS with it." >&2; \
 		exit 1; \
@@ -757,9 +767,23 @@ BLOCK_CACHE_BIN := $(TEST_BUILD)/leanos-block-cache
 $(BLOCK_CACHE_BIN): $(BLOCK_CACHE_SRCS) $(TEST_HDRS) $(TEST_SAN_STAMP) | $(TEST_BUILD)
 	$(HOSTCC) $(TEST_CFLAGS) -o $@ $(BLOCK_CACHE_SRCS)
 
-test-fast: $(TEST_BIN) $(BLOCK_CACHE_BIN)
+# M194: leanfs over the real block layer and its journal, with the power cut
+# at forty-eight points across a workload.
+JOURNAL_CRASH_SRCS := tests/journalcrash/journal_crash_test.c tests/runner.c \
+                      tests/fakes/fake_block_backends.c \
+                      $(filter-out tests/fakes/fake_blk.c,$(TEST_FAKES)) \
+                      kernel/drivers/block_device.c kernel/file_system/leanfs.c \
+                      kernel/library/kernel_library.c kernel/memory_management/heap.c
+
+JOURNAL_CRASH_BIN := $(TEST_BUILD)/leanos-journal-crash
+
+$(JOURNAL_CRASH_BIN): $(JOURNAL_CRASH_SRCS) $(TEST_HDRS) $(TEST_SAN_STAMP) | $(TEST_BUILD)
+	$(HOSTCC) $(TEST_CFLAGS) -o $@ $(JOURNAL_CRASH_SRCS)
+
+test-fast: $(TEST_BIN) $(BLOCK_CACHE_BIN) $(JOURNAL_CRASH_BIN)
 	@$(TEST_BIN) $(TEST_FILTER)
 	@$(BLOCK_CACHE_BIN)
+	@$(JOURNAL_CRASH_BIN) $(TEST_FILTER)
 
 COV_BUILD  := $(BUILD)/coverage
 LLVM_CC    := $(shell for c in /opt/homebrew/opt/llvm/bin/clang \

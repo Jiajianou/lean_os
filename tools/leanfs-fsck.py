@@ -65,26 +65,97 @@ VERSION = _number(_D, "LEANFS_VERSION")
 STATE_CLEAN = _number(_D, "LEANFS_STATE_CLEAN")
 STATE_DIRTY = _number(_D, "LEANFS_STATE_DIRTY")
 
+JOURNAL_BLOCKS = _number(_D, "LEANFS_JOURNAL_BLOCKS")
+JOURNAL_VERSION = _number(_D, "LEANFS_JOURNAL_VERSION")
+JOURNAL_HEADER_MAGIC = _number(_D, "LEANFS_JOURNAL_HEADER_MAGIC")
+JOURNAL_DESCRIPTOR_MAGIC = _number(_D, "LEANFS_JOURNAL_DESCRIPTOR_MAGIC")
+JOURNAL_COMMIT_MAGIC = _number(_D, "LEANFS_JOURNAL_COMMIT_MAGIC")
+JOURNAL_TARGETS = _number(_D, "LEANFS_JOURNAL_TARGETS_PER_DESCRIPTOR")
+FNV_INIT = _number(_D, "LEANFS_FNV1A_INIT")
+
 TYPE_FREE, TYPE_FILE, TYPE_DIR, TYPE_LINK = 0, 1, 2, 3
 DIRENT_HDR = 8
 ROOT_INODE = 0
 
+def fnv1a(h, data):
+    for byte in data:
+        h = ((h ^ byte) * 0x01000193) & 0xFFFFFFFF
+    return h
+
+
 class Image:
+    """The image as the kernel would see it after mounting: the file, with
+    every committed journal transaction (M194) laid over it. Replayed here by
+    a second implementation read off leanfs_format.h rather than the kernel's
+    code, and never written back - this reader does not modify the image."""
+
     def __init__(self, path):
         self.f = open(path, "rb")
+        self.overlay = {}
+        self.replayed = 0
 
-    def block(self, n):
+    def raw(self, n):
         self.f.seek(n * BLOCK)
         b = self.f.read(BLOCK)
         if len(b) < BLOCK:
             b += b"\0" * (BLOCK - len(b))
         return b
 
+    def block(self, n):
+        return self.overlay.get(n) or self.raw(n)
+
+    def replay(self, journal_block, fs_first_block, fs_end_block):
+        header = self.raw(journal_block)
+        magic, version, start, blocks, sequence, checksum = struct.unpack("<4IQI", header[:28])
+        if (magic != JOURNAL_HEADER_MAGIC or version != JOURNAL_VERSION
+                or blocks != JOURNAL_BLOCKS or not 0 < start < blocks
+                or fnv1a(FNV_INIT, header[:24]) != checksum):
+            return 0
+        at = start
+        while at + 2 < blocks:
+            first = self.raw(journal_block + at)
+            magic, index, seq, count = struct.unpack("<IIQI", first[:20])
+            if (magic != JOURNAL_DESCRIPTOR_MAGIC or index != 0 or seq != sequence
+                    or not 0 < count <= blocks):
+                break
+            descriptors = (count + JOURNAL_TARGETS - 1) // JOURNAL_TARGETS
+            if at + descriptors + count + 1 > blocks:
+                break
+            items = [self.raw(journal_block + at + i) for i in range(descriptors + count)]
+            targets = []
+            ok = True
+            for i in range(descriptors):
+                m, idx, sq, cnt = struct.unpack("<IIQI", items[i][:20])
+                if m != JOURNAL_DESCRIPTOR_MAGIC or idx != i or sq != sequence or cnt != count:
+                    ok = False
+                    break
+                targets += struct.unpack("<%dI" % JOURNAL_TARGETS, items[i][24:24 + 4 * JOURNAL_TARGETS])
+            h = FNV_INIT
+            for item in items:
+                h = fnv1a(h, item)
+            commit = self.raw(journal_block + at + descriptors + count)
+            cm, ccount, cseq, csum = struct.unpack("<IIQI", commit[:20])
+            if (not ok or cm != JOURNAL_COMMIT_MAGIC or cseq != sequence or ccount != count
+                    or csum != h):
+                break
+            for i in range(count):
+                if not fs_first_block <= targets[i] < fs_end_block:
+                    return self.replayed
+                self.overlay[targets[i]] = items[descriptors + i]
+            self.replayed += 1
+            at += descriptors + count + 1
+            sequence += 1
+        return self.replayed
+
 class Fsck:
     def __init__(self, path, compare_against=None):
         self.img = Image(path)
+        fs_blocks = 1 + MAX_INODES * INODE_SIZE // BLOCK + DATA_BLOCKS // 8 // BLOCK + DATA_BLOCKS
+        replayed = self.img.replay(START_BLOCK + fs_blocks, START_BLOCK, START_BLOCK + fs_blocks)
         self.problems = []
         self.notes = []
+        if replayed:
+            self.note("%d committed journal transaction(s) laid over the image before checking", replayed)
         self.compared = None
         self.compare_against = compare_against
 
