@@ -16,6 +16,26 @@ static long read_exact(int fd, void *buffer, size_t length) {
     return (long)got;
 }
 
+static long read_exact_before(int fd, void *buffer, size_t length, long deadline) {
+    uint8_t *p = (uint8_t *)buffer;
+    size_t got = 0;
+    while (got < length) {
+        long n = sys_read(fd, p + got, length - got);
+        if (n == -OS_ERROR_AGAIN) {
+            if (sys_uptime_ms() >= deadline) {
+                return (long)got;
+            }
+            sys_yield();
+            continue;
+        }
+        if (n <= 0) {
+            return -1;
+        }
+        got += (size_t)n;
+    }
+    return (long)got;
+}
+
 #define WINDOW_MANAGER_CONNECT_TIMEOUT_MS 400
 #define WINDOW_MANAGER_CONNECT_ATTEMPTS   12
 
@@ -25,6 +45,13 @@ static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h
     if (sys_pipe_open(WINDOW_MANAGER_REQUEST_PIPE, request_file_descriptors) != 0 || sys_pipe_open(WINDOW_MANAGER_RESPONSE_PIPE, response_file_descriptors) != 0) {
         return -1;
     }
+    /* Non-blocking, because the reply that made the poll below say "ready"
+       can be read by another client before this one reads it. A blocking read
+       then waited for a reply that was never coming when the compositor's
+       startup reset had already thrown this client's request away - it never
+       reached the re-send that exists for exactly that, and on a laptop with
+       eight processors desktop_icons slept there for good. */
+    sys_fcntl(response_file_descriptors[0], F_SETFL_COMMAND, OS_NONBLOCK_BIT);
 
     window_manager_create_request_t request;
     request.width = width;
@@ -68,7 +95,11 @@ static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h
                 sys_yield();
                 continue;
             }
-            if (read_exact(response_file_descriptors[0], &response, sizeof(response)) != (long)sizeof(response)) {
+            long got = read_exact_before(response_file_descriptors[0], &response, sizeof(response), deadline);
+            if (got == 0) {
+                continue;
+            }
+            if (got != (long)sizeof(response)) {
                 break;
             }
             got_response = (response.client_pid == request.client_pid);
