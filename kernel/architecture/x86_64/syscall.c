@@ -1430,9 +1430,20 @@ static long sys_futex(uint64_t address, uint64_t op, uint64_t val,
     if (!user_range_ok(address, sizeof(uint32_t), 0)) {
         return -1;
     }
+    /* M193: the wake takes the same lock the wait checks the word under. It
+       did not, and on two processors a waker could change the word and call
+       wake between a waiter's check and its sleep: the wake found nobody
+       asleep and the waiter then slept on a word that had already changed -
+       for ever, or until its timeout. One processor cannot interleave the
+       two, so this was invisible until the machine had more than one; then
+       it hung the forksmp stage for its whole half hour, one thread asleep on
+       a pthread word, and turned every timed wait it hit into a stall. */
     if (op == FUTEX_WAKE) {
         int max = (val > (uint64_t)(unsigned)MAX_TASKS) ? MAX_TASKS : (int)val;
-        return scheduler_wake_n((const void *)address, max);
+        uint64_t wake_flags = spin_lock_irqsave(&futex_lock);
+        int woken = scheduler_wake_n((const void *)address, max);
+        spin_unlock_irqrestore(&futex_lock, wake_flags);
+        return woken;
     }
     if (op != FUTEX_WAIT) {
         return -1;

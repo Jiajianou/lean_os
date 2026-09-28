@@ -4437,8 +4437,9 @@ static void boot_selftests_system(void) {
         kernel_log_puts("\n");
 
         int forksmp_ok = 1;
-        static const char *const forksmp_modes[] = {"threads", "threadfork", "descriptors"};
-        for (unsigned m = 0; m < 3; m++) {
+        static const char *const forksmp_modes[] = {"futex", "threads", "threadfork",
+                                                     "descriptors"};
+        for (unsigned m = 0; m < 4; m++) {
             size_t fs_bytes = 0;
             uint8_t *fs_img = read_program(PATH_BIN_DIRECTORY "forktest", &fs_bytes);
             if (!fs_img) {
@@ -13556,10 +13557,13 @@ display_self_test_done:
         kernel_log_puts(" boot-protocol HID device(s) on the USB bus.\n");
     }
 
+    /* The two three-second waits below are for a harness at a QEMU monitor;
+       with self-tests off nobody is sending the key. */
+    uint64_t input_wait_ticks = boot_selftests_enabled() ? 3 * PIT_HZ : 0;
     kernel_log_puts("[kbd] IRQ1 unmasked, waiting up to 3s for a test keypress "
                "(QEMU monitor: 'sendkey <key>')...\n");
     int key = -1;
-    uint64_t deadline = pit_get_ticks() + 3 * PIT_HZ;
+    uint64_t deadline = pit_get_ticks() + input_wait_ticks;
     while (pit_get_ticks() < deadline) {
         key = keyboard_read();
         if (key != -1) {
@@ -13587,7 +13591,7 @@ display_self_test_done:
                "/ 'mouse_button val')...\n");
     int got_mouse_event = 0;
     mouse_event_t last_ev = {0, 0, 0, 0, 0};
-    uint64_t mouse_deadline = pit_get_ticks() + 3 * PIT_HZ;
+    uint64_t mouse_deadline = pit_get_ticks() + input_wait_ticks;
     while (pit_get_ticks() < mouse_deadline) {
         mouse_event_t ev;
         while (mouse_read(&ev)) {
@@ -13620,7 +13624,7 @@ display_self_test_done:
     task_spawn("demo-b", demo_task, "B");
     kernel_log_puts("[sched] spawned tasks A and B; letting them run via "
                "preemption for ~1.5s...\n");
-    pit_sleep_ms(1500);
+    pit_sleep_ms(boot_selftests_enabled() ? 1500 : 100);
     kernel_log_puts("[sched] back on the main task - preemption round trip verified.\n\n");
 
     long pid = do_syscall(SYS_getpid, 0, 0, 0);
@@ -13711,7 +13715,11 @@ display_self_test_done:
     disk_log_start();
 
     virtual_file_system_init();
-    {
+    /* M193. The disk measurements below are the battery's, and until now they
+       ran on every boot: on the ThinkPad's stick [m104]'s write-through
+       megabyte alone is 2,048 synchronous writes and 35 seconds, before the
+       desktop could start. A person booting the machine is not grading it. */
+    if (boot_selftests_enabled()) {
         block_device_statistics_t before, after;
         static uint8_t cold[64 * 1024];
         static uint8_t warm[64 * 1024];
@@ -13768,7 +13776,7 @@ display_self_test_done:
         kernel_log_puts(" reads served without touching the device since boot - self-test passed.\n\n");
     }
 
-    {
+    if (boot_selftests_enabled()) {
         const uint32_t SCRATCH_LBA = LEANFS_START_LBA - 16;
         static uint8_t m107_write[512];
         static uint8_t m107_read[512];
@@ -13888,7 +13896,7 @@ display_self_test_done:
         kernel_log_puts(" - self-test passed.\n\n");
     }
 
-    {
+    if (boot_selftests_enabled()) {
         static uint8_t wbuf[64 * 1024];
         static uint8_t rbuf[64 * 1024];
         const uint32_t RUNS = 16;

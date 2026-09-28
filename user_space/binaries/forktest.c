@@ -408,7 +408,58 @@ static int descriptors_mode(void) {
     return descriptor_failures != 0 ? 42 : 0;
 }
 
+/* M193. Two threads handing a word back and forth through futexes, on as
+   many processors as the machine has. A wait carries a two-second timeout it
+   should never need: the other side changes the word and wakes it at once. A
+   wait that times out and finds the word already handed over is a wake that
+   was lost - the waker ran between the waiter's check and its sleep - which on
+   the old kernel hung the forksmp stage for its whole half hour. */
+#define FUTEX_ROUNDS 20000
+#define FUTEX_PATIENCE_MS 2000
+
+static volatile unsigned int futex_turn;
+static volatile int futex_lost;
+
+static void futex_player(unsigned int me) {
+    for (int round = 0; round < FUTEX_ROUNDS; round++) {
+        while (futex_turn != me) {
+            unsigned int seen = futex_turn;
+            if (seen == me) {
+                break;
+            }
+            long waited = sys_futex(&futex_turn, FUTEX_WAIT, seen, FUTEX_PATIENCE_MS);
+            if (waited == -2 && futex_turn == me) {
+                __sync_fetch_and_add(&futex_lost, 1);
+            }
+        }
+        futex_turn = me ^ 1u;
+        sys_futex(&futex_turn, FUTEX_WAKE, 1, 0);
+    }
+}
+
+static void *futex_partner(void *arg) {
+    (void)arg;
+    futex_player(1);
+    return 0;
+}
+
+static int futex_mode(void) {
+    futex_turn = 0;
+    pthread_t partner;
+    if (pthread_create(&partner, 0, futex_partner, 0) != 0) {
+        return 50;
+    }
+    futex_player(0);
+    pthread_join(partner, 0);
+    printf("forktest: %d futex hand-overs each way, %d wake(s) lost\n", FUTEX_ROUNDS,
+           futex_lost);
+    return futex_lost != 0 ? 51 : 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && argv[1] && strcmp(argv[1], "futex") == 0) {
+        return futex_mode();
+    }
     if (argc > 1 && argv[1] && strcmp(argv[1], "descriptors") == 0) {
         return descriptors_mode();
     }

@@ -77,7 +77,12 @@ grep -qF "$DESKTOP_MARKER" "$WORK/disk-1.log" \
 python3 - "$WORK/serial-1.log" "$WORK/disk-1.log" <<'PYTHON' && pass "every serial line to the desktop is in the disk log, in order" || fail "the disk log is not the serial log"
 import sys
 serial = open(sys.argv[1], "rb").read().replace(b"\r\n", b"\n")
-disk = open(sys.argv[2], "rb").read()
+import re
+# M193: the file carries a timestamp line a second that the serial port does
+# not - "[t+12.3s] disk read ..." - and those are the only lines allowed to
+# be in one and not the other.
+disk = re.sub(rb"(?m)^\[t\+[0-9]+\.[0-9]s\] disk read [^\n]*\n", b"",
+              open(sys.argv[2], "rb").read())
 start = serial.find(b"[disk-log] mirroring")
 end = serial.find(b"[init] PID 1 spawned")
 if start < 0 or end < 0:
