@@ -61,6 +61,8 @@ int fake_spinlock_order_pairs(void);
 
 void fake_arch_reset(void);
 void fake_arch_set_cpu(int cpu);
+void fake_arch_reset_unguarded_cpu_reads(void);
+int fake_arch_unguarded_cpu_reads(void);
 int fake_arch_broadcasts(void);
 uint64_t fake_arch_switches(void);
 void fake_arch_stand_on(uint64_t sp);

@@ -1231,6 +1231,37 @@ static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint6
     return 0;
 }
 
+/* Numbering a descriptor is claiming it. The lowest free slot used to be
+   FOUND here and FILLED by the caller afterwards, with nothing in between to
+   say it was taken - so two threads of one process opening at the same
+   moment on two processors were handed the same number, and one of the two
+   objects was silently lost. One processor never does two things at the same
+   moment, which is why a hundred and ninety milestones ran on it without
+   meeting this. Chromium on four did at once: base's descriptor-ownership
+   tracker stopped the browser with "Crashing due to FD ownership violation"
+   before it drew a pixel. The claim is a compare-and-swap from NONE to
+   RESERVED, so exactly one claimant wins each slot, and the caller either
+   fills it or gives it back. */
+static int claim_file_descriptor(task_t *t, int from) {
+    for (int i = from; i < MAX_FILE_DESCRIPTORS; i++) {
+        file_descriptor_type_t *type = &t->descriptor_table->slots[i].type;
+        file_descriptor_type_t expected = FILE_DESCRIPTOR_NONE;
+        if (*type == FILE_DESCRIPTOR_NONE &&
+            __atomic_compare_exchange_n(type, &expected, FILE_DESCRIPTOR_RESERVED, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void unclaim_file_descriptor(task_t *t, int fd) {
+    if (fd >= 0 && t->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_RESERVED) {
+        __atomic_store_n(&t->descriptor_table->slots[fd].type, FILE_DESCRIPTOR_NONE,
+                         __ATOMIC_RELEASE);
+    }
+}
+
 static long sys_pipe(uint64_t file_descriptors_out_pointer, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
@@ -1242,23 +1273,17 @@ static long sys_pipe(uint64_t file_descriptors_out_pointer, uint64_t a2, uint64_
         return -1;
     }
     task_t *self = scheduler_current();
-    int read_file_descriptor = -1, write_file_descriptor = -1;
-    for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-        if (self->descriptor_table->slots[i].type == FILE_DESCRIPTOR_NONE) {
-            if (read_file_descriptor < 0) {
-                read_file_descriptor = i;
-            } else {
-                write_file_descriptor = i;
-                break;
-            }
-        }
-    }
+    int read_file_descriptor = claim_file_descriptor(self, 0);
+    int write_file_descriptor = read_file_descriptor < 0 ? -1 : claim_file_descriptor(self, 0);
     if (read_file_descriptor < 0 || write_file_descriptor < 0) {
+        unclaim_file_descriptor(self, read_file_descriptor);
         return -1;
     }
 
     pipe_t *p = pipe_create();
     if (!p) {
+        unclaim_file_descriptor(self, read_file_descriptor);
+        unclaim_file_descriptor(self, write_file_descriptor);
         return -1;
     }
     self->descriptor_table->slots[read_file_descriptor].type = FILE_DESCRIPTOR_PIPE_READ;
@@ -2075,23 +2100,17 @@ static long sys_pipe_open(uint64_t name_pointer, uint64_t file_descriptors_out_p
         return -1;
     }
     task_t *self = scheduler_current();
-    int read_file_descriptor = -1, write_file_descriptor = -1;
-    for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-        if (self->descriptor_table->slots[i].type == FILE_DESCRIPTOR_NONE) {
-            if (read_file_descriptor < 0) {
-                read_file_descriptor = i;
-            } else {
-                write_file_descriptor = i;
-                break;
-            }
-        }
-    }
+    int read_file_descriptor = claim_file_descriptor(self, 0);
+    int write_file_descriptor = read_file_descriptor < 0 ? -1 : claim_file_descriptor(self, 0);
     if (read_file_descriptor < 0 || write_file_descriptor < 0) {
+        unclaim_file_descriptor(self, read_file_descriptor);
         return -1;
     }
 
     pipe_t *p = pipe_named(name);
     if (!p) {
+        unclaim_file_descriptor(self, read_file_descriptor);
+        unclaim_file_descriptor(self, write_file_descriptor);
         return -1;
     }
     self->descriptor_table->slots[read_file_descriptor].type = FILE_DESCRIPTOR_PIPE_READ;
@@ -2444,10 +2463,9 @@ static int descriptor_exhaustions;
    Both arrive at a caller as "it failed", and telling them apart by reading
    the source is what M183 did not want to do a second time. */
 static int alloc_file_descriptor(task_t *t) {
-    for (int i = 2; i < MAX_FILE_DESCRIPTORS; i++) {
-        if (t->descriptor_table->slots[i].type == FILE_DESCRIPTOR_NONE) {
-            return i;
-        }
+    int claimed = claim_file_descriptor(t, 2);
+    if (claimed >= 0) {
+        return claimed;
     }
     descriptor_exhaustions++;
     if (descriptor_exhaustions == 1 || descriptor_exhaustions % 64 == 0) {
@@ -2608,6 +2626,7 @@ static long sys_open(uint64_t path_pointer, uint64_t flags, uint64_t a3, uint64_
     }
     open_file_t *of = open_file_alloc(handle, writable, path, opening_directory);
     if (!of) {
+        unclaim_file_descriptor(self, fd);
         return -1;
     }
     if (flags & OPEN_APPEND) {
@@ -4892,17 +4911,14 @@ static long sys_fcntl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
         if (arg >= MAX_FILE_DESCRIPTORS) {
             return -1;
         }
-        for (uint64_t i = arg; i < MAX_FILE_DESCRIPTORS; i++) {
-            if (self->descriptor_table->slots[i].type != FILE_DESCRIPTOR_NONE) {
-                continue;
-            }
-            self->descriptor_table->slots[i] = self->descriptor_table->slots[fd];
-            self->descriptor_table->slots[i].cloexec =
-                command == F_DUPFD_CLOEXEC_COMMAND ? 1 : 0;
-            file_descriptor_retain(&self->descriptor_table->slots[i]);
-            return (long)i;
+        int i = claim_file_descriptor(self, (int)arg);
+        if (i < 0) {
+            return -1;
         }
-        return -1;
+        self->descriptor_table->slots[i] = self->descriptor_table->slots[fd];
+        self->descriptor_table->slots[i].cloexec = command == F_DUPFD_CLOEXEC_COMMAND ? 1 : 0;
+        file_descriptor_retain(&self->descriptor_table->slots[i]);
+        return (long)i;
     }
     case F_GETLK_COMMAND:
     case F_SETLK_COMMAND:

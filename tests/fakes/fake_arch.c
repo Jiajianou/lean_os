@@ -8,9 +8,37 @@ void panic(const char *message);
 
 static int current_cpu;
 
+/* M191. Which CPU the caller is on is only true while it cannot be moved, and
+   on the real machine what stops a move is interrupts being off. The fake
+   keeps that one bit so a test can ask whether the scheduler ever read the
+   index while a tick could still have migrated it. */
+static int interrupts_on = 1;
+static int unguarded_cpu_reads;
+
+uint64_t fake_irq_save_disable(void) {
+    uint64_t was = (uint64_t)interrupts_on;
+    interrupts_on = 0;
+    return was;
+}
+
+void fake_irq_restore(uint64_t flags) { interrupts_on = flags ? 1 : 0; }
+
+void fake_arch_reset_unguarded_cpu_reads(void);
+int fake_arch_unguarded_cpu_reads(void);
+void fake_arch_reset_unguarded_cpu_reads(void) {
+    interrupts_on = 1;
+    unguarded_cpu_reads = 0;
+}
+int fake_arch_unguarded_cpu_reads(void) { return unguarded_cpu_reads; }
+
 void fake_arch_set_cpu(int cpu) { current_cpu = cpu; }
-int smp_current_cpu(void) { return current_cpu; }
-int gdt_current_cpu(void) { return current_cpu; }
+int smp_current_cpu(void) {
+    if (interrupts_on) {
+        unguarded_cpu_reads++;
+    }
+    return current_cpu;
+}
+int gdt_current_cpu(void) { return smp_current_cpu(); }
 
 int smp_cpu_count = 1;
 
@@ -50,8 +78,8 @@ void fork_return_to_user(void *frame) {
     }
 }
 
-void cpu_enable_interrupts(void) {}
-void cpu_disable_interrupts(void) {}
+void cpu_enable_interrupts(void) { interrupts_on = 1; }
+void cpu_disable_interrupts(void) { interrupts_on = 0; }
 void cpu_spin_hint(void) {}
 
 static uint64_t claimed_sp;

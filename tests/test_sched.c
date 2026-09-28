@@ -1220,3 +1220,51 @@ TEST(scheduler, a_saved_stack_pointer_outside_its_own_task_is_caught_before_it_r
     q13_kill(runner);
     q13_kill(victim);
 }
+
+/* M192. A task that reads which processor it is on with interrupts still
+   enabled can be moved by the next tick and go on using the old answer: it
+   then treats the other processor's running task as its own, saves its stack
+   pointer into it and points that processor's tss.rsp0 at the next task's
+   stack. That was the four-core bug M172 to M182 chased. No entry point may
+   ask the question while the answer can still change. */
+TEST(scheduler, no_entry_point_asks_which_cpu_it_is_on_while_it_can_still_be_moved) {
+    q13_boot();
+    task_t *a = q13_spawn("migrant-a");
+    task_t *b = q13_spawn("migrant-b");
+    REQUIRE(a != NULL);
+    REQUIRE(b != NULL);
+    int placed = 0;
+    for (int i = 0; i < 200 * Q13_QUANTUM && !placed; i++) {
+        q13_tick(0);
+        placed = (scheduler_current() == a);
+    }
+    REQUIRE(placed);
+    fake_arch_set_cpu(0);
+    fake_arch_stand_on(a->kernel_stack_top - 64);
+
+    fake_arch_reset_unguarded_cpu_reads();
+    CHECK(scheduler_current() == a);
+    CHECK_EQ(fake_arch_unguarded_cpu_reads(), 0);
+
+    fake_arch_reset_unguarded_cpu_reads();
+    (void)scheduler_signal_pending();
+    CHECK_EQ(fake_arch_unguarded_cpu_reads(), 0);
+
+    fake_arch_reset_unguarded_cpu_reads();
+    schedule();
+    CHECK_EQ(fake_arch_unguarded_cpu_reads(), 0);
+
+    fake_arch_set_cpu(0);
+    task_t *now = scheduler_current();
+    fake_arch_stand_on(now->kernel_stack_top ? now->kernel_stack_top - 64 : 0);
+    static spinlock_t held;
+    uint64_t flags = spin_lock_irqsave(&held);
+    fake_arch_reset_unguarded_cpu_reads();
+    scheduler_block_on(&held, 0, &held, &flags);
+    CHECK_EQ(fake_arch_unguarded_cpu_reads(), 0);
+    spin_unlock_irqrestore(&held, flags);
+
+    fake_arch_reset_unguarded_cpu_reads();
+    q13_kill(a);
+    q13_kill(b);
+}

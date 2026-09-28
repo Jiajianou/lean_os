@@ -859,6 +859,26 @@ static void demo_task(void *arg) {
     }
 }
 
+static volatile int forksmp_finished;
+
+static void forksmp_watchdog(void *arg) {
+    (void)arg;
+    uint32_t wait_seconds = 240;
+    for (int report = 0; report < 2 && !forksmp_finished; report++) {
+        for (uint32_t second = 0; second < wait_seconds && !forksmp_finished; second++) {
+            scheduler_sleep_ms(1000);
+        }
+        if (forksmp_finished) {
+            break;
+        }
+        scheduler_debug_dump("forksmp: forktest has not finished");
+        kernel_log_puts("[sched-dump] on each cpu:");
+        scheduler_dump_cpus();
+        wait_seconds = 60;
+    }
+    task_exit();
+}
+
 static void smp_probe_task(void *arg) {
     volatile int *seen = (volatile int *)arg;
     for (int iter = 0; iter < 30; iter++) {
@@ -4395,6 +4415,18 @@ static void boot_selftests_system(void) {
     }
 
     if (boot_forksmp_enabled()) {
+        /* M192. When this stage hangs it says nothing for half an hour and
+           then the harness gives up, which is no information at all. A
+           detached watchdog - detached so SYS_wait below cannot mistake it for
+           forktest - names every task's state, wait channel and processor
+           time if forktest is still going after four minutes (it takes well
+           under one), and again a minute later, so what is stuck and what is
+           still spinning can be told apart. Silence from the watchdog too
+           means the machine itself stopped scheduling. */
+        task_t *watchdog = task_spawn("forksmp-watchdog", forksmp_watchdog, (void *)0);
+        if (watchdog) {
+            watchdog->parent_id = -1;
+        }
         /* The [m83] threaded-fork modes on their own, on whatever core count
            this machine was booted with. They are in the battery too, but the
            battery boots one core and a shootdown between cores is not a thing
@@ -4405,8 +4437,8 @@ static void boot_selftests_system(void) {
         kernel_log_puts("\n");
 
         int forksmp_ok = 1;
-        static const char *const forksmp_modes[] = {"threads", "threadfork"};
-        for (unsigned m = 0; m < 2; m++) {
+        static const char *const forksmp_modes[] = {"threads", "threadfork", "descriptors"};
+        for (unsigned m = 0; m < 3; m++) {
             size_t fs_bytes = 0;
             uint8_t *fs_img = read_program(PATH_BIN_DIRECTORY "forktest", &fs_bytes);
             if (!fs_img) {
@@ -4432,6 +4464,7 @@ static void boot_selftests_system(void) {
                 }
             }
         }
+        forksmp_finished = 1;
         if (!forksmp_ok) {
             panic("forksmp: fork out of a process with sibling threads is wrong on this machine");
         }

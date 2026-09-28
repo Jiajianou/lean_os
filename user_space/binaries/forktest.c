@@ -1,3 +1,4 @@
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -340,7 +341,77 @@ static int thread_fork_mode(void) {
     return thread_fork_result;
 }
 
+/* M192. Threads of one process opening and closing at once, on as many
+   processors as the machine has. Each registers the number it was given
+   before using it and clears the registration before closing; finding the
+   number already registered means two live descriptors were handed the same
+   number - the bug that stopped Chromium on four cores. Pipes and open(2)
+   both, because they claimed slots by different code. */
+#define DESCRIPTOR_RACERS 4
+#define DESCRIPTOR_ROUNDS 3000
+#define DESCRIPTOR_CEILING 1024
+
+static volatile int descriptor_owner[DESCRIPTOR_CEILING];
+static volatile int descriptor_collisions;
+static volatile int descriptor_failures;
+
+static void *descriptor_racer(void *arg) {
+    int me = (int)(long)arg + 1;
+    for (int round = 0; round < DESCRIPTOR_ROUNDS; round++) {
+        int fds[2];
+        int count = 0;
+        if (round & 1) {
+            if (pipe(fds) != 0) {
+                __sync_fetch_and_add(&descriptor_failures, 1);
+                continue;
+            }
+            count = 2;
+        } else {
+            fds[0] = open("/dev/null", O_RDONLY);
+            if (fds[0] < 0) {
+                __sync_fetch_and_add(&descriptor_failures, 1);
+                continue;
+            }
+            count = 1;
+        }
+        for (int i = 0; i < count; i++) {
+            if (fds[i] >= DESCRIPTOR_CEILING ||
+                !__sync_bool_compare_and_swap(&descriptor_owner[fds[i]], 0, me)) {
+                __sync_fetch_and_add(&descriptor_collisions, 1);
+            }
+        }
+        for (int i = 0; i < count; i++) {
+            if (fds[i] < DESCRIPTOR_CEILING && descriptor_owner[fds[i]] == me) {
+                descriptor_owner[fds[i]] = 0;
+            }
+            close(fds[i]);
+        }
+    }
+    return 0;
+}
+
+static int descriptors_mode(void) {
+    pthread_t racers[DESCRIPTOR_RACERS];
+    for (long i = 0; i < DESCRIPTOR_RACERS; i++) {
+        if (pthread_create(&racers[i], 0, descriptor_racer, (void *)i) != 0) {
+            return 40;
+        }
+    }
+    for (int i = 0; i < DESCRIPTOR_RACERS; i++) {
+        pthread_join(racers[i], 0);
+    }
+    printf("forktest: %d racers x %d rounds, %d descriptor(s) handed out twice, %d failure(s)\n",
+           DESCRIPTOR_RACERS, DESCRIPTOR_ROUNDS, descriptor_collisions, descriptor_failures);
+    if (descriptor_collisions != 0) {
+        return 41;
+    }
+    return descriptor_failures != 0 ? 42 : 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && argv[1] && strcmp(argv[1], "descriptors") == 0) {
+        return descriptors_mode();
+    }
     if (argc > 1 && argv[1] && strcmp(argv[1], "cow") == 0) {
         return cow_mode();
     }

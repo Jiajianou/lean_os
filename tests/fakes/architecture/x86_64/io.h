@@ -21,8 +21,11 @@ static inline void outsw(uint16_t port, const void *source, uint32_t words) {
     (void)port; (void)source; (void)words;
 }
 
-static inline uint64_t irq_save_disable(void) { return 0; }
-static inline void irq_restore(uint64_t flags) { (void)flags; }
+uint64_t fake_irq_save_disable(void);
+void fake_irq_restore(uint64_t flags);
+
+static inline uint64_t irq_save_disable(void) { return fake_irq_save_disable(); }
+static inline void irq_restore(uint64_t flags) { fake_irq_restore(flags); }
 
 static inline int cpu_interrupts_enabled(void) { return 1; }
 static inline void cpu_halt(void) {}

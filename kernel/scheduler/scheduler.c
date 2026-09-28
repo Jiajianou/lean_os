@@ -56,6 +56,30 @@ static uint64_t loaded_pml4_phys[MAX_CPUS];
 
 static spinlock_t scheduler_lock;
 
+/* Which processor this is - and so which task this is - is only true while
+   nothing can move the caller to another one. With interrupts on, a tick
+   between reading the index and using it can preempt the task and resume it
+   on a different processor, still holding the old index.
+
+   That was the four-core bug M172 to M182 chased. schedule() read the index
+   and THEN disabled interrupts, so a task preempted in that gap went on, on
+   its new processor, to treat the old processor's running task as its own:
+   it saved its stack pointer into that task, installed the next task as the
+   old processor's current one, and pointed the old processor's tss.rsp0 at
+   the next task's stack. The old processor's next entry from ring 3 then
+   landed one interrupt frame below a stack top that belonged to somebody
+   else - the exact 0x1D0 M182 measured - and task_exit's copy of the same
+   pattern wrote another processor's record of which page table it had
+   loaded, so that processor could skip a CR3 switch and run a task in the
+   wrong address space. One processor cannot migrate anything, which is why
+   one processor never saw it. */
+static task_t *current_task_now(void) {
+    uint64_t flags = irq_save_disable();
+    task_t *t = current_task[smp_current_cpu()];
+    irq_restore(flags);
+    return t;
+}
+
 static uint64_t event_sequence;
 
 static int blocked_count;
@@ -93,6 +117,18 @@ void scheduler_debug_dump(const char *label) {
         kernel_log_put_hex32((uint32_t)(uint64_t)t->wait_chan);
         kernel_log_puts(" deadline=");
         kernel_log_put_dec((uint32_t)t->wake_deadline_ms);
+        kernel_log_puts(" ticks=");
+        kernel_log_put_dec((uint32_t)t->user_ticks);
+        kernel_log_puts("u/");
+        kernel_log_put_dec((uint32_t)t->sys_ticks);
+        kernel_log_puts("s tgid=");
+        kernel_log_put_dec((uint32_t)t->tgid);
+        if (t->kernel_stack_top != 0 && t->pml4_phys != virtual_memory_kernel_pml4_phys()) {
+            const isr_regs_t *frame =
+                (const isr_regs_t *)(t->kernel_stack_top - sizeof(isr_regs_t));
+            kernel_log_puts(" user-rip=0x");
+            kernel_log_put_hex64(frame->rip);
+        }
         kernel_log_putc('\n');
     }
 }
@@ -205,9 +241,9 @@ static void set_task_name(task_t *t, const char *name) {
    M170's blocking sleep made the tick take the lock on most ticks of an idle
    machine, and it became three boots in three (M171). */
 static void task_entry_trampoline(void) {
+    task_t *t = current_task[smp_current_cpu()];
     spin_unlock(&scheduler_lock);
     cpu_enable_interrupts();
-    task_t *t = current_task[smp_current_cpu()];
     t->entry(t->arg);
     task_exit();
 }
@@ -537,7 +573,8 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
             /* Close-on-exec, and this IS the exec: a spawn replaces the
                image, which is what the flag is about. A thread above takes
                the other branch and keeps them. */
-            if (t->descriptor_table->slots[i].cloexec) {
+            if (t->descriptor_table->slots[i].cloexec ||
+                t->descriptor_table->slots[i].type == FILE_DESCRIPTOR_RESERVED) {
                 t->descriptor_table->slots[i].type = FILE_DESCRIPTOR_NONE;
                 t->descriptor_table->slots[i].cloexec = 0;
                 continue;
@@ -835,10 +872,10 @@ static void unblock_self(task_t *self) {
 
 void scheduler_block_on_sequence(const void *chan, uint64_t deadline_ms, uint64_t expected_sequence) {
     scheduler_deliver_pending_signal();
-    scheduler_take_pending_stop_if_any(current_task[smp_current_cpu()]);
+    scheduler_take_pending_stop_if_any(current_task_now());
 
-    int cpu = smp_current_cpu();
     uint64_t sflags = irq_save_disable();
+    int cpu = smp_current_cpu();
     spin_lock(&scheduler_lock);
     if (event_sequence != expected_sequence) {
         spin_unlock(&scheduler_lock);
@@ -874,8 +911,7 @@ void scheduler_block_on_sequence(const void *chan, uint64_t deadline_ms, uint64_
 static const char sleep_channel;
 
 void scheduler_sleep_ms(uint32_t ms) {
-    int cpu = smp_current_cpu();
-    task_t *self = current_task[cpu];
+    task_t *self = current_task_now();
     if (!self || self->is_idle) {
         return;
     }
@@ -896,8 +932,8 @@ void scheduler_sleep_ms(uint32_t ms) {
 }
 
 void scheduler_block_on(const void *chan, uint64_t deadline_ms, spinlock_t *lock, uint64_t *flags) {
-    int cpu = smp_current_cpu();
     uint64_t sflags = irq_save_disable();
+    int cpu = smp_current_cpu();
     spin_lock(&scheduler_lock);
     task_t *self = current_task[cpu];
     self->wait_chan = chan;
@@ -917,8 +953,8 @@ void scheduler_block_on(const void *chan, uint64_t deadline_ms, spinlock_t *lock
 }
 
 void schedule(void) {
-    int cpu = smp_current_cpu();
     uint64_t flags = irq_save_disable();
+    int cpu = smp_current_cpu();
     spin_lock(&scheduler_lock);
     task_t *previous = current_task[cpu];
     task_t *next = pick_next(previous, cpu);
@@ -1095,14 +1131,14 @@ void scheduler_dump_cpus(void) {
 }
 
 static void scheduler_deliver_pending_signal(void) {
-    task_t *t = current_task[smp_current_cpu()];
+    task_t *t = current_task_now();
     if (t->pending_signal != 0) {
         deliver_pending_signal_and_exit(t);
     }
 }
 
 void task_exit_with_signal(int sig) {
-    task_t *t = current_task[smp_current_cpu()];
+    task_t *t = current_task_now();
     if (t) {
         t->exit_signal = sig;
     }
@@ -1110,7 +1146,7 @@ void task_exit_with_signal(int sig) {
 }
 
 void task_exit_with_code(int code) {
-    task_t *t = current_task[smp_current_cpu()];
+    task_t *t = current_task_now();
     shared_memory_free_by_owner(t->id);
     scheduler_release_file_descriptors(t);
     scheduler_release_env(t);
@@ -1121,7 +1157,6 @@ void task_exit_with_code(int code) {
     }
 
     if (t->pml4_phys != virtual_memory_kernel_pml4_phys()) {
-        int cpu = smp_current_cpu();
         uint64_t dead = t->pml4_phys;
         uint64_t peak = virtual_memory_rss_peak_pages(dead);
         if (peak > t->max_rss_pages) {
@@ -1175,9 +1210,11 @@ void task_exit_with_code(int code) {
            page stayed mapped into an address space nobody could release it
            from. */
         if (!others) {
+            uint64_t switch_flags = irq_save_disable();
             t->pml4_phys = virtual_memory_kernel_pml4_phys();
             virtual_memory_switch_address_space(t->pml4_phys);
-            loaded_pml4_phys[cpu] = t->pml4_phys;
+            loaded_pml4_phys[smp_current_cpu()] = t->pml4_phys;
+            irq_restore(switch_flags);
             process_destroy_address_space(dead);
         }
     }
@@ -1207,7 +1244,7 @@ void task_exit(void) {
 }
 
 task_t *scheduler_current(void) {
-    return current_task[smp_current_cpu()];
+    return current_task_now();
 }
 
 task_t *scheduler_task_by_id(int pid) {
@@ -2158,6 +2195,9 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->descriptor_table = fresh;
     for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
         t->descriptor_table->slots[i] = parent->descriptor_table->slots[i];
+        if (t->descriptor_table->slots[i].type == FILE_DESCRIPTOR_RESERVED) {
+            t->descriptor_table->slots[i].type = FILE_DESCRIPTOR_NONE;
+        }
         file_descriptor_retain(&t->descriptor_table->slots[i]);
     }
     t->parent_id = parent->id;
@@ -2415,7 +2455,7 @@ void scheduler_raise_signal_group(int pgid, int sig) {
 }
 
 int scheduler_signal_pending(void) {
-    task_t *t = current_task[smp_current_cpu()];
+    task_t *t = current_task_now();
     return (t->sig_pending & ~t->sig_blocked) != 0;
 }
 

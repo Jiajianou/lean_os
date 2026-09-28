@@ -41,6 +41,10 @@ typedef enum {
     FILE_DESCRIPTOR_TIMER,
     FILE_DESCRIPTOR_EPOLL,
     FILE_DESCRIPTOR_MEMFD,
+    /* Claimed by a thread that has not finished filling it in. Numbering a
+       descriptor and installing one are two steps, and a slot has to belong
+       to somebody between them or another processor takes the same number. */
+    FILE_DESCRIPTOR_RESERVED,
 } file_descriptor_type_t;
 
 /* Descriptors per process. 128 until M187, which was enough for every
