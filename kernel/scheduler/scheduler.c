@@ -90,6 +90,9 @@ void scheduler_dump_cpus(void);
 static void wake_expired(uint64_t now_ms);
 static void fire_expired_alarms(uint64_t now_ms);
 static void unblock_self(task_t *self);
+static void block_on(const void *chan, uint64_t space, uint64_t deadline_ms, spinlock_t *lock,
+                     uint64_t *flags, int interruptible);
+
 
 const int scheduler_poll_channel = 0;
 const int scheduler_keyboard_channel = 0;
@@ -123,6 +126,16 @@ static uint64_t tsc_to_us(uint64_t cycles) {
 #define HALT_WITH_INTERRUPTS() __asm__ volatile("sti; hlt; cli" ::: "memory")
 #define CPU_RELAX() __asm__ volatile("pause")
 #endif
+
+/* M198: bumped when a task exits and when one is reaped - the two moments
+   the answer to "is that program still there" changes - so a task that
+   keeps windows for other programs can ask whether anything changed since it
+   last looked instead of polling each one. */
+static uint64_t exit_sequence;
+
+uint64_t scheduler_exit_sequence(void) {
+    return __atomic_load_n(&exit_sequence, __ATOMIC_ACQUIRE);
+}
 
 static void close_halt_interval(int cpu) {
     if (halt_since[cpu] != 0) {
@@ -391,11 +404,13 @@ void scheduler_tick_cpu(int cpu) {
         return;
     }
 
-    if (t->pending_signal != 0) {
-        deliver_pending_signal_and_exit(t);
-    }
-    if (t->pending_stop != 0) {
-        take_pending_stop(t);
+    if (t->sleep_locks_held == 0) {
+        if (t->pending_signal != 0) {
+            deliver_pending_signal_and_exit(t);
+        }
+        if (t->pending_stop != 0) {
+            take_pending_stop(t);
+        }
     }
     if (cpu == 0 && ++aging_ticks >= SCHEDULER_AGING_TICKS) {
         aging_ticks = 0;
@@ -417,6 +432,18 @@ void scheduler_tick_cpu(int cpu) {
         return;
     }
     ticks_in_slice[cpu] = 0;
+
+    /* M198. A task holding a sleep lock is not taken off the processor by
+       the timer. It runs with interrupts on - answering IPIs and shootdowns,
+       unlike the spinlock it replaced - but preempting it hands the processor
+       to tasks that can only find the lock taken and go back to sleep, and
+       four tasks writing files at once went from 0.32 s to 1.94 s that way
+       (four_writers_us). It still gives the processor up whenever it blocks,
+       and the first tick after it lets go takes it off. */
+    if (t->sleep_locks_held > 0) {
+        ticks_in_slice[cpu] = SCHEDULER_QUANTUM_TICKS - 1;
+        return;
+    }
 
     if (t->full_slices < 255) {
         t->full_slices++;
@@ -699,6 +726,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->heap_brk = heap_start;
     t->heap_mapped_end = heap_start;
     t->shared_memory_next_vaddr = shared_memory_base;
+    t->seen_exit_sequence = scheduler_exit_sequence();
     set_task_name(t, name);
 
     uint64_t *sp = (uint64_t *)t->kernel_stack_top;
@@ -1074,17 +1102,43 @@ void sleep_lock_acquire(sleep_lock_t *lock) {
             flags = spin_lock_irqsave(&lock->guard);
             continue;
         }
+        /* Not interruptible. Delivering a signal here can end the task, and
+           a task waiting for one of these locks may already hold another -
+           an exec holds the image cache's while it waits for the
+           filesystem's - so a SIGKILL that arrived mid-exec left the image
+           cache locked and every exec after it asleep for good (the boot
+           battery hung at the first exec after [m167] killed its browser).
+           A signal still wakes the waiter; it looks at the lock again and is
+           delivered on the way back to user space, as it would be anyway. */
         lock->waiters++;
-        scheduler_block_on_in_space(lock, 0, 0, &lock->guard, &flags);
+        block_on(lock, 0, 0, &lock->guard, &flags, 0);
         lock->waiters--;
     }
     lock->held = 1;
+    task_t *owner = current_task[smp_current_cpu()];
+    lock->holder = owner ? owner->id : -1;
+    /* M198. The holder runs with interrupts on, and the tick delivers a
+       pending fatal signal to whatever it interrupts - kernel mode included.
+       A spinlock taken with interrupts off was never interrupted; this is,
+       and a SIGKILL that landed while an exec held the image cache's lock
+       ended the task holding it, and every exec after that waited for a
+       task that no longer existed (the boot battery stopped at the first
+       exec after [m167] killed its browser mid-launch). While a task holds
+       one of these, its signals wait for it to let go. */
+    if (owner) {
+        owner->sleep_locks_held++;
+    }
     spin_unlock_irqrestore(&lock->guard, flags);
 }
 
 void sleep_lock_release(sleep_lock_t *lock) {
     uint64_t flags = spin_lock_irqsave(&lock->guard);
     lock->held = 0;
+    lock->holder = 0;
+    task_t *owner = current_task[smp_current_cpu()];
+    if (owner && owner->sleep_locks_held > 0) {
+        owner->sleep_locks_held--;
+    }
     if (lock->waiters > 0) {
         scheduler_wake_n(lock, 0, 1);
     }
@@ -1240,6 +1294,11 @@ void scheduler_block_on(const void *chan, uint64_t deadline_ms, spinlock_t *lock
 
 void scheduler_block_on_in_space(const void *chan, uint64_t space, uint64_t deadline_ms,
                                  spinlock_t *lock, uint64_t *flags) {
+    block_on(chan, space, deadline_ms, lock, flags, 1);
+}
+
+static void block_on(const void *chan, uint64_t space, uint64_t deadline_ms, spinlock_t *lock,
+                     uint64_t *flags, int interruptible) {
     uint64_t sflags = irq_save_disable();
     int cpu = smp_current_cpu();
     spin_lock(&scheduler_lock);
@@ -1254,7 +1313,9 @@ void scheduler_block_on_in_space(const void *chan, uint64_t space, uint64_t dead
 
     spin_unlock_irqrestore(lock, *flags);
 
-    scheduler_deliver_pending_signal();
+    if (interruptible) {
+        scheduler_deliver_pending_signal();
+    }
 
     schedule();
     unblock_self(self);
@@ -1447,7 +1508,7 @@ void scheduler_dump_cpus(void) {
 
 static void scheduler_deliver_pending_signal(void) {
     task_t *t = current_task_now();
-    if (t->pending_signal != 0) {
+    if (t->pending_signal != 0 && t->sleep_locks_held == 0) {
         deliver_pending_signal_and_exit(t);
     }
 }
@@ -1540,6 +1601,7 @@ void task_exit_with_code(int code) {
         blocked_count--;
     }
     t->state = TASK_TERMINATED;
+    __atomic_add_fetch(&exit_sequence, 1, __ATOMIC_RELEASE);
     scheduler_wake_all((const void *)t);
     scheduler_wake_all(SCHEDULER_POLL_CHAN);
     if (t->parent_id >= 0) {
@@ -1675,6 +1737,8 @@ void scheduler_reap_slot(task_t *t) {
     if (!t || t->state != TASK_TERMINATED) {
         return;
     }
+    __atomic_add_fetch(&exit_sequence, 1, __ATOMIC_RELEASE);
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
 
     /* A thread-group leader's slot is not reset while its threads are still
        running in the address space it owns.

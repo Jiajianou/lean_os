@@ -50,6 +50,10 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
                                      const char *const *argv,
                                      const char *const *envp,
                                      uint64_t *out_entry);
+uint64_t process_build_address_space_from_path(const char *path,
+                                               const char *const *argv,
+                                               const char *const *envp,
+                                               uint64_t *out_entry, int *not_cached);
 
 task_t *process_spawnv(const char *name, const uint8_t *image, size_t image_size,
                         const char *const *argv);

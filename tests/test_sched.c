@@ -1504,3 +1504,74 @@ TEST(scheduler, a_watch_set_that_overflows_watches_everything) {
     scheduler_watch_end();
     CHECK_EQ(self->watching, 0);
 }
+
+TEST(scheduler, a_sleep_lock_is_counted_against_the_task_holding_it) {
+    q13_boot();
+    fake_arch_set_cpu(0);
+    static sleep_lock_t lock;
+    task_t *self = scheduler_current();
+    uint32_t before = self->sleep_locks_held;
+    sleep_lock_acquire(&lock);
+    CHECK_EQ(self->sleep_locks_held, before + 1);
+    CHECK_EQ(lock.held, 1);
+    CHECK_EQ(lock.holder, self->id);
+    sleep_lock_release(&lock);
+    CHECK_EQ(self->sleep_locks_held, before);
+    CHECK_EQ(lock.held, 0);
+}
+
+TEST(scheduler, a_fatal_signal_waits_while_its_task_holds_a_sleep_lock) {
+    q13_boot();
+    task_t *holder = q13_spawn("holder");
+    REQUIRE(holder != 0);
+    int placed = 0;
+    for (int i = 0; i < 200 * Q13_QUANTUM && !placed; i++) {
+        q13_tick(0);
+        fake_arch_set_cpu(0);
+        placed = (scheduler_current() == holder);
+    }
+    REQUIRE(placed);
+
+    holder->sleep_locks_held = 1;
+    holder->pending_signal = SIGKILL;
+    q13_tick(0);
+    CHECK(holder->state != TASK_TERMINATED);
+    CHECK_EQ(holder->pending_signal, SIGKILL);
+
+    holder->pending_signal = 0;
+    holder->sleep_locks_held = 0;
+    q13_kill(holder);
+}
+
+TEST(scheduler, the_timer_does_not_take_the_processor_from_a_sleep_lock_holder) {
+    q13_boot();
+    task_t *holder = q13_spawn("holder");
+    task_t *other = q13_spawn("other");
+    REQUIRE(holder != 0);
+    REQUIRE(other != 0);
+    int placed = 0;
+    for (int i = 0; i < 200 * Q13_QUANTUM && !placed; i++) {
+        q13_tick(0);
+        fake_arch_set_cpu(0);
+        placed = (scheduler_current() == holder);
+    }
+    REQUIRE(placed);
+
+    holder->sleep_locks_held = 1;
+    for (int i = 0; i < 20 * Q13_QUANTUM; i++) {
+        q13_tick(0);
+        fake_arch_set_cpu(0);
+        CHECK(scheduler_current() == holder);
+    }
+
+    holder->sleep_locks_held = 0;
+    int moved = 0;
+    for (int i = 0; i < 4 * Q13_QUANTUM && !moved; i++) {
+        q13_tick(0);
+        fake_arch_set_cpu(0);
+        moved = (scheduler_current() != holder);
+    }
+    CHECK(moved);
+    q13_kill(holder);
+    q13_kill(other);
+}

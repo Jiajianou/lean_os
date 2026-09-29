@@ -5,6 +5,7 @@
 #include "architecture/x86_64/global_descriptor_table.h"
 #include "drivers/kernel_log.h"
 #include "elf.h"
+#include "image_cache.h"
 #include "file_system/virtual_file_system.h"
 #include "library/kernel_library.h"
 #include "memory_management/heap.h"
@@ -55,10 +56,47 @@ uint64_t process_fork_address_space(uint64_t source_pml4_phys,
                                              shared_ranges, shared_count);
 }
 
+static uint64_t build_address_space(const uint8_t *image, size_t image_size,
+                                    const image_cache_entry_t *cached,
+                                    const char *const *argv,
+                                    const char *const *envp,
+                                    uint64_t *out_entry);
+
 uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
                                      const char *const *argv,
                                      const char *const *envp,
                                      uint64_t *out_entry) {
+    return build_address_space(image, image_size, (const image_cache_entry_t *)0, argv, envp,
+                               out_entry);
+}
+
+/* M198: an exec by path goes through the program image cache, which hands
+   back the file's first page and the size of the whole - all the ELF checks
+   and the auxiliary vector read - and maps the segments from frames it keeps.
+   A program the cache will not take is the caller's to read and load the old
+   way; *not_cached says so. */
+uint64_t process_build_address_space_from_path(const char *path,
+                                               const char *const *argv,
+                                               const char *const *envp,
+                                               uint64_t *out_entry, int *not_cached) {
+    *not_cached = 0;
+    image_cache_entry_t *cached = image_cache_acquire(path);
+    if (!cached) {
+        *not_cached = 1;
+        return 0;
+    }
+    size_t file_size = 0;
+    const uint8_t *header = image_cache_header(cached, &file_size);
+    uint64_t pml4 = build_address_space(header, file_size, cached, argv, envp, out_entry);
+    image_cache_release(cached);
+    return pml4;
+}
+
+static uint64_t build_address_space(const uint8_t *image, size_t image_size,
+                                    const image_cache_entry_t *cached,
+                                    const char *const *argv,
+                                    const char *const *envp,
+                                    uint64_t *out_entry) {
     if (elf_validate(image, image_size) == 0) {
         return 0;
     }
@@ -100,7 +138,8 @@ uint64_t process_build_address_space(const uint8_t *image, size_t image_size,
         return 0;
     }
     uint64_t prog_bias = elf_is_dyn(image, image_size) ? USER_IMAGE_BASE : 0;
-    uint64_t entry = elf_load_at(pml4_phys, image, image_size, prog_bias);
+    uint64_t entry = cached ? image_cache_map(pml4_phys, cached)
+                            : elf_load_at(pml4_phys, image, image_size, prog_bias);
     if (entry == 0) {
         kfree(interp_image);
         process_destroy_address_space(pml4_phys);

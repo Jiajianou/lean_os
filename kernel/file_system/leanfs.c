@@ -32,6 +32,17 @@ static void block_write_meta(uint32_t block, const void *source);
    they were. */
 static int journal_active;
 
+/* M198: a number that changes whenever an inode's contents might have - a
+   write, a truncation, the inode being freed - and never takes a value it has
+   had before, even for an inode number reused by another file or a disk
+   mounted again. The program image cache keys on it, so a binary rewritten on
+   disk is read again. It lives only in memory, and it lives beside the inode
+   table rather than in the kernel image: half a megabyte of bss pushed the
+   kernel's end past a range the laptop's firmware keeps, and the boot loader
+   could not place it at all. */
+static uint32_t *inode_generation;
+static uint32_t generation_clock;
+
 static void inodes_alloc(void) {
     uint64_t frames = (sizeof(leanfs_inode_t) * (uint64_t)LEANFS_MAX_INODES) / 4096;
     if (!inodes) {
@@ -39,6 +50,14 @@ static void inodes_alloc(void) {
         inodes = (leanfs_inode_t *)(uintptr_t)base;
     }
     k_memset(inodes, 0, sizeof(leanfs_inode_t) * (size_t)LEANFS_MAX_INODES);
+    if (!inode_generation) {
+        uint64_t generation_frames = (sizeof(uint32_t) * (uint64_t)LEANFS_MAX_INODES + 4095) / 4096;
+        inode_generation = (uint32_t *)(uintptr_t)physical_memory_alloc_contiguous(generation_frames);
+    }
+    uint32_t epoch = ++generation_clock;
+    for (uint32_t i = 0; i < LEANFS_MAX_INODES; i++) {
+        inode_generation[i] = epoch;
+    }
 }
 
 static uint8_t directory_block[LEANFS_BLOCK_SIZE];
@@ -353,6 +372,12 @@ static int inode_valid(int idx) {
     return idx >= 0 && idx < (int)LEANFS_MAX_INODES && inodes[idx].type != LEANFS_TYPE_FREE;
 }
 
+static void inode_changed(int idx) {
+    if (idx >= 0 && idx < (int)LEANFS_MAX_INODES) {
+        inode_generation[idx] = ++generation_clock;
+    }
+}
+
 static int find_free_inode(void) {
     for (int i = 0; i < (int)LEANFS_MAX_INODES; i++) {
         if (inodes[i].type == LEANFS_TYPE_FREE) {
@@ -553,6 +578,7 @@ uint32_t leanfs_check(void) {
 }
 
 static void free_inode_blocks(int idx) {
+    inode_changed(idx);
     leanfs_inode_t *inode = &inodes[idx];
     uint32_t nblocks = (inode->size + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE;
     static uint32_t table[LEANFS_INDIRECT_POINTERS];
@@ -641,6 +667,7 @@ static int64_t inode_pread(int idx, void *buffer, size_t length, uint32_t off) {
 }
 
 static int64_t inode_pwrite(int idx, const void *buffer, size_t length, uint32_t off) {
+    inode_changed(idx);
     leanfs_inode_t *inode = &inodes[idx];
     if (off > (uint32_t)LEANFS_MAX_FILE_SIZE || length > (size_t)LEANFS_MAX_FILE_SIZE - off) {
         return -1;
@@ -1376,6 +1403,7 @@ static void orphan_inode(int idx) {
 
 static void release_inode(int idx) {
     free_inode_blocks(idx);
+    inode_changed(idx);
     k_memset(&inodes[idx], 0, sizeof(inodes[idx]));
     mark_inode(idx);
 }
@@ -1692,6 +1720,7 @@ int leanfs_lstat(const char *path, leanfs_stat_t *out) {
     out->is_directory = (inodes[idx].type == LEANFS_TYPE_DIRECTORY) ? 1 : 0;
     out->is_link = (inodes[idx].type == LEANFS_TYPE_LINK) ? 1 : 0;
     out->inode = (uint32_t)idx;
+    out->generation = inode_generation[idx];
     return 0;
 }
 
@@ -1705,6 +1734,7 @@ int leanfs_stat(const char *path, leanfs_stat_t *out) {
     out->is_directory = inodes[idx].type == LEANFS_TYPE_DIRECTORY;
     out->is_link = 0;
     out->inode = (uint32_t)idx;
+    out->generation = inode_generation[idx];
     return 0;
 }
 
@@ -1717,6 +1747,7 @@ int leanfs_handle_stat(int handle, leanfs_stat_t *out) {
     out->is_directory = inodes[handle].type == LEANFS_TYPE_DIRECTORY;
     out->is_link = 0;
     out->inode = (uint32_t)handle;
+    out->generation = inode_generation[handle];
     return 0;
 }
 
@@ -1844,6 +1875,7 @@ int leanfs_handle_truncate_to(int handle, uint32_t length) {
         return -1;
     }
     uint32_t old = inodes[handle].size;
+    inode_changed(handle);
     if (length < old) {
         uint32_t first = (length + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE;
         uint32_t last = (old + LEANFS_BLOCK_SIZE - 1) / LEANFS_BLOCK_SIZE;

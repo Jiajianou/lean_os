@@ -205,6 +205,10 @@ typedef struct task {
     uint8_t watching;
     uint8_t watch_everything;
     uint8_t watch_fired;
+    /* M198: sleep locks this task holds. A signal is not delivered while it
+       is above zero - see sleep_lock_acquire. */
+    uint32_t sleep_locks_held;
+    uint64_t seen_exit_sequence;
     uint64_t wake_deadline_ms;
     uint8_t prio;
     uint8_t full_slices;
@@ -314,6 +318,7 @@ typedef struct {
     spinlock_t guard;
     volatile int held;
     int waiters;
+    int holder;
 } sleep_lock_t;
 
 void sleep_lock_acquire(sleep_lock_t *lock);
@@ -325,6 +330,7 @@ void scheduler_watch_block(uint64_t deadline_ms);
 void scheduler_watch_end(void);
 void scheduler_wake_object(const void *object);
 void scheduler_wake_objects(const void *first, const void *second);
+uint64_t scheduler_exit_sequence(void);
 uint64_t scheduler_halted_us(int cpu);
 
 void scheduler_wake_all(const void *chan);

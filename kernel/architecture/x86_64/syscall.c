@@ -4609,6 +4609,18 @@ static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint6
             scheduler_watch_end();
             return -2;
         }
+        /* M198: and so does a program ending. Its windows are the
+           compositor's to take down, and its death is no descriptor's event:
+           a compositor that was busy when the exit woke everybody found
+           nothing ready afterwards and slept until its backstop - and the
+           kill storm counted a window that was still up. */
+        uint64_t exits = scheduler_exit_sequence();
+        if ((self->caps & CAP_FRAMEBUFFER) && self->pml4_phys != virtual_memory_kernel_pml4_phys() &&
+            exits != self->seen_exit_sequence) {
+            self->seen_exit_sequence = exits;
+            scheduler_watch_end();
+            return -2;
+        }
         if (timeout == 0) {
             scheduler_watch_end();
             return -2;
@@ -5214,18 +5226,6 @@ static long sys_execve(isr_regs_t *regs) {
         free_vectors(&v);
         return -1;
     }
-    uint8_t *image = (uint8_t *)kmalloc(st.size ? st.size : 1);
-    if (!image) {
-        free_vectors(&v);
-        return -1;
-    }
-    int64_t size = virtual_file_system_read(path, image, st.size);
-    if (size < 2 || (image[0] == '#' && image[1] == '!') ||
-        !elf_validate(image, (size_t)size)) {
-        kfree(image);
-        free_vectors(&v);
-        return -1;
-    }
 
     const char *inherited[USER_ENV_MAX_VARS + 1];
     const char *const *effective = v.envp;
@@ -5245,9 +5245,25 @@ static long sys_execve(isr_regs_t *regs) {
     }
 
     uint64_t entry = 0;
-    uint64_t new_pml4 = process_build_address_space(image, (size_t)size, v.argv,
-                                                    effective, &entry);
-    kfree(image);
+    int not_cached = 0;
+    uint64_t new_pml4 = process_build_address_space_from_path(path, v.argv, effective, &entry,
+                                                              &not_cached);
+    if (not_cached) {
+        uint8_t *image = (uint8_t *)kmalloc(st.size ? st.size : 1);
+        if (!image) {
+            free_vectors(&v);
+            return -1;
+        }
+        int64_t size = virtual_file_system_read(path, image, st.size);
+        if (size < 2 || (image[0] == '#' && image[1] == '!') ||
+            !elf_validate(image, (size_t)size)) {
+            kfree(image);
+            free_vectors(&v);
+            return -1;
+        }
+        new_pml4 = process_build_address_space(image, (size_t)size, v.argv, effective, &entry);
+        kfree(image);
+    }
     if (new_pml4 == 0) {
         free_vectors(&v);
         return -1;

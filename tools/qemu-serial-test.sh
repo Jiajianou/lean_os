@@ -318,6 +318,7 @@ REQUIRED_MARKERS=(
   "[m87] files with a type and a place:"
   "[m90] more than a gigabyte:"
   "[m170] a task that is asleep costs nothing:"
+  "[m198] one program, two processes, one copy of its text:"
   "[m91] an address space that is a set of mappings:"
   "a file mapped MAP_PRIVATE reading back as its own bytes"
   "the same file mapped MAP_SHARED twice as one piece of memory"

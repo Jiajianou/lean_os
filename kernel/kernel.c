@@ -63,6 +63,7 @@
 #include "profile.h"
 #include "profile/syscall_counters.h"
 #include "process/process.h"
+#include "process/image_cache.h"
 #include "process/package_capabilities.h"
 #include "scheduler/scheduler.h"
 #include "shortcuts.h"
@@ -2187,6 +2188,85 @@ static void selftest_oom(void) {
 }
 
 static void boot_selftests_system(void) {
+    {
+        /* M198. Two processes running one program map the same frames for
+           its text; the cache reads the file once; a program rewritten on
+           disk - even with the same bytes - is read again; and when both
+           processes are gone their references to the kept frames are too. */
+        static const char *const m198_argv[] = {PATH_TEMPORARY_DIRECTORY "m198-hello", 0};
+        size_t hello_bytes = 0;
+        uint8_t *hello = read_program(PATH_BIN_DIRECTORY "hello", &hello_bytes);
+        if (!hello || virtual_file_system_write(PATH_TEMPORARY_DIRECTORY "m198-hello", hello,
+                                                hello_bytes) != 0) {
+            panic("M198 self-test: could not copy /bin/hello to " PATH_TEMPORARY_DIRECTORY);
+        }
+        image_cache_statistics_t before, after_two, after_rewrite;
+        image_cache_statistics(&before);
+        uint64_t entry_a = 0, entry_b = 0;
+        int not_cached_a = 0, not_cached_b = 0;
+        uint64_t space_a = process_build_address_space_from_path(
+            m198_argv[0], m198_argv, (const char *const *)0, &entry_a, &not_cached_a);
+        uint64_t space_b = process_build_address_space_from_path(
+            m198_argv[0], m198_argv, (const char *const *)0, &entry_b, &not_cached_b);
+        image_cache_statistics(&after_two);
+        if (!space_a || !space_b || not_cached_a || not_cached_b || entry_a != entry_b) {
+            panic("M198 self-test: the image cache would not load /bin/hello");
+        }
+        uint64_t page = entry_a & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t frame_a = virtual_memory_lookup_frame(space_a, page) & 0x000FFFFFFFFFF000ULL;
+        uint64_t frame_b = virtual_memory_lookup_frame(space_b, page) & 0x000FFFFFFFFFF000ULL;
+        uint32_t sharing = physical_memory_frame_refs(frame_a);
+        if (after_two.misses != before.misses + 1 || after_two.hits != before.hits + 1) {
+            panic("M198 self-test: two execs of one program did not read it exactly once");
+        }
+        if (frame_a == 0 || frame_a != frame_b || sharing < 3) {
+            panic("M198 self-test: two processes running one program do not share its text");
+        }
+        if (virtual_file_system_write(PATH_TEMPORARY_DIRECTORY "m198-hello", hello, hello_bytes) != 0) {
+            panic("M198 self-test: could not rewrite the copy of /bin/hello");
+        }
+        uint64_t entry_c = 0;
+        int not_cached_c = 0;
+        uint64_t space_c = process_build_address_space_from_path(
+            m198_argv[0], m198_argv, (const char *const *)0, &entry_c, &not_cached_c);
+        image_cache_statistics(&after_rewrite);
+        uint64_t frame_c = space_c ? virtual_memory_lookup_frame(space_c, page) & 0x000FFFFFFFFFF000ULL : 0;
+        if (!space_c || after_rewrite.misses != after_two.misses + 1 || frame_c == frame_a) {
+            panic("M198 self-test: a program rewritten on disk was served from the old copy");
+        }
+        /* mprotect(PROT_WRITE) on shared text must not make the shared frame
+           writable: it becomes copy-on-write, and the first store in one
+           process gives that process a copy while the other keeps the page. */
+        virtual_memory_protect_range_in(space_a, page, page + PAGE_SIZE,
+                                        VIRTUAL_MEMORY_FLAG_USER | VIRTUAL_MEMORY_FLAG_WRITABLE |
+                                            VIRTUAL_MEMORY_FLAG_EXEC);
+        uint64_t granted = virtual_memory_lookup_frame(space_a, page);
+        if ((granted & 0x2u) || !(granted & 0x200u) ||
+            (granted & 0x000FFFFFFFFFF000ULL) != frame_a) {
+            panic("M198 self-test: write granted on shared text made the shared frame writable");
+        }
+        if (virtual_memory_cow_break(space_a, page) == 0 ||
+            (virtual_memory_lookup_frame(space_a, page) & 0x000FFFFFFFFFF000ULL) == frame_a ||
+            (virtual_memory_lookup_frame(space_b, page) & 0x000FFFFFFFFFF000ULL) != frame_a) {
+            panic("M198 self-test: the first store to shared text did not take a private copy");
+        }
+        process_destroy_address_space(space_a);
+        process_destroy_address_space(space_b);
+        process_destroy_address_space(space_c);
+        uint32_t left = physical_memory_frame_refs(frame_c);
+        kfree(hello);
+        virtual_file_system_unlink(PATH_TEMPORARY_DIRECTORY "m198-hello");
+        if (left != 1) {
+            panic("M198 self-test: a destroyed address space kept its reference to a cached frame");
+        }
+        kernel_log_puts("[m198] one program, two processes, one copy of its text: the frame "
+                        "behind its entry point was shared by the cache and both (");
+        kernel_log_put_dec(sharing);
+        kernel_log_puts(" references), the second exec read nothing from the disk, write access "
+                        "to that text became a private copy rather than a shared write, a "
+                        "rewrite of the file was read again, and the references went with "
+                        "the processes - self-test passed.\n\n");
+    }
     {
         static volatile int smp_seen_cpu[MAX_CPUS];
         task_t *probe_tasks[4];
@@ -12450,7 +12530,11 @@ static void boot_selftests_system(void) {
 
     {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
-        uint64_t frames_before = physical_memory_free_frame_count();
+        /* M198: an exec leaves the program it loaded in the image cache on
+           purpose, and the cache may evict another to make room - whose
+           frames go back only if no running process still maps them. So what
+           is compared is free frames plus the frames only the cache holds. */
+        uint64_t frames_before = physical_memory_free_frame_count() + image_cache_private_pages();
 
         size_t ex_bytes = 0;
         uint8_t *ex_img = read_program(PATH_BIN_DIRECTORY "exectest", &ex_bytes);
@@ -12477,7 +12561,7 @@ static void boot_selftests_system(void) {
                 selftest_reap(stale);
             }
         }
-        uint64_t frames_after = physical_memory_free_frame_count();
+        uint64_t frames_after = physical_memory_free_frame_count() + image_cache_private_pages();
         if (all_ok && frames_after != frames_before) {
             kernel_log_puts("[m84] frames before 0x");
             kernel_log_put_hex64(frames_before);

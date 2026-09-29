@@ -93,6 +93,7 @@ typedef struct {
     uint8_t is_directory;
     uint8_t is_link;
     uint32_t inode;
+    uint32_t generation;
 } leanfs_stat_t;
 
 int leanfs_stat(const char *path, leanfs_stat_t *out);

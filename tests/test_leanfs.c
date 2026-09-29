@@ -735,3 +735,46 @@ TEST(leanfs, an_fsync_leaves_a_mounted_filesystem_marked_in_use) {
     CHECK_EQ(superblock_state_on_disk(), LEANFS_STATE_CLEAN);
     fake_block_device_free();
 }
+
+TEST(leanfs, a_file_changed_in_any_way_reports_a_generation_it_never_had) {
+    fs_fixture();
+    static const char body[] = "the same bytes every time";
+    leanfs_stat_t st;
+    uint32_t seen[8];
+    int n = 0;
+
+    CHECK_EQ(leanfs_write("/program", body, sizeof(body)), 0);
+    REQUIRE(leanfs_stat("/program", &st) == 0);
+    seen[n++] = st.generation;
+    uint32_t inode = st.inode;
+
+    REQUIRE(leanfs_stat("/program", &st) == 0);
+    CHECK_EQ(st.generation, seen[0]);
+
+    CHECK_EQ(leanfs_write("/program", body, sizeof(body)), 0);
+    REQUIRE(leanfs_stat("/program", &st) == 0);
+    seen[n++] = st.generation;
+
+    int handle = leanfs_open("/program", 0);
+    REQUIRE(handle >= 0);
+    CHECK_EQ(leanfs_handle_truncate_to(handle, 4), 0);
+    REQUIRE(leanfs_stat("/program", &st) == 0);
+    seen[n++] = st.generation;
+
+    CHECK_EQ(leanfs_unlink("/program"), 0);
+    CHECK_EQ(leanfs_write("/another", body, sizeof(body)), 0);
+    REQUIRE(leanfs_stat("/another", &st) == 0);
+    CHECK_EQ(st.inode, inode);
+    seen[n++] = st.generation;
+
+    leanfs_init();
+    REQUIRE(leanfs_stat("/another", &st) == 0);
+    seen[n++] = st.generation;
+
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            CHECK(seen[i] != seen[j]);
+        }
+    }
+    fake_block_device_free();
+}

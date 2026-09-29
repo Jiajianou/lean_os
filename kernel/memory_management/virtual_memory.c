@@ -7,6 +7,7 @@
 #include "memory_management/e820.h"
 #include "memory_management/physical_memory.h"
 #include "panic.h"
+#include "process/process.h"
 #include "scheduler/scheduler.h"
 #include "architecture/x86_64/symmetric_multiprocessing.h"
 
@@ -503,6 +504,16 @@ uint64_t virtual_memory_protect_range_in(uint64_t pml4_phys, uint64_t start, uin
         }
         uint64_t want = leaf_flags(flags);
         if (e & PTE_COW) {
+            want = (want & ~PTE_WRITABLE) | PTE_COW;
+        }
+        /* M198: a read-only page of a program's image can be a frame every
+           process running that program maps (the image cache). Made writable
+           in place, one process's store would land in all of them; it becomes
+           copy-on-write instead, and the first store takes a private copy -
+           the same path fork's pages take. Only in the image window: a shared
+           mapping in the arena is shared on purpose. */
+        if ((want & PTE_WRITABLE) && !(e & PTE_WRITABLE) && virt >= USER_IMAGE_BASE &&
+            virt < USER_IMAGE_LIMIT && physical_memory_frame_refs(e & PTE_ADDRESS_MASK) > 1) {
             want = (want & ~PTE_WRITABLE) | PTE_COW;
         }
         uint64_t replacement = (e & PTE_ADDRESS_MASK) | want;
