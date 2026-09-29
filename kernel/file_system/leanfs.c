@@ -1554,9 +1554,9 @@ void leanfs_unmount_clean(void) {
 
 /* Called between operations, where the filesystem is consistent: the only
    place a commit may cut the stream of writes. */
-void leanfs_transaction_boundary(void) {
+void leanfs_transaction_boundary(int from_journal_task) {
     if (journal_active) {
-        block_device_commit_if_due();
+        block_device_commit_if_due(from_journal_task);
     }
 }
 

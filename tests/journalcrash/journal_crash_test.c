@@ -85,7 +85,7 @@ static void fresh_disk(void) {
 }
 
 static void commit_point(int use_fsync) {
-    leanfs_transaction_boundary();
+    leanfs_transaction_boundary(1);
     if (state_count >= MAX_STATES || fake_backend_power_was_cut()) {
         return;
     }
@@ -142,7 +142,7 @@ static void workload(void) {
                 leanfs_write(name, data, length / 3);
                 break;
             }
-            leanfs_transaction_boundary();
+            leanfs_transaction_boundary(1);
             if (i % 3 == 2) {
                 commit_point(i % 2);
             }

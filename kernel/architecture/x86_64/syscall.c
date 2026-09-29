@@ -310,7 +310,8 @@ static long sys_write(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4
             return -1;
         }
         for (;;) {
-            uint64_t seq = scheduler_event_sequence();
+            scheduler_watch_begin();
+            scheduler_watch_add((const void *)slot->event);
             int rc = eventfd_write(slot->event, v);
             if (rc == 0) {
                 return (long)sizeof(v);
@@ -324,7 +325,7 @@ static long sys_write(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4
             if (scheduler_signal_pending()) {
                 return -OS_ERROR_INTR;
             }
-            scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, 0, seq);
+            scheduler_watch_block(0);
         }
     }
     if (slot->type == FILE_DESCRIPTOR_UNIX) {
@@ -335,7 +336,8 @@ static long sys_write(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4
             if (copy_from_user(staging, buffer + sent, chunk) != 0) {
                 return sent ? (long)sent : -1;
             }
-            uint64_t seq = scheduler_event_sequence();
+            scheduler_watch_begin();
+            scheduler_watch_add((const void *)slot->un);
             long m = unix_socket_send(slot->un, staging, chunk, (const file_descriptor_slot_t *)0, 0);
             if (m < 0) {
                 return sent ? (long)sent : -1;
@@ -347,7 +349,7 @@ static long sys_write(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4
                 if (scheduler_signal_pending()) {
                     return sent ? (long)sent : -OS_ERROR_INTR;
                 }
-                scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, 0, seq);
+                scheduler_watch_block(0);
                 continue;
             }
             sent += (uint64_t)m;
@@ -437,7 +439,8 @@ static long sys_read(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4,
             return -1;
         }
         for (;;) {
-            uint64_t seq = scheduler_event_sequence();
+            scheduler_watch_begin();
+            scheduler_watch_add((const void *)slot->pipe);
             uint64_t value = 0;
             int got = (slot->type == FILE_DESCRIPTOR_EVENT)
                           ? eventfd_read(slot->event, &value)
@@ -462,14 +465,15 @@ static long sys_read(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4,
                     deadline = clock_monotonic_ms() + (uint64_t)ms;
                 }
             }
-            scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, deadline, seq);
+            scheduler_watch_block(deadline);
         }
     }
     if (slot->type == FILE_DESCRIPTOR_UNIX) {
         uint32_t want = length > UNIX_STAGING_CHUNK ? UNIX_STAGING_CHUNK : (uint32_t)length;
         uint8_t staging[UNIX_STAGING_CHUNK];
         for (;;) {
-            uint64_t seq = scheduler_event_sequence();
+            scheduler_watch_begin();
+            scheduler_watch_add((const void *)slot->un);
             long n = unix_socket_receive(slot->un, staging, want, (file_descriptor_slot_t *)0, 0,
                                    (int *)0, (int *)0);
             if (n > 0) {
@@ -484,7 +488,7 @@ static long sys_read(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4,
             if (scheduler_signal_pending()) {
                 return -OS_ERROR_INTR;
             }
-            scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, 0, seq);
+            scheduler_watch_block(0);
         }
     }
     if (slot->type == FILE_DESCRIPTOR_SOCKET) {
@@ -1443,7 +1447,7 @@ static long sys_futex(uint64_t address, uint64_t op, uint64_t val,
     if (op == FUTEX_WAKE) {
         int max = (val > (uint64_t)(unsigned)MAX_TASKS) ? MAX_TASKS : (int)val;
         uint64_t wake_flags = spin_lock_irqsave(&futex_lock);
-        int woken = scheduler_wake_n((const void *)address, max);
+        int woken = scheduler_wake_n((const void *)address, scheduler_current()->pml4_phys, max);
         spin_unlock_irqrestore(&futex_lock, wake_flags);
         return woken;
     }
@@ -1461,7 +1465,8 @@ static long sys_futex(uint64_t address, uint64_t op, uint64_t val,
     if (timeout_ms > 0) {
         deadline = clock_monotonic_ms() + timeout_ms;
     }
-    scheduler_block_on((const void *)address, deadline, &futex_lock, &flags);
+    scheduler_block_on_in_space((const void *)address, scheduler_current()->pml4_phys, deadline,
+                                &futex_lock, &flags);
     spin_unlock_irqrestore(&futex_lock, flags);
     if (deadline != 0 && clock_monotonic_ms() >= deadline) {
         return -2;
@@ -3675,7 +3680,8 @@ static long sys_sendmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, u
         return -1;
     }
     for (;;) {
-        uint64_t seq = scheduler_event_sequence();
+        scheduler_watch_begin();
+        scheduler_watch_add((const void *)u);
         long n = unix_socket_send(u, staging, length, slots, nfds);
         if (n != 0 || (length == 0 && nfds == 0)) {
             return n;
@@ -3686,7 +3692,7 @@ static long sys_sendmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, u
         if (scheduler_signal_pending()) {
             return -OS_ERROR_INTR;
         }
-        scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, 0, seq);
+        scheduler_watch_block(0);
     }
 }
 
@@ -3711,7 +3717,8 @@ static long sys_recvmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, u
     uint8_t staging[UNIX_MESSAGE_STAGING];
     file_descriptor_slot_t slots[UNIX_MAX_FILE_DESCRIPTORS];
     for (;;) {
-        uint64_t seq = scheduler_event_sequence();
+        scheduler_watch_begin();
+        scheduler_watch_add((const void *)u);
         int nfds = 0;
         int rflags = 0;
         long n = unix_socket_receive(u, staging, want, slots, (int)message.nfds, &nfds, &rflags);
@@ -3757,7 +3764,7 @@ static long sys_recvmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, u
         if (scheduler_signal_pending()) {
             return -OS_ERROR_INTR;
         }
-        scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, 0, seq);
+        scheduler_watch_block(0);
     }
 }
 
@@ -3996,7 +4003,8 @@ static long sys_peek(uint64_t fd, uint64_t buffer, uint64_t max, uint64_t dontwa
         uint32_t want = max > UNIX_STAGING_CHUNK ? UNIX_STAGING_CHUNK : (uint32_t)max;
         uint8_t staging[UNIX_STAGING_CHUNK];
         for (;;) {
-            uint64_t seq = scheduler_event_sequence();
+            scheduler_watch_begin();
+            scheduler_watch_add((const void *)slot->un);
             long n = unix_socket_peek(slot->un, staging, want);
             if (n > 0) {
                 return copy_to_user(buffer, staging, (size_t)n) == 0 ? n : -1;
@@ -4010,7 +4018,7 @@ static long sys_peek(uint64_t fd, uint64_t buffer, uint64_t max, uint64_t dontwa
             if (scheduler_signal_pending()) {
                 return -OS_ERROR_INTR;
             }
-            scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, 0, seq);
+            scheduler_watch_block(0);
         }
     }
 
@@ -4486,8 +4494,12 @@ static long sys_epoll_control(uint64_t epfd, uint64_t op, uint64_t fd, uint64_t 
         return -1;
     }
     const void *object = (const void *)self->descriptor_table->slots[fd].pipe;
-    return epoll_control_set(self->descriptor_table->slots[epfd].epoll, (int)op, (int)fd, object,
-                         ev.events, ev.data);
+    struct epoll *ep = self->descriptor_table->slots[epfd].epoll;
+    long result = epoll_control_set(ep, (int)op, (int)fd, object, ev.events, ev.data);
+    if (result == 0) {
+        scheduler_wake_object(ep);
+    }
+    return result;
 }
 
 static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxevents, uint64_t timeout_ms, uint64_t a5, uint64_t a6) {
@@ -4507,31 +4519,45 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxeven
     uint64_t now = clock_monotonic_ms();
     uint64_t deadline = (timeout < 0) ? 0 : now + (uint64_t)timeout;
     epoll_ev_t evs[EPOLL_MAX_WATCH];
+    int watched_fds[EPOLL_MAX_WATCH];
+    const void *watched_objects[EPOLL_MAX_WATCH];
     for (;;) {
-        uint64_t seq = scheduler_event_sequence();
+        scheduler_watch_begin();
+        scheduler_watch_add(ep);
+        int watched = epoll_objects(ep, watched_fds, watched_objects, EPOLL_MAX_WATCH);
+        for (int i = 0; i < watched; i++) {
+            scheduler_watch_add(watched_objects[i]);
+        }
         int n = epoll_scan(ep, epoll_mask_callback, self, evs, (int)maxevents);
         if (n > 0) {
+            scheduler_watch_end();
             if (copy_to_user(out_pointer, evs, (size_t)n * sizeof(epoll_ev_t)) != 0) {
                 return -1;
             }
             return n;
         }
         if (timeout == 0) {
+            scheduler_watch_end();
             return 0;
         }
         if (scheduler_signal_pending()) {
+            scheduler_watch_end();
             return -OS_ERROR_INTR;
         }
         now = clock_monotonic_ms();
         if (timeout > 0 && now >= deadline) {
+            scheduler_watch_end();
             return 0;
         }
         uint64_t park_until = deadline;
-        for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-            if (self->descriptor_table->slots[i].type != FILE_DESCRIPTOR_TIMER) {
+        for (int i = 0; i < watched; i++) {
+            int fd = watched_fds[i];
+            if (fd < 0 || fd >= MAX_FILE_DESCRIPTORS ||
+                self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_TIMER ||
+                (const void *)self->descriptor_table->slots[fd].timer != watched_objects[i]) {
                 continue;
             }
-            long ms = timerfd_next_ms(self->descriptor_table->slots[i].timer, clock_now_ns());
+            long ms = timerfd_next_ms(self->descriptor_table->slots[fd].timer, clock_now_ns());
             if (ms < 0) {
                 continue;
             }
@@ -4540,7 +4566,7 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxeven
                 park_until = when;
             }
         }
-        scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, park_until, seq);
+        scheduler_watch_block(park_until);
     }
 }
 
@@ -4563,20 +4589,36 @@ static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint6
     uint64_t deadline = (timeout < 0) ? 0 : now + (uint64_t)timeout;
 
     for (;;) {
-        uint64_t seq = scheduler_event_sequence();
+        scheduler_watch_begin();
+        for (uint64_t i = 0; i < count; i++) {
+            int fd = file_descriptors[i];
+            if (fd >= 0 && fd < MAX_FILE_DESCRIPTORS) {
+                scheduler_watch_add((const void *)self->descriptor_table->slots[fd].pipe);
+            }
+        }
         for (uint64_t i = 0; i < count; i++) {
             if (file_descriptor_is_ready(self, file_descriptors[i])) {
+                scheduler_watch_end();
                 return (long)i;
             }
         }
+        /* M197: the pointer is not a descriptor. The one program that may
+           read it used to find its movement by waking a hundred times a
+           second; it waits properly now, so movement has to end the wait. */
+        if ((self->caps & CAP_FRAMEBUFFER) && mouse_pending()) {
+            scheduler_watch_end();
+            return -2;
+        }
         if (timeout == 0) {
+            scheduler_watch_end();
             return -2;
         }
         if (deadline != 0 && clock_monotonic_ms() >= deadline) {
+            scheduler_watch_end();
             return -2;
         }
 
-        scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, deadline, seq);
+        scheduler_watch_block(deadline);
         if (scheduler_signal_pending()) {
             return -2;
         }

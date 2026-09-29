@@ -89,6 +89,8 @@ _Static_assert(((uint64_t)MMAP_REGIONS_INITIAL << MMAP_RETIRED_MAX) >=
                "MAX_MMAP_REGIONS leaves more retired tables than there is "
                "room to keep");
 
+#define SCHEDULER_WATCH_MAX 64
+
 typedef struct {
     uint64_t base;
     uint32_t pages;
@@ -195,6 +197,14 @@ typedef struct task {
     uint64_t heap_mapped_end;
     uint64_t shared_memory_next_vaddr;
     const void *wait_chan;
+    uint64_t wait_space;
+    /* M197: the kernel objects a poller is waiting on - see
+       scheduler_watch_begin. */
+    const void *watch_objects[SCHEDULER_WATCH_MAX];
+    uint32_t watch_count;
+    uint8_t watching;
+    uint8_t watch_everything;
+    uint8_t watch_fired;
     uint64_t wake_deadline_ms;
     uint8_t prio;
     uint8_t full_slices;
@@ -288,15 +298,38 @@ void scheduler_init_ap(int cpu_id);
 void scheduler_tick_cpu(int cpu);
 
 void scheduler_block_on(const void *chan, uint64_t deadline_ms, spinlock_t *lock, uint64_t *flags);
+void scheduler_block_on_in_space(const void *chan, uint64_t space, uint64_t deadline_ms,
+                                 spinlock_t *lock, uint64_t *flags);
 
 /* A sleep that gives the CPU up rather than halting on it. See the comment
    at the definition: pit_sleep_ms() stays runnable, which costs a share of a
    busy machine for every task that is asleep in it. */
 void scheduler_sleep_ms(uint32_t ms);
 
+void scheduler_halt(void);
+
+/* M197: a lock a task sleeps on rather than spins for, held with interrupts
+   ON so its holder can be preempted and its waiters cost nothing. */
+typedef struct {
+    spinlock_t guard;
+    volatile int held;
+    int waiters;
+} sleep_lock_t;
+
+void sleep_lock_acquire(sleep_lock_t *lock);
+void sleep_lock_release(sleep_lock_t *lock);
+
+void scheduler_watch_begin(void);
+void scheduler_watch_add(const void *object);
+void scheduler_watch_block(uint64_t deadline_ms);
+void scheduler_watch_end(void);
+void scheduler_wake_object(const void *object);
+void scheduler_wake_objects(const void *first, const void *second);
+uint64_t scheduler_halted_us(int cpu);
+
 void scheduler_wake_all(const void *chan);
 
-int scheduler_wake_n(const void *chan, int max);
+int scheduler_wake_n(const void *chan, uint64_t space, int max);
 
 uint64_t scheduler_event_sequence(void);
 

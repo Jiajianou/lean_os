@@ -128,7 +128,7 @@ int leanfs_sync(void);
 
 void leanfs_unmount_clean(void);
 
-void leanfs_transaction_boundary(void);
+void leanfs_transaction_boundary(int from_journal_task);
 
 int leanfs_journal_active(void);
 

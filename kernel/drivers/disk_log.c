@@ -24,12 +24,45 @@ static int write_sectors(void *context, uint32_t lba, uint32_t count, void *buff
     return block_device_write(lba, count, buffer);
 }
 
+/* M197. Every append is a device write, and a USB stick charges about
+   ten milliseconds a command whatever its size: a stamp line was 28 of them,
+   which is why the one-second interval measured 1280 ms. A flush gathers
+   everything it has to say here and writes it as one run. */
+static char pending[32768];
+static size_t pending_length;
+
+static int pending_write(void) {
+    if (pending_length == 0) {
+        return 0;
+    }
+    int result = disk_log_area_append(&area, pending, pending_length);
+    pending_length = 0;
+    return result;
+}
+
+static int append_bytes(const char *data, size_t length) {
+    while (length > 0) {
+        if (pending_length == sizeof(pending) && pending_write() != 0) {
+            return -1;
+        }
+        size_t room = sizeof(pending) - pending_length;
+        size_t take = length < room ? length : room;
+        for (size_t i = 0; i < take; i++) {
+            pending[pending_length + i] = data[i];
+        }
+        pending_length += take;
+        data += take;
+        length -= take;
+    }
+    return 0;
+}
+
 static int append_text(const char *text) {
     size_t length = 0;
     while (text[length]) {
         length++;
     }
-    return disk_log_area_append(&area, text, length);
+    return append_bytes(text, length);
 }
 
 static int append_decimal(uint64_t value) {
@@ -43,7 +76,7 @@ static int append_decimal(uint64_t value) {
     for (int i = 0; i < count; i++) {
         text[i] = digits[count - 1 - i];
     }
-    return disk_log_area_append(&area, text, (size_t)count);
+    return append_bytes(text, (size_t)count);
 }
 
 /* M193. The first log home from the laptop said the browser was slow and
@@ -57,6 +90,7 @@ static uint64_t stamp_last_read_sectors;
 static uint64_t stamp_last_written_sectors;
 static uint64_t stamp_last_total[MAX_CPUS];
 static uint64_t stamp_last_idle[MAX_CPUS];
+static uint64_t stamp_last_halted_us[MAX_CPUS];
 static int at_line_start = 1;
 
 static int append_stamp(int log_grew) {
@@ -66,14 +100,28 @@ static int append_stamp(int log_grew) {
     uint64_t read_sectors = disk.device_reads - stamp_last_read_sectors;
     uint64_t written_sectors = disk.device_writes - stamp_last_written_sectors;
     uint32_t busy_percent[MAX_CPUS];
+    uint32_t waiting_percent[MAX_CPUS];
     int any_busy = 0;
+    int any_waiting = 0;
     int cpus = smp_cpu_count > 0 && smp_cpu_count <= MAX_CPUS ? smp_cpu_count : 1;
+    uint64_t elapsed_us = now_us - stamp_last_us;
     for (int c = 0; c < cpus; c++) {
+        uint64_t halted = scheduler_halted_us(c) - stamp_last_halted_us[c];
+        busy_percent[c] = elapsed_us && halted < elapsed_us
+                              ? (uint32_t)(((elapsed_us - halted) * 100u) / elapsed_us)
+                              : 0;
         uint64_t total = scheduler_total_ticks(c) - stamp_last_total[c];
         uint64_t idle = scheduler_idle_ticks(c) - stamp_last_idle[c];
-        busy_percent[c] = total ? (uint32_t)(((total - (idle < total ? idle : total)) * 100u) / total) : 0;
+        uint64_t not_idle = total - (idle < total ? idle : total);
+        uint64_t waited = not_idle > 0 && busy_percent[c] < 100u
+                              ? not_idle * 100u / total
+                              : 0;
+        waiting_percent[c] = waited > busy_percent[c] ? (uint32_t)(waited - busy_percent[c]) : 0;
         if (busy_percent[c] >= 10) {
             any_busy = 1;
+        }
+        if (waiting_percent[c] >= 10) {
+            any_waiting = 1;
         }
     }
     if (!log_grew && !read_sectors && !written_sectors && !any_busy) {
@@ -92,6 +140,16 @@ static int append_stamp(int log_grew) {
             return -1;
         }
     }
+    if (any_waiting) {
+        if (append_text("; ready but idle %") != 0) {
+            return -1;
+        }
+        for (int c = 0; c < cpus; c++) {
+            if (append_text(" ") != 0 || append_decimal(waiting_percent[c]) != 0) {
+                return -1;
+            }
+        }
+    }
     if (append_text("\n") != 0) {
         return -1;
     }
@@ -101,8 +159,53 @@ static int append_stamp(int log_grew) {
     for (int c = 0; c < cpus; c++) {
         stamp_last_total[c] = scheduler_total_ticks(c);
         stamp_last_idle[c] = scheduler_idle_ticks(c);
+        stamp_last_halted_us[c] = scheduler_halted_us(c);
     }
     return 0;
+}
+
+static int append_line_time(uint64_t offset) {
+    uint64_t tsc;
+    if (!kernel_log_line_time(offset, &tsc)) {
+        return 0;
+    }
+    uint64_t us = tsc_to_us(tsc);
+    uint64_t seconds = us / 1000000u;
+    uint64_t milliseconds = (us / 1000u) % 1000u;
+    char text[24];
+    int length = 0;
+    text[length++] = '[';
+    for (uint64_t pad = 10000; pad > 1 && seconds < pad; pad /= 10u) {
+        text[length++] = ' ';
+    }
+    if (append_bytes(text, (size_t)length) != 0 || append_decimal(seconds) != 0) {
+        return -1;
+    }
+    text[0] = '.';
+    text[1] = (char)('0' + milliseconds / 100u);
+    text[2] = (char)('0' + (milliseconds / 10u) % 10u);
+    text[3] = (char)('0' + milliseconds % 10u);
+    text[4] = ']';
+    text[5] = ' ';
+    return append_bytes(text, 6);
+}
+
+static int append_timed(uint64_t from, const char *text, size_t n) {
+    size_t start = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (at_line_start) {
+            if ((i > start && append_bytes(text + start, i - start) != 0) ||
+                append_line_time(from + i) != 0) {
+                return -1;
+            }
+            start = i;
+            at_line_start = 0;
+        }
+        if (text[i] == '\n') {
+            at_line_start = 1;
+        }
+    }
+    return n > start ? append_bytes(text + start, n - start) : 0;
 }
 
 static int flush_once(void) {
@@ -111,7 +214,10 @@ static int flush_once(void) {
         return -1;
     }
     if (cursor >= total) {
-        return disk_log_area_write_header(&area) != 0 ? -1 : block_device_flush();
+        if (pending_length == 0) {
+            return 0;
+        }
+        return pending_write() != 0 || disk_log_area_write_header(&area) != 0 ? -1 : block_device_flush();
     }
     while (cursor < total) {
         uint64_t next = cursor;
@@ -126,13 +232,12 @@ static int flush_once(void) {
         if (n == 0) {
             break;
         }
-        if (disk_log_area_append(&area, chunk, n) != 0) {
+        if (append_timed(from, chunk, n) != 0) {
             return -1;
         }
-        at_line_start = chunk[n - 1] == '\n';
         cursor = next;
     }
-    if (disk_log_area_write_header(&area) != 0) {
+    if (pending_write() != 0 || disk_log_area_write_header(&area) != 0) {
         return -1;
     }
     return block_device_flush();

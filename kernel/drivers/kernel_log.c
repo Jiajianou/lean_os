@@ -5,6 +5,7 @@
 
 #include "architecture/x86_64/io.h"
 #include "architecture/x86_64/symmetric_multiprocessing.h"
+#include "architecture/x86_64/timestamp_counter.h"
 #include "console.h"
 #include "library/spinlock.h"
 #include "serial.h"
@@ -69,7 +70,25 @@ void kernel_log_enter_panic(void) {
 static char kernel_log_ring[KERNEL_LOG_RING_SIZE];
 static uint64_t kernel_log_written;
 
+/* M197. The stick log said the laptop took nine seconds to reach the desktop
+   and could not say where: a line carried no time. Each line's first byte is
+   remembered with the TSC it was written at, so the log a machine with no
+   serial port leaves behind can be read as a timeline. */
+#define KERNEL_LOG_LINE_RING 16384u
+
+static uint64_t kernel_log_line_offset[KERNEL_LOG_LINE_RING];
+static uint64_t kernel_log_line_tsc[KERNEL_LOG_LINE_RING];
+static uint64_t kernel_log_lines;
+static int kernel_log_mid_line;
+
 static void kernel_log_emit_locked(char c, int also_console) {
+    if (!kernel_log_mid_line) {
+        uint64_t slot = kernel_log_lines % KERNEL_LOG_LINE_RING;
+        kernel_log_line_offset[slot] = kernel_log_written;
+        kernel_log_line_tsc[slot] = tsc_read();
+        kernel_log_lines++;
+    }
+    kernel_log_mid_line = c != '\n';
     if (also_console && !console_released) {
         if (use_console) {
             console_putc(c);
@@ -204,4 +223,30 @@ uint64_t kernel_log_written_total(void) {
     spin_unlock(&kernel_log_lock);
     irq_restore(flags);
     return v;
+}
+
+int kernel_log_line_time(uint64_t offset, uint64_t *tsc) {
+    uint64_t flags = irq_save_disable();
+    spin_lock(&kernel_log_lock);
+    uint64_t oldest = kernel_log_lines > KERNEL_LOG_LINE_RING ? kernel_log_lines - KERNEL_LOG_LINE_RING : 0;
+    uint64_t low = oldest;
+    uint64_t high = kernel_log_lines;
+    int found = 0;
+    while (low < high) {
+        uint64_t middle = low + (high - low) / 2u;
+        uint64_t at = kernel_log_line_offset[middle % KERNEL_LOG_LINE_RING];
+        if (at == offset) {
+            *tsc = kernel_log_line_tsc[middle % KERNEL_LOG_LINE_RING];
+            found = 1;
+            break;
+        }
+        if (at < offset) {
+            low = middle + 1u;
+        } else {
+            high = middle;
+        }
+    }
+    spin_unlock(&kernel_log_lock);
+    irq_restore(flags);
+    return found;
 }

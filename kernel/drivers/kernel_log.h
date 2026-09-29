@@ -40,3 +40,5 @@ void kernel_log_use_console(void);
 size_t kernel_log_read(uint64_t from, char *out, size_t max, uint64_t *next);
 
 uint64_t kernel_log_written_total(void);
+
+int kernel_log_line_time(uint64_t offset, uint64_t *tsc);

@@ -176,31 +176,45 @@ uint64_t file_mapping_get(int handle, uint32_t index, int writable) {
     return 0;
 }
 
+/* M197. The last unmap of a dirty page took it out of the table and THEN
+   wrote it back to the file, and a process mapping the same page in between
+   found no entry and read the file - the contents from before the write-back.
+   The window was a few instructions while the filesystem lock was a spinlock
+   with interrupts off; once the writer could sleep behind a USB command it
+   was long enough for Chromium to see its own shared histograms go back in
+   time and call it corruption. A page stays in the table, holding a reference
+   of its own, until what it held is on the file: a mapper in the meantime is
+   handed the same frame. */
 void file_mapping_put(int handle, uint32_t index) {
     if (handle < 0) {
         return;
     }
     ensure_init();
     uint64_t flags = spin_lock_irqsave(&file_mapping_lock);
-    int slot = find_slot(handle, index);
-    if (slot < 0) {
+    for (;;) {
+        int slot = find_slot(handle, index);
+        if (slot < 0) {
+            spin_unlock_irqrestore(&file_mapping_lock, flags);
+            return;
+        }
+        if (--table[slot].refs > 0) {
+            spin_unlock_irqrestore(&file_mapping_lock, flags);
+            return;
+        }
+        uint64_t phys = table[slot].phys;
+        if (!table[slot].dirty) {
+            remove_slot((uint32_t)slot);
+            spin_unlock_irqrestore(&file_mapping_lock, flags);
+            physical_memory_free_frame(phys);
+            return;
+        }
+        table[slot].refs = 1;
+        table[slot].dirty = 0;
         spin_unlock_irqrestore(&file_mapping_lock, flags);
-        return;
-    }
-    if (--table[slot].refs > 0) {
-        spin_unlock_irqrestore(&file_mapping_lock, flags);
-        return;
-    }
-    uint64_t phys = table[slot].phys;
-    int dirty = table[slot].dirty;
-    remove_slot((uint32_t)slot);
-    spin_unlock_irqrestore(&file_mapping_lock, flags);
-
-    if (dirty) {
         virtual_file_system_handle_write(handle, (const void *)phys, PAGE_SIZE,
-                         index * PAGE_SIZE);
+                                         index * PAGE_SIZE);
+        flags = spin_lock_irqsave(&file_mapping_lock);
     }
-    physical_memory_free_frame(phys);
 }
 
 void file_mapping_sync(int handle) {
@@ -215,11 +229,13 @@ void file_mapping_sync(int handle) {
         uint32_t index = table[i].index;
         if (dirty) {
             table[i].dirty = 0;
+            table[i].refs++;
         }
         spin_unlock_irqrestore(&file_mapping_lock, flags);
         if (dirty) {
             virtual_file_system_handle_write(handle, (const void *)phys, PAGE_SIZE,
                              index * PAGE_SIZE);
+            file_mapping_put(handle, index);
         }
     }
 }

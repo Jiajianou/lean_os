@@ -82,7 +82,7 @@ void ap_main(uint32_t cpu_id) {
     __asm__ volatile("sti");
     for (;;) {
         schedule();
-        __asm__ volatile("hlt");
+        scheduler_halt();
     }
 }
 

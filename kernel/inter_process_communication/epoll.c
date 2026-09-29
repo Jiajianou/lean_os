@@ -177,6 +177,23 @@ int epoll_control_set(struct epoll *ep, int op, int fd, const void *object,
     return rc;
 }
 
+int epoll_objects(struct epoll *ep, int *fds, const void **objects, int max) {
+    if (!ep) {
+        return 0;
+    }
+    int n = 0;
+    uint64_t f = spin_lock_irqsave(&epoll_lock);
+    for (int i = 0; i < EPOLL_MAX_WATCH && n < max; i++) {
+        if (ep->w[i].used && !ep->w[i].disarmed) {
+            fds[n] = ep->w[i].fd;
+            objects[n] = ep->w[i].object;
+            n++;
+        }
+    }
+    spin_unlock_irqrestore(&epoll_lock, f);
+    return n;
+}
+
 int epoll_watch_count(const struct epoll *ep) {
     if (!ep) {
         return 0;

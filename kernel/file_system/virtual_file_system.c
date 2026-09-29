@@ -8,14 +8,30 @@
 #include "library/spinlock.h"
 #include "scheduler/scheduler.h"
 
-static spinlock_t fs_lock;
+/* M197. This was a spinlock taken with interrupts off, held across whole
+   filesystem operations - device reads and writes included, which on a USB
+   stick are a busy-wait of up to seventeen milliseconds a command. Every
+   other core wanting any file for that time spun with its interrupts off:
+   no tick, no IPI, no TLB shootdown answered except from the spin loop.
+   Reading a 300 MB browser put the machine's filesystem users in a line for
+   three seconds, each burning its core. It is a lock a task sleeps on now,
+   and its holder runs with interrupts on. */
+static sleep_lock_t fs_lock;
+
+static uint64_t fs_lock_take(void) {
+    sleep_lock_acquire(&fs_lock);
+    return 0;
+}
 
 /* M194: releasing fs_lock is the end of an operation, so it is where the
    filesystem is consistent and the one place a journal commit may cut the
-   stream of writes. */
+   stream of writes. M197: only a commit that cannot wait is made here - the
+   journal's map filling up. A commit that is merely due is the journal
+   task's, so no program's stat() pays for a USB write it did not ask for. */
 static void fs_unlock(uint64_t flags) {
-    leanfs_transaction_boundary();
-    spin_unlock_irqrestore(&fs_lock, flags);
+    (void)flags;
+    leanfs_transaction_boundary(0);
+    sleep_lock_release(&fs_lock);
 }
 
 #define VIRTUAL_FILE_SYSTEM_READ_CHUNK (4u * 1024 * 1024)
@@ -87,8 +103,9 @@ static void journal_commit_task(void *argument) {
     (void)argument;
     for (;;) {
         scheduler_sleep_ms(500);
-        uint64_t f = spin_lock_irqsave(&fs_lock);
-        fs_unlock(f);
+        fs_lock_take();
+        leanfs_transaction_boundary(1);
+        sleep_lock_release(&fs_lock);
     }
 }
 
@@ -117,14 +134,14 @@ int64_t virtual_file_system_read(const char *path, void *buffer, size_t maxlen) 
         int64_t n = mounts[m].ops->read(h, buffer, maxlen, 0);
         return n;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     if (maxlen <= VIRTUAL_FILE_SYSTEM_READ_CHUNK) {
         int64_t r = leanfs_read(path, buffer, maxlen);
         fs_unlock(f);
         return r;
     }
 
-    /* fs_lock is held with interrupts off, and an exec reads the whole program
+    /* fs_lock was held with interrupts off, and an exec reads the whole program
        under it: 306 MB of browser off a USB stick was twenty seconds in which
        the processor doing it took no timer tick, no keystroke and no other
        task. A big read gives the lock back between pieces. The inode is held
@@ -152,7 +169,7 @@ int64_t virtual_file_system_read(const char *path, void *buffer, size_t maxlen) 
         }
         done += (size_t)n;
         fs_unlock(f);
-        f = spin_lock_irqsave(&fs_lock);
+        f = fs_lock_take();
     }
     leanfs_handle_release(handle);
     fs_unlock(f);
@@ -164,7 +181,7 @@ int virtual_file_system_write(const char *path, const void *buffer, size_t lengt
     if (virtual_file_system_resolve_mount(path, &rel) >= 0) {
         return -1;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_write(path, buffer, length);
     fs_unlock(f);
     return r;
@@ -176,7 +193,7 @@ int virtual_file_system_exists(const char *path) {
     if (m >= 0) {
         return mounts[m].ops->exists(rel);
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_exists(path);
     fs_unlock(f);
     return r;
@@ -188,7 +205,7 @@ int virtual_file_system_is_directory(const char *path) {
     if (m >= 0) {
         return mounts[m].ops->is_directory(rel);
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_is_directory(path);
     fs_unlock(f);
     return r;
@@ -199,14 +216,14 @@ int virtual_file_system_mkdir(const char *path) {
     if (virtual_file_system_resolve_mount(path, &rel) >= 0) {
         return -1;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_mkdir(path);
     fs_unlock(f);
     return r;
 }
 
 uint32_t virtual_file_system_free_blocks(void) {
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     uint32_t r = leanfs_free_blocks();
     fs_unlock(f);
     return r;
@@ -217,7 +234,7 @@ int virtual_file_system_unlink(const char *path) {
     if (virtual_file_system_resolve_mount(path, &rel) >= 0) {
         return -1;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_unlink(path);
     fs_unlock(f);
     return r;
@@ -229,7 +246,7 @@ int virtual_file_system_rename(const char *old_path, const char *new_path) {
         virtual_file_system_resolve_mount(new_path, &rel) >= 0) {
         return -1;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_rename(old_path, new_path);
     fs_unlock(f);
     return r;
@@ -249,7 +266,7 @@ int virtual_file_system_readdir(const char *path, uint32_t *cookie, leanfs_direc
     }
 
     if (!root_is(path) || *cookie < VIRTUAL_FILE_SYSTEM_SYNTH_COOKIE) {
-        uint64_t f = spin_lock_irqsave(&fs_lock);
+        uint64_t f = fs_lock_take();
         int r = leanfs_readdir(path, cookie, out);
         fs_unlock(f);
         if (r != 0 || !root_is(path)) {
@@ -275,14 +292,14 @@ int virtual_file_system_directory_open(const char *path) {
     if (virtual_file_system_resolve_mount(path, &rel) >= 0) {
         return -1;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_directory_open(path);
     fs_unlock(f);
     return r;
 }
 
 int virtual_file_system_readdir_at(int handle, uint32_t *cookie, leanfs_directory_entry_t *out) {
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_readdir_at(handle, cookie, out);
     fs_unlock(f);
     return r;
@@ -310,7 +327,7 @@ size_t virtual_file_system_list(const char *path, char *buffer, size_t maxlen) {
         }
         return written;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     size_t r = leanfs_list(path, buffer, maxlen);
     fs_unlock(f);
     if (root_is(path)) {
@@ -330,28 +347,28 @@ size_t virtual_file_system_list(const char *path, char *buffer, size_t maxlen) {
 }
 
 int virtual_file_system_sync(void) {
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_sync();
     fs_unlock(f);
     return r;
 }
 
 void virtual_file_system_unmount_clean(void) {
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     leanfs_unmount_clean();
     fs_unlock(f);
     kernel_log_puts("[vfs] sync: leanfs is write-through; superblock marked cleanly unmounted.\n");
 }
 
 int virtual_file_system_rename_replace(const char *old_path, const char *new_path) {
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_rename_replace(old_path, new_path);
     fs_unlock(f);
     return r;
 }
 
 int virtual_file_system_check(void) {
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     uint32_t problems = leanfs_check();
     fs_unlock(f);
     return (int)problems;
@@ -362,7 +379,7 @@ int virtual_file_system_rmdir(const char *path) {
     if (virtual_file_system_resolve_mount(path, &rel) >= 0) {
         return -1;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_rmdir(path);
     fs_unlock(f);
     return r;
@@ -374,7 +391,7 @@ int virtual_file_system_stat(const char *path, leanfs_stat_t *out) {
     if (m >= 0) {
         return mounts[m].ops->stat(rel, out);
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_stat(path, out);
     fs_unlock(f);
     return r;
@@ -385,7 +402,7 @@ int virtual_file_system_symlink(const char *path, const char *target) {
     if (virtual_file_system_resolve_mount(path, &rel) >= 0) {
         return -1;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_symlink(path, target);
     fs_unlock(f);
     return r;
@@ -396,7 +413,7 @@ int virtual_file_system_link(const char *old_path, const char *new_path) {
     if (virtual_file_system_resolve_mount(old_path, &rel) >= 0 || virtual_file_system_resolve_mount(new_path, &rel) >= 0) {
         return -1;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_link(old_path, new_path);
     fs_unlock(f);
     return r;
@@ -407,7 +424,7 @@ int virtual_file_system_utime(const char *path, uint32_t mtime) {
     if (virtual_file_system_resolve_mount(path, &rel) >= 0) {
         return -1;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_utime(path, mtime);
     fs_unlock(f);
     return r;
@@ -418,7 +435,7 @@ int virtual_file_system_statvfs(const char *path, virtual_file_system_statvfs_t 
     if (!out || virtual_file_system_resolve_mount(path, &rel) >= 0) {
         return -1;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int ok = leanfs_exists(path);
     out->block_size = LEANFS_BLOCK_SIZE;
     out->total_blocks = leanfs_total_blocks();
@@ -435,7 +452,7 @@ uint32_t virtual_file_system_nlink(const char *path) {
     if (virtual_file_system_resolve_mount(path, &rel) >= 0) {
         return 0;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     uint32_t r = leanfs_nlink(path);
     fs_unlock(f);
     return r;
@@ -450,7 +467,7 @@ int64_t virtual_file_system_readlink(const char *path, char *buffer, size_t maxl
         }
         return mounts[m].ops->readlink(rel, buffer, maxlen);
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int64_t r = leanfs_readlink(path, buffer, maxlen);
     fs_unlock(f);
     return r;
@@ -466,7 +483,7 @@ int virtual_file_system_lstat(const char *path, leanfs_stat_t *out) {
         }
         return r;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_lstat(path, out);
     fs_unlock(f);
     return r;
@@ -479,7 +496,7 @@ int virtual_file_system_open(const char *path, int create) {
         int local = mounts[m].ops->open(rel, create);
         return local < 0 ? -1 : VIRTUAL_FILE_SYSTEM_HANDLE_MAKE(m + 1, local);
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_open(path, create);
     fs_unlock(f);
     return r;
@@ -490,7 +507,7 @@ int64_t virtual_file_system_handle_read(int handle, void *buffer, size_t length,
     if (m > 0) {
         return mounts[m - 1].ops->read(VIRTUAL_FILE_SYSTEM_HANDLE_LOCAL(handle), buffer, length, off);
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int64_t r = leanfs_handle_read(handle, buffer, length, off);
     fs_unlock(f);
     return r;
@@ -501,7 +518,7 @@ int64_t virtual_file_system_handle_write(int handle, const void *buffer, size_t 
     if (m > 0) {
         return mounts[m - 1].ops->write(VIRTUAL_FILE_SYSTEM_HANDLE_LOCAL(handle), buffer, length, off);
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int64_t r = leanfs_handle_write(handle, buffer, length, off);
     fs_unlock(f);
     return r;
@@ -512,7 +529,7 @@ uint32_t virtual_file_system_handle_size(int handle) {
     if (m > 0) {
         return mounts[m - 1].ops->size(VIRTUAL_FILE_SYSTEM_HANDLE_LOCAL(handle));
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     uint32_t r = leanfs_handle_size(handle);
     fs_unlock(f);
     return r;
@@ -530,7 +547,7 @@ int virtual_file_system_handle_truncate_to(int handle, uint32_t length) {
     if (VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle) > 0) {
         return -1;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_handle_truncate_to(handle, length);
     fs_unlock(f);
     return r;
@@ -540,7 +557,7 @@ int virtual_file_system_handle_truncate(int handle) {
     if (VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle) > 0) {
         return 0;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     int r = leanfs_handle_truncate(handle);
     fs_unlock(f);
     return r;
@@ -569,7 +586,7 @@ void virtual_file_system_handle_hold(int handle) {
     if (handle < 0 || VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle) != 0) {
         return;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     leanfs_handle_hold(handle);
     fs_unlock(f);
 }
@@ -578,7 +595,7 @@ void virtual_file_system_handle_release(int handle) {
     if (handle < 0 || VIRTUAL_FILE_SYSTEM_HANDLE_MOUNT(handle) != 0) {
         return;
     }
-    uint64_t f = spin_lock_irqsave(&fs_lock);
+    uint64_t f = fs_lock_take();
     leanfs_handle_release(handle);
     fs_unlock(f);
 }

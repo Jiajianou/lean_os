@@ -50,5 +50,5 @@ void block_device_journal_forget(void);
 int block_device_journal_reset(void);
 int block_device_commit(void);
 int block_device_checkpoint(void);
-void block_device_commit_if_due(void);
+void block_device_commit_if_due(int timed);
 uint32_t block_device_journal_scratch_lba(uint32_t blocks);

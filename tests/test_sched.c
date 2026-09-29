@@ -1387,3 +1387,120 @@ TEST(scheduler, an_idle_cpu_takes_ready_work_at_its_next_tick_not_its_quantums_e
     m196_unblock_everything();
     q13_kill(worker);
 }
+
+TEST(scheduler, a_futex_wake_stays_in_the_address_space_it_was_made_in) {
+    q13_boot();
+    static uint32_t word;
+    task_t *here = q13_spawn("futex-here");
+    task_t *there = q13_spawn("futex-there");
+    REQUIRE(here != 0);
+    REQUIRE(there != 0);
+    here->state = TASK_BLOCKED;
+    here->wait_chan = &word;
+    here->wait_space = 0x1000;
+    there->state = TASK_BLOCKED;
+    there->wait_chan = &word;
+    there->wait_space = 0x2000;
+
+    CHECK_EQ(scheduler_wake_n(&word, 0x2000, 1), 1);
+    CHECK_EQ(there->state, TASK_READY);
+    CHECK_EQ(here->state, TASK_BLOCKED);
+
+    CHECK_EQ(scheduler_wake_n(&word, 0x3000, 1), 0);
+    CHECK_EQ(here->state, TASK_BLOCKED);
+
+    CHECK_EQ(scheduler_wake_n(&word, 0x1000, 1), 1);
+    CHECK_EQ(here->state, TASK_READY);
+
+    q13_kill(here);
+    q13_kill(there);
+}
+
+static void watch_on(task_t *t, const void *object) {
+    t->watching = 1;
+    t->watch_everything = 0;
+    t->watch_fired = 0;
+    t->watch_objects[0] = object;
+    t->watch_count = 1;
+    t->state = TASK_BLOCKED;
+    t->wait_chan = SCHEDULER_POLL_CHAN;
+}
+
+TEST(scheduler, a_change_to_one_object_wakes_only_the_pollers_watching_it) {
+    q13_boot();
+    static int pipe_a, pipe_b;
+    task_t *reader_a = q13_spawn("watch-a");
+    task_t *reader_b = q13_spawn("watch-b");
+    REQUIRE(reader_a != 0);
+    REQUIRE(reader_b != 0);
+    watch_on(reader_a, &pipe_a);
+    watch_on(reader_b, &pipe_b);
+
+    scheduler_wake_object(&pipe_a);
+    CHECK_EQ(reader_a->state, TASK_READY);
+    CHECK_EQ(reader_b->state, TASK_BLOCKED);
+
+    scheduler_wake_objects(&pipe_a, &pipe_b);
+    CHECK_EQ(reader_b->state, TASK_READY);
+
+    reader_a->watching = 0;
+    reader_b->watching = 0;
+    q13_kill(reader_a);
+    q13_kill(reader_b);
+}
+
+TEST(scheduler, a_broadcast_and_an_unconverted_sleeper_still_behave_as_before) {
+    q13_boot();
+    static int pipe_a, pipe_b;
+    task_t *watcher = q13_spawn("watch-a");
+    task_t *legacy = q13_spawn("legacy");
+    REQUIRE(watcher != 0);
+    REQUIRE(legacy != 0);
+    watch_on(watcher, &pipe_a);
+    legacy->watching = 0;
+    legacy->state = TASK_BLOCKED;
+    legacy->wait_chan = SCHEDULER_POLL_CHAN;
+
+    scheduler_wake_object(&pipe_b);
+    CHECK_EQ(watcher->state, TASK_BLOCKED);
+    CHECK_EQ(legacy->state, TASK_READY);
+
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
+    CHECK_EQ(watcher->state, TASK_READY);
+
+    watcher->watching = 0;
+    q13_kill(watcher);
+    q13_kill(legacy);
+}
+
+TEST(scheduler, a_watcher_woken_before_it_sleeps_does_not_sleep) {
+    q13_boot();
+    fake_arch_set_cpu(0);
+    static int pipe_a;
+    task_t *self = scheduler_current();
+    REQUIRE(self != 0);
+    scheduler_watch_begin();
+    scheduler_watch_add(&pipe_a);
+    scheduler_wake_object(&pipe_a);
+    CHECK_EQ(self->watch_fired, 1);
+    scheduler_watch_block(0);
+    CHECK(self->state != TASK_BLOCKED);
+    CHECK_EQ(self->watching, 0);
+}
+
+TEST(scheduler, a_watch_set_that_overflows_watches_everything) {
+    q13_boot();
+    fake_arch_set_cpu(0);
+    static int objects[SCHEDULER_WATCH_MAX + 1];
+    task_t *self = scheduler_current();
+    scheduler_watch_begin();
+    for (int i = 0; i <= SCHEDULER_WATCH_MAX; i++) {
+        scheduler_watch_add(&objects[i]);
+    }
+    CHECK_EQ(self->watch_everything, 1);
+    static int unrelated;
+    scheduler_wake_object(&unrelated);
+    CHECK_EQ(self->watch_fired, 1);
+    scheduler_watch_end();
+    CHECK_EQ(self->watching, 0);
+}

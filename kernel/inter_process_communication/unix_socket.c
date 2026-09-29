@@ -62,8 +62,12 @@ void unix_socket_init(void) {
 
 static int unix_refusals;
 
-static void unix_wake(void) {
-    scheduler_wake_all(SCHEDULER_POLL_CHAN);
+/* M197: a change wakes the pollers of the two sockets it can make ready -
+   the one whose buffer changed and the one on the other end, whose room to
+   write or whose peer's existence just changed - rather than every poller on
+   the machine. */
+static void unix_wake(const unix_socket_t *first, const unix_socket_t *second) {
+    scheduler_wake_objects(first, second);
 }
 
 static unix_socket_t *unix_new(int type) {
@@ -168,6 +172,7 @@ void unix_socket_unref(struct unix_socket *s) {
             names[i].sock = (unix_socket_t *)0;
         }
     }
+    unix_socket_t *old_peer = s->peer;
     if (s->peer) {
         s->peer->peer = (unix_socket_t *)0;
         s->peer = (unix_socket_t *)0;
@@ -184,7 +189,7 @@ void unix_socket_unref(struct unix_socket *s) {
     live_count--;
     spin_unlock_irqrestore(&unix_lock, f);
 
-    unix_wake();
+    unix_wake(old_peer, s);
 
     unix_release_queued_file_descriptors(s);
     for (int i = 0; i < npending; i++) {
@@ -281,7 +286,7 @@ int unix_socket_connect(struct unix_socket *s, const char *name, int length) {
     s->peer = srv;
     listener->backlog[listener->backlog_count++] = srv;
     spin_unlock_irqrestore(&unix_lock, f);
-    unix_wake();
+    unix_wake(listener, s);
     return 0;
 }
 
@@ -396,7 +401,7 @@ long unix_socket_send(struct unix_socket *s, const uint8_t *data, uint32_t lengt
         ring_write(d, data, take);
     }
     spin_unlock_irqrestore(&unix_lock, f);
-    unix_wake();
+    unix_wake(d, s);
     return (long)take;
 }
 
@@ -482,13 +487,14 @@ long unix_socket_receive(struct unix_socket *s, uint8_t *out, uint32_t max,
             break;
         }
     }
+    const unix_socket_t *writer = s->peer;
     spin_unlock_irqrestore(&unix_lock, f);
 
     for (int i = 0; i < ndropped; i++) {
         file_descriptor_release(&dropped[i]);
     }
     if (got > 0 || took_file_descriptors) {
-        unix_wake();
+        unix_wake(s, writer);
         return (long)got;
     }
     return 0;
@@ -616,8 +622,9 @@ int unix_socket_shutdown(struct unix_socket *s, int how) {
     if (how == 1 || how == 2) {
         s->shut_wr = 1;
     }
+    const unix_socket_t *peer = s->peer;
     spin_unlock_irqrestore(&unix_lock, f);
-    unix_wake();
+    unix_wake(s, peer);
     return 0;
 }
 

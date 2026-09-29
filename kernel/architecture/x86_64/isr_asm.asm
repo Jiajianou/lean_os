@@ -118,6 +118,7 @@ isr_lapic_spurious:
     push r13
     push r14
     push r15
+    cld
 %endmacro
 
 %macro RESTORE_REGS 0

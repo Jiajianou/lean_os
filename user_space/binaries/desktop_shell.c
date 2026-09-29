@@ -179,6 +179,40 @@ static void copy_label(char *destination, const char *source) {
     destination[i] = '\0';
 }
 
+/* M197. The panel asked the compositor for its windows every 300 ms and
+   then redrew and presented itself whether or not anything had changed -
+   three whole-panel composites a second on an idle desktop. It still asks;
+   it only presents when what it would draw is different. */
+static uint32_t last_signature;
+
+static uint32_t signature_mix(uint32_t hash, uint32_t value) {
+    return (hash ^ value) * 16777619u;
+}
+
+static void format_clock(long now_ms, char *out);
+
+static uint32_t panel_signature(void) {
+    uint32_t hash = 2166136261u;
+    hash = signature_mix(hash, (uint32_t)shown_workspace);
+    hash = signature_mix(hash, (uint32_t)running_count);
+    for (int i = 0; i < running_count; i++) {
+        const running_slot_t *slot = &running_slots[i];
+        hash = signature_mix(hash, (uint32_t)slot->x);
+        hash = signature_mix(hash, (uint32_t)slot->window_id);
+        hash = signature_mix(hash, (uint32_t)slot->focused << 8 | slot->minimized);
+        hash = signature_mix(hash, (uint32_t)(uintptr_t)slot->image);
+        for (const char *c = slot->name; *c; c++) {
+            hash = signature_mix(hash, (uint8_t)*c);
+        }
+    }
+    char clock_text[CLOCK_CHARS + 1];
+    format_clock(sys_uptime_ms(), clock_text);
+    for (const char *c = clock_text; *c; c++) {
+        hash = signature_mix(hash, (uint8_t)*c);
+    }
+    return hash;
+}
+
 static void refresh_running_slots(window_manager_window_t *self) {
     window_manager_query_response_t q;
     if (window_manager_query_windows(&q) != 0) {
@@ -528,7 +562,11 @@ int main(void) {
         if (now >= next_refresh) {
             refresh_running_slots(&win);
             next_refresh = now + REFRESH_INTERVAL_MS;
-            changed = 1;
+            uint32_t signature = panel_signature();
+            if (signature != last_signature) {
+                last_signature = signature;
+                changed = 1;
+            }
         }
         static int was_pressed;
         int pressed = now < start_pressed_until_ms;

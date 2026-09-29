@@ -14,6 +14,8 @@
 #define LAST_ADDRESS  0x77
 
 #define POLL_INTERVAL_MS 8
+#define RESTING_POLL_INTERVAL_MS 25
+#define RESTING_AFTER_MS 500
 
 static const uint16_t descriptor_registers[] = {0x0020, 0x0001, 0x0000};
 
@@ -69,7 +71,7 @@ void i2c_touchpad_statistics(i2c_touchpad_statistics_t *out) {
    hands over an input report and what Linux's i2c-hid does; writing the input
    register's address and then reading is a different transaction, and the
    first real touchpad this ran against answered it with nothing usable. */
-static void poll_once(void) {
+static int poll_once(void) {
     uint32_t want = descriptor.max_input_length;
     if (want > sizeof(input_buffer)) {
         want = sizeof(input_buffer);
@@ -77,7 +79,7 @@ static void poll_once(void) {
     statistics.polls++;
     if (!designware_i2c_transfer(found_controller, found_address, 0, 0, input_buffer, want)) {
         statistics.read_failures++;
-        return;
+        return 0;
     }
 
     uint16_t length = i2c_hid_input_length(input_buffer, want);
@@ -87,29 +89,42 @@ static void poll_once(void) {
     }
     if (length <= 2 || length > want) {
         statistics.empty++;
-        return;
+        return 0;
     }
 
     hid_mouse_report_t report;
     if (!hid_mouse_decode(&layout, input_buffer + 2, (uint32_t)(length - 2), &report)) {
         statistics.wrong_report++;
-        return;
+        return 0;
     }
     statistics.reports++;
 
     if (report.dx == 0 && report.dy == 0 && report.wheel == 0 && report.buttons == last_buttons) {
-        return;
+        return 0;
     }
     last_buttons = report.buttons;
     statistics.injected++;
     mouse_inject(report.dx, report.dy, report.buttons, report.wheel);
+    return 1;
 }
 
+/* M197. This used pit_sleep_ms, which halts with the task still RUNNING -
+   M170's bug, in the one driver QEMU never exercises - and every poll is a
+   whole report clocked over a 400 kHz bus by a busy-waiting transfer. On the
+   laptop that was a core's steady share with nobody touching anything. A
+   finger that is moving is read every tick; a pad left alone for half a
+   second is read about forty times a second, and the first report brings the
+   full rate back. */
 static void poll_task(void *argument) {
     (void)argument;
+    uint64_t last_report_ms = 0;
     for (;;) {
-        poll_once();
-        pit_sleep_ms(POLL_INTERVAL_MS);
+        uint64_t now_ms = clock_monotonic_ms();
+        if (poll_once() || last_buttons != 0) {
+            last_report_ms = now_ms;
+        }
+        scheduler_sleep_ms(now_ms - last_report_ms < RESTING_AFTER_MS ? POLL_INTERVAL_MS
+                                                                      : RESTING_POLL_INTERVAL_MS);
     }
 }
 

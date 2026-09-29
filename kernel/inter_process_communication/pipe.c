@@ -52,7 +52,7 @@ void pipe_unref_read(pipe_t *p) {
     }
     if (p->persistent) {
         scheduler_wake_all(PIPE_SPACE_CHAN(p));
-        scheduler_wake_all(SCHEDULER_POLL_CHAN);
+        scheduler_wake_object(p);
         return;
     }
     uint64_t f = spin_lock_irqsave(&pipe_lock);
@@ -64,7 +64,7 @@ void pipe_unref_read(pipe_t *p) {
     spin_unlock_irqrestore(&pipe_lock, f);
     if (closed) {
         scheduler_wake_all(PIPE_SPACE_CHAN(p));
-        scheduler_wake_all(SCHEDULER_POLL_CHAN);
+        scheduler_wake_object(p);
     }
 }
 
@@ -74,7 +74,7 @@ void pipe_unref_write(pipe_t *p) {
     }
     if (p->persistent) {
         scheduler_wake_all(PIPE_DATA_CHAN(p));
-        scheduler_wake_all(SCHEDULER_POLL_CHAN);
+        scheduler_wake_object(p);
         return;
     }
     uint64_t f = spin_lock_irqsave(&pipe_lock);
@@ -86,7 +86,7 @@ void pipe_unref_write(pipe_t *p) {
     spin_unlock_irqrestore(&pipe_lock, f);
     if (closed) {
         scheduler_wake_all(PIPE_DATA_CHAN(p));
-        scheduler_wake_all(SCHEDULER_POLL_CHAN);
+        scheduler_wake_object(p);
     }
 }
 
@@ -95,7 +95,7 @@ void pipe_close_write(pipe_t *p) {
     p->write_closed = 1;
     spin_unlock_irqrestore(&pipe_lock, f);
     scheduler_wake_all(PIPE_DATA_CHAN(p));
-    scheduler_wake_all(SCHEDULER_POLL_CHAN);
+    scheduler_wake_object(p);
 }
 
 void pipe_reset(pipe_t *p) {
@@ -195,7 +195,7 @@ long pipe_write(pipe_t *p, const void *buffer, size_t length, int nonblock) {
         }
         if (p->count == PIPE_BUFFER_SIZE) {
             scheduler_wake_all(PIPE_DATA_CHAN(p));
-            scheduler_wake_all(SCHEDULER_POLL_CHAN);
+            scheduler_wake_object(p);
             if (nonblock) {
                 spin_unlock_irqrestore(&pipe_lock, f);
                 return written ? (long)written : -OS_ERROR_AGAIN;
@@ -210,7 +210,7 @@ long pipe_write(pipe_t *p, const void *buffer, size_t length, int nonblock) {
     }
     spin_unlock_irqrestore(&pipe_lock, f);
     scheduler_wake_all(PIPE_DATA_CHAN(p));
-    scheduler_wake_all(SCHEDULER_POLL_CHAN);
+    scheduler_wake_object(p);
     return (long)written;
 }
 
@@ -246,6 +246,7 @@ long pipe_read(pipe_t *p, void *buffer, size_t maxlen, int nonblock) {
     spin_unlock_irqrestore(&pipe_lock, f);
     if (n > 0) {
         scheduler_wake_all(PIPE_SPACE_CHAN(p));
+        scheduler_wake_object(p);
     }
     return (long)n;
 }

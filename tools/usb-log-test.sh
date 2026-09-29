@@ -83,6 +83,14 @@ import re
 # be in one and not the other.
 disk = re.sub(rb"(?m)^\[t\+[0-9]+\.[0-9]s\] disk read [^\n]*\n", b"",
               open(sys.argv[2], "rb").read())
+# M197: and every kernel line starts with the time it was written, which the
+# serial copy does not carry either. The times must never run backwards.
+times = [float(t) for t in re.findall(rb"(?m)^\[ *([0-9]+\.[0-9]{3})\] ", disk)]
+if len(times) < 100:
+    sys.exit("only %d kernel lines carry a time in the disk log" % len(times))
+if any(b < a for a, b in zip(times, times[1:])):
+    sys.exit("the disk log's line times run backwards")
+disk = re.sub(rb"(?m)^\[ *[0-9]+\.[0-9]{3}\] ", b"", disk)
 start = serial.find(b"[disk-log] mirroring")
 end = serial.find(b"[init] PID 1 spawned")
 if start < 0 or end < 0:

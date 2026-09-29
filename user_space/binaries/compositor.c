@@ -34,7 +34,6 @@
 #define TITLEBAR_ACCENT_ALPHA 255u
 #define CURSOR_COLOR         0x00FFFFFFu
 #define CURSOR_SIZE          8
-#define REDRAW_INTERVAL_MS   1000
 
 #define BTN_SIZE   12
 #define BTN_GAP    8
@@ -3447,6 +3446,37 @@ static session_entry_t *session_claim(int client_pid) {
     return 0;
 }
 
+/* M197. An idle desktop woke this loop a hundred times a second to run
+   twenty-odd syscalls that found nothing, and redrew and presented the whole
+   screen once a second besides. Input, a client's present, a request and a
+   client's exit all end the wait already; what is left is the handful of
+   things with a deadline, so the wait ends at the nearest of them. The cap
+   is a backstop for anything that forgets to wake us, not a frame rate. */
+#define IDLE_WAIT_CAP_MS 250
+
+static int idle_wait_ms(void) {
+    long now = sys_uptime_ms();
+    long due = now + IDLE_WAIT_CAP_MS;
+    for (int i = 0; i < toast_count; i++) {
+        if (toasts[i].expires_ms < due) {
+            due = toasts[i].expires_ms;
+        }
+    }
+    for (int i = 0; i < window_count; i++) {
+        if (windows[i].alive && windows[i].close_requested && windows[i].close_deadline_ms > 0 &&
+            windows[i].close_deadline_ms < due) {
+            due = windows[i].close_deadline_ms;
+        }
+    }
+    if (mode_revert_at_ms != 0 && mode_revert_at_ms < due) {
+        due = mode_revert_at_ms;
+    }
+    if (shutdown_pending_mode != POWER_CONFIRM_NONE && now + 10 < due) {
+        due = now + 10;
+    }
+    return due > now ? (int)(due - now) : 0;
+}
+
 int main(void) {
     {
         const char *sess = getenv("LEANOS_SESSION");
@@ -3555,7 +3585,6 @@ int main(void) {
     last_drawn_cursor_x = cursor_x;
     last_drawn_cursor_y = cursor_y;
 
-    long last_redraw_ms = sys_uptime_ms();
     for (;;) {
         accept_pending_window(request_file_descriptors[0], response_file_descriptors[1]);
         accept_pending_query(query_file_descriptors[0], query_response_file_descriptors[1]);
@@ -3580,7 +3609,6 @@ int main(void) {
         }
         toasts_expire(now);
         shutdown_tick(now);
-
         if (session_enabled) {
             static uint32_t last_sig;
             static uint32_t settling_sig;
@@ -3678,11 +3706,10 @@ int main(void) {
             }
         }
 
-        if (dirty || now - last_redraw_ms >= REDRAW_INTERVAL_MS) {
+        if (dirty) {
             redraw();
             dirty = 0;
             present_pending = 0;
-            last_redraw_ms = now;
             last_drawn_cursor_x = cursor_x;
             last_drawn_cursor_y = cursor_y;
         } else if (present_pending && !anim_any_active()) {
@@ -3721,7 +3748,7 @@ int main(void) {
             long remaining = frame_due_ms - sys_uptime_ms();
             sys_waitfds(wait_file_descriptors, nwait, remaining > 0 ? (int)remaining : 0);
         } else {
-            sys_waitfds(wait_file_descriptors, nwait, 10);
+            sys_waitfds(wait_file_descriptors, nwait, idle_wait_ms());
         }
     }
 }

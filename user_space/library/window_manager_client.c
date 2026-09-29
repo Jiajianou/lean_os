@@ -226,6 +226,7 @@ int window_manager_wait_event(window_manager_window_t *win, window_manager_event
         if (window_manager_poll_event(win, out)) {
             return 0;
         }
+        window_manager_wait_ms(win, NULL, 0, -1);
     }
 }
 
@@ -241,11 +242,9 @@ int window_manager_poll_event(window_manager_window_t *win, window_manager_event
         return 1;
     }
     if (sys_pipe_poll(win->evt_file_descriptor) < (long)sizeof(*out)) {
-        sys_yield();
         return 0;
     }
     if (read_exact(win->evt_file_descriptor, out, sizeof(*out)) != (long)sizeof(*out)) {
-        sys_yield();
         return 0;
     }
     if (out->type == WINDOW_MANAGER_EVENT_DISPLAY_CHANGED) {

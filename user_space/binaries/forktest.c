@@ -456,6 +456,12 @@ static int futex_mode(void) {
     return futex_lost != 0 ? 51 : 0;
 }
 
+/* M197: a page of this program's own data that nothing touches before the
+   fork, so that after it the page is copy-on-write and has never been
+   written - the state a kernel that writes a result into it has to cope
+   with. Chromium's static pipe descriptors were exactly this. */
+static int written_by_the_kernel_after_fork[PAGE / sizeof(int)] __attribute__((aligned(PAGE)));
+
 int main(int argc, char **argv) {
     if (argc > 1 && argv[1] && strcmp(argv[1], "futex") == 0) {
         return futex_mode();
@@ -531,6 +537,13 @@ int main(int argc, char **argv) {
     if (before_fork != 0x5A5A || heap_marker[0] != 'P') {
         return 5;
     }
+    if (pipe(written_by_the_kernel_after_fork) != 0) {
+        printf("forktest: pipe() refused to write its descriptors into a copy-on-write page "
+               "of this program's own data\n");
+        return 12;
+    }
+    close(written_by_the_kernel_after_fork[0]);
+    close(written_by_the_kernel_after_fork[1]);
     if (arena[0] != 'P' || arena[2 * PAGE] != 'P') {
         return 6;
     }

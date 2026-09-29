@@ -46,6 +46,7 @@ int epoll_control_set(struct epoll *ep, int op, int fd, const void *object,
                   uint32_t events, uint64_t data);
 
 int epoll_watch_count(const struct epoll *ep);
+int epoll_objects(struct epoll *ep, int *fds, const void **objects, int max);
 
 #define EPOLL_STALE 0xFFFFFFFFu
 typedef uint32_t (*epoll_mask_function)(void *context, int fd, const void *object);

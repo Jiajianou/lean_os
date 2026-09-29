@@ -1242,17 +1242,17 @@ int block_device_checkpoint(void) {
     return r;
 }
 
-void block_device_commit_if_due(void) {
+void block_device_commit_if_due(int timed) {
     uint64_t irq = spin_lock_irqsave(&block_device_lock);
     if (journaled) {
         uint64_t now = journal_now_ms();
         if (journal_uncommitted > 0 &&
-            (now >= journal_oldest_uncommitted_ms + JOURNAL_COMMIT_DELAY_MS ||
+            ((timed && now >= journal_oldest_uncommitted_ms + JOURNAL_COMMIT_DELAY_MS) ||
              journal_uncommitted >= journal_map_limit / 2)) {
             journal_commit_locked();
         }
         if (journal_uncommitted == 0 && journal_map_used > 0 &&
-            (now >= journal_last_commit_ms + JOURNAL_IDLE_CHECKPOINT_MS ||
+            ((timed && now >= journal_last_commit_ms + JOURNAL_IDLE_CHECKPOINT_MS) ||
              journal_head > journal_blocks - journal_blocks / 4)) {
             journal_write_home(0);
         }

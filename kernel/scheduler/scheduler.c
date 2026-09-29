@@ -97,6 +97,53 @@ const int scheduler_keyboard_channel = 0;
 static uint64_t idle_ticks[MAX_CPUS];
 static uint64_t total_ticks[MAX_CPUS];
 
+/* M197. The busy figure counted a tick as busy when ready work existed
+   ANYWHERE while this core idled - on any tick where a timed wait expired
+   every idle core reported busy - so an idle desktop read 30% on eight
+   cores. What a core did is the time it spent halted, measured with the TSC:
+   an interval opens just before hlt and closes when hlt returns or when the
+   scheduler switches away on that core, whichever happens first. */
+static uint64_t halted_cycles[MAX_CPUS];
+static uint64_t halt_since[MAX_CPUS];
+
+#ifdef LEANOS_HOST_TEST
+static uint64_t tsc_read(void) {
+    return 0;
+}
+
+static uint64_t tsc_to_us(uint64_t cycles) {
+    return cycles;
+}
+
+#define HALT_WITH_INTERRUPTS() ((void)0)
+#define CPU_RELAX() ((void)0)
+#else
+#include "architecture/x86_64/timestamp_counter.h"
+
+#define HALT_WITH_INTERRUPTS() __asm__ volatile("sti; hlt; cli" ::: "memory")
+#define CPU_RELAX() __asm__ volatile("pause")
+#endif
+
+static void close_halt_interval(int cpu) {
+    if (halt_since[cpu] != 0) {
+        halted_cycles[cpu] += tsc_read() - halt_since[cpu];
+        halt_since[cpu] = 0;
+    }
+}
+
+void scheduler_halt(void) {
+    uint64_t flags = irq_save_disable();
+    int cpu = smp_current_cpu();
+    halt_since[cpu] = tsc_read();
+    HALT_WITH_INTERRUPTS();
+    close_halt_interval(smp_current_cpu());
+    irq_restore(flags);
+}
+
+uint64_t scheduler_halted_us(int cpu) {
+    return (cpu >= 0 && cpu < MAX_CPUS) ? tsc_to_us(halted_cycles[cpu]) : 0;
+}
+
 void scheduler_debug_dump(const char *label) {
     kernel_log_puts("[sched-dump] ");
     kernel_log_puts(label);
@@ -162,7 +209,7 @@ static void idle_task_body(void *arg) {
     (void)arg;
     cpu_enable_interrupts();
     for (;;) {
-        cpu_halt();
+        scheduler_halt();
     }
 }
 
@@ -861,16 +908,24 @@ uint64_t scheduler_event_sequence(void) {
     return v;
 }
 
-int scheduler_wake_n(const void *chan, int max) {
+/* M197. A futex is a user address, and every process running /bin/chrome
+   has the same addresses: its image is loaded at one place and nothing
+   randomises it. Keyed on the address alone, a FUTEX_WAKE of one waiter in
+   one process could take a thread of ANOTHER process off its word - a
+   spurious wake there and a lost one here, whose waiter then slept to its
+   timeout. The key is the address AND the address space that owns it, which
+   is what Linux means by a private futex. It also no longer bumps the poll
+   sequence: nothing that waits on the sequence waits for a futex. */
+int scheduler_wake_n(const void *chan, uint64_t space, int max) {
     if (!chan || max <= 0) {
         return 0;
     }
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
-    event_sequence++;
     int woken = 0;
     for (int i = 0; i < task_count && woken < max; i++) {
-        if (tasks[i].state == TASK_BLOCKED && tasks[i].wait_chan == chan) {
+        if (tasks[i].state == TASK_BLOCKED && tasks[i].wait_chan == chan &&
+            tasks[i].wait_space == space) {
             blocked_count--;
             tasks[i].state = TASK_READY;
             tasks[i].prio = PRIO_INTERACTIVE;
@@ -889,8 +944,195 @@ int scheduler_wake_n(const void *chan, int max) {
     return woken;
 }
 
+/* M197. Every poller on the machine - epoll_wait, waitfds, a blocking read
+   of a pipe or a socket - slept on ONE channel, and every pipe write, eventfd
+   poke, socket send and timer change woke ALL of them: one Chromium thread
+   posting a task woke every message pump in every process, the compositor
+   and every desktop application, and each rescanned its descriptors and went
+   back to sleep. Worse, a sleeper that saw the global sequence move between
+   its scan and its sleep did not sleep at all, and on eight busy cores the
+   sequence always moved - so pollers spun through the system call.
+
+   A poller now says which kernel objects it is waiting on BEFORE it looks at
+   them (scheduler_watch_begin/add), and a producer names the object it
+   changed (scheduler_wake_object). A watcher that is already asleep is woken;
+   one that has not got to sleep yet has watch_fired set and will not sleep.
+   The object's own lock orders the two sides: the poller publishes its watch
+   and then takes the object's lock to look; the producer changes the object
+   under that lock and then takes the scheduler lock to read the watches. So
+   either the poller's look sees the change or the producer sees the watch.
+
+   A broadcast - task exit, input, anything that has no single object - still
+   reaches every poller, and a poller that has not said what it watches (the
+   paths not converted) is still woken by any object's change, exactly as
+   before. */
+static int watch_matches(const task_t *t, const void *first, const void *second) {
+    if (!first || t->watch_everything) {
+        return 1;
+    }
+    uint32_t count = __atomic_load_n(&t->watch_count, __ATOMIC_ACQUIRE);
+    for (uint32_t i = 0; i < count && i < SCHEDULER_WATCH_MAX; i++) {
+        const void *object = t->watch_objects[i];
+        if (object == first || (second && object == second)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int wake_pollers_locked(const void *first, const void *second) {
+    int woken = 0;
+    for (int i = 0; i < task_count; i++) {
+        task_t *t = &tasks[i];
+        int blocked_here = t->state == TASK_BLOCKED && t->wait_chan == SCHEDULER_POLL_CHAN;
+        if (!t->watching) {
+            if (!blocked_here) {
+                continue;
+            }
+        } else if (!watch_matches(t, first, second)) {
+            continue;
+        } else if (!blocked_here) {
+            t->watch_fired = 1;
+            continue;
+        }
+        t->watch_fired = 1;
+        blocked_count--;
+        t->state = TASK_READY;
+        t->prio = PRIO_INTERACTIVE;
+        t->full_slices = 0;
+        t->wait_chan = (const void *)0;
+        t->wake_deadline_ms = 0;
+        woken++;
+    }
+    return woken;
+}
+
+void scheduler_wake_objects(const void *first, const void *second) {
+    if (!first) {
+        first = second;
+        second = (const void *)0;
+    }
+    if (!first) {
+        return;
+    }
+    uint64_t flags = irq_save_disable();
+    spin_lock(&scheduler_lock);
+    event_sequence++;
+    int woken = wake_pollers_locked(first, second);
+    spin_unlock(&scheduler_lock);
+    irq_restore(flags);
+    kick_idle_cpus(woken);
+}
+
+void scheduler_wake_object(const void *object) {
+    scheduler_wake_objects(object, (const void *)0);
+}
+
+void scheduler_watch_begin(void) {
+    uint64_t flags = irq_save_disable();
+    task_t *self = current_task[smp_current_cpu()];
+    spin_lock(&scheduler_lock);
+    self->watch_count = 0;
+    self->watch_everything = 0;
+    self->watch_fired = 0;
+    self->watching = 1;
+    spin_unlock(&scheduler_lock);
+    irq_restore(flags);
+}
+
+void scheduler_watch_add(const void *object) {
+    task_t *self = current_task_now();
+    if (!object || !self->watching) {
+        return;
+    }
+    uint32_t count = self->watch_count;
+    for (uint32_t i = 0; i < count; i++) {
+        if (self->watch_objects[i] == object) {
+            return;
+        }
+    }
+    if (count >= SCHEDULER_WATCH_MAX) {
+        __atomic_store_n(&self->watch_everything, 1, __ATOMIC_SEQ_CST);
+        return;
+    }
+    self->watch_objects[count] = object;
+    __atomic_store_n(&self->watch_count, count + 1, __ATOMIC_SEQ_CST);
+}
+
+/* A task that can sleep sleeps; the only callers that cannot - the boot
+   context before there is anybody to switch to, and a CPU's idle identity -
+   spin, and they only exist before the machine is running or never touch a
+   lock like this at all. A waiter must never spin with interrupts off here:
+   the holder runs with them on, so it can be preempted on this very core. */
+void sleep_lock_acquire(sleep_lock_t *lock) {
+    uint64_t flags = spin_lock_irqsave(&lock->guard);
+    while (lock->held) {
+        task_t *self = current_task[smp_current_cpu()];
+        if (!self || self->is_idle || task_count <= 1) {
+            spin_unlock_irqrestore(&lock->guard, flags);
+            CPU_RELAX();
+            flags = spin_lock_irqsave(&lock->guard);
+            continue;
+        }
+        lock->waiters++;
+        scheduler_block_on_in_space(lock, 0, 0, &lock->guard, &flags);
+        lock->waiters--;
+    }
+    lock->held = 1;
+    spin_unlock_irqrestore(&lock->guard, flags);
+}
+
+void sleep_lock_release(sleep_lock_t *lock) {
+    uint64_t flags = spin_lock_irqsave(&lock->guard);
+    lock->held = 0;
+    if (lock->waiters > 0) {
+        scheduler_wake_n(lock, 0, 1);
+    }
+    spin_unlock_irqrestore(&lock->guard, flags);
+}
+
+void scheduler_watch_end(void) {
+    current_task_now()->watching = 0;
+}
+
+void scheduler_watch_block(uint64_t deadline_ms) {
+    scheduler_deliver_pending_signal();
+    scheduler_take_pending_stop_if_any(current_task_now());
+
+    uint64_t sflags = irq_save_disable();
+    int cpu = smp_current_cpu();
+    spin_lock(&scheduler_lock);
+    task_t *self = current_task[cpu];
+    if (self->watch_fired) {
+        self->watching = 0;
+        spin_unlock(&scheduler_lock);
+        irq_restore(sflags);
+        return;
+    }
+    self->wait_chan = SCHEDULER_POLL_CHAN;
+    self->wake_deadline_ms = deadline_ms;
+    self->state = TASK_BLOCKED;
+    blocked_count++;
+    spin_unlock(&scheduler_lock);
+    irq_restore(sflags);
+
+    schedule();
+    unblock_self(self);
+    self->watching = 0;
+}
+
 void scheduler_wake_all(const void *chan) {
     if (!chan) {
+        return;
+    }
+    if (chan == SCHEDULER_POLL_CHAN) {
+        uint64_t pflags = irq_save_disable();
+        spin_lock(&scheduler_lock);
+        event_sequence++;
+        int woken = wake_pollers_locked((const void *)0, (const void *)0);
+        spin_unlock(&scheduler_lock);
+        irq_restore(pflags);
+        kick_idle_cpus(woken);
         return;
     }
     uint64_t flags = irq_save_disable();
@@ -993,11 +1235,17 @@ void scheduler_sleep_ms(uint32_t ms) {
 }
 
 void scheduler_block_on(const void *chan, uint64_t deadline_ms, spinlock_t *lock, uint64_t *flags) {
+    scheduler_block_on_in_space(chan, 0, deadline_ms, lock, flags);
+}
+
+void scheduler_block_on_in_space(const void *chan, uint64_t space, uint64_t deadline_ms,
+                                 spinlock_t *lock, uint64_t *flags) {
     uint64_t sflags = irq_save_disable();
     int cpu = smp_current_cpu();
     spin_lock(&scheduler_lock);
     task_t *self = current_task[cpu];
     self->wait_chan = chan;
+    self->wait_space = space;
     self->wake_deadline_ms = deadline_ms;
     self->state = TASK_BLOCKED;
     blocked_count++;
@@ -1025,6 +1273,7 @@ void schedule(void) {
         irq_restore(flags);
         return;
     }
+    close_halt_interval(cpu);
 
     for (int c = 0; c < MAX_CPUS; c++) {
         if (c != cpu && current_task[c] == next) {
@@ -2179,6 +2428,29 @@ void scheduler_prefault_range(uint64_t address, uint64_t length, int for_write) 
     }
     int in_arena = !(last < USER_MMAP_BASE || first >= USER_MMAP_LIMIT);
     int in_stack = !(last < USER_STACK_LIMIT || first >= USER_STACK_TOP);
+    int in_image = !(last < USER_IMAGE_BASE || first >= USER_IMAGE_LIMIT);
+    /* M197. A process that has forked has every page of its own data
+       segment copy-on-write, and the kernel writing a result into one of
+       them - a pipe's two descriptors, a stat, a read - asked only whether
+       the page was writable, found it was not, and refused. The program's
+       own store to the same byte would have faulted and been given the page.
+       Chromium's browser forks its children and then opens the pipe it tells
+       the compositor it has drawn through; the open failed on a static in
+       its data segment, every frame it presented after that went nowhere,
+       and the desktop's once-a-second full redraw was all that ever put the
+       browser on the screen. The image is filled at exec and never demand
+       paged, so all a write here can need is the copy - and a page that is
+       read-only for real, text, is not copy-on-write and stays refused. */
+    if (in_image && !in_arena && !in_stack) {
+        if (for_write) {
+            for (uint64_t page = first; page <= last; page += PAGE_SIZE) {
+                if (!virtual_memory_user_range_ok(self->pml4_phys, page, 1, 1)) {
+                    virtual_memory_cow_break(self->pml4_phys, page);
+                }
+            }
+        }
+        return;
+    }
     if (!in_arena && !in_stack) {
         return;
     }

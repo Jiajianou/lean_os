@@ -57,7 +57,7 @@ void pit_sleep_ms(uint32_t ms) {
     uint64_t target = ticks + needed;
     scheduler_idle_enter();
     while (ticks < target) {
-        __asm__ volatile("hlt");
+        scheduler_halt();
     }
     scheduler_idle_exit();
 }

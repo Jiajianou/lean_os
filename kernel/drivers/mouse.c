@@ -30,6 +30,10 @@ static int packet_bytes = 3;
 static uint8_t packet[4];
 static int packet_index;
 
+int mouse_pending(void) {
+    return buffer_head != buffer_tail;
+}
+
 static void push_event(mouse_event_t ev) {
     uint32_t next = (buffer_head + 1) % EVENT_BUFFER_SIZE;
     if (next == buffer_tail) {
