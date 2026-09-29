@@ -27,7 +27,13 @@ void smp_broadcast_schedule_tick(void);
    sibling's TLB. */
 void smp_tlb_shootdown(void);
 
+/* The same, for only the cores in the mask (bit n is cpu n; the caller's own
+   bit is ignored). Safe to call with interrupts off and locks held. */
+void smp_tlb_shootdown_cpus(uint32_t cpu_mask);
+
 void smp_tlb_shootdown_acknowledge(void);
+
+void smp_send_reschedule(int cpu);
 
 void smp_halt_other_cpus(void);
 int smp_halt_was_requested(void);

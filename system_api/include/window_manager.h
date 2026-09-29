@@ -13,6 +13,8 @@ typedef struct {
     uint32_t bpp;
 } window_manager_framebuffer_info_t;
 
+#define WINDOW_MANAGER_FRAMEBUFFER_PHYSICAL 1
+
 #define WINDOW_MANAGER_REQUEST_PIPE  "wm_req"
 #define WINDOW_MANAGER_RESPONSE_PIPE "wm_resp"
 

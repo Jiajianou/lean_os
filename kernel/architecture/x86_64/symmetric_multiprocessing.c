@@ -125,34 +125,93 @@ void smp_broadcast_schedule_tick(void) {
     lapic_send_ipi_all_excl_self(IPI_SCHEDULE_VECTOR | LAPIC_ICR_DELIVERY_FIXED);
 }
 
-/* One core at a time may ask, because the acknowledgement count below is a
-   single number rather than one per request. The lock is taken WITHOUT
-   disabling interrupts on purpose: the asking core spins here waiting for
-   every other core to take an interrupt, and a core that cannot take one
-   would never answer. For the same reason nothing that holds a lock another
-   core takes with interrupts off may call this. */
+/* One core at a time may ask, because the pending mask below is a single
+   request rather than one per asker. A core that owes an acknowledgement
+   answers it from the IPI when its interrupts are on, and from its spin loop
+   when they are off (spinlock.h) - which is what lets a core ask while it
+   holds a lock with interrupts disabled: whoever is waiting for that lock is
+   spinning, and a spinning core answers. The ask itself spins the same way,
+   so two cores asking at once cannot wait for each other either. */
 static spinlock_t shootdown_lock;
-static volatile int shootdown_acknowledgements;
+volatile uint32_t smp_shootdown_pending;
 
-void smp_tlb_shootdown(void) {
+static inline int interrupts_enabled(void) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; popq %0" : "=r"(flags));
+    return (flags & (1u << 9)) != 0;
+}
+
+void smp_tlb_service_pending(void) {
+    /* With interrupts on, the IPI is on its way and will be taken; the index
+       read below would also be a guess, because the task could move to
+       another core between reading it and flushing (M192's rule). */
+    if (interrupts_enabled()) {
+        return;
+    }
+    uint32_t bit = 1u << smp_current_cpu();
+    if (__atomic_load_n(&smp_shootdown_pending, __ATOMIC_ACQUIRE) & bit) {
+        virtual_memory_flush_local_tlb();
+        __atomic_and_fetch(&smp_shootdown_pending, ~bit, __ATOMIC_SEQ_CST);
+    }
+}
+
+void smp_tlb_shootdown_cpus(uint32_t cpu_mask) {
     if (!initialized || smp_cpu_count < 2) {
         return;
     }
-
-    spin_lock(&shootdown_lock);
-    __atomic_store_n(&shootdown_acknowledgements, smp_cpu_count - 1,
-                     __ATOMIC_SEQ_CST);
-    lapic_send_ipi_all_excl_self(IPI_TLB_SHOOTDOWN_VECTOR |
-                                 LAPIC_ICR_DELIVERY_FIXED);
-    while (__atomic_load_n(&shootdown_acknowledgements, __ATOMIC_SEQ_CST) > 0) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    uint32_t self = 1u << smp_current_cpu();
+    uint32_t online = smp_cpu_count >= 32 ? 0xFFFFFFFFu : ((1u << smp_cpu_count) - 1u);
+    cpu_mask &= online & ~self;
+    if (cpu_mask == 0) {
+        __asm__ volatile("pushq %0; popfq" : : "r"(flags) : "memory", "cc");
+        return;
+    }
+    while (__atomic_exchange_n(&shootdown_lock.locked, 1, __ATOMIC_ACQUIRE)) {
+        while (shootdown_lock.locked) {
+            smp_tlb_service_pending();
+            cpu_spin_hint();
+        }
+    }
+    __atomic_store_n(&smp_shootdown_pending, cpu_mask, __ATOMIC_SEQ_CST);
+    for (int c = 0; c < smp_cpu_count; c++) {
+        if (cpu_mask & (1u << c)) {
+            lapic_send_ipi(smp_cpus[c].apic_id, IPI_TLB_SHOOTDOWN_VECTOR |
+                                                    LAPIC_ICR_DELIVERY_FIXED);
+        }
+    }
+    while (__atomic_load_n(&smp_shootdown_pending, __ATOMIC_SEQ_CST) != 0) {
         cpu_spin_hint();
     }
     spin_unlock(&shootdown_lock);
+    __asm__ volatile("pushq %0; popfq" : : "r"(flags) : "memory", "cc");
+}
+
+/* Wake one sleeping core so it picks up work now rather than at its next
+   tick. The ICR is written with interrupts off because a tick's broadcast
+   from this core's own timer handler would otherwise interleave its two
+   halves with ours. */
+void smp_send_reschedule(int cpu) {
+    if (!initialized || cpu < 0 || cpu >= smp_cpu_count) {
+        return;
+    }
+    uint64_t flags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    lapic_send_ipi(smp_cpus[cpu].apic_id, IPI_RESCHEDULE_VECTOR | LAPIC_ICR_DELIVERY_FIXED);
+    __asm__ volatile("pushq %0; popfq" : : "r"(flags) : "memory", "cc");
+}
+
+void smp_tlb_shootdown(void) {
+    smp_tlb_shootdown_cpus(0xFFFFFFFFu);
 }
 
 void smp_tlb_shootdown_acknowledge(void) {
-    virtual_memory_flush_local_tlb();
-    __atomic_sub_fetch(&shootdown_acknowledgements, 1, __ATOMIC_SEQ_CST);
+    uint32_t bit = 1u << smp_current_cpu();
+    if (__atomic_load_n(&smp_shootdown_pending, __ATOMIC_ACQUIRE) & bit) {
+        virtual_memory_flush_local_tlb();
+        __atomic_and_fetch(&smp_shootdown_pending, ~bit, __ATOMIC_SEQ_CST);
+    }
 }
 
 static volatile int halt_requested;
@@ -271,5 +330,7 @@ void lapic_vector_handler(isr_regs_t *regs) {
         scheduler_tick_cpu(smp_current_cpu());
     } else if (regs->vector == IPI_TLB_SHOOTDOWN_VECTOR) {
         smp_tlb_shootdown_acknowledge();
+    } else if (regs->vector == IPI_RESCHEDULE_VECTOR) {
+        scheduler_reschedule_if_idle();
     }
 }

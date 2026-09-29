@@ -201,3 +201,34 @@ TEST(boot_options, video_firmware_names_no_mode_of_its_own) {
     uint32_t width = 0, height = 0;
     CHECK_EQ(best_mode(&options, thinkpad_modes, 5, &width, &height), 0);
 }
+
+TEST(boot_options, the_desktop_scale_is_auto_unless_a_line_pins_it_to_one_or_two) {
+    boot_options_t options;
+    parse("video=native\n", &options);
+    CHECK_EQ(options.display_scale, 0u);
+    parse("scale=2\n", &options);
+    CHECK_EQ(options.display_scale, 2u);
+    CHECK_EQ(options.unknown_keys, 0u);
+    parse("scale = 1\n", &options);
+    CHECK_EQ(options.display_scale, 1u);
+    parse("scale=2\nscale=auto\n", &options);
+    CHECK_EQ(options.display_scale, 0u);
+    CHECK_EQ(options.unknown_keys, 0u);
+}
+
+TEST(boot_options, a_scale_it_cannot_draw_is_refused_and_counted) {
+    boot_options_t options;
+    parse("scale=3\nscale=0\nscale=big\nscale=\n", &options);
+    CHECK_EQ(options.display_scale, 0u);
+    CHECK_EQ(options.unknown_keys, 4u);
+}
+
+TEST(boot_options, the_scale_crosses_the_handoff_and_a_forged_one_does_not) {
+    boot_options_t handoff;
+    parse("scale=1\n", &handoff);
+    boot_options_set_active(&handoff);
+    CHECK_EQ(boot_options_active()->display_scale, 1u);
+    handoff.display_scale = 7;
+    boot_options_set_active(&handoff);
+    CHECK_EQ(boot_options_active()->display_scale, 0u);
+}

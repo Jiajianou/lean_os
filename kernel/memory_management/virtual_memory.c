@@ -8,6 +8,7 @@
 #include "memory_management/physical_memory.h"
 #include "panic.h"
 #include "scheduler/scheduler.h"
+#include "architecture/x86_64/symmetric_multiprocessing.h"
 
 static void virtual_memory_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags);
 
@@ -34,6 +35,29 @@ static uint64_t *kernel_pml4;
 static uint64_t kernel_pml4_phys;
 
 static int nx_enabled;
+
+/* invlpg reaches the core that runs it. Any other core running a thread of
+   the same address space can go on using the old translation - reading a
+   page that was unmapped, writing a page that was made read-only, or writing
+   into a frame that has already been freed and handed to somebody else. That
+   last one is how a browser on eight real cores corrupted its own allocator
+   (M196): PartitionAlloc decommits with madvise and mprotect from one thread
+   while its siblings run on the other seven. So every change that takes a
+   translation away or narrows it tells the cores holding that address space,
+   and a frame is freed only after they have answered.
+
+   Safe with virtual_memory_lock held: a core spinning for this lock with
+   interrupts off answers the request from its spin loop. */
+static void tell_other_cpus(uint64_t pml4_phys) {
+    uint32_t mask = pml4_phys == kernel_pml4_phys
+                        ? 0xFFFFFFFFu
+                        : scheduler_cpus_holding_address_space(pml4_phys);
+    smp_tlb_shootdown_cpus(mask);
+}
+
+void virtual_memory_flush_other_cpus(uint64_t pml4_phys) {
+    tell_other_cpus(pml4_phys);
+}
 
 static int cpu_has_nx(void) {
     uint32_t eax, ebx, ecx, edx;
@@ -403,9 +427,49 @@ int virtual_memory_try_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t p
         return -1;
     }
 
-    if (!(pt[PT_INDEX(virt)] & PTE_PRESENT)) {
+    uint64_t old = pt[PT_INDEX(virt)];
+    uint64_t new_entry = (phys & PTE_ADDRESS_MASK) | leaf_flags(flags);
+    if (!(old & PTE_PRESENT)) {
         rss_charge(pml4_phys, 1);
     }
+    pt[PT_INDEX(virt)] = new_entry;
+    __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+    if ((old & PTE_PRESENT) && old != new_entry) {
+        tell_other_cpus(pml4_phys);
+    }
+    spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
+    return 0;
+}
+
+/* A page fault's fill: install this frame only if nothing is there yet. Two
+   threads that fault on the same untouched page both get here with a frame
+   of their own, and a plain map lets the second REPLACE the first - after
+   the first thread has already returned and written to its frame, so what it
+   wrote is gone, and nothing faults to say so. Returns 0 if this frame was
+   installed, 1 if the page was already present (the caller keeps its frame
+   and the faulting access is simply retried), -1 if a page table could not
+   be allocated. */
+int virtual_memory_try_map_page_if_absent(uint64_t pml4_phys, uint64_t virt, uint64_t phys,
+                                          uint64_t flags) {
+    uint64_t irq_flags = spin_lock_irqsave(&virtual_memory_lock);
+    uint64_t *pml4 = phys_to_table(pml4_phys);
+    uint64_t extra = flags & PTE_USER;
+    uint64_t *pdpt = table_walk(pml4, PML4_INDEX(virt), 1, extra);
+    uint64_t *pd = pdpt ? table_walk(pdpt, PDPT_INDEX(virt), 1, extra) : (uint64_t *)0;
+    if (!pd || (pd[PD_INDEX(virt)] & PTE_HUGE)) {
+        spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
+        return -1;
+    }
+    uint64_t *pt = table_walk(pd, PD_INDEX(virt), 1, extra);
+    if (!pt) {
+        spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
+        return -1;
+    }
+    if (pt[PT_INDEX(virt)] & PTE_PRESENT) {
+        spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
+        return 1;
+    }
+    rss_charge(pml4_phys, 1);
     pt[PT_INDEX(virt)] = (phys & PTE_ADDRESS_MASK) | leaf_flags(flags);
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
     spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
@@ -441,9 +505,16 @@ uint64_t virtual_memory_protect_range_in(uint64_t pml4_phys, uint64_t start, uin
         if (e & PTE_COW) {
             want = (want & ~PTE_WRITABLE) | PTE_COW;
         }
-        pt[PT_INDEX(virt)] = (e & PTE_ADDRESS_MASK) | want;
+        uint64_t replacement = (e & PTE_ADDRESS_MASK) | want;
+        if (replacement == e) {
+            continue;
+        }
+        pt[PT_INDEX(virt)] = replacement;
         __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
         changed++;
+    }
+    if (changed) {
+        tell_other_cpus(pml4_phys);
     }
     spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
     return changed;
@@ -628,6 +699,8 @@ uint64_t virtual_memory_unmap_range_free(uint64_t pml4_phys, uint64_t start, uin
     uint64_t irq_flags = spin_lock_irqsave(&virtual_memory_lock);
     uint64_t *pml4 = phys_to_table(pml4_phys);
     uint64_t freed = 0;
+    uint64_t released[64];
+    uint64_t count = 0;
 
     for (uint64_t address = start; address < end; ) {
         uint64_t *pdpt = table_walk(pml4, PML4_INDEX(address), 0, 0);
@@ -660,9 +733,23 @@ uint64_t virtual_memory_unmap_range_free(uint64_t pml4_phys, uint64_t start, uin
             }
             pt[PT_INDEX(address)] = 0;
             __asm__ volatile("invlpg (%0)" : : "r"(address) : "memory");
-            physical_memory_free_frame(entry & PTE_ADDRESS_MASK);
-            freed++;
+            released[count++] = entry & PTE_ADDRESS_MASK;
+            if (count == sizeof(released) / sizeof(released[0])) {
+                tell_other_cpus(pml4_phys);
+                for (uint64_t i = 0; i < count; i++) {
+                    physical_memory_free_frame(released[i]);
+                }
+                freed += count;
+                count = 0;
+            }
         }
+    }
+    if (count) {
+        tell_other_cpus(pml4_phys);
+        for (uint64_t i = 0; i < count; i++) {
+            physical_memory_free_frame(released[i]);
+        }
+        freed += count;
     }
 
     rss_charge(pml4_phys, -(int64_t)freed);
@@ -822,6 +909,7 @@ int virtual_memory_cow_break(uint64_t pml4_phys, uint64_t virt) {
     }
     pt[PT_INDEX(virt)] = new_phys | (entry & (PTE_USER | PTE_PRESENT | PTE_NX)) | PTE_WRITABLE;
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+    tell_other_cpus(pml4_phys);
     spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
 
     physical_memory_free_frame(old_phys);

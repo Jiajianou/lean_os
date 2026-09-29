@@ -314,6 +314,10 @@ long sys_framebuffer_info(window_manager_framebuffer_info_t *out) {
     return do_syscall(SYS_framebuffer_info, (long)out, 0, 0);
 }
 
+long sys_framebuffer_info_physical(window_manager_framebuffer_info_t *out) {
+    return do_syscall(SYS_framebuffer_info, (long)out, WINDOW_MANAGER_FRAMEBUFFER_PHYSICAL, 0);
+}
+
 long sys_framebuffer_map(void) {
     return do_syscall(SYS_framebuffer_map, 0, 0, 0);
 }

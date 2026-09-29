@@ -17,6 +17,7 @@ void framebuffer_remap(uint32_t pitch, uint32_t width, uint32_t height);
 uint64_t framebuffer_mapped_bytes(void);
 
 uint32_t framebuffer_width(void);
+uint32_t framebuffer_desktop_scale(void);
 uint32_t framebuffer_height(void);
 uint32_t framebuffer_pitch_bytes(void);
 uint64_t framebuffer_phys_address(void);

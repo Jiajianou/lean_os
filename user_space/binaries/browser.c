@@ -112,14 +112,35 @@ int main(int argc, char **argv) {
        one principal and /home is theirs, so that is HOME and the profile
        is named under it rather than left to a fallback in /tmp - which is
        a fresh directory on every boot and would forget every tab. */
+    /* The window is sized for the desktop it opens on. 900x640 is what the
+       input suite's coordinates are measured against on QEMU's 1024x768; on
+       a laptop's 1920x1200 desktop (M196's scaled 4K panel) the same window
+       is a postcard in the corner. */
+    static char window_size[48];
+    {
+        window_manager_framebuffer_info_t screen;
+        int32_t width = 900, height = 640;
+        if (sys_framebuffer_info(&screen) == 0 && screen.width >= 1600 && screen.height >= 1000) {
+            width = (int32_t)screen.width - 320;
+            height = (int32_t)screen.height - 240;
+            if (width > 1600) {
+                width = 1600;
+            }
+            if (height > 1000) {
+                height = 1000;
+            }
+        }
+        snprintf(window_size, sizeof(window_size), "--window-size=%d,%d", (int)width, (int)height);
+    }
+
     if (exists(BROWSER_PROGRAM)) {
         setenv("HOME", PATH_HOME, 1);
-        static const char *const fixed[] = {
+        const char *const fixed[] = {
             BROWSER_PROGRAM,
             "--ozone-platform=leanos",
             "--disable-gpu",
             "--in-process-gpu",
-            "--window-size=900,640",
+            window_size,
             "--user-data-dir=" BROWSER_PROFILE,
             "--no-first-run",
             "--no-default-browser-check",

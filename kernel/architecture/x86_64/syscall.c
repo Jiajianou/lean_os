@@ -271,7 +271,7 @@ static void pkg_note_write(const char *path, long result) {
 }
 
 static uint64_t clock_now_ns(void) {
-    return pit_get_ticks() * (1000ULL / PIT_HZ) * 1000000ULL;
+    return clock_monotonic_ns();
 }
 
 /* What one syscall stages on the KERNEL STACK between a user buffer and a
@@ -380,7 +380,7 @@ static long sys_write(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4
                 if (scheduler_signal_pending()) {
                     return sent ? (long)sent : -OS_ERROR_INTR;
                 }
-                scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, pit_get_ticks() * (1000 / PIT_HZ) + 10, seq);
+                scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, clock_monotonic_ms() + 10, seq);
                 continue;
             }
             sent += (uint64_t)m;
@@ -459,7 +459,7 @@ static long sys_read(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4,
                 if (ms < 0) {
                     deadline = 0;
                 } else {
-                    deadline = pit_get_ticks() * (1000 / PIT_HZ) + (uint64_t)ms;
+                    deadline = clock_monotonic_ms() + (uint64_t)ms;
                 }
             }
             scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, deadline, seq);
@@ -1007,7 +1007,7 @@ static long sys_wait(uint64_t pid_argument, uint64_t a2, uint64_t a3, uint64_t a
             if (!any_children) {
                 return -1;
             }
-            scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, pit_get_ticks() * (1000 / PIT_HZ) + 50, seq);
+            scheduler_block_on_sequence(SCHEDULER_POLL_CHAN, clock_monotonic_ms() + 50, seq);
         }
     }
 
@@ -1020,7 +1020,7 @@ static long sys_wait(uint64_t pid_argument, uint64_t a2, uint64_t a3, uint64_t a
         if (t->state == TASK_TERMINATED) {
             break;
         }
-        scheduler_block_on_sequence((const void *)t, pit_get_ticks() * (1000 / PIT_HZ) + 200, seq);
+        scheduler_block_on_sequence((const void *)t, clock_monotonic_ms() + 200, seq);
     }
     t->reaped = 1;
     int code = t->exit_code;
@@ -1459,11 +1459,11 @@ static long sys_futex(uint64_t address, uint64_t op, uint64_t val,
     }
     uint64_t deadline = 0;
     if (timeout_ms > 0) {
-        deadline = pit_get_ticks() * (1000 / PIT_HZ) + timeout_ms;
+        deadline = clock_monotonic_ms() + timeout_ms;
     }
     scheduler_block_on((const void *)address, deadline, &futex_lock, &flags);
     spin_unlock_irqrestore(&futex_lock, flags);
-    if (deadline != 0 && pit_get_ticks() * (1000 / PIT_HZ) >= deadline) {
+    if (deadline != 0 && clock_monotonic_ms() >= deadline) {
         return -2;
     }
     return 0;
@@ -1997,6 +1997,7 @@ static long sys_shared_memory_unmap(uint64_t vaddr, uint64_t bytes, uint64_t a3,
     for (uint64_t i = 0; i < pages; i++) {
         (void)virtual_memory_unmap_page_in(pml4, vaddr + i * PAGE_SIZE);
     }
+    virtual_memory_flush_other_cpus(pml4);
     return 0;
 }
 
@@ -2041,19 +2042,27 @@ static long sys_shared_memory_free(uint64_t id, uint64_t vaddr, uint64_t a3, uin
         for (int64_t i = 0; i < pages; i++) {
             (void)virtual_memory_unmap_page_in(pml4, vaddr + (uint64_t)i * PAGE_SIZE);
         }
+        virtual_memory_flush_other_cpus(pml4);
     }
     return shared_memory_free((int)id, scheduler_current()->id);
 }
 
+/* The size every program is told is the DESKTOP's: on a panel the kernel
+   scales by two, a 3840x2400 framebuffer is a 1920x1200 screen, and that is
+   what a client laying out a window - Chromium's ozone platform among them -
+   has to plan for. Only the compositor, which owns the real pixels and does
+   the scaling, asks for the physical mode (a2 = WINDOW_MANAGER_FRAMEBUFFER_PHYSICAL).
+   The struct stays the size it has always been, because a program built
+   against it is handing the kernel a buffer exactly that big. */
 static long sys_framebuffer_info(uint64_t out_pointer, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
-    (void)a2;
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
     window_manager_framebuffer_info_t out;
-    out.width = framebuffer_width();
-    out.height = framebuffer_height();
+    uint32_t scale = a2 == WINDOW_MANAGER_FRAMEBUFFER_PHYSICAL ? 1u : framebuffer_desktop_scale();
+    out.width = framebuffer_width() / scale;
+    out.height = framebuffer_height() / scale;
     out.pitch = framebuffer_pitch_bytes();
     out.bpp = 32;
     return copy_to_user(out_pointer, &out, sizeof(out));
@@ -2178,7 +2187,7 @@ static long sys_uptime_ms(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, ui
     (void)a4;
     (void)a5;
     (void)a6;
-    return (long)(pit_get_ticks() * (1000 / PIT_HZ));
+    return (long)(clock_monotonic_ms());
 }
 
 static uint32_t slot_inode(const file_descriptor_slot_t *slot) {
@@ -4495,7 +4504,7 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxeven
     }
     struct epoll *ep = self->descriptor_table->slots[epfd].epoll;
     long timeout = (long)timeout_ms;
-    uint64_t now = pit_get_ticks() * (1000 / PIT_HZ);
+    uint64_t now = clock_monotonic_ms();
     uint64_t deadline = (timeout < 0) ? 0 : now + (uint64_t)timeout;
     epoll_ev_t evs[EPOLL_MAX_WATCH];
     for (;;) {
@@ -4513,7 +4522,7 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxeven
         if (scheduler_signal_pending()) {
             return -OS_ERROR_INTR;
         }
-        now = pit_get_ticks() * (1000 / PIT_HZ);
+        now = clock_monotonic_ms();
         if (timeout > 0 && now >= deadline) {
             return 0;
         }
@@ -4550,7 +4559,7 @@ static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint6
     task_t *self = scheduler_current();
 
     long timeout = (long)timeout_ms;
-    uint64_t now = pit_get_ticks() * (1000 / PIT_HZ);
+    uint64_t now = clock_monotonic_ms();
     uint64_t deadline = (timeout < 0) ? 0 : now + (uint64_t)timeout;
 
     for (;;) {
@@ -4563,7 +4572,7 @@ static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint6
         if (timeout == 0) {
             return -2;
         }
-        if (deadline != 0 && pit_get_ticks() * (1000 / PIT_HZ) >= deadline) {
+        if (deadline != 0 && clock_monotonic_ms() >= deadline) {
             return -2;
         }
 
@@ -5089,10 +5098,10 @@ static long sys_waitpid(uint64_t pid_argument, uint64_t status_pointer, uint64_t
         }
         if (only) {
             scheduler_block_on_sequence((const void *)only,
-                               pit_get_ticks() * (1000 / PIT_HZ) + 200, seq);
+                               clock_monotonic_ms() + 200, seq);
         } else {
             scheduler_block_on_sequence(SCHEDULER_POLL_CHAN,
-                               pit_get_ticks() * (1000 / PIT_HZ) + 50, seq);
+                               clock_monotonic_ms() + 50, seq);
         }
     }
 }

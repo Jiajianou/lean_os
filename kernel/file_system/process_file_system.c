@@ -166,10 +166,10 @@ static void generate(process_file_t *f, int kind, int pid) {
     uint32_t cap = f->cap;
     switch (kind) {
     case P_UPTIME:
-        at = put_dec(f->buffer, at, cap, pit_get_ticks() * (1000 / PIT_HZ) / 1000);
+        at = put_dec(f->buffer, at, cap, clock_monotonic_ms() / 1000);
         at = put_string(f->buffer, at, cap, ".");
         at = put_dec(f->buffer, at, cap,
-                     (pit_get_ticks() * (1000 / PIT_HZ) / 100) % 10);
+                     (clock_monotonic_ms() / 100) % 10);
         at = put_string(f->buffer, at, cap, "\n");
         break;
     case P_MEMINFO: {

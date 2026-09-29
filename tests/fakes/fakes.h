@@ -61,6 +61,10 @@ int fake_spinlock_order_pairs(void);
 
 void fake_arch_reset(void);
 void fake_arch_set_cpu(int cpu);
+void fake_arch_set_smp_initialized(int on);
+int fake_arch_reschedules_sent(int cpu);
+void fake_arch_reset_reschedules(void);
+int fake_vmm_other_cpu_flushes(void);
 void fake_arch_reset_unguarded_cpu_reads(void);
 int fake_arch_unguarded_cpu_reads(void);
 int fake_arch_broadcasts(void);

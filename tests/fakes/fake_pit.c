@@ -15,3 +15,6 @@ uint64_t pit_get_ticks(void) {
     return ticks++;
 }
 void pit_sleep_ms(uint32_t ms) { ticks += ms; }
+
+uint64_t clock_monotonic_ns(void) { return ticks * (1000000000ULL / PIT_HZ); }
+uint64_t clock_monotonic_ms(void) { return ticks * (1000ULL / PIT_HZ); }

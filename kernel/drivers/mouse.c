@@ -68,7 +68,7 @@ static void mouse_irq(isr_regs_t *regs) {
     ev.dx = dx;
     ev.dy = -dy;
     ev.buttons = status & 0x07;
-    ev.time_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+    ev.time_ms = (uint32_t)(clock_monotonic_ms());
     ev.wheel = 0;
     if (packet_bytes == 4) {
         int32_t z = packet[3] & 0x0F;
@@ -131,7 +131,7 @@ void mouse_inject(int32_t dx, int32_t dy, uint8_t buttons, int32_t wheel) {
     ev.dx = dx;
     ev.dy = dy;
     ev.buttons = buttons & 0x07u;
-    ev.time_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+    ev.time_ms = (uint32_t)(clock_monotonic_ms());
     ev.wheel = wheel;
     push_event(ev);
 }

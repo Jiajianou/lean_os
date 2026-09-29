@@ -116,6 +116,7 @@ long sys_shared_memory_create(size_t size);
 long sys_shared_memory_map(long id);
 
 long sys_framebuffer_info(window_manager_framebuffer_info_t *out);
+long sys_framebuffer_info_physical(window_manager_framebuffer_info_t *out);
 
 long sys_framebuffer_map(void);
 

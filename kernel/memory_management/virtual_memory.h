@@ -36,6 +36,8 @@ uint64_t virtual_memory_kernel_heap_base(void);
 
 
 int virtual_memory_try_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags);
+int virtual_memory_try_map_page_if_absent(uint64_t pml4_phys, uint64_t virt, uint64_t phys,
+                                          uint64_t flags);
 
 int virtual_memory_unmap_page_in(uint64_t pml4_phys, uint64_t virt);
 
@@ -67,5 +69,11 @@ void virtual_memory_switch_address_space(uint64_t pml4_phys);
    core changed the page tables under it calls this; there is nothing cheaper
    here, because invlpg needs the addresses and a shootdown carries none. */
 void virtual_memory_flush_local_tlb(void);
+
+/* Make every OTHER core holding this address space drop its cached
+   translations, and return when they have. For callers that cleared entries
+   with virtual_memory_unmap_page_in and still own the frames behind them: do
+   this before handing those frames back to whoever frees them. */
+void virtual_memory_flush_other_cpus(uint64_t pml4_phys);
 uint64_t virtual_memory_lookup_frame(uint64_t pml4_phys, uint64_t virt);
 uint64_t virtual_memory_lookup_frame(uint64_t pml4_phys, uint64_t virt);

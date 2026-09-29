@@ -6,9 +6,18 @@ typedef struct {
     volatile uint32_t locked;
 } spinlock_t;
 
+/* A core waiting here with interrupts off cannot take a TLB shootdown's IPI,
+   and the core asking for the shootdown may be the one holding this lock - so
+   the wait answers the request itself instead of deadlocking against it. */
+extern volatile uint32_t smp_shootdown_pending;
+void smp_tlb_service_pending(void);
+
 static inline void spin_lock(spinlock_t *lock) {
     while (__atomic_exchange_n(&lock->locked, 1, __ATOMIC_ACQUIRE)) {
         while (lock->locked) {
+            if (smp_shootdown_pending) {
+                smp_tlb_service_pending();
+            }
             __asm__ volatile("pause");
         }
     }

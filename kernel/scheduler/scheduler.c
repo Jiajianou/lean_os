@@ -85,6 +85,7 @@ static uint64_t event_sequence;
 static int blocked_count;
 
 static task_t *pick_next(task_t *from, int cpu);
+static void kick_idle_cpus(int wanted);
 void scheduler_dump_cpus(void);
 static void wake_expired(uint64_t now_ms);
 static void fire_expired_alarms(uint64_t now_ms);
@@ -312,6 +313,7 @@ void scheduler_tick_cpu(int cpu) {
     task_t *t = current_task[cpu];
 
     total_ticks[cpu]++;
+    int work_waiting = 0;
     if (t->is_idle || scheduler_task_is_idle_waiting(t)) {
         uint64_t f = irq_save_disable();
         spin_lock(&scheduler_lock);
@@ -326,11 +328,21 @@ void scheduler_tick_cpu(int cpu) {
         irq_restore(f);
         if (nothing_else) {
             idle_ticks[cpu]++;
+        } else {
+            work_waiting = 1;
         }
     }
 
-    wake_expired(pit_get_ticks() * (1000 / PIT_HZ));
-    fire_expired_alarms(pit_get_ticks() * (1000 / PIT_HZ));
+    wake_expired(clock_monotonic_ms());
+    fire_expired_alarms(clock_monotonic_ms());
+
+    /* An idle core with work ready does not wait out the rest of its idle
+       quantum for it. */
+    if (t->is_idle && work_waiting) {
+        ticks_in_slice[cpu] = 0;
+        schedule();
+        return;
+    }
 
     if (t->pending_signal != 0) {
         deliver_pending_signal_and_exit(t);
@@ -757,7 +769,7 @@ unsigned int scheduler_set_alarm(task_t *t, unsigned int seconds) {
     if (!t) {
         return 0;
     }
-    uint64_t now_ms = pit_get_ticks() * (1000 / PIT_HZ);
+    uint64_t now_ms = clock_monotonic_ms();
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
     unsigned int remaining = 0;
@@ -771,6 +783,7 @@ unsigned int scheduler_set_alarm(task_t *t, unsigned int seconds) {
 }
 
 static void wake_expired(uint64_t now_ms) {
+    int woken = 0;
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
     if (blocked_count == 0) {
@@ -789,10 +802,54 @@ static void wake_expired(uint64_t now_ms) {
             need_resched[smp_current_cpu()] = 1;
             tasks[i].wait_chan = (const void *)0;
             tasks[i].wake_deadline_ms = 0;
+            woken++;
         }
     }
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
+    kick_idle_cpus(woken);
+}
+
+/* A task made READY used to wait for some idle core's own tick - and an
+   idle core rescheduled only when its quantum ran out, so up to twenty
+   milliseconds - before anything ran it. A browser is dozens of threads in
+   several processes handing messages to each other, and every hand-off paid
+   that wait: on eight real cores the log showed ready work sitting beside
+   idle processors a third of the time. Now the waker sends a sleeping core an
+   IPI and the woken task runs within microseconds. One core per woken task,
+   and not one that has already been asked and has not yet looked. */
+static volatile uint8_t kick_pending[MAX_CPUS];
+
+static void kick_idle_cpus(int wanted) {
+    if (wanted <= 0 || !smp_is_initialized() || smp_cpu_count < 2) {
+        return;
+    }
+    uint64_t flags = irq_save_disable();
+    int self = smp_current_cpu();
+    irq_restore(flags);
+    for (int c = 0; c < smp_cpu_count && c < MAX_CPUS && wanted > 0; c++) {
+        if (c == self) {
+            continue;
+        }
+        task_t *running = current_task[c];
+        if (!running || !running->is_idle) {
+            continue;
+        }
+        if (__atomic_exchange_n(&kick_pending[c], 1, __ATOMIC_ACQ_REL)) {
+            continue;
+        }
+        smp_send_reschedule(c);
+        wanted--;
+    }
+}
+
+void scheduler_reschedule_if_idle(void) {
+    int cpu = smp_current_cpu();
+    __atomic_store_n(&kick_pending[cpu], 0, __ATOMIC_RELEASE);
+    task_t *t = current_task[cpu];
+    if (t && t->is_idle) {
+        schedule();
+    }
 }
 
 uint64_t scheduler_event_sequence(void) {
@@ -828,6 +885,7 @@ int scheduler_wake_n(const void *chan, int max) {
     }
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
+    kick_idle_cpus(woken);
     return woken;
 }
 
@@ -843,6 +901,7 @@ void scheduler_wake_all(const void *chan) {
         irq_restore(flags);
         return;
     }
+    int woken = 0;
     for (int i = 0; i < task_count; i++) {
         if (tasks[i].state == TASK_BLOCKED && tasks[i].wait_chan == chan) {
             blocked_count--;
@@ -851,10 +910,12 @@ void scheduler_wake_all(const void *chan) {
             tasks[i].full_slices = 0;
             tasks[i].wait_chan = (const void *)0;
             tasks[i].wake_deadline_ms = 0;
+            woken++;
         }
     }
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
+    kick_idle_cpus(woken);
 }
 
 static void unblock_self(task_t *self) {
@@ -915,7 +976,7 @@ void scheduler_sleep_ms(uint32_t ms) {
     if (!self || self->is_idle) {
         return;
     }
-    uint64_t deadline = pit_get_ticks() * (1000 / PIT_HZ) +
+    uint64_t deadline = clock_monotonic_ms() +
                         (uint64_t)(ms ? ms : 1);
     uint64_t sflags = irq_save_disable();
     spin_lock(&scheduler_lock);
@@ -986,8 +1047,13 @@ void schedule(void) {
 
     tss_set_rsp0(cpu, next->kernel_stack_top);
     if (next->pml4_phys != loaded_pml4_phys[cpu]) {
+        /* Published BEFORE the load, and fenced: a core that changes this
+           address space's page tables reads this array afterwards to decide
+           whom to tell, so a core that is about to load it must already be
+           visible here - otherwise it could fill its TLB from the old entries
+           in the gap and never be asked to drop them. */
+        __atomic_store_n(&loaded_pml4_phys[cpu], next->pml4_phys, __ATOMIC_SEQ_CST);
         virtual_memory_switch_address_space(next->pml4_phys);
-        loaded_pml4_phys[cpu] = next->pml4_phys;
     }
 
     fpu_save(previous->fpu_state);
@@ -1212,8 +1278,9 @@ void task_exit_with_code(int code) {
         if (!others) {
             uint64_t switch_flags = irq_save_disable();
             t->pml4_phys = virtual_memory_kernel_pml4_phys();
+            __atomic_store_n(&loaded_pml4_phys[smp_current_cpu()], t->pml4_phys,
+                             __ATOMIC_SEQ_CST);
             virtual_memory_switch_address_space(t->pml4_phys);
-            loaded_pml4_phys[smp_current_cpu()] = t->pml4_phys;
             irq_restore(switch_flags);
             process_destroy_address_space(dead);
         }
@@ -1554,6 +1621,7 @@ void scheduler_wake_task(task_t *t) {
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
     event_sequence++;
+    int woken = 0;
     if (t->state == TASK_BLOCKED) {
         blocked_count--;
         t->state = TASK_READY;
@@ -1561,9 +1629,22 @@ void scheduler_wake_task(task_t *t) {
         t->full_slices = 0;
         t->wait_chan = (const void *)0;
         t->wake_deadline_ms = 0;
+        woken = 1;
     }
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
+    kick_idle_cpus(woken);
+}
+
+uint32_t scheduler_cpus_holding_address_space(uint64_t pml4_phys) {
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    uint32_t mask = 0;
+    for (int c = 0; c < MAX_CPUS; c++) {
+        if (__atomic_load_n(&loaded_pml4_phys[c], __ATOMIC_SEQ_CST) == pml4_phys) {
+            mask |= 1u << c;
+        }
+    }
+    return mask;
 }
 
 void scheduler_forget_address_space(uint64_t pml4_phys) {
@@ -1902,13 +1983,18 @@ int scheduler_release_shared_range(task_t *t, uint64_t start, uint64_t end) {
             uint64_t rend = rstart + (uint64_t)t->mmaps[i].pages * PAGE_SIZE;
             uint64_t from = start > rstart ? start : rstart;
             uint64_t to = end < rend ? end : rend;
+            int here = 0;
             for (uint64_t p = from; p < to; p += PAGE_SIZE) {
                 if (!virtual_memory_user_range_ok(t->pml4_phys, p, 1, 0)) {
                     continue;
                 }
                 virtual_memory_unmap_page_in(t->pml4_phys, p);
-                dropped++;
+                here++;
             }
+            if (here) {
+                virtual_memory_flush_other_cpus(t->pml4_phys);
+            }
+            dropped += here;
             continue;
         }
         if (!t->mmaps[i].shared || t->mmaps[i].handle < 0) {
@@ -1918,15 +2004,30 @@ int scheduler_release_shared_range(task_t *t, uint64_t start, uint64_t end) {
         uint64_t rend = rstart + (uint64_t)t->mmaps[i].pages * PAGE_SIZE;
         uint64_t from = start > rstart ? start : rstart;
         uint64_t to = end < rend ? end : rend;
+        /* The put can free the frame, so it waits until no other core can
+           still reach that frame through a translation of this page. */
+        uint32_t pending[32];
+        int count = 0;
         for (uint64_t p = from; p < to; p += PAGE_SIZE) {
             if (!virtual_memory_user_range_ok(t->pml4_phys, p, 1, 0)) {
                 continue;
             }
             virtual_memory_unmap_page_in(t->pml4_phys, p);
-            file_mapping_put(t->mmaps[i].handle,
-                        t->mmaps[i].file_page +
-                            (uint32_t)((p - rstart) / PAGE_SIZE));
+            pending[count++] = t->mmaps[i].file_page + (uint32_t)((p - rstart) / PAGE_SIZE);
             dropped++;
+            if (count == (int)(sizeof(pending) / sizeof(pending[0]))) {
+                virtual_memory_flush_other_cpus(t->pml4_phys);
+                for (int k = 0; k < count; k++) {
+                    file_mapping_put(t->mmaps[i].handle, pending[k]);
+                }
+                count = 0;
+            }
+        }
+        if (count) {
+            virtual_memory_flush_other_cpus(t->pml4_phys);
+            for (int k = 0; k < count; k++) {
+                file_mapping_put(t->mmaps[i].handle, pending[k]);
+            }
         }
     }
     return dropped;
@@ -1934,8 +2035,15 @@ int scheduler_release_shared_range(task_t *t, uint64_t start, uint64_t end) {
 
 static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_exec) {
 
+    /* Present already: a sibling thread faulted on the same page and filled
+       it first. This fault was real when it was taken, so the access is
+       retried rather than refused - answering 0 here turned the loser of
+       that race into a SIGSEGV, SEGV_ACCERR, on a page it had every right to
+       write (M196: Chromium's histogram allocator, on eight real cores). If
+       the retry really is not allowed it faults again, as a protection fault,
+       and is refused there. */
     if (virtual_memory_user_range_ok(self->pml4_phys, page, 1, 0)) {
-        return 0;
+        return 1;
     }
 
     /* M180: one snapshot, used by the policy and by everything below it. */
@@ -1960,7 +2068,7 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
         if (phys == 0) {
             return 0;
         }
-        return virtual_memory_try_map_page_in(self->pml4_phys, page, phys, flags) == 0
+        return virtual_memory_try_map_page_if_absent(self->pml4_phys, page, phys, flags) >= 0
                    ? 1
                    : FILL_NO_MEMORY;
     }
@@ -1972,11 +2080,11 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
         if (sphys == 0) {
             return FILL_NO_MEMORY;
         }
-        if (virtual_memory_try_map_page_in(self->pml4_phys, page, sphys, flags) != 0) {
+        int installed = virtual_memory_try_map_page_if_absent(self->pml4_phys, page, sphys, flags);
+        if (installed != 0) {
             file_mapping_put(region->handle, index);
-            return FILL_NO_MEMORY;
         }
-        return 1;
+        return installed < 0 ? FILL_NO_MEMORY : 1;
     }
 
     uint64_t phys = physical_memory_try_alloc_frame();
@@ -1990,11 +2098,11 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
         (void)virtual_file_system_handle_read(region->handle, (void *)phys, PAGE_SIZE,
                               index * PAGE_SIZE);
     }
-    if (virtual_memory_try_map_page_in(self->pml4_phys, page, phys, flags) != 0) {
+    int installed = virtual_memory_try_map_page_if_absent(self->pml4_phys, page, phys, flags);
+    if (installed != 0) {
         physical_memory_free_frame(phys);
-        return FILL_NO_MEMORY;
     }
-    return 1;
+    return installed < 0 ? FILL_NO_MEMORY : 1;
 }
 
 static int fill_one_page(task_t *self, uint64_t page, int for_write) {
@@ -2046,16 +2154,6 @@ int scheduler_fault_fill(uint64_t address, uint64_t error_code, uint64_t user_rs
     if (error_code & 1u) {
         if (error_code & 2u) {
             int broke = virtual_memory_cow_break(self->pml4_phys, page);
-            if (broke == 2 && scheduler_address_space_is_shared(self)) {
-                /* The frame moved and a sibling on another core may still be
-                   reading the old one. The shootdown waits for every core to
-                   answer, and a core answers with an interrupt, so this waits
-                   the way sys_fork's does: with interrupts on. A fault from
-                   ring 3 is on the task's own kernel stack, like a syscall. */
-                cpu_enable_interrupts();
-                smp_tlb_shootdown();
-                cpu_disable_interrupts();
-            }
             return broke ? 1 : 0;
         }
         return 0;
@@ -2090,9 +2188,6 @@ void scheduler_prefault_range(uint64_t address, uint64_t length, int for_write) 
         }
         if (for_write) {
             int broke = virtual_memory_cow_break(self->pml4_phys, page);
-            if (broke == 2 && scheduler_address_space_is_shared(self)) {
-                smp_tlb_shootdown();
-            }
             if (broke) {
                 continue;
             }

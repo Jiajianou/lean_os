@@ -426,6 +426,14 @@ int scheduler_count_sharing_address_space(uint64_t pml4_phys);
 
 task_t *scheduler_task_by_slot(int slot);
 void scheduler_forget_address_space(uint64_t pml4_phys);
+
+/* The cores whose CR3 currently holds this address space (bit n is cpu n) -
+   the ones that can have its translations cached, and so the only ones a
+   change to its page tables has to reach. */
+uint32_t scheduler_cpus_holding_address_space(uint64_t pml4_phys);
+
+/* The reschedule IPI's handler: an idle core that was asked looks for work. */
+void scheduler_reschedule_if_idle(void);
 int scheduler_address_space_is_shared(task_t *owner);
 
 int scheduler_task_count(void);

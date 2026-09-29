@@ -1,5 +1,6 @@
 #include "framebuffer.h"
 
+#include "boot/boot_options.h"
 #include "console.h"
 #include "kernel_log.h"
 #include "library/kernel_library.h"
@@ -91,6 +92,19 @@ void framebuffer_remap(uint32_t pitch, uint32_t width, uint32_t height) {
 
 uint64_t framebuffer_mapped_bytes(void) {
     return framebuffer_mapped;
+}
+
+/* How many physical pixels, along each axis, one pixel of the desktop is.
+   A 14-inch panel at 3840x2400 is about 320 pixels to the inch, and at one
+   to one every glyph and icon drawn for a 96-dpi screen came out a third of
+   the size a person could read (M196). Two is what that panel wants; a boot
+   option pins it either way. */
+uint32_t framebuffer_desktop_scale(void) {
+    uint32_t asked = boot_options_active()->display_scale;
+    if (asked == 1 || asked == 2) {
+        return asked;
+    }
+    return (framebuffer_w >= 2560 && framebuffer_h >= 1440) ? 2u : 1u;
 }
 
 uint32_t framebuffer_width(void) {

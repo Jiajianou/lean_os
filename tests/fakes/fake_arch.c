@@ -46,6 +46,21 @@ static int broadcasts;
 void fake_arch_reset(void);
 int fake_arch_broadcasts(void) { return broadcasts; }
 void smp_broadcast_schedule_tick(void) { broadcasts++; }
+static int smp_ready = 0;
+static int reschedules[16];
+void fake_arch_set_smp_initialized(int on) { smp_ready = on; }
+int smp_is_initialized(void) { return smp_ready; }
+void smp_send_reschedule(int cpu) {
+    if (cpu >= 0 && cpu < 16) {
+        reschedules[cpu]++;
+    }
+}
+int fake_arch_reschedules_sent(int cpu) { return (cpu >= 0 && cpu < 16) ? reschedules[cpu] : 0; }
+void fake_arch_reset_reschedules(void) {
+    for (int i = 0; i < 16; i++) {
+        reschedules[i] = 0;
+    }
+}
 static int shootdowns;
 void smp_tlb_shootdown(void) { shootdowns++; }
 int fake_smp_shootdowns(void) { return shootdowns; }

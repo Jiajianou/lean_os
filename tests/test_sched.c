@@ -2,6 +2,7 @@
 #include "fakes/fakes.h"
 
 #include "architecture/x86_64/cpu.h"
+#include "architecture/x86_64/symmetric_multiprocessing.h"
 #include "library/spinlock.h"
 #include "file_system/flock.h"
 #include "scheduler/scheduler.h"
@@ -1267,4 +1268,122 @@ TEST(scheduler, no_entry_point_asks_which_cpu_it_is_on_while_it_can_still_be_mov
     fake_arch_reset_unguarded_cpu_reads();
     q13_kill(a);
     q13_kill(b);
+}
+
+/* M196: bring cpu 5 up as an AP sitting on its own idle identity, with every
+   other task out of the way, so what a wake or a tick does to it is the only
+   thing that can move it. */
+static task_t *m196_idle_cpu5(void) {
+    static task_t *identity;
+    if (!identity) {
+        fake_arch_set_cpu(5);
+        scheduler_init_ap(5);
+        identity = scheduler_current();
+    }
+    return identity;
+}
+
+static void m196_block_everything_but(task_t *keep, task_t *also) {
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *t = scheduler_task_by_slot(i);
+        if (!t || t == keep || t == also || t->is_idle) {
+            continue;
+        }
+        if (t->state == TASK_RUNNING || t->state == TASK_READY) {
+            t->state = TASK_BLOCKED;
+        }
+    }
+}
+
+static void m196_unblock_everything(void) {
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *t = scheduler_task_by_slot(i);
+        if (t && t->state == TASK_BLOCKED) {
+            t->state = TASK_READY;
+        }
+    }
+}
+
+TEST(scheduler, a_wake_asks_a_sleeping_cpu_to_look_now_and_asks_it_once) {
+    q13_boot();
+    task_t *cpu5_idle = m196_idle_cpu5();
+    REQUIRE(cpu5_idle != NULL);
+    fake_arch_set_cpu(5);
+    REQUIRE(scheduler_current() == cpu5_idle);
+
+    int saved_count = smp_cpu_count;
+    smp_cpu_count = 6;
+    fake_arch_set_smp_initialized(1);
+    fake_arch_reset_reschedules();
+
+    task_t *sleeper = q13_spawn("m196wake");
+    task_t *second = q13_spawn("m196two");
+    REQUIRE(sleeper != NULL);
+    REQUIRE(second != NULL);
+    sleeper->state = TASK_BLOCKED;
+    second->state = TASK_BLOCKED;
+
+    fake_arch_set_cpu(0);
+    scheduler_wake_task(sleeper);
+    int asked = 0;
+    for (int c = 0; c < 6; c++) {
+        asked += fake_arch_reschedules_sent(c);
+    }
+    CHECK_EQ(asked, 1);
+    CHECK_EQ(fake_arch_reschedules_sent(0), 0);
+
+    scheduler_wake_task(second);
+    for (int c = 0; c < 6; c++) {
+        CHECK(fake_arch_reschedules_sent(c) <= 1);
+    }
+
+    fake_arch_reset_reschedules();
+    scheduler_wake_task(sleeper);
+    for (int c = 0; c < 6; c++) {
+        CHECK_EQ(fake_arch_reschedules_sent(c), 0);
+    }
+
+    smp_cpu_count = saved_count;
+    fake_arch_set_smp_initialized(0);
+    q13_kill(sleeper);
+    q13_kill(second);
+}
+
+TEST(scheduler, an_idle_cpu_takes_ready_work_at_its_next_tick_not_its_quantums_end) {
+    q13_boot();
+    task_t *cpu5_idle = m196_idle_cpu5();
+    task_t *worker = q13_spawn("m196work");
+    REQUIRE(worker != NULL);
+
+    m196_block_everything_but((task_t *)0, (task_t *)0);
+    fake_arch_set_cpu(5);
+    task_t *was = scheduler_current();
+    if (was != cpu5_idle && !was->is_idle) {
+        was->state = TASK_BLOCKED;
+    }
+    for (int i = 0; i < 40 * Q13_QUANTUM; i++) {
+        fake_arch_set_cpu(5);
+        if (scheduler_current() == cpu5_idle) {
+            break;
+        }
+        q13_tick(5);
+    }
+    fake_arch_set_cpu(5);
+    REQUIRE(scheduler_current() == cpu5_idle);
+
+    worker->state = TASK_READY;
+    q13_tick(5);
+    fake_arch_set_cpu(5);
+    CHECK(scheduler_current() == worker);
+
+    worker->state = TASK_BLOCKED;
+    for (int i = 0; i < 4 * Q13_QUANTUM; i++) {
+        fake_arch_set_cpu(5);
+        if (scheduler_current() == cpu5_idle) {
+            break;
+        }
+        q13_tick(5);
+    }
+    m196_unblock_everything();
+    q13_kill(worker);
 }

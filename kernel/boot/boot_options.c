@@ -51,6 +51,7 @@ void boot_options_defaults(boot_options_t *options) {
     options->offered_count = 0;
     options->log_lba = 0;
     options->log_sectors = 0;
+    options->display_scale = 0;
 }
 
 static void apply_video(const char *text, uint32_t start, uint32_t end, boot_options_t *options) {
@@ -106,6 +107,22 @@ static void apply_cpus(const char *text, uint32_t start, uint32_t end, boot_opti
     options->cpu_limit = value;
 }
 
+/* scale=1 or scale=2 fixes how many physical pixels one of the desktop's is;
+   scale=auto (and no line at all) lets the kernel decide from the panel. */
+static void apply_scale(const char *text, uint32_t start, uint32_t end, boot_options_t *options) {
+    if (token_equals(text, start, end, "auto")) {
+        options->display_scale = 0;
+        return;
+    }
+    uint32_t cursor = start;
+    uint32_t value = parse_number(text, &cursor, end);
+    if (cursor != end || cursor == start || value < 1 || value > 2) {
+        options->unknown_keys++;
+        return;
+    }
+    options->display_scale = value;
+}
+
 static void apply_log(const char *text, uint32_t start, uint32_t end, boot_options_t *options) {
     uint32_t cursor = start;
     uint32_t lba = parse_number(text, &cursor, end);
@@ -136,6 +153,10 @@ static void apply_pair(const char *text, uint32_t key_start, uint32_t key_end,
     }
     if (token_equals(text, key_start, key_end, "cpus")) {
         apply_cpus(text, value_start, value_end, options);
+        return;
+    }
+    if (token_equals(text, key_start, key_end, "scale")) {
+        apply_scale(text, value_start, value_end, options);
         return;
     }
     if (token_equals(text, key_start, key_end, "log")) {
@@ -253,6 +274,7 @@ void boot_options_set_active(const boot_options_t *handoff) {
     active_options.offered_count = handoff->offered_count;
     active_options.log_lba = handoff->log_lba;
     active_options.log_sectors = handoff->log_sectors;
+    active_options.display_scale = handoff->display_scale <= 2 ? handoff->display_scale : 0;
     if (active_options.offered_count > BOOT_OFFERED_MODES_MAX) {
         active_options.offered_count = BOOT_OFFERED_MODES_MAX;
     }

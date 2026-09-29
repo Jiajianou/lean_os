@@ -156,6 +156,7 @@ typedef struct {
     uint8_t alive;
     uint8_t close_requested;
     uint8_t confirm_close;
+    long close_deadline_ms;
     int32_t client_pid;
     uint8_t is_popup;
     int32_t parent_window;
@@ -208,8 +209,30 @@ static int resize_hit_mask(const window_t *win, int32_t px, int32_t py) {
 }
 
 static window_manager_framebuffer_info_t framebuffer_info;
+static window_manager_framebuffer_info_t physical_info;
+static uint32_t display_scale = 1;
 static uint32_t *real_framebuffer;
 static uint32_t framebuffer_pitch_pixels;
+
+/* Everything here - windows, the cursor, the back buffer - is in DESKTOP
+   pixels, the size the kernel tells every program the screen is. The real
+   framebuffer is display_scale times that along each axis, and present() is
+   the one place the two meet. */
+static int read_display_modes(void) {
+    if (sys_framebuffer_info(&framebuffer_info) != 0 ||
+        sys_framebuffer_info_physical(&physical_info) != 0 ||
+        framebuffer_info.width == 0 || framebuffer_info.height == 0) {
+        return -1;
+    }
+    display_scale = physical_info.width / framebuffer_info.width;
+    if (display_scale < 1 || display_scale > 2 ||
+        framebuffer_info.height * display_scale > physical_info.height) {
+        display_scale = 1;
+        framebuffer_info = physical_info;
+    }
+    framebuffer_pitch_pixels = physical_info.pitch / (uint32_t)sizeof(uint32_t);
+    return 0;
+}
 
 static uint32_t *back_buffer;
 static uint32_t back_pitch_pixels;
@@ -544,10 +567,27 @@ static inline void put_pixel_clipped(int32_t x, int32_t y, uint32_t color) {
 }
 
 static void present(void) {
+    if (display_scale == 1) {
+        for (int32_t y = clip_y0; y < clip_y1; y++) {
+            memcpy(&real_framebuffer[(uint32_t)y * framebuffer_pitch_pixels + (uint32_t)clip_x0],
+                   &back_buffer[(uint32_t)y * back_pitch_pixels + (uint32_t)clip_x0],
+                   (size_t)(clip_x1 - clip_x0) * sizeof(uint32_t));
+        }
+        return;
+    }
+    /* Each desktop pixel becomes a 2x2 block, written as one 64-bit store to
+       each of the two rows it covers. The framebuffer is write-combining
+       memory and is only ever written: reading a row back to copy it would
+       cost more than building it twice. */
     for (int32_t y = clip_y0; y < clip_y1; y++) {
-        memcpy(&real_framebuffer[(uint32_t)y * framebuffer_pitch_pixels + (uint32_t)clip_x0],
-               &back_buffer[(uint32_t)y * back_pitch_pixels + (uint32_t)clip_x0],
-               (size_t)(clip_x1 - clip_x0) * sizeof(uint32_t));
+        const uint32_t *source = &back_buffer[(uint32_t)y * back_pitch_pixels];
+        uint64_t *top = (uint64_t *)&real_framebuffer[(uint32_t)(2 * y) * framebuffer_pitch_pixels];
+        uint64_t *bottom = (uint64_t *)&real_framebuffer[(uint32_t)(2 * y + 1) * framebuffer_pitch_pixels];
+        for (int32_t x = clip_x0; x < clip_x1; x++) {
+            uint64_t pair = (uint64_t)source[x] | ((uint64_t)source[x] << 32);
+            top[x] = pair;
+            bottom[x] = pair;
+        }
     }
 }
 
@@ -1589,7 +1629,27 @@ static void reclaim_window(int idx) {
     dirty = 1;
 }
 
+/* SIGTERM asks; a program whose event loop is wedged never answers, and
+   its window stays on the screen after the person pressed close - a black
+   browser window that would not go away was exactly that (M196). Past the
+   grace period the ask becomes SIGKILL, which is what the window's own
+   "Force quit" does anyway. */
+#define CLOSE_GRACE_MS 5000
+
+static void enforce_close_requests(void) {
+    long now = sys_uptime_ms();
+    for (int i = 0; i < window_count; i++) {
+        window_t *w = &windows[i];
+        if (w->alive && w->close_requested && w->close_deadline_ms > 0 &&
+            now >= w->close_deadline_ms && w->client_pid > 0) {
+            w->close_deadline_ms = 0;
+            sys_kill(w->client_pid, SIGKILL);
+        }
+    }
+}
+
 static void reap_dead_clients(void) {
+    enforce_close_requests();
     for (int i = 0; i < window_count; i++) {
         if (windows[i].alive && sys_task_alive(windows[i].client_pid) <= 0) {
             if (!windows[i].close_requested) {
@@ -1822,6 +1882,7 @@ static void accept_pending_window(int request_read_file_descriptor, int response
     win->maximized = 0;
     win->alive = 1;
     win->close_requested = 0;
+    win->close_deadline_ms = 0;
     win->confirm_close = request.confirm_close;
     win->client_pid = request.client_pid;
     win->is_popup = request.popup ? 1 : 0;
@@ -1925,6 +1986,7 @@ static void apply_window_action(int idx, uint32_t action, int32_t value) {
             send_event(win, &ev);
         } else {
             win->close_requested = 1;
+            win->close_deadline_ms = sys_uptime_ms() + CLOSE_GRACE_MS;
             sys_kill(win->client_pid, SIGTERM);
         }
     } else if (action == WINDOW_MANAGER_ACTION_KILL) {
@@ -2466,13 +2528,14 @@ static void anim_window_close(int idx) {
 }
 
 static int apply_display_mode(uint32_t w, uint32_t h) {
-    if (w == framebuffer_info.width && h == framebuffer_info.height) {
+    if ((w == framebuffer_info.width && h == framebuffer_info.height) ||
+        (w == physical_info.width && h == physical_info.height)) {
         return 0;
     }
     if (sys_display_set_mode(w, h) != 0) {
         return -1;
     }
-    if (sys_framebuffer_info(&framebuffer_info) != 0) {
+    if (read_display_modes() != 0) {
         return -1;
     }
     long framebuffer_vaddr = sys_framebuffer_map();
@@ -2480,7 +2543,6 @@ static int apply_display_mode(uint32_t w, uint32_t h) {
         return -1;
     }
     real_framebuffer = (uint32_t *)framebuffer_vaddr;
-    framebuffer_pitch_pixels = framebuffer_info.pitch / (uint32_t)sizeof(uint32_t);
 
     long new_id = sys_shared_memory_create((size_t)framebuffer_info.width * framebuffer_info.height * sizeof(uint32_t));
     long new_vaddr = new_id < 0 ? -1 : sys_shared_memory_map(new_id);
@@ -2489,7 +2551,7 @@ static int apply_display_mode(uint32_t w, uint32_t h) {
             sys_shared_memory_free(new_id, (void *)0);
         }
         sys_display_set_mode(mode_previous_w ? mode_previous_w : (uint32_t)back_pitch_pixels, h);
-        sys_framebuffer_info(&framebuffer_info);
+        read_display_modes();
         return -1;
     }
     if (back_shared_memory_id >= 0) {
@@ -3391,7 +3453,7 @@ int main(void) {
         session_enabled = sess != 0;
         session_relaunch = sess != 0 && strcmp(sess, "reconnect") != 0;
     }
-    if (sys_framebuffer_info(&framebuffer_info) != 0) {
+    if (read_display_modes() != 0) {
         sys_exit(1);
     }
     long framebuffer_vaddr = sys_framebuffer_map();
@@ -3399,19 +3461,17 @@ int main(void) {
         sys_exit(1);
     }
     real_framebuffer = (uint32_t *)framebuffer_vaddr;
-    framebuffer_pitch_pixels = framebuffer_info.pitch / sizeof(uint32_t);
 
     {
         uint32_t saved_w = 0, saved_h = 0;
         if (settings_file_load_display(&saved_w, &saved_h) &&
             (saved_w != framebuffer_info.width || saved_h != framebuffer_info.height)) {
             if (sys_display_set_mode(saved_w, saved_h) == 0) {
-                sys_framebuffer_info(&framebuffer_info);
+                read_display_modes();
                 long remapped = sys_framebuffer_map();
                 if (remapped >= 0) {
                     real_framebuffer = (uint32_t *)remapped;
                 }
-                framebuffer_pitch_pixels = framebuffer_info.pitch / (uint32_t)sizeof(uint32_t);
             }
         }
     }

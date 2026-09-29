@@ -93,6 +93,11 @@ int virtual_memory_try_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t p
     return 0;
 }
 
+int virtual_memory_try_map_page_if_absent(uint64_t pml4_phys, uint64_t virt, uint64_t phys,
+                                          uint64_t flags) {
+    return virtual_memory_try_map_page_in(pml4_phys, virt, phys, flags);
+}
+
 uint64_t virtual_memory_unmap_page_take(uint64_t pml4_phys, uint64_t virt) {
     (void)pml4_phys;
     uint64_t i = page_index(virt);
@@ -147,6 +152,15 @@ int virtual_memory_unmap_page_in(uint64_t pml4_phys, uint64_t virt) {
     unmaps_in++;
     return 0;
 }
+
+static int other_cpu_flushes;
+
+void virtual_memory_flush_other_cpus(uint64_t pml4_phys) {
+    (void)pml4_phys;
+    other_cpu_flushes++;
+}
+
+int fake_vmm_other_cpu_flushes(void) { return other_cpu_flushes; }
 
 static uint64_t rss_peak;
 

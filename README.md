@@ -373,6 +373,10 @@ video=1920x1200     # a mode by name
 interrupts=ioapic   # or pic; the default is the I/O APIC on a machine
                     #   with no QEMU fw_cfg device, and the 8259 under QEMU
 cpus=4              # fewer processors than the MADT lists
+scale=2             # desktop pixels are 2x2 panel pixels; scale=1 turns
+                    #   it off. The default doubles on any panel of
+                    #   2560x1440 or more, so a 3840x2400 laptop screen
+                    #   is a 1920x1200 desktop you can read
 ```
 
 `tools/make-hardware-image.sh` writes a copy of the image with that file
