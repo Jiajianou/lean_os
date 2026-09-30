@@ -25,7 +25,7 @@ static long read_exact_before(int fd, void *buffer, size_t length, long deadline
             if (sys_uptime_ms() >= deadline) {
                 return (long)got;
             }
-            sys_yield();
+            sys_waitfds(&fd, 1, 1);
             continue;
         }
         if (n <= 0) {
@@ -75,9 +75,15 @@ static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h
     int got_response = 0;
     for (int attempt = 0; attempt < WINDOW_MANAGER_CONNECT_ATTEMPTS && !got_response; attempt++) {
         long room_deadline = sys_uptime_ms() + WINDOW_MANAGER_CONNECT_TIMEOUT_MS;
+        /* M203: these waits slept on yield, and on a laptop that boots
+           faster than the compositor starts, desktop_icons and desktop_shell
+           each spent the difference at a third of a processor asking
+           whether it had started yet - 400,000 system calls in the second
+           the log caught. A millisecond's sleep costs a connection nothing
+           it would notice, and a reply ends the second wait at once. */
         while (sys_pipe_poll(request_file_descriptors[0]) + (long)sizeof(request) > SYS_PIPE_CAPACITY &&
                sys_uptime_ms() < room_deadline) {
-            sys_yield();
+            sys_waitfds((const int *)0, 0, 1);
         }
         if (sys_pipe_poll(request_file_descriptors[0]) + (long)sizeof(request) > SYS_PIPE_CAPACITY) {
             continue;
@@ -92,7 +98,7 @@ static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h
         long deadline = sys_uptime_ms() + WINDOW_MANAGER_CONNECT_TIMEOUT_MS;
         while (!got_response && sys_uptime_ms() < deadline) {
             if (sys_pipe_poll(response_file_descriptors[0]) < (long)sizeof(response)) {
-                sys_yield();
+                sys_waitfds(&response_file_descriptors[0], 1, 1);
                 continue;
             }
             long got = read_exact_before(response_file_descriptors[0], &response, sizeof(response), deadline);
@@ -111,7 +117,12 @@ static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h
                It goes back for its owner unless its owner is gone. */
             if (!got_response && sys_task_alive(response.client_pid) > 0) {
                 sys_write(response_file_descriptors[1], &response, sizeof(response));
-                sys_yield();
+                /* M203: and then stays out of its way. A yield put this
+                   client straight back at the pipe, where it read the same
+                   reply again - two clients handed one message back and
+                   forth until its owner happened to win, which was the
+                   400,000 calls a second in the laptop's boot. */
+                sys_waitfds((const int *)0, 0, 1);
             }
         }
     }

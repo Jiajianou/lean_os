@@ -8,6 +8,7 @@
 #include "drivers/disk_log_area.h"
 #include "drivers/kernel_log.h"
 #include "drivers/pit.h"
+#include "architecture/x86_64/syscall_entry.h"
 #include "profile/sampler.h"
 #include "profile/syscall_counters.h"
 #include "scheduler/scheduler.h"
@@ -292,6 +293,67 @@ static int append_kernel_profile(int busy) {
     return 0;
 }
 
+/* M203: who is calling, and why the waits end. The laptop's worst second
+   was 1.7 million system calls from three desktop programs, and the busiest
+   by processor time was not necessarily the busiest caller. When waitfds is
+   returning more than WAITFDS_STORM times a second, the line says what ended
+   those waits. */
+#define WAITFDS_STORM 5000u
+static uint64_t waitfds_seen[WAITFDS_RETURN_REASONS];
+static const char *const waitfds_reason_names[WAITFDS_RETURN_REASONS] = {
+    "ready", "pointer", "exits", "no-wait", "deadline", "signal",
+};
+
+static int append_callers(int busy) {
+    task_t *caller = (task_t *)0;
+    uint64_t most = 0;
+    int slots = scheduler_task_slot_count();
+    for (int i = 0; i < slots; i++) {
+        task_t *t = scheduler_task_slot(i);
+        if (!t || t->state == TASK_FREE) {
+            continue;
+        }
+        uint64_t calls = t->syscalls >= t->stamp_syscalls_seen ? t->syscalls - t->stamp_syscalls_seen : 0;
+        t->stamp_syscalls_seen = t->syscalls;
+        if (calls > most) {
+            most = calls;
+            caller = t;
+        }
+    }
+    uint64_t returns[WAITFDS_RETURN_REASONS];
+    uint64_t total = 0;
+    for (int r = 0; r < WAITFDS_RETURN_REASONS; r++) {
+        uint64_t now = syscall_waitfds_returns(r);
+        returns[r] = now - waitfds_seen[r];
+        waitfds_seen[r] = now;
+        total += returns[r];
+    }
+    if (!busy) {
+        return 0;
+    }
+    if (caller && most >= 1000u &&
+        (append_text("; most calls ") != 0 || append_text(caller->name[0] ? caller->name : "?") != 0 ||
+         append_text("/") != 0 || append_decimal((uint64_t)caller->id) != 0 ||
+         append_text(" ") != 0 || append_decimal(most) != 0)) {
+        return -1;
+    }
+    if (total >= WAITFDS_STORM) {
+        if (append_text("; waitfds ended by") != 0) {
+            return -1;
+        }
+        for (int r = 0; r < WAITFDS_RETURN_REASONS; r++) {
+            if (returns[r] == 0) {
+                continue;
+            }
+            if (append_text(" ") != 0 || append_text(waitfds_reason_names[r]) != 0 ||
+                append_text(" ") != 0 || append_decimal(returns[r]) != 0) {
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 static int append_stamp(int log_grew) {
     block_device_statistics_t disk;
     block_device_statistics(&disk);
@@ -369,6 +431,7 @@ static int append_stamp(int log_grew) {
         }
     }
     if (append_top_tasks(busy_percent, cpus) != 0 || append_kernel_profile(any_busy) != 0 ||
+        append_callers(any_busy) != 0 ||
         append_text("\n") != 0) {
         return -1;
     }

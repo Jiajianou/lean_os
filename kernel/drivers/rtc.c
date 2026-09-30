@@ -3,6 +3,7 @@
 #include "architecture/x86_64/io.h"
 #include "kernel_log.h"
 #include "architecture/x86_64/timestamp_counter.h"
+#include "library/spinlock.h"
 
 #define CMOS_ADDRESS 0x70
 #define CMOS_DATA 0x71
@@ -141,24 +142,57 @@ static os_datetime_t last_good;
 static uint64_t last_good_tsc;
 static int have_good;
 
+/* M203: the CMOS clock is read once a minute, not once a call. Every
+   gettimeofday and CLOCK_REALTIME a program made was a SYS_time, and each
+   was two passes over eight I/O ports - about a microsecond apiece on real
+   hardware - with no lock, so two cores reading at once overwrote each
+   other's index register, the passes disagreed, and it tried again, up to
+   sixty-four times. Chromium asks for the wall clock from many threads at
+   once: on the laptop that was most of a processor while the browser
+   started. Between samples the answer is the last sample plus the TSC's
+   elapsed seconds, which is what this function already fell back to when a
+   sample failed; a new sample moves the anchor only when the two disagree
+   by more than a second, so a reader never sees the time jitter by one at
+   each minute. */
+#define RTC_RESAMPLE_US 60000000ull
+
+static spinlock_t rtc_lock;
+static uint64_t cmos_samples;
+static uint64_t last_sample_tsc;
+
+static uint32_t extrapolated_locked(uint64_t now_tsc) {
+    uint64_t elapsed_s = tsc_to_us(now_tsc - last_good_tsc) / 1000000ULL;
+    return os_unix_time(&last_good) + (uint32_t)elapsed_s;
+}
+
 void rtc_read(os_datetime_t *out) {
-    if (available && sample(out)) {
-        if (correction != 0) {
-            os_civil_from_unix((uint32_t)((int64_t)os_unix_time(out) + correction), out);
-            out->valid = 1;
+    uint64_t flags = spin_lock_irqsave(&rtc_lock);
+    uint64_t now_tsc = tsc_read();
+    if (available && (!have_good || tsc_to_us(now_tsc - last_sample_tsc) >= RTC_RESAMPLE_US)) {
+        os_datetime_t fresh;
+        cmos_samples++;
+        last_sample_tsc = now_tsc;
+        if (sample(&fresh)) {
+            if (correction != 0) {
+                os_civil_from_unix((uint32_t)((int64_t)os_unix_time(&fresh) + correction), &fresh);
+                fresh.valid = 1;
+            }
+            int64_t drift = have_good ? (int64_t)os_unix_time(&fresh) - (int64_t)extrapolated_locked(now_tsc) : 0;
+            if (!have_good || drift > 1 || drift < -1) {
+                last_good = fresh;
+                last_good_tsc = now_tsc;
+            }
+            have_good = 1;
         }
-        last_good = *out;
-        last_good_tsc = tsc_read();
-        have_good = 1;
-        return;
     }
 
     if (have_good) {
-        uint64_t elapsed_s = tsc_to_us(tsc_read() - last_good_tsc) / 1000000ULL;
-        os_civil_from_unix((uint32_t)(os_unix_time(&last_good) + (uint32_t)elapsed_s), out);
+        os_civil_from_unix(extrapolated_locked(now_tsc), out);
         out->valid = 1;
+        spin_unlock_irqrestore(&rtc_lock, flags);
         return;
     }
+    spin_unlock_irqrestore(&rtc_lock, flags);
 
     out->year = 0;
     out->month = 0;
@@ -169,6 +203,10 @@ void rtc_read(os_datetime_t *out) {
     out->valid = 0;
 }
 
+uint64_t rtc_cmos_samples(void) {
+    return __atomic_load_n(&cmos_samples, __ATOMIC_RELAXED);
+}
+
 int rtc_set_unix(uint32_t seconds) {
     if (seconds < 1577836800u || seconds > 4102444800u) {
         return -1;
@@ -176,11 +214,20 @@ int rtc_set_unix(uint32_t seconds) {
     if (!available) {
         return -1;
     }
+    uint64_t flags = spin_lock_irqsave(&rtc_lock);
     os_datetime_t hw;
+    cmos_samples++;
     if (!sample(&hw)) {
+        spin_unlock_irqrestore(&rtc_lock, flags);
         return -1;
     }
     correction = (int32_t)((int64_t)seconds - (int64_t)os_unix_time(&hw));
+    os_civil_from_unix(seconds, &last_good);
+    last_good.valid = 1;
+    last_good_tsc = tsc_read();
+    last_sample_tsc = last_good_tsc;
+    have_good = 1;
+    spin_unlock_irqrestore(&rtc_lock, flags);
     return 0;
 }
 

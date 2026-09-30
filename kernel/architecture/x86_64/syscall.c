@@ -4586,6 +4586,22 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxeven
     }
 }
 
+/* M203: why each waitfds returned, for the stick log - see
+   syscall_waitfds_returns. */
+static uint64_t waitfds_returns[WAITFDS_RETURN_REASONS];
+
+uint64_t syscall_waitfds_returns(int reason) {
+    return (reason >= 0 && reason < WAITFDS_RETURN_REASONS)
+               ? __atomic_load_n(&waitfds_returns[reason], __ATOMIC_RELAXED)
+               : 0;
+}
+
+#define WAITFDS_RETURN(reason, value)                                              \
+    do {                                                                           \
+        __atomic_fetch_add(&waitfds_returns[reason], 1, __ATOMIC_RELAXED);         \
+        return (value);                                                            \
+    } while (0)
+
 static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint64_t timeout_ms,
                          uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
@@ -4623,7 +4639,7 @@ static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint6
         for (uint64_t i = 0; i < count; i++) {
             if (file_descriptor_is_ready(self, file_descriptors[i])) {
                 scheduler_watch_end();
-                return (long)i;
+                WAITFDS_RETURN(WAITFDS_RETURN_READY, (long)i);
             }
         }
         /* M197: the pointer is not a descriptor. The one program that may
@@ -4631,7 +4647,7 @@ static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint6
            second; it waits properly now, so movement has to end the wait. */
         if ((self->caps & CAP_FRAMEBUFFER) && mouse_pending()) {
             scheduler_watch_end();
-            return -2;
+            WAITFDS_RETURN(WAITFDS_RETURN_POINTER, -2);
         }
         /* M198: and so does a program ending. Its windows are the
            compositor's to take down, and its death is no descriptor's event:
@@ -4643,20 +4659,20 @@ static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint6
             exits != self->seen_exit_sequence) {
             self->seen_exit_sequence = exits;
             scheduler_watch_end();
-            return -2;
+            WAITFDS_RETURN(WAITFDS_RETURN_EXITS, -2);
         }
         if (timeout == 0) {
             scheduler_watch_end();
-            return -2;
+            WAITFDS_RETURN(WAITFDS_RETURN_ZERO, -2);
         }
         if (deadline != 0 && clock_monotonic_ms() >= deadline) {
             scheduler_watch_end();
-            return -2;
+            WAITFDS_RETURN(WAITFDS_RETURN_DEADLINE, -2);
         }
 
         scheduler_watch_block(deadline);
         if (scheduler_signal_pending()) {
-            return -2;
+            WAITFDS_RETURN(WAITFDS_RETURN_SIGNAL, -2);
         }
     }
 }
@@ -5881,6 +5897,7 @@ void syscall_handler(isr_regs_t *regs) {
     task_t *self = scheduler_current();
     uint16_t outer = self->kernel_activity;
     self->kernel_activity = (uint16_t)(num < SYSCALL_COUNT ? num + 1 : KERNEL_ACTIVITY_NONE);
+    self->syscalls++;
 
     syscall_dispatch(regs);
 

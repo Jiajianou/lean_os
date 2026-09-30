@@ -229,6 +229,12 @@ typedef struct task {
        lands in the kernel can say which request the time belongs to. */
     uint16_t kernel_activity;
     uint64_t ready_since_ms;
+    /* M203: system calls this task has made, and as the stick log's last
+       line saw them - "who is calling" is not "who is using the processor",
+       and the laptop's worst storm was a process at 90% of a core that was
+       mostly being woken. */
+    uint64_t syscalls;
+    uint64_t stamp_syscalls_seen;
     uint64_t woken_at_ns;
     uint8_t woken_by_timer;
     uint64_t seen_exit_sequence;

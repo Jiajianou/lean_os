@@ -63,6 +63,12 @@ static long waitfds_answer;
 long window_manager_test_waitfds(const int *file_descriptors, int count, int timeout_ms) {
     last_count = count;
     last_timeout = timeout_ms;
+    /* A wait that finds nothing takes its timeout. Since M203 the connect
+       loops sleep here instead of yielding, and a clock that did not move
+       made their deadlines unreachable. */
+    if (waitfds_answer < 0 && timeout_ms > 0) {
+        now_ms += timeout_ms;
+    }
     for (int i = 0; i < count && i < 16; i++) {
         last_file_descriptors[i] = file_descriptors[i];
     }

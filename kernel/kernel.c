@@ -9680,6 +9680,37 @@ static void boot_selftests_system(void) {
         kernel_log_put_dec((uint32_t)gettid_calls);
         kernel_log_puts(" system calls, and the answers matched the kernel's in this thread, "
                         "a second one and a forked child - self-test passed.\n\n");
+
+        /* M203: the wall clock is answered from an anchor, not from the
+           CMOS ports - Chromium asking for it from many threads at once cost
+           the laptop most of a processor. A thousand asks may touch the
+           ports once at most, may never go backwards, and may not run more
+           than a second ahead of where they started. */
+        if (rtc_available()) {
+            os_datetime_t first, now;
+            rtc_read(&first);
+            uint64_t samples_before = rtc_cmos_samples();
+            uint32_t previous = os_unix_time(&first);
+            for (int i = 0; i < 1000; i++) {
+                rtc_read(&now);
+                uint32_t t = os_unix_time(&now);
+                if (!now.valid || t < previous) {
+                    panic("M203 self-test: the wall clock went backwards or became invalid between two reads");
+                }
+                previous = t;
+            }
+            uint64_t samples = rtc_cmos_samples() - samples_before;
+            int64_t off = (int64_t)previous - (int64_t)os_unix_time(&first);
+            if (samples > 1 || off > 1) {
+                kernel_log_puts("[m203] a thousand wall-clock reads touched the CMOS ");
+                kernel_log_put_dec((uint32_t)samples);
+                kernel_log_puts(" times\n");
+                panic("M203 self-test: every wall-clock read still goes to the CMOS ports");
+            }
+            kernel_log_puts("[m203] a thousand wall-clock reads touched the CMOS ports ");
+            kernel_log_put_dec((uint32_t)samples);
+            kernel_log_puts(" time(s) and never went backwards - self-test passed.\n\n");
+        }
     }
 
     {

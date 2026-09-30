@@ -161,6 +161,11 @@ typedef struct {
     uint8_t is_popup;
     int32_t parent_window;
     char title[WINDOW_MANAGER_TITLE_MAX];
+    /* M203: when the window was created and whether its client has shown
+       anything yet - the gap between the two is the black window a person
+       sees, and the log says how long it was. */
+    long opened_ms;
+    uint8_t presented;
 } window_t;
 
 static window_t windows[MAX_WINDOWS];
@@ -1892,6 +1897,8 @@ static void accept_pending_window(int request_read_file_descriptor, int response
     win->minimized = 0;
     win->maximized = 0;
     win->alive = 1;
+    win->opened_ms = sys_uptime_ms();
+    win->presented = 0;
     win->close_requested = 0;
     win->close_deadline_ms = 0;
     win->confirm_close = request.confirm_close;
@@ -2640,6 +2647,33 @@ static void present_window(int id) {
     present_window_rect(id, 0, 0, windows[id].w, windows[id].h);
 }
 
+static void note_first_frame(window_t *win) {
+    if (win->presented) {
+        return;
+    }
+    win->presented = 1;
+    char message[WINDOW_MANAGER_TITLE_MAX + 80];
+    int m = 0;
+    static const char pre[] = "[wm] first frame from '";
+    for (int i = 0; pre[i]; i++) {
+        message[m++] = pre[i];
+    }
+    for (int i = 0; i < WINDOW_MANAGER_TITLE_MAX && win->title[i]; i++) {
+        message[m++] = win->title[i];
+    }
+    static const char mid[] = "' ";
+    for (int i = 0; mid[i]; i++) {
+        message[m++] = mid[i];
+    }
+    long waited = sys_uptime_ms() - win->opened_ms;
+    m += format_uint((uint32_t)(waited > 0 ? waited : 0), message + m);
+    static const char tail[] = " ms after its window opened\n";
+    for (int i = 0; tail[i]; i++) {
+        message[m++] = tail[i];
+    }
+    sys_write(1, message, (size_t)m);
+}
+
 static void accept_one_action(int action_read_file_descriptor) {
     window_manager_action_request_t request;
     if (read_exact(action_read_file_descriptor, &request, sizeof(request)) != (long)sizeof(request)) {
@@ -2647,6 +2681,7 @@ static void accept_one_action(int action_read_file_descriptor) {
     }
     if (request.action == WINDOW_MANAGER_ACTION_PRESENT) {
         if (request.window_id >= 0 && request.window_id < window_count && windows[request.window_id].alive) {
+            note_first_frame(&windows[request.window_id]);
             present_window(request.window_id);
         }
         return;
@@ -2661,6 +2696,7 @@ static void accept_one_action(int action_read_file_descriptor) {
             win->damage_x = (int32_t)window_manager_pair_first(request.value);
             win->damage_y = (int32_t)window_manager_pair_second(request.value);
         } else {
+            note_first_frame(win);
             present_window_rect(request.window_id, win->damage_x, win->damage_y,
                                 (int32_t)window_manager_pair_first(request.value),
                                 (int32_t)window_manager_pair_second(request.value));

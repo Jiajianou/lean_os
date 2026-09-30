@@ -864,7 +864,7 @@ static int journal_commit_locked(void) {
         checksum = leanfs_fnv1a(checksum, slot, LINE_BYTES);
         staged++;
         block++;
-        if (staged == scratch_lines || item + 1 == descriptors + n) {
+        if (staged == scratch_lines) {
             if (device_write(journal_lba(stream_first), staged * BLOCK_DEVICE_PER_LINE, scratch) != 0) {
                 return -1;
             }
@@ -874,16 +874,33 @@ static int journal_commit_locked(void) {
         }
     }
 
-    k_memset(journal_block, 0, LINE_BYTES);
-    leanfs_journal_commit_t *c = (leanfs_journal_commit_t *)journal_block;
+    /* M203: the commit block rides in the same write as the end of the
+       transaction whenever there is room for it, rather than going out as a
+       write of its own. An fsync is a commit, Chromium makes about three
+       hundred of them starting up, and on a USB stick each write command
+       costs milliseconds whatever its size - so this halves what an fsync
+       costs. It is safe because replay accepts a transaction only when this
+       block's checksum matches every byte before it: a write torn so that
+       the commit block landed and some of the data did not is rejected
+       exactly as a commit block that never landed is. */
+    uint8_t *commit_slot = staged > 0 ? scratch + (uint64_t)staged * LINE_BYTES : journal_block;
+    k_memset(commit_slot, 0, LINE_BYTES);
+    leanfs_journal_commit_t *c = (leanfs_journal_commit_t *)commit_slot;
     c->magic = LEANFS_JOURNAL_COMMIT_MAGIC;
     c->count = n;
     c->sequence = journal_sequence;
     c->checksum = checksum;
-    if (device_write(journal_lba(block), BLOCK_DEVICE_PER_LINE, journal_block) != 0) {
-        return -1;
+    if (staged > 0) {
+        if (device_write(journal_lba(stream_first), (staged + 1) * BLOCK_DEVICE_PER_LINE, scratch) != 0) {
+            return -1;
+        }
+        statistics.journal_blocks_written += staged + 1;
+    } else {
+        if (device_write(journal_lba(block), BLOCK_DEVICE_PER_LINE, journal_block) != 0) {
+            return -1;
+        }
+        statistics.journal_blocks_written++;
     }
-    statistics.journal_blocks_written++;
 
     for (uint32_t k = 0; k < n; k++) {
         journal_map[journal_order[k]].uncommitted = 0;

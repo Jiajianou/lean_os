@@ -674,6 +674,8 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->kernel_stack_top = (uint64_t)(stack_base + TASK_STACK_SIZE);
     t->home_cpu = -1;
     t->kernel_activity = KERNEL_ACTIVITY_NONE;
+    t->syscalls = 0;
+    t->stamp_syscalls_seen = 0;
 
     if (thread_of) {
         /* A thread. It does not get a copy of anything: it points at the
@@ -1847,8 +1849,6 @@ void scheduler_reap_slot(task_t *t) {
     if (!t || t->state != TASK_TERMINATED) {
         return;
     }
-    __atomic_add_fetch(&exit_sequence, 1, __ATOMIC_RELEASE);
-    scheduler_wake_all(SCHEDULER_POLL_CHAN);
 
     /* A thread-group leader's slot is not reset while its threads are still
        running in the address space it owns.
@@ -1874,6 +1874,13 @@ void scheduler_reap_slot(task_t *t) {
     if (!t->is_thread && thread_group_has_live_members(t->tgid, t)) {
         return;
     }
+    /* M203: announced only once the slot really goes. It was announced
+       before the check above, so every attempt to reap a leader whose
+       threads were still running told every poller on the machine that a
+       program had exited when none had - and woke the compositor, whose
+       wait ends on exactly that. */
+    __atomic_add_fetch(&exit_sequence, 1, __ATOMIC_RELEASE);
+    scheduler_wake_all(SCHEDULER_POLL_CHAN);
     const int reaped_group = t->tgid;
     const int reaped_a_thread = t->is_thread;
 
@@ -1963,6 +1970,8 @@ void scheduler_reap_slot(task_t *t) {
     t->kernel_stack_top = 0;
     t->home_cpu = -1;
     t->kernel_activity = KERNEL_ACTIVITY_NONE;
+    t->syscalls = 0;
+    t->stamp_syscalls_seen = 0;
     t->generation++;
     t->state = TASK_FREE;
     t->pending_signal = 0;
@@ -2735,6 +2744,8 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->kernel_stack_top = (uint64_t)(stack_base + TASK_STACK_SIZE);
     t->home_cpu = -1;
     t->kernel_activity = KERNEL_ACTIVITY_NONE;
+    t->syscalls = 0;
+    t->stamp_syscalls_seen = 0;
 
     t->descriptor_table = fresh;
     for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {

@@ -13,3 +13,5 @@ uint32_t rtc_now(void);
 int rtc_set_unix(uint32_t seconds);
 
 int rtc_available(void);
+
+uint64_t rtc_cmos_samples(void);

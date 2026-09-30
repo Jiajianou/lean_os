@@ -465,7 +465,11 @@ TEST(scheduler, a_leaders_slot_is_held_while_its_threads_are_still_running) {
     const int generation_before = leader->generation;
 
     leader->state = TASK_TERMINATED;
+    const uint64_t exits_before = scheduler_exit_sequence();
     scheduler_reap_slot(leader);
+    /* M203: and says nothing - no program has gone. Announcing every held
+       reap woke every poller on the machine for nothing. */
+    CHECK_EQ(scheduler_exit_sequence(), exits_before);
 
     /* Held: still terminated, still the owner, still holding the table the
        running thread reaches through scheduler_vm_owner(). */
@@ -484,6 +488,7 @@ TEST(scheduler, a_leaders_slot_is_held_while_its_threads_are_still_running) {
     CHECK_EQ(thread->state, TASK_FREE);
     CHECK_EQ(leader->state, TASK_FREE);
     CHECK(leader->mmaps == NULL);
+    CHECK(scheduler_exit_sequence() > exits_before);
 }
 
 TEST(scheduler, a_leader_with_nobody_left_is_reaped_at_once) {

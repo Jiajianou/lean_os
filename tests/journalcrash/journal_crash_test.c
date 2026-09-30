@@ -22,6 +22,8 @@ uint8_t *fake_backend_sector(uint32_t lba);
 void fake_backend_power_cut_after_sectors(int64_t sectors);
 int fake_backend_power_was_cut(void);
 uint64_t fake_backend_sectors_written(void);
+void fake_backend_reset_counters(void);
+uint64_t fake_backend_write_calls(void);
 void kernel_log_capture_reset(void);
 int kernel_log_capture_contains(const char *needle);
 
@@ -167,6 +169,28 @@ TEST(journal_crash, a_run_with_no_power_cut_ends_where_it_was_left) {
     capture(&found);
     CHECK(same_state(&found, &last));
     CHECK(!kernel_log_capture_contains("reclaimed, 1") && !kernel_log_capture_contains("were in use but marked free - bitmap"));
+}
+
+/* M203: an fsync is a commit, and a small commit is one write command -
+   the transaction and the block that says it is complete, together. They
+   were two, and on a USB stick every command costs milliseconds whatever it
+   carries. The sweep above is what says doing it in one is safe. */
+TEST(journal_crash, a_small_commit_is_one_write_command) {
+    fresh_disk();
+    fake_backend_power_cut_after_sectors(1ll << 40);
+    REQUIRE(leanfs_write("/first", "one", 3) == 0);
+    leanfs_transaction_boundary(1);
+    REQUIRE(block_device_commit() == 0);
+    REQUIRE(block_device_checkpoint() == 0);
+    REQUIRE(leanfs_write("/second", "two", 3) == 0);
+    leanfs_transaction_boundary(1);
+    fake_backend_reset_counters();
+    REQUIRE(block_device_commit() == 0);
+    CHECK_EQ(fake_backend_write_calls(), 1);
+    boot();
+    char back[4] = {0};
+    CHECK_EQ(leanfs_read("/second", back, 3), 3);
+    CHECK_MEMEQ(back, "two", 3);
 }
 
 static void sweep(int cuts);
