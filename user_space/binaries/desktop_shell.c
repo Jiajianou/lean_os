@@ -26,8 +26,9 @@
 
 #define START_X       EDGE_PAD
 #define START_W       46
-#define START_DOT     5
-#define START_DOT_GAP 4
+#define START_RING_OUTER 8
+#define START_RING_INNER 4
+#define START_RING_SAMPLES 4
 
 #define SLOT_ICON        ICON_SMALL_SIZE
 #define SLOT_W           130
@@ -282,6 +283,32 @@ static void refresh_running_slots(window_manager_window_t *self) {
     }
 }
 
+static void draw_ring(int32_t centre_x, int32_t centre_y, int32_t outer, int32_t inner, uint32_t color) {
+    const int32_t n = START_RING_SAMPLES;
+    const int32_t outer_squared = outer * outer * 4 * n * n;
+    const int32_t inner_squared = inner * inner * 4 * n * n;
+    for (int32_t y = centre_y - outer; y < centre_y + outer; y++) {
+        for (int32_t x = centre_x - outer; x < centre_x + outer; x++) {
+            uint32_t covered = 0;
+            for (int32_t sy = 0; sy < n; sy++) {
+                for (int32_t sx = 0; sx < n; sx++) {
+                    int32_t dx = 2 * ((x - centre_x) * n + sx) + 1;
+                    int32_t dy = 2 * ((y - centre_y) * n + sy) + 1;
+                    int32_t d = dx * dx + dy * dy;
+                    if (d <= outer_squared && d >= inner_squared) {
+                        covered++;
+                    }
+                }
+            }
+            if (covered == (uint32_t)(n * n)) {
+                graphics_put_pixel(&bar_graphics, x, y, color);
+            } else if (covered) {
+                graphics_blend_pixel(&bar_graphics, x, y, color, covered * 255u / (uint32_t)(n * n));
+            }
+        }
+    }
+}
+
 static void draw_start_button(int pressed) {
     uint32_t alpha = pressed ? PRESS_ALPHA : (hovered == HOVER_START ? HOVER_ALPHA : 0u);
     if (alpha) {
@@ -292,17 +319,7 @@ static void draw_start_button(int pressed) {
                             OVERLAY_COLOR, EDGE_ALPHA);
 
     uint32_t glyph = pressed ? OVERLAY_COLOR : ACCENT_COLOR;
-    int32_t span = 2 * START_DOT + START_DOT_GAP;
-    int32_t gx = START_X + (START_W - span) / 2;
-    int32_t gy = BTN_Y + (BTN_H - span) / 2;
-    for (int row = 0; row < 2; row++) {
-        for (int col = 0; col < 2; col++) {
-            graphics_fill_rounded(&bar_graphics,
-                                  gx + col * (START_DOT + START_DOT_GAP),
-                                  gy + row * (START_DOT + START_DOT_GAP),
-                                  START_DOT, START_DOT, 2, glyph, 255);
-        }
-    }
+    draw_ring(START_X + START_W / 2, BTN_Y + BTN_H / 2, START_RING_OUTER, START_RING_INNER, glyph);
 }
 
 static void draw_slot(const running_slot_t *slot, int hover) {

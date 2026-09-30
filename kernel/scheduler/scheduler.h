@@ -208,6 +208,21 @@ typedef struct task {
     /* M198: sleep locks this task holds. A signal is not delivered while it
        is above zero - see sleep_lock_acquire. */
     uint32_t sleep_locks_held;
+    /* M199: the sleep lock this task is waiting for and since when, so a
+       wait that never ends can be named along with the lock's holder. */
+    const void *sleep_lock_waiting;
+    uint64_t sleep_lock_wait_since_ms;
+    uint8_t lock_wait_reported;
+    /* M199: user and kernel ticks as the stick log's last line saw them,
+       so the next line can say who used the processor in between. */
+    uint64_t stamp_user_seen;
+    uint64_t stamp_sys_seen;
+    /* M199: when this task last got a processor, for the detector's
+       "ready and never picked" check. */
+    uint64_t last_ran_ms;
+    uint8_t starvation_reported;
+    uint64_t woken_at_ns;
+    uint8_t woken_by_timer;
     uint64_t seen_exit_sequence;
     uint64_t wake_deadline_ms;
     uint8_t prio;
@@ -483,6 +498,11 @@ int scheduler_file_descriptor_high_water(int *which_task_out);
 
 void scheduler_reap_slot(task_t *t);
 void scheduler_dump_cpus(void);
+
+void scheduler_deadline_timer_fired(void);
+uint64_t scheduler_switch_count(int cpu);
+uint64_t scheduler_deadline_timer_interrupts(void);
+uint64_t scheduler_deadline_timer_lost(void);
 int scheduler_task_slot_count(void);
 task_t *scheduler_task_slot(int index);
 task_t *scheduler_cpu_current(int cpu);

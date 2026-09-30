@@ -6,6 +6,7 @@
 #include "memory_management/physical_memory.h"
 #include "ioapic.h"
 #include "lapic.h"
+#include "scheduler/scheduler_diagnostics.h"
 #include "pic.h"
 #include "global_descriptor_table.h"
 #include "memory_management/virtual_memory.h"
@@ -179,6 +180,14 @@ void isr_handler(isr_regs_t *r) {
         for (;;) {
             __asm__ volatile("cli; hlt");
         }
+    }
+
+    /* M199: the hang detector's question - where is this core? It answers
+       and carries on, because a core that is merely slow must not be
+       stopped for having been asked. */
+    if (r->vector == NMI_VECTOR && scheduler_hang_report_requested(smp_current_cpu())) {
+        scheduler_hang_report_this_cpu(smp_current_cpu(), r->rip, r->rsp, (r->cs & 3) != 0);
+        return;
     }
 
     if (r->vector == BREAKPOINT_VECTOR) {

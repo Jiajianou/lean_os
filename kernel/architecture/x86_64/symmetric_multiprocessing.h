@@ -34,6 +34,7 @@ void smp_tlb_shootdown_cpus(uint32_t cpu_mask);
 void smp_tlb_shootdown_acknowledge(void);
 
 void smp_send_reschedule(int cpu);
+void smp_send_nmi(int cpu);
 
 void smp_halt_other_cpus(void);
 int smp_halt_was_requested(void);

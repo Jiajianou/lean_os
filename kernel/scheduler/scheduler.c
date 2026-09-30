@@ -10,6 +10,7 @@
 #include "architecture/x86_64/interrupt_service_routines.h"
 #include "architecture/x86_64/global_descriptor_table.h"
 #include "architecture/x86_64/io.h"
+#include "architecture/x86_64/lapic.h"
 #include "architecture/x86_64/symmetric_multiprocessing.h"
 #include "drivers/kernel_log.h"
 #include "drivers/pit.h"
@@ -47,6 +48,7 @@ static int task_count;
 
 static task_t *current_task[MAX_CPUS];
 static uint32_t ticks_in_slice[MAX_CPUS];
+static volatile uint64_t switch_count[MAX_CPUS];
 static uint32_t aging_ticks;
 
 static volatile int need_resched[MAX_CPUS];
@@ -87,7 +89,11 @@ static int blocked_count;
 static task_t *pick_next(task_t *from, int cpu);
 static void kick_idle_cpus(int wanted);
 void scheduler_dump_cpus(void);
-static void wake_expired(uint64_t now_ms);
+static int wake_expired_until(uint64_t now_ms, uint64_t *next_deadline_ms);
+static void arm_deadline_timer(int cpu, uint64_t deadline_ms);
+static volatile uint64_t deadline_timer_interrupts;
+static volatile uint64_t lost_deadline_arms;
+static uint64_t armed_deadline_ms[MAX_CPUS];
 static void fire_expired_alarms(uint64_t now_ms);
 static void unblock_self(task_t *self);
 static void block_on(const void *chan, uint64_t space, uint64_t deadline_ms, spinlock_t *lock,
@@ -393,8 +399,28 @@ void scheduler_tick_cpu(int cpu) {
         }
     }
 
-    wake_expired(clock_monotonic_ms());
+    /* M199: a sleeper this tick wakes is work for this core too. The check
+       above ran first, so an idle core that woke a task here went back to
+       halting beside it until the NEXT tick - a 3 ms sleep took 15 on a
+       quiet machine. Other idle cores are kicked; this one looks. */
+    {
+        uint64_t next_deadline;
+        if (wake_expired_until(clock_monotonic_ms(), &next_deadline) > 0 && t->is_idle) {
+            work_waiting = 1;
+        }
+    }
     fire_expired_alarms(clock_monotonic_ms());
+    /* A deadline this core armed for and never heard about - the tick is
+       already a period past it - is forgotten, or every later, later deadline
+       would be taken as covered by it and the timer would never be armed
+       again. */
+    {
+        uint64_t armed = armed_deadline_ms[cpu];
+        if (armed != 0 && clock_monotonic_ms() > armed + 2u * (1000u / PIT_HZ)) {
+            armed_deadline_ms[cpu] = 0;
+            lost_deadline_arms++;
+        }
+    }
 
     /* An idle core with work ready does not wait out the rest of its idle
        quantum for it. */
@@ -857,18 +883,24 @@ unsigned int scheduler_set_alarm(task_t *t, unsigned int seconds) {
     return remaining;
 }
 
-static void wake_expired(uint64_t now_ms) {
+static int waking_from_timer;
+
+static int wake_expired_until(uint64_t now_ms, uint64_t *next_deadline_ms) {
     int woken = 0;
+    uint64_t next = 0;
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
     if (blocked_count == 0) {
         spin_unlock(&scheduler_lock);
         irq_restore(flags);
-        return;
+        *next_deadline_ms = 0;
+        return 0;
     }
     for (int i = 0; i < task_count; i++) {
-        if (tasks[i].state == TASK_BLOCKED && tasks[i].wake_deadline_ms != 0 &&
-            now_ms >= tasks[i].wake_deadline_ms) {
+        if (tasks[i].state != TASK_BLOCKED || tasks[i].wake_deadline_ms == 0) {
+            continue;
+        }
+        if (now_ms >= tasks[i].wake_deadline_ms) {
             blocked_count--;
             tasks[i].state = TASK_READY;
             tasks[i].prio = PRIO_INTERACTIVE;
@@ -877,12 +909,64 @@ static void wake_expired(uint64_t now_ms) {
             need_resched[smp_current_cpu()] = 1;
             tasks[i].wait_chan = (const void *)0;
             tasks[i].wake_deadline_ms = 0;
+            tasks[i].woken_at_ns = clock_monotonic_ns();
+            tasks[i].woken_by_timer = (uint8_t)waking_from_timer;
             woken++;
+        } else if (next == 0 || tasks[i].wake_deadline_ms < next) {
+            next = tasks[i].wake_deadline_ms;
         }
     }
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
     kick_idle_cpus(woken);
+    *next_deadline_ms = next;
+    return woken;
+}
+
+/* Interrupts are off wherever this is called: the timer belongs to the core
+   it is programmed on, and the task that asked must not move in between.
+   A core keeps only its earliest deadline armed; a later one is found again
+   when that fires, from the same scan that wakes the sleepers. */
+static void arm_deadline_timer(int cpu, uint64_t deadline_ms) {
+    if (deadline_ms == 0 || cpu < 0 || cpu >= MAX_CPUS || !lapic_timer_available()) {
+        return;
+    }
+    uint64_t armed = armed_deadline_ms[cpu];
+    if (armed != 0 && armed <= deadline_ms) {
+        return;
+    }
+    armed_deadline_ms[cpu] = deadline_ms;
+    uint64_t now_ns = clock_monotonic_ns();
+    uint64_t at_ns = deadline_ms * 1000000ULL;
+    lapic_timer_arm_ns(at_ns > now_ns ? at_ns - now_ns : 0);
+}
+
+void scheduler_deadline_timer_fired(void) {
+    int cpu = smp_current_cpu();
+    armed_deadline_ms[cpu] = 0;
+    deadline_timer_interrupts++;
+    uint64_t now_ms = clock_monotonic_ms();
+    uint64_t next = 0;
+    waking_from_timer = 1;
+    int woken = wake_expired_until(now_ms, &next);
+    waking_from_timer = 0;
+    if (next != 0) {
+        arm_deadline_timer(cpu, next);
+    }
+    task_t *t = current_task[cpu];
+    if (woken > 0 && t && t->is_idle) {
+        ticks_in_slice[cpu] = 0;
+        schedule();
+    }
+}
+
+
+uint64_t scheduler_deadline_timer_interrupts(void) {
+    return deadline_timer_interrupts;
+}
+
+uint64_t scheduler_deadline_timer_lost(void) {
+    return lost_deadline_arms;
 }
 
 /* A task made READY used to wait for some idle core's own tick - and an
@@ -1111,8 +1195,16 @@ void sleep_lock_acquire(sleep_lock_t *lock) {
            A signal still wakes the waiter; it looks at the lock again and is
            delivered on the way back to user space, as it would be anyway. */
         lock->waiters++;
+        if (self->sleep_lock_waiting != lock) {
+            self->sleep_lock_wait_since_ms = clock_monotonic_ms();
+            self->lock_wait_reported = 0;
+        }
+        self->sleep_lock_waiting = lock;
         block_on(lock, 0, 0, &lock->guard, &flags, 0);
         lock->waiters--;
+    }
+    if (current_task[smp_current_cpu()]) {
+        current_task[smp_current_cpu()]->sleep_lock_waiting = (const void *)0;
     }
     lock->held = 1;
     task_t *owner = current_task[smp_current_cpu()];
@@ -1165,6 +1257,7 @@ void scheduler_watch_block(uint64_t deadline_ms) {
     }
     self->wait_chan = SCHEDULER_POLL_CHAN;
     self->wake_deadline_ms = deadline_ms;
+    arm_deadline_timer(cpu, deadline_ms);
     self->state = TASK_BLOCKED;
     blocked_count++;
     spin_unlock(&scheduler_lock);
@@ -1242,6 +1335,7 @@ void scheduler_block_on_sequence(const void *chan, uint64_t deadline_ms, uint64_
     task_t *self = current_task[cpu];
     self->wait_chan = chan;
     self->wake_deadline_ms = deadline_ms;
+    arm_deadline_timer(cpu, deadline_ms);
     self->state = TASK_BLOCKED;
     blocked_count++;
     spin_unlock(&scheduler_lock);
@@ -1278,6 +1372,7 @@ void scheduler_sleep_ms(uint32_t ms) {
     spin_lock(&scheduler_lock);
     self->wait_chan = (const void *)&sleep_channel;
     self->wake_deadline_ms = deadline;
+    arm_deadline_timer(smp_current_cpu(), deadline);
     self->state = TASK_BLOCKED;
     blocked_count++;
     spin_unlock(&scheduler_lock);
@@ -1306,6 +1401,7 @@ static void block_on(const void *chan, uint64_t space, uint64_t deadline_ms, spi
     self->wait_chan = chan;
     self->wait_space = space;
     self->wake_deadline_ms = deadline_ms;
+    arm_deadline_timer(cpu, deadline_ms);
     self->state = TASK_BLOCKED;
     blocked_count++;
     spin_unlock(&scheduler_lock);
@@ -1438,10 +1534,17 @@ void schedule(void) {
         }
     }
 
+    switch_count[cpu]++;
+    next->last_ran_ms = clock_monotonic_ms();
+    next->starvation_reported = 0;
     context_switch(&previous->rsp, next->rsp);
 
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
+}
+
+uint64_t scheduler_switch_count(int cpu) {
+    return (cpu >= 0 && cpu < MAX_CPUS) ? switch_count[cpu] : 0;
 }
 
 /* M182: whose stack is this address in? A saved rsp that is not in its own

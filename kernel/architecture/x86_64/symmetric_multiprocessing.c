@@ -68,6 +68,7 @@ void ap_main(uint32_t cpu_id) {
     virtual_memory_enable_nx_this_cpu();
     virtual_memory_enable_pat_this_cpu();
     lapic_init_this_cpu();
+    lapic_timer_start_this_cpu();
     verify_cpu_identity(cpu_id);
     scheduler_init_ap((int)cpu_id);
 
@@ -192,6 +193,13 @@ void smp_tlb_shootdown_cpus(uint32_t cpu_mask) {
    tick. The ICR is written with interrupts off because a tick's broadcast
    from this core's own timer handler would otherwise interleave its two
    halves with ours. */
+void smp_send_nmi(int cpu) {
+    if (!initialized || cpu < 0 || cpu >= smp_cpu_count || !smp_cpus[cpu].online) {
+        return;
+    }
+    lapic_send_ipi(smp_cpus[cpu].apic_id, LAPIC_ICR_DELIVERY_NMI);
+}
+
 void smp_send_reschedule(int cpu) {
     if (!initialized || cpu < 0 || cpu >= smp_cpu_count) {
         return;
@@ -281,6 +289,9 @@ void smp_init(void) {
     }
 
     lapic_init(madt.lapic_base);
+    if (lapic_timer_calibrate()) {
+        lapic_timer_start_this_cpu();
+    }
     uint32_t bsp_apic_id = lapic_id();
     smp_cpus[0].apic_id = bsp_apic_id;
     smp_cpus[0].online = 1;
@@ -332,5 +343,7 @@ void lapic_vector_handler(isr_regs_t *regs) {
         smp_tlb_shootdown_acknowledge();
     } else if (regs->vector == IPI_RESCHEDULE_VECTOR) {
         scheduler_reschedule_if_idle();
+    } else if (regs->vector == LAPIC_TIMER_VECTOR) {
+        scheduler_deadline_timer_fired();
     }
 }

@@ -97,6 +97,11 @@ isr_ipi_reschedule:
     push qword 0xF2
     jmp lapic_common_stub
 
+isr_lapic_timer:
+    push qword 0
+    push qword 0xF3
+    jmp lapic_common_stub
+
 isr_lapic_spurious:
     push qword 0
     push qword 0xFF
@@ -207,6 +212,10 @@ isr_ipi_tlb_shootdown_address:
 global isr_ipi_reschedule_address
 isr_ipi_reschedule_address:
     dq isr_ipi_reschedule
+
+global isr_lapic_timer_address
+isr_lapic_timer_address:
+    dq isr_lapic_timer
 
 global isr_lapic_spurious_address
 isr_lapic_spurious_address:

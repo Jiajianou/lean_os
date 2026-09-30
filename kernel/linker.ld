@@ -5,8 +5,10 @@ SECTIONS
     . = 0x100000;
 
     .text : {
+        __kernel_text_start = .;
         *(.text.entry)
         *(.text*)
+        __kernel_text_end = .;
     }
 
     .rodata : {

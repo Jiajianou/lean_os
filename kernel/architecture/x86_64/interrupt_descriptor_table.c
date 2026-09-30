@@ -72,6 +72,7 @@ void idt_init(void) {
     idt_set_gate(IPI_SCHEDULE_VECTOR, isr_ipi_schedule_address, 0, IDT_GATE_INTERRUPT_RING0);
     idt_set_gate(IPI_TLB_SHOOTDOWN_VECTOR, isr_ipi_tlb_shootdown_address, 0, IDT_GATE_INTERRUPT_RING0);
     idt_set_gate(IPI_RESCHEDULE_VECTOR, isr_ipi_reschedule_address, 0, IDT_GATE_INTERRUPT_RING0);
+    idt_set_gate(LAPIC_TIMER_VECTOR, isr_lapic_timer_address, 0, IDT_GATE_INTERRUPT_RING0);
     idt_set_gate(LAPIC_SPURIOUS_VECTOR, isr_lapic_spurious_address, 0, IDT_GATE_INTERRUPT_RING0);
 
     idtp.limit = sizeof(idt) - 1;

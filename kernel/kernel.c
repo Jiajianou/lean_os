@@ -8,6 +8,8 @@
 #include "architecture/x86_64/pic.h"
 #include "architecture/x86_64/symmetric_multiprocessing.h"
 #include "architecture/x86_64/timestamp_counter.h"
+#include "architecture/x86_64/lapic.h"
+#include "scheduler/scheduler_diagnostics.h"
 #include "drivers/block_device.h"
 #include "drivers/console.h"
 #include "drivers/cursor.h"
@@ -878,6 +880,53 @@ static void forksmp_watchdog(void *arg) {
         wait_seconds = 60;
     }
     task_exit();
+}
+
+/* M199: the hang detector's own exam. A holder keeps a sleep lock for longer
+   than the detector's patience while another task waits for it, and a third
+   task turns interrupts off on whichever core it lands on and spins. */
+extern char __kernel_text_end[];
+static sleep_lock_t m199_lock;
+static volatile int m199_holder_pid;
+static volatile int m199_phase;
+static volatile uint64_t m199_held_ms;
+static volatile uint64_t m199_waited_ms;
+
+static void m199_holder_task(void *arg) {
+    (void)arg;
+    sleep_lock_acquire(&m199_lock);
+    m199_holder_pid = scheduler_current()->id;
+    m199_phase = 1;
+    uint64_t start = clock_monotonic_ms();
+    while (clock_monotonic_ms() - start < 2500u) {
+        scheduler_sleep_ms((uint32_t)(2500u - (clock_monotonic_ms() - start)));
+    }
+    m199_held_ms = clock_monotonic_ms() - start;
+    sleep_lock_release(&m199_lock);
+}
+
+static void m199_waiter_task(void *arg) {
+    (void)arg;
+    while (m199_phase == 0) {
+        scheduler_sleep_ms(5);
+    }
+    uint64_t start = clock_monotonic_ms();
+    sleep_lock_acquire(&m199_lock);
+    m199_waited_ms = clock_monotonic_ms() - start;
+    sleep_lock_release(&m199_lock);
+}
+
+static volatile int m199_spinner_cpu = -1;
+
+static void m199_spinner_task(void *arg) {
+    (void)arg;
+    uint64_t flags = irq_save_disable();
+    m199_spinner_cpu = smp_current_cpu();
+    uint64_t start = tsc_read();
+    while (tsc_to_us(tsc_read() - start) < 3500000u) {
+        __asm__ volatile("pause");
+    }
+    irq_restore(flags);
 }
 
 static void smp_probe_task(void *arg) {
@@ -2294,6 +2343,109 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_wait, (uint64_t)probe_tasks[i]->id, 0, 0);
         }
         kernel_log_puts("[smp] self-test passed.\n\n");
+    }
+
+    {
+        /* M199. Every deadline a task sleeps to - a poll timeout, a futex
+           wait, a frame's timerfd - was noticed on the first 100 Hz tick
+           after it passed. The one-shot LAPIC timer each core now arms for
+           its earliest deadline has to be measurably better than that, or it
+           is not there. */
+        if (!lapic_timer_available()) {
+            kernel_log_puts("[m199] no one-shot LAPIC timer on this machine - deadlines stay "
+                            "on the tick (skipped).\n");
+        } else {
+            uint64_t total_late_ns = 0;
+            uint64_t worst_late_ns = 0;
+            const int rounds = 20;
+            uint64_t woke_late_ns = 0, ran_late_ns = 0;
+            int by_timer = 0;
+            for (int i = 0; i < rounds; i++) {
+                uint64_t start = clock_monotonic_ns();
+                task_t *me = scheduler_current();
+                me->woken_at_ns = 0;
+                me->woken_by_timer = 0;
+                uint64_t due_ns = (start / 1000000u + 3u) * 1000000u;
+                scheduler_sleep_ms(3);
+                uint64_t resumed = clock_monotonic_ns();
+                uint64_t slept = resumed - start;
+                if (me->woken_at_ns) {
+                    woke_late_ns += me->woken_at_ns > due_ns ? me->woken_at_ns - due_ns : 0;
+                    ran_late_ns += resumed - me->woken_at_ns;
+                    by_timer += me->woken_by_timer;
+                }
+                uint64_t late = slept > 3000000u ? slept - 3000000u : 0;
+                total_late_ns += late;
+                if (late > worst_late_ns) {
+                    worst_late_ns = late;
+                }
+            }
+            uint64_t mean_late_us = total_late_ns / (uint64_t)rounds / 1000u;
+            kernel_log_perf("deadline_lateness_us", mean_late_us, "us");
+            if (mean_late_us > 4000u) {
+                panic("M199 self-test: a 3 ms sleep woke on the tick rather than at its deadline");
+            }
+            kernel_log_puts("[m199] a 3 ms sleep wakes ");
+            kernel_log_put_dec((uint32_t)mean_late_us);
+            kernel_log_puts(" us late on average (worst ");
+            kernel_log_put_dec((uint32_t)(worst_late_ns / 1000u));
+            kernel_log_puts(" us), ");
+            kernel_log_put_dec((uint32_t)by_timer);
+            kernel_log_puts(" of 20 woken by the deadline timer ");
+            kernel_log_put_dec((uint32_t)(woke_late_ns / 20000u));
+            kernel_log_puts(" us after the deadline on average, then run ");
+            kernel_log_put_dec((uint32_t)(ran_late_ns / 20000u));
+            kernel_log_puts(" us after being woken - the tick alone made it about 5000.\n");
+        }
+
+        hang_statistics_t before, after;
+        scheduler_hang_statistics(&before);
+        scheduler_hang_set_thresholds(2u, 5u, 1000u);
+        task_t *holder = task_spawn("m199-holder", m199_holder_task, (void *)0);
+        task_t *waiter = task_spawn("m199-waiter", m199_waiter_task, (void *)0);
+        if (!holder || !waiter) {
+            panic("M199 self-test: could not start the lock holder and its waiter");
+        }
+        do_syscall(SYS_wait, (uint64_t)holder->id, 0, 0);
+        do_syscall(SYS_wait, (uint64_t)waiter->id, 0, 0);
+        int spun_on_an_ap = 0;
+        if (smp_cpu_count > 1) {
+            task_t *spinner = task_spawn("m199-spinner", m199_spinner_task, (void *)0);
+            if (!spinner) {
+                panic("M199 self-test: could not start the spinner");
+            }
+            pit_sleep_ms(4500);
+            do_syscall(SYS_wait, (uint64_t)spinner->id, 0, 0);
+            spun_on_an_ap = m199_spinner_cpu > 0;
+        }
+        scheduler_hang_statistics(&after);
+        scheduler_hang_set_thresholds(3u, 5u, 10000u);
+        if (!scheduler_hang_lock_was_reported(&m199_lock, m199_holder_pid)) {
+            kernel_log_puts("[m199] the holder kept the lock ");
+            kernel_log_put_dec((uint32_t)m199_held_ms);
+            kernel_log_puts(" ms and the waiter waited ");
+            kernel_log_put_dec((uint32_t)m199_waited_ms);
+            kernel_log_puts(" ms; reports ");
+            kernel_log_put_dec(after.lock_waits - before.lock_waits);
+            kernel_log_puts(", last holder named ");
+            kernel_log_put_dec((uint32_t)after.last_lock_holder);
+            kernel_log_puts("\n");
+            panic("M199 self-test: a task waited on a sleep lock past the detector's patience "
+                  "and it did not name the holder");
+        }
+        if (spun_on_an_ap &&
+            (after.tickless == before.tickless || after.answers == before.answers ||
+             after.last_answer_rip < 0x100000u || after.last_answer_rip >= (uint64_t)(uintptr_t)__kernel_text_end)) {
+            panic("M199 self-test: a core spun with interrupts off and the detector did not "
+                  "find out where");
+        }
+        kernel_log_puts("[m199] the hang detector named the holder of a sleep lock another task "
+                        "waited on too long");
+        if (spun_on_an_ap) {
+            kernel_log_puts(", and a core that spun with interrupts off answered its NMI "
+                            "with where it was");
+        }
+        kernel_log_puts(" - self-test passed.\n\n");
     }
 
     {

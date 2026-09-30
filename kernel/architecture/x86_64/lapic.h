@@ -17,3 +17,8 @@ void lapic_send_eoi(void);
 
 void lapic_send_ipi(uint32_t apic_id, uint32_t vector_and_flags);
 void lapic_send_ipi_all_excl_self(uint32_t vector_and_flags);
+
+int lapic_timer_calibrate(void);
+int lapic_timer_available(void);
+void lapic_timer_start_this_cpu(void);
+void lapic_timer_arm_ns(uint64_t delay_ns);

@@ -128,10 +128,13 @@ PANEL_PROBE_ROW = 20
 PANEL_PROBE_Y = PANEL_TOP + PANEL_PROBE_ROW
 PANEL_BG = panel_px(panel_row_raw(PANEL_PROBE_ROW), PANEL_PROBE_Y)
 
-START_DOT, START_DOT_GAP = 5, 4
-START_GLYPH_SPAN = 2 * START_DOT + START_DOT_GAP
-START_PROBE = (START_X + (START_W - START_GLYPH_SPAN) // 2 + START_DOT // 2,
-               PANEL_TOP + BTN_Y + (BTN_H - START_GLYPH_SPAN) // 2 + START_DOT // 2)
+# The Start glyph is a plain donut: a ring of the accent colour with the
+# panel showing through its middle. One probe on the ring, one in the hole.
+START_RING_OUTER, START_RING_INNER = 8, 4
+START_CENTRE = (START_X + START_W // 2, PANEL_TOP + BTN_Y + BTN_H // 2)
+START_PROBE = (START_CENTRE[0] - (START_RING_OUTER + START_RING_INNER) // 2 - 1,
+               START_CENTRE[1])
+START_HOLE = START_CENTRE
 START_GLYPH = panel_px(ACCENT, START_PROBE[1])
 START_CLICK = (START_X + START_W // 2, PANEL_TOP + BTN_Y + BTN_H // 2)
 START_BG_PROBE = (START_X + 6, PANEL_TOP + BTN_Y + BTN_H // 2)
@@ -620,6 +623,16 @@ def test_start_button_opens_launcher(m):
     shot = m.screenshot()
     check(shot.px(*START_PROBE) == START_GLYPH,
           "the Start button's glyph is not drawn at rest")
+    check(shot.px(*START_HOLE) == shot.px(START_BG_PROBE[0], START_HOLE[1]),
+          "the Start glyph has no hole in its middle - it is meant to be a "
+          "donut, with the panel showing through (0x%06X, panel 0x%06X)"
+          % (shot.px(*START_HOLE), shot.px(START_BG_PROBE[0], START_HOLE[1])))
+    ring = sum(1 for dx in range(-START_RING_OUTER, START_RING_OUTER)
+               if shot.px(START_CENTRE[0] + dx, START_HOLE[1]) == START_GLYPH)
+    check(ring >= 2 * (START_RING_OUTER - START_RING_INNER) - 2,
+          "the Start ring is %d solid accent pixels across its middle row; "
+          "a donut of this size has two solid runs of about %d each"
+          % (ring, START_RING_OUTER - START_RING_INNER))
     check(not start_highlighted(shot),
           "the Start button is highlighted before the pointer has reached it")
 
@@ -1970,6 +1983,41 @@ def test_browser_survives_an_empty_flex_container(m):
     check(count_app_windows(m.screenshot()) == 1,
           "the browser window is gone - it died on the page")
 
+def _close_button_on_screen(shot):
+    hits = [(x, y) for y in range(0, min(shot.height, PANEL_TOP), 2)
+            for x in range(0, shot.width, 2) if shot.px(x, y) == BTN_CLOSE_COLOR]
+    if not hits:
+        return None
+    xs = sorted(h[0] for h in hits)
+    ys = sorted(h[1] for h in hits)
+    return xs[len(xs) // 2], ys[len(ys) // 2]
+
+def test_browser_closes_from_its_titlebar_button(m):
+    # M199: the close button asks with SIGTERM and Chromium answers the way it
+    # should - it writes its profile and exits 0. The compositor took "exited
+    # 0" for "still running", and the dead browser's window stayed on the
+    # screen until its process slot happened to be recycled. On the laptop that
+    # was a browser that froze when closed. The button also has to be ON the
+    # screen: a 900-pixel window cascaded to x=180 put it past the edge of
+    # this 1024-pixel display.
+    boot(m)
+    browser = ICONS[-1]
+    m.double_click(browser[3], browser[2])
+    wait_for_windows(m, 1, timeout=45.0)
+    shot = wait_for(m, lambda s: _blue_in_page(s) > 5000,
+                    "the browser never finished showing its own start page",
+                    timeout=45.0)
+    button = _close_button_on_screen(shot)
+    check(button is not None and button[0] < shot.width - 4,
+          "the browser's close button is not on the screen (found at %r) - "
+          "its window was placed past the right edge" % (button,))
+    m.click(*button)
+    wait_for(m, lambda s: count_app_windows(s) == 0,
+             "the browser's window stayed after its close button was clicked",
+             timeout=30.0)
+    m.double_click(ICON_X, ICONS[4][2])
+    wait_for_windows(m, 1, timeout=20.0)
+
 def test_window_animations_stay_smooth(m):
     boot(m)
     before = m.read_log().count("anim_frame_gap_ms")
@@ -2059,6 +2107,8 @@ TESTS = [
      test_browser_loads_a_page_from_another_machine),
     ("browser_survives_an_empty_flex_container",
      test_browser_survives_an_empty_flex_container),
+    ("browser_closes_from_its_titlebar_button",
+     test_browser_closes_from_its_titlebar_button),
     ("popup_window_opens_captures_and_dismisses",
      test_popup_window_opens_captures_and_dismisses),
     ("window_animations_stay_smooth", test_window_animations_stay_smooth),
@@ -2080,6 +2130,7 @@ QUICK_TESTS = [
     "launching_an_app_does_not_disturb_the_rest_of_the_screen",
     "browser_loads_a_page_from_another_machine",
     "browser_survives_an_empty_flex_container",
+    "browser_closes_from_its_titlebar_button",
     "popup_window_opens_captures_and_dismisses",
     "window_animations_stay_smooth",
 ]

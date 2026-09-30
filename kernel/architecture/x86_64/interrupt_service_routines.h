@@ -17,10 +17,12 @@ extern uint64_t syscall_stub_address;
 #define IPI_SCHEDULE_VECTOR       0xF0
 #define IPI_TLB_SHOOTDOWN_VECTOR  0xF1
 #define IPI_RESCHEDULE_VECTOR     0xF2
+#define LAPIC_TIMER_VECTOR        0xF3
 #define LAPIC_SPURIOUS_VECTOR     0xFF
 extern uint64_t isr_ipi_schedule_address;
 extern uint64_t isr_ipi_tlb_shootdown_address;
 extern uint64_t isr_ipi_reschedule_address;
+extern uint64_t isr_lapic_timer_address;
 extern uint64_t isr_lapic_spurious_address;
 
 typedef void (*irq_handler_function)(isr_regs_t *regs);

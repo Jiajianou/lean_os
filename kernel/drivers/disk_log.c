@@ -6,6 +6,7 @@
 #include "drivers/block_device.h"
 #include "drivers/disk_log_area.h"
 #include "drivers/kernel_log.h"
+#include "drivers/pit.h"
 #include "scheduler/scheduler.h"
 
 #define DISK_LOG_INTERVAL_MS 1000u
@@ -93,6 +94,76 @@ static uint64_t stamp_last_idle[MAX_CPUS];
 static uint64_t stamp_last_halted_us[MAX_CPUS];
 static int at_line_start = 1;
 
+/* M199: who. A core at 100% for a minute after the browser closed was
+   the whole of the evidence the laptop gave, and "cpu busy % 100" does not
+   say which task - so when any core is busy the line names the three tasks
+   that used the most of the second, in hundredths of a core, and how much
+   of it was in the kernel. */
+#define TOP_TASKS 3
+#define TOP_BUSY_PERCENT 50u
+
+static int append_top_tasks(const uint32_t *busy_percent, int cpus) {
+    int busy = 0;
+    for (int c = 0; c < cpus; c++) {
+        if (busy_percent[c] >= TOP_BUSY_PERCENT) {
+            busy = 1;
+        }
+    }
+    task_t *top[TOP_TASKS] = {0};
+    uint64_t top_ticks[TOP_TASKS] = {0};
+    uint64_t top_sys[TOP_TASKS] = {0};
+    int slots = scheduler_task_slot_count();
+    for (int i = 0; i < slots; i++) {
+        task_t *t = scheduler_task_slot(i);
+        if (!t || t->state == TASK_FREE) {
+            continue;
+        }
+        uint64_t user = t->user_ticks;
+        uint64_t sys = t->sys_ticks;
+        uint64_t used = (user >= t->stamp_user_seen ? user - t->stamp_user_seen : 0) +
+                        (sys >= t->stamp_sys_seen ? sys - t->stamp_sys_seen : 0);
+        uint64_t used_sys = sys >= t->stamp_sys_seen ? sys - t->stamp_sys_seen : 0;
+        t->stamp_user_seen = user;
+        t->stamp_sys_seen = sys;
+        if (!busy || t->is_idle || used == 0) {
+            continue;
+        }
+        for (int k = 0; k < TOP_TASKS; k++) {
+            if (used > top_ticks[k]) {
+                for (int m = TOP_TASKS - 1; m > k; m--) {
+                    top[m] = top[m - 1];
+                    top_ticks[m] = top_ticks[m - 1];
+                    top_sys[m] = top_sys[m - 1];
+                }
+                top[k] = t;
+                top_ticks[k] = used;
+                top_sys[k] = used_sys;
+                break;
+            }
+        }
+    }
+    if (!busy || !top[0]) {
+        return 0;
+    }
+    if (append_text("; top") != 0) {
+        return -1;
+    }
+    for (int k = 0; k < TOP_TASKS && top[k]; k++) {
+        if (append_text(" ") != 0 || append_text(top[k]->name[0] ? top[k]->name : "?") != 0 ||
+            append_text("/") != 0 || append_decimal((uint64_t)top[k]->id) != 0 ||
+            append_text(" ") != 0 || append_decimal(top_ticks[k] * 100u / PIT_HZ) != 0 ||
+            append_text("%") != 0) {
+            return -1;
+        }
+        if (top_sys[k] * 2 >= top_ticks[k] &&
+            (append_text(" (kernel ") != 0 || append_decimal(top_sys[k] * 100u / PIT_HZ) != 0 ||
+             append_text("%)") != 0)) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int append_stamp(int log_grew) {
     block_device_statistics_t disk;
     block_device_statistics(&disk);
@@ -150,7 +221,7 @@ static int append_stamp(int log_grew) {
             }
         }
     }
-    if (append_text("\n") != 0) {
+    if (append_top_tasks(busy_percent, cpus) != 0 || append_text("\n") != 0) {
         return -1;
     }
     stamp_last_us = now_us;

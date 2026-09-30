@@ -3,6 +3,7 @@
 
 #include "architecture/x86_64/cpu.h"
 #include "architecture/x86_64/symmetric_multiprocessing.h"
+#include "drivers/pit.h"
 #include "library/spinlock.h"
 #include "file_system/flock.h"
 #include "scheduler/scheduler.h"
@@ -1573,5 +1574,104 @@ TEST(scheduler, the_timer_does_not_take_the_processor_from_a_sleep_lock_holder) 
     }
     CHECK(moved);
     q13_kill(holder);
+    q13_kill(other);
+}
+
+/* M199. A deadline is armed on the one-shot timer of the core the sleeper
+   blocked on, the earliest one wins, and a later one does not push it back
+   - otherwise a sixty hertz frame waits for a sleeper due a second later. */
+TEST(scheduler, a_deadline_arms_the_cores_one_shot_timer_and_the_earliest_wins) {
+    q13_boot();
+    fake_lapic_timer_reset(1);
+    fake_arch_set_cpu(0);
+    task_t *now = scheduler_current();
+    fake_arch_stand_on(now->kernel_stack_top ? now->kernel_stack_top - 64 : 0);
+    static spinlock_t held;
+
+    uint64_t start = clock_monotonic_ms();
+    uint64_t flags = spin_lock_irqsave(&held);
+    scheduler_block_on(&held, start + 500, &held, &flags);
+    spin_unlock_irqrestore(&held, flags);
+    CHECK_EQ(fake_lapic_timer_arms(), 1);
+    CHECK(fake_lapic_timer_last_delay_ns() > 0);
+    CHECK(fake_lapic_timer_last_delay_ns() <= 500ULL * 1000000ULL);
+
+    fake_arch_set_cpu(0);
+    now = scheduler_current();
+    fake_arch_stand_on(now->kernel_stack_top ? now->kernel_stack_top - 64 : 0);
+    flags = spin_lock_irqsave(&held);
+    scheduler_block_on(&held, start + 5000, &held, &flags);
+    spin_unlock_irqrestore(&held, flags);
+    CHECK_EQ(fake_lapic_timer_arms(), 1);
+
+    fake_arch_set_cpu(0);
+    now = scheduler_current();
+    fake_arch_stand_on(now->kernel_stack_top ? now->kernel_stack_top - 64 : 0);
+    flags = spin_lock_irqsave(&held);
+    scheduler_block_on(&held, start + 200, &held, &flags);
+    spin_unlock_irqrestore(&held, flags);
+    CHECK_EQ(fake_lapic_timer_arms(), 2);
+    CHECK(fake_lapic_timer_last_delay_ns() <= 200ULL * 1000000ULL);
+
+    fake_arch_set_cpu(0);
+    scheduler_deadline_timer_fired();
+    fake_lapic_timer_reset(0);
+    fake_arch_set_cpu(0);
+    now = scheduler_current();
+    fake_arch_stand_on(now->kernel_stack_top ? now->kernel_stack_top - 64 : 0);
+    flags = spin_lock_irqsave(&held);
+    scheduler_block_on(&held, start + 100, &held, &flags);
+    spin_unlock_irqrestore(&held, flags);
+    CHECK_EQ(fake_lapic_timer_arms(), 0);
+}
+
+static task_t *m199_sleeper;
+static int m199_state_before_fire;
+static int m199_state_after_fire;
+static uint64_t m199_fired_before;
+
+static void m199_fire_while_away(void) {
+    m199_state_before_fire = m199_sleeper->state;
+    fake_pit_advance(1000);
+    fake_arch_set_cpu(0);
+    m199_fired_before = scheduler_deadline_timer_interrupts();
+    scheduler_deadline_timer_fired();
+    m199_state_after_fire = m199_sleeper->state;
+}
+
+TEST(scheduler, the_one_shot_timer_wakes_a_sleeper_whose_deadline_passed) {
+    q13_boot();
+    fake_lapic_timer_reset(1);
+    task_t *sleeper = q13_spawn("m199-sleeper");
+    task_t *other = q13_spawn("m199-other");
+    REQUIRE(sleeper != NULL);
+    REQUIRE(other != NULL);
+    m196_block_everything_but(sleeper, other);
+    int placed = 0;
+    for (int i = 0; i < 200 * Q13_QUANTUM && !placed; i++) {
+        q13_tick(0);
+        placed = (scheduler_current() == sleeper);
+    }
+    REQUIRE(placed);
+
+    fake_arch_set_cpu(0);
+    fake_arch_stand_on(sleeper->kernel_stack_top - 64);
+    m199_sleeper = sleeper;
+    m199_state_before_fire = -1;
+    m199_state_after_fire = -1;
+    fake_arch_raise_interrupt(m199_fire_while_away);
+    static spinlock_t held;
+    uint64_t flags = spin_lock_irqsave(&held);
+    scheduler_block_on(&held, clock_monotonic_ms() + 30, &held, &flags);
+    spin_unlock_irqrestore(&held, flags);
+    fake_arch_raise_interrupt(0);
+
+    CHECK_EQ(m199_state_before_fire, TASK_BLOCKED);
+    CHECK_EQ(m199_state_after_fire, TASK_READY);
+    CHECK_EQ(scheduler_deadline_timer_interrupts(), m199_fired_before + 1);
+
+    fake_lapic_timer_reset(0);
+    m196_unblock_everything();
+    q13_kill(sleeper);
     q13_kill(other);
 }

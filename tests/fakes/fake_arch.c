@@ -21,7 +21,21 @@ uint64_t fake_irq_save_disable(void) {
     return was;
 }
 
-void fake_irq_restore(uint64_t flags) { interrupts_on = flags ? 1 : 0; }
+/* An interrupt raised while they were off is taken the moment they come
+   back on, which is where the real machine takes it. */
+static void (*pending_interrupt)(void);
+void fake_arch_raise_interrupt(void (*handler)(void)) { pending_interrupt = handler; }
+
+void fake_irq_restore(uint64_t flags) {
+    interrupts_on = flags ? 1 : 0;
+    if (interrupts_on && pending_interrupt) {
+        void (*handler)(void) = pending_interrupt;
+        pending_interrupt = 0;
+        interrupts_on = 0;
+        handler();
+        interrupts_on = 1;
+    }
+}
 
 void fake_arch_reset_unguarded_cpu_reads(void);
 int fake_arch_unguarded_cpu_reads(void);
@@ -203,3 +217,25 @@ void fake_arch_reset(void) {
     memset(rsp0, 0, sizeof(rsp0));
     memset(fpu_scratch, 0, sizeof(fpu_scratch));
 }
+
+/* The one-shot LAPIC timer: whether it exists, how many times it was armed
+   and the last delay it was armed for, which is all a test can observe of
+   a timer that has not fired yet. */
+static int lapic_timer_present;
+static int lapic_timer_arms;
+static uint64_t lapic_timer_last_delay_ns;
+
+void fake_lapic_timer_reset(int present) {
+    lapic_timer_present = present;
+    lapic_timer_arms = 0;
+    lapic_timer_last_delay_ns = 0;
+}
+int fake_lapic_timer_arms(void) { return lapic_timer_arms; }
+uint64_t fake_lapic_timer_last_delay_ns(void) { return lapic_timer_last_delay_ns; }
+
+int lapic_timer_available(void) { return lapic_timer_present; }
+void lapic_timer_arm_ns(uint64_t delay_ns) {
+    lapic_timer_arms++;
+    lapic_timer_last_delay_ns = delay_ns;
+}
+

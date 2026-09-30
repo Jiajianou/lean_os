@@ -1650,7 +1650,15 @@ static void enforce_close_requests(void) {
 static void reap_dead_clients(void) {
     enforce_close_requests();
     for (int i = 0; i < window_count; i++) {
-        if (windows[i].alive && sys_task_alive(windows[i].client_pid) <= 0) {
+        /* A client that crashed, or is gone altogether, loses its window.
+           One that exited 0 keeps it - a program may draw and leave, and
+           wm_demo's self-test is exactly that - unless the window had been
+           asked to close. That is what the titlebar button and Chromium's
+           own quit both do, and Chromium answers SIGTERM by exiting 0: the
+           browser's window used to stay on the screen, dead, until its
+           process slot was recycled (M199). */
+        long alive = windows[i].alive ? sys_task_alive(windows[i].client_pid) : 1;
+        if (alive != 1 && (alive != 2 || windows[i].close_requested)) {
             if (!windows[i].close_requested) {
                 toast_post(WINDOW_MANAGER_NOTIFY_ERROR,
                             windows[i].title[0] ? windows[i].title : "A program",
@@ -1854,7 +1862,10 @@ static void accept_pending_window(int request_read_file_descriptor, int response
         win->x = max_i32(min_i32(parent->x + request.popup_x, (int32_t)framebuffer_info.width - (int32_t)width), 0);
         win->y = max_i32(min_i32(parent->y + request.popup_y, (int32_t)framebuffer_info.height - (int32_t)height), 0);
     } else {
-        win->x = 100 + idx * 40;
+        /* The cascade steps right with every slot, and a wide window on
+           a small screen stepped its own titlebar buttons off the right
+           edge - a browser nobody could close with the pointer. */
+        win->x = max_i32(min_i32(100 + idx * 40, (int32_t)framebuffer_info.width - (int32_t)width), 0);
         int32_t cascade_y = 100 + idx * 40;
         int32_t bottom_fit = content_bottom_limit() - (int32_t)height;
         win->y = max_i32(min_i32(cascade_y, bottom_fit), content_top_limit());
