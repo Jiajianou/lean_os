@@ -10,6 +10,8 @@ extern char __lean_tls_init_end[] __attribute__((weak));
 extern char __lean_tls_end[] __attribute__((weak));
 extern char __lean_tls_align[] __attribute__((weak));
 
+static int thread_pointer_ready;
+
 size_t __lean_tls_init_size(void) {
     if (!__lean_tls_init_start || !__lean_tls_init_end) {
         return 0;
@@ -100,7 +102,39 @@ void *__lean_tls_setup(void) {
         munmap(block, bytes);
         return 0;
     }
+    thread_pointer_ready = 1;
     return block;
+}
+
+/* M202. pthread_self() and gettid() were a system call each, and Chromium
+   asks for one or the other on almost every lock it takes and every task it
+   posts: under QEMU the browser made 300,000 of them a second, and on the
+   laptop - where its own code runs thirty times faster and the kernel entry
+   does not - that was most of what three processors spent eighty-five
+   percent of their time in the kernel doing. A thread's id does not change,
+   so the first answer is kept in the word after the thread pointer, which
+   tls_block_bytes leaves room for and nothing else uses; a forked child is
+   a new thread with the parent's memory and forgets it. A process whose
+   thread pointer was never set up asks the kernel every time, as before. */
+#define THREAD_ID_OFFSET 8
+
+long __lean_thread_id(void) {
+    if (!thread_pointer_ready) {
+        return sys_gettid();
+    }
+    long id;
+    __asm__ volatile("movq %%fs:%c1, %0" : "=r"(id) : "i"(THREAD_ID_OFFSET));
+    if (id == 0) {
+        id = sys_gettid();
+        __asm__ volatile("movq %0, %%fs:%c1" : : "r"(id), "i"(THREAD_ID_OFFSET) : "memory");
+    }
+    return id;
+}
+
+void __lean_forget_thread_id(void) {
+    if (thread_pointer_ready) {
+        __asm__ volatile("movq $0, %%fs:%c0" : : "i"(THREAD_ID_OFFSET) : "memory");
+    }
 }
 
 void __lean_tls_release(void *block) {

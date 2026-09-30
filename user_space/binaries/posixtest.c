@@ -27,6 +27,7 @@
 #include <unistd.h>
 
 #include "paths.h"
+#include "syscall_wrappers.h"
 
 #if !defined(_POSIX_MONOTONIC_CLOCK) || _POSIX_MONOTONIC_CLOCK < 0
 #error "unistd.h has to advertise the monotonic clock this libc implements"
@@ -630,6 +631,59 @@ static int anonymous_mappings_ignore_the_descriptor(void) {
     return 0;
 }
 
+/* M202: pthread_self() and gettid() answer from the thread's own memory
+   rather than a system call - the kernel harness counts the gettid calls
+   this program makes and requires the loop below to have made almost none.
+   What is checked here is that the remembered answer is the kernel's: in
+   this thread, in a second one, and in a forked child, which is a new
+   thread carrying this one's memory and must not carry its answer. */
+#define THREAD_ID_ASKS 10000
+
+static void *remember_thread_ids(void *out) {
+    long *ids = (long *)out;
+    ids[0] = (long)pthread_self();
+    ids[1] = (long)gettid();
+    ids[2] = sys_gettid();
+    return 0;
+}
+
+static int thread_ids_are_remembered_and_right(void) {
+    long mine = sys_gettid();
+    if ((long)pthread_self() != mine || (long)gettid() != mine) {
+        return 90;
+    }
+    for (int i = 0; i < THREAD_ID_ASKS; i++) {
+        if ((long)pthread_self() != mine || (long)gettid() != mine) {
+            return 91;
+        }
+    }
+    long other[3] = {0, 0, 0};
+    pthread_t thread;
+    if (pthread_create(&thread, 0, remember_thread_ids, other) != 0 ||
+        pthread_join(thread, 0) != 0) {
+        return 92;
+    }
+    if (other[0] != other[2] || other[1] != other[2] || other[2] == mine) {
+        return 93;
+    }
+    pid_t child = fork();
+    if (child < 0) {
+        return 94;
+    }
+    if (child == 0) {
+        long kernel = sys_gettid();
+        _exit(kernel != mine && (long)gettid() == kernel && (long)pthread_self() == kernel ? 0 : 1);
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        return 95;
+    }
+    if ((long)pthread_self() != mine) {
+        return 96;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--exec-probe") == 0) {
         return exec_probe(argc, argv);
@@ -675,6 +729,10 @@ int main(int argc, char **argv) {
         return code;
     }
     code = anonymous_mappings_ignore_the_descriptor();
+    if (code) {
+        return code;
+    }
+    code = thread_ids_are_remembered_and_right();
     if (code) {
         return code;
     }

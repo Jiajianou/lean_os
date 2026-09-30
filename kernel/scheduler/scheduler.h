@@ -104,6 +104,9 @@ typedef struct {
 
 #define TASK_NAME_MAX 24
 
+#define KERNEL_ACTIVITY_NONE        0u
+#define KERNEL_ACTIVITY_PAGE_FAULT  0xFFFFu
+
 /* Tasks on the whole machine - and a thread is a task, so this is processes
    and threads together. 128 until M187, which Chromium's own browser crossed
    with its browser, renderer, network, storage and utility processes and the
@@ -221,6 +224,11 @@ typedef struct task {
        "ready and never picked" check. */
     uint64_t last_ran_ms;
     uint8_t starvation_reported;
+    /* M202: what the kernel is doing on this task's behalf - a system call
+       number plus one, KERNEL_ACTIVITY_PAGE_FAULT, or zero - so a tick that
+       lands in the kernel can say which request the time belongs to. */
+    uint16_t kernel_activity;
+    uint64_t ready_since_ms;
     uint64_t woken_at_ns;
     uint8_t woken_by_timer;
     uint64_t seen_exit_sequence;

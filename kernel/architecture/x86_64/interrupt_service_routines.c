@@ -200,7 +200,15 @@ void isr_handler(isr_regs_t *r) {
     }
 
     if (r->vector == PAGE_FAULT_VECTOR) {
+        task_t *faulting = scheduler_current();
+        uint16_t outer = faulting ? faulting->kernel_activity : KERNEL_ACTIVITY_NONE;
+        if (faulting) {
+            faulting->kernel_activity = KERNEL_ACTIVITY_PAGE_FAULT;
+        }
         int filled = scheduler_fault_fill(read_cr2(), r->error_code, r->rsp);
+        if (faulting) {
+            faulting->kernel_activity = outer;
+        }
         if (filled == 1) {
             return;
         }

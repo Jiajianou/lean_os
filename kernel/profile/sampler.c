@@ -7,6 +7,8 @@
 static spinlock_t prof_lock;
 static prof_sample_t buckets[PROF_BUCKETS];
 static prof_statistics_t statistics;
+static volatile int kernel_only;
+static uint64_t activity_samples[PROFILE_ACTIVITIES];
 
 static uint32_t hash_key(uint64_t rip, int32_t pid) {
     uint64_t h = rip * 0x9E3779B97F4A7C15ULL;
@@ -64,8 +66,17 @@ void profile_sample(isr_regs_t *regs) {
     }
     if (user) {
         statistics.user++;
+        if (kernel_only) {
+            spin_unlock_irqrestore(&prof_lock, flags);
+            return;
+        }
     } else {
         statistics.kernel++;
+        uint16_t activity = self ? self->kernel_activity : KERNEL_ACTIVITY_NONE;
+        int index = activity == KERNEL_ACTIVITY_PAGE_FAULT ? PROFILE_ACTIVITY_PAGE_FAULT
+                    : activity <= SYSCALL_COUNT             ? (int)activity
+                                                            : 0;
+        activity_samples[index]++;
     }
 
     uint64_t rip = regs->rip;
@@ -95,6 +106,17 @@ void profile_sample(isr_regs_t *regs) {
     }
     statistics.overflow++;
     spin_unlock_irqrestore(&prof_lock, flags);
+}
+
+void profile_set_kernel_only(int on) {
+    kernel_only = on ? 1 : 0;
+}
+
+uint64_t profile_activity_samples(int activity) {
+    if (activity < 0 || activity >= PROFILE_ACTIVITIES) {
+        return 0;
+    }
+    return __atomic_load_n(&activity_samples[activity], __ATOMIC_RELAXED);
 }
 
 void profile_get_statistics(prof_statistics_t *out) {

@@ -20,6 +20,9 @@
 #include <string.h>
 #include <sys/resource.h>
 
+extern long __lean_thread_id(void);
+extern void __lean_forget_thread_id(void);
+
 int __lean_fd_errno(int fd) {
     os_stat_t st;
     return sys_fstat(fd, &st) == 0 ? EIO : EBADF;
@@ -227,7 +230,7 @@ int dup2(int oldfd, int newfd) {
 }
 
 pid_t gettid(void) {
-    return (pid_t)sys_gettid();
+    return (pid_t)__lean_thread_id();
 }
 
 int pipe(int file_descriptors[2]) {
@@ -390,6 +393,7 @@ pid_t fork(void) {
         return -1;
     }
     if (r == 0) {
+        __lean_forget_thread_id();
         __lean_pthread_atfork_child();
     } else {
         __lean_pthread_atfork_parent();

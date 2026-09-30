@@ -21,6 +21,7 @@ typedef struct {
 } thread_block_t;
 
 extern void *__lean_tls_setup(void);
+extern long __lean_thread_id(void);
 extern void __lean_tls_release(void *block);
 extern void __lean_run_thread_destructors(void);
 
@@ -501,7 +502,7 @@ int pthread_attr_setstacksize(pthread_attr_t *attribute, size_t size) {
 }
 
 pthread_t pthread_self(void) {
-    return (pthread_t)sys_gettid();
+    return (pthread_t)__lean_thread_id();
 }
 
 /* A thread's name goes to the kernel rather than into a field here, because

@@ -2018,6 +2018,51 @@ def test_browser_closes_from_its_titlebar_button(m):
     m.double_click(ICON_X, ICONS[4][2])
     wait_for_windows(m, 1, timeout=20.0)
 
+def _new_tab_button(shot, page_left):
+    # The tab strip is the light band between the titlebar and the toolbar,
+    # and the + is the last dark mark on it: the tab list's own glyphs, each
+    # tab's title and close box are all to its left.
+    marks = sorted({x for y in range(88, 122) for x in range(page_left + 1, shot.width)
+                    if sum(((shot.px(x, y) >> s) & 0xFF) for s in (16, 8, 0)) < 250})
+    if not marks:
+        return None
+    last = [marks[-1]]
+    for x in reversed(marks[:-1]):
+        if last[-1] - x > 3:
+            break
+        last.append(x)
+    return ((min(last) + max(last)) // 2, 104)
+
+def test_browser_new_tab_button_opens_a_tab(m):
+    # M202: every views::Button that acts on release - New Tab, back, reload,
+    # a tab's close box - ignored every click, because this ozone platform
+    # left the released button out of a release's flags and Chromium only
+    # fires a button whose flags name a button it answers to. Ctrl+T worked
+    # and so did anything that acts on press, which is how it survived from
+    # M171 to the laptop.
+    boot(m)
+    browser = ICONS[-1]
+    m.double_click(browser[3], browser[2])
+    wait_for_windows(m, 1, timeout=45.0)
+    shot = wait_for(m, lambda s: _blue_in_page(s) > 5000,
+                    "the browser never finished showing its own start page",
+                    timeout=45.0)
+    page = _page_columns(shot)
+    check(page is not None, "could not find the browser's page on the screen")
+    plus = _new_tab_button(shot, page[0])
+    check(plus is not None, "could not find the New Tab button on the tab strip")
+    m.click(*plus)
+
+    # A second tab pushes the + a tab's width to the right; nothing else does.
+    def moved(s):
+        now = _new_tab_button(s, page[0])
+        return now is not None and now[0] > plus[0] + 100
+    wait_for(m, moved,
+             "clicking the New Tab button at %r opened no tab - the click "
+             "reached the button (it highlights under the cursor) and the "
+             "button never fired" % (plus,),
+             timeout=45.0)
+
 def test_window_animations_stay_smooth(m):
     boot(m)
     before = m.read_log().count("anim_frame_gap_ms")
@@ -2109,6 +2154,8 @@ TESTS = [
      test_browser_survives_an_empty_flex_container),
     ("browser_closes_from_its_titlebar_button",
      test_browser_closes_from_its_titlebar_button),
+    ("browser_new_tab_button_opens_a_tab",
+     test_browser_new_tab_button_opens_a_tab),
     ("popup_window_opens_captures_and_dismisses",
      test_popup_window_opens_captures_and_dismisses),
     ("window_animations_stay_smooth", test_window_animations_stay_smooth),
@@ -2131,6 +2178,7 @@ QUICK_TESTS = [
     "browser_loads_a_page_from_another_machine",
     "browser_survives_an_empty_flex_container",
     "browser_closes_from_its_titlebar_button",
+    "browser_new_tab_button_opens_a_tab",
     "popup_window_opens_captures_and_dismisses",
     "window_animations_stay_smooth",
 ]

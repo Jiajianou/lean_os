@@ -8,6 +8,8 @@
 #include "drivers/disk_log_area.h"
 #include "drivers/kernel_log.h"
 #include "drivers/pit.h"
+#include "profile/sampler.h"
+#include "profile/syscall_counters.h"
 #include "scheduler/scheduler.h"
 
 #define DISK_LOG_INTERVAL_MS 1000u
@@ -166,6 +168,130 @@ static int append_top_tasks(const uint32_t *busy_percent, int cpus) {
     return 0;
 }
 
+static int append_hex(uint64_t value) {
+    char text[16];
+    int count = 0;
+    do {
+        uint32_t nibble = (uint32_t)(value & 0xFu);
+        text[15 - count] = (char)(nibble < 10u ? '0' + nibble : 'a' + nibble - 10u);
+        value >>= 4;
+        count++;
+    } while (value);
+    return append_bytes(text + 16 - count, (size_t)count);
+}
+
+/* M202: where. The laptop's log after M201 said chrome processes spent
+   eighty-five percent of their time in the kernel for half a minute, and
+   nothing more - "(kernel 87%)" names a task, not a path. Each tick that
+   lands in the kernel now records what the kernel was doing for the task
+   it interrupted - a system call, a page fault, or neither - and the
+   address it was at. A busy second's line ends with the three requests
+   that took most of those samples, the three hottest addresses, and the
+   three system calls made most often. A sample is one tick of one core,
+   ten milliseconds. The numbers are raw on purpose: tools/read-usb-log.py
+   turns sys#N into its name from system_api/include/syscall.h and an
+   address into a function from build/kernel.elf. */
+#define PROFILE_SHOWN 3
+#define PROFILE_MIN_KERNEL_SAMPLES 10u
+
+static uint64_t profile_last_activity[PROFILE_ACTIVITIES];
+static uint64_t profile_last_calls[SYSCALL_COUNT];
+static prof_sample_t profile_buckets[PROF_BUCKETS];
+static int profile_running;
+
+static int append_activity(int activity) {
+    if (activity == PROFILE_ACTIVITY_PAGE_FAULT) {
+        return append_text("fault");
+    }
+    if (activity == 0) {
+        return append_text("other");
+    }
+    return append_text("sys#") != 0 || append_decimal((uint64_t)(activity - 1)) != 0 ? -1 : 0;
+}
+
+static void top_indices(const uint64_t *values, int count, int *out, int shown) {
+    for (int k = 0; k < shown; k++) {
+        out[k] = -1;
+    }
+    for (int i = 0; i < count; i++) {
+        if (values[i] == 0) {
+            continue;
+        }
+        for (int k = 0; k < shown; k++) {
+            if (out[k] < 0 || values[i] > values[out[k]]) {
+                for (int m = shown - 1; m > k; m--) {
+                    out[m] = out[m - 1];
+                }
+                out[k] = i;
+                break;
+            }
+        }
+    }
+}
+
+static int append_kernel_profile(int busy) {
+    if (!profile_running) {
+        return 0;
+    }
+    uint64_t activity[PROFILE_ACTIVITIES];
+    uint64_t kernel_samples = 0;
+    for (int i = 0; i < PROFILE_ACTIVITIES; i++) {
+        uint64_t now = profile_activity_samples(i);
+        activity[i] = now - profile_last_activity[i];
+        profile_last_activity[i] = now;
+        kernel_samples += activity[i];
+    }
+    static uint64_t calls[SYSCALL_COUNT];
+    for (int i = 0; i < SYSCALL_COUNT; i++) {
+        syscall_counters_entry_t entry;
+        syscall_counters_get(i, &entry);
+        calls[i] = entry.calls - profile_last_calls[i];
+        profile_last_calls[i] = entry.calls;
+    }
+    int sampled = profile_snapshot(profile_buckets, PROF_BUCKETS);
+    profile_reset();
+    if (!busy || kernel_samples < PROFILE_MIN_KERNEL_SAMPLES) {
+        return 0;
+    }
+    int top[PROFILE_SHOWN];
+    if (append_text("; kernel samples ") != 0 || append_decimal(kernel_samples) != 0 ||
+        append_text(" in") != 0) {
+        return -1;
+    }
+    top_indices(activity, PROFILE_ACTIVITIES, top, PROFILE_SHOWN);
+    for (int k = 0; k < PROFILE_SHOWN && top[k] >= 0; k++) {
+        if (append_text(" ") != 0 || append_activity(top[k]) != 0 || append_text(" ") != 0 ||
+            append_decimal(activity[top[k]]) != 0) {
+            return -1;
+        }
+    }
+    static uint64_t counts[PROF_BUCKETS];
+    for (int i = 0; i < sampled; i++) {
+        counts[i] = profile_buckets[i].count;
+    }
+    top_indices(counts, sampled, top, PROFILE_SHOWN);
+    if (top[0] >= 0 && append_text(", at") != 0) {
+        return -1;
+    }
+    for (int k = 0; k < PROFILE_SHOWN && top[k] >= 0; k++) {
+        if (append_text(" 0x") != 0 || append_hex(profile_buckets[top[k]].rip) != 0 ||
+            append_text(" ") != 0 || append_decimal(counts[top[k]]) != 0) {
+            return -1;
+        }
+    }
+    top_indices(calls, SYSCALL_COUNT, top, PROFILE_SHOWN);
+    if (top[0] >= 0 && append_text("; calls") != 0) {
+        return -1;
+    }
+    for (int k = 0; k < PROFILE_SHOWN && top[k] >= 0; k++) {
+        if (append_text(" sys#") != 0 || append_decimal((uint64_t)top[k]) != 0 ||
+            append_text(" ") != 0 || append_decimal(calls[top[k]]) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int append_stamp(int log_grew) {
     block_device_statistics_t disk;
     block_device_statistics(&disk);
@@ -242,7 +368,8 @@ static int append_stamp(int log_grew) {
             }
         }
     }
-    if (append_top_tasks(busy_percent, cpus) != 0 || append_text("\n") != 0) {
+    if (append_top_tasks(busy_percent, cpus) != 0 || append_kernel_profile(any_busy) != 0 ||
+        append_text("\n") != 0) {
         return -1;
     }
     stamp_last_us = now_us;
@@ -411,6 +538,10 @@ void disk_log_start(void) {
         kernel_log_puts("[disk-log] the first write to the log area failed - no log this boot.\n");
         return;
     }
+    profile_set_kernel_only(1);
+    profile_reset();
+    profile_start();
+    profile_running = 1;
     task_t *writer = task_spawn("disk_log", disk_log_task, 0);
     if (writer) {
         writer->parent_id = -1;

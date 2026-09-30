@@ -8,6 +8,7 @@
 
 #define DNS_PORT        53
 #define DNS_TIMEOUT_MS  3000
+#define DNS_WAIT_SLICE_MS 20
 #define DNS_MAX_MESSAGE     512
 #define DNS_MAX_CNAME   4
 
@@ -400,6 +401,17 @@ int dns_resolve(const char *name, uint32_t *out) {
         return -1;
     }
 
+    /* M202: a machine with no network interface - the laptop, which has no
+       driver for its wireless card - cannot reach 1.1.1.1 however long it
+       waits, and resolv.conf names it on every image. Every lookup there
+       used to take the whole timeout, and a page that asks for a dozen names
+       took a dozen of them. Linux answers the same question at once, from
+       the routing table; this is that answer. */
+    os_netconf_t conf;
+    if (sys_netconf(&conf) != 0 || conf.ip == 0) {
+        return -1;
+    }
+
     int fd = (int)sys_socket(OS_SOCKET_DGRAM);
     if (fd < 0) {
         return -1;
@@ -454,7 +466,18 @@ int dns_resolve(const char *name, uint32_t *out) {
                 }
             }
         }
-        sys_yield();
+        /* M202: asleep until a reply arrives or the next resend is due, not
+           spinning - a lookup nobody answers used to hold a processor at
+           100% for the whole three seconds. The cap bounds what a missed
+           wake-up can cost. */
+        long now = sys_uptime_ms();
+        long wait = (next_send < deadline ? next_send : deadline) - now;
+        if (wait > DNS_WAIT_SLICE_MS) {
+            wait = DNS_WAIT_SLICE_MS;
+        }
+        if (wait > 0) {
+            sys_waitfds(&fd, 1, (int)wait);
+        }
     }
     sys_close(fd);
     return -2;

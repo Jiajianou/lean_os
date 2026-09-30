@@ -972,8 +972,15 @@ static void m199_spinner_task(void *arg) {
    on a machine with memory to spare for it: the cache takes an eighth of
    RAM, and below 8 GiB that eighth is not much more than the browser. The
    read no longer holds up other programs' launches while it runs (M201's
-   image cache change), which is what makes doing it speculatively fair. */
-#define PREFETCH_DELAY_MS 10000u
+   image cache change), which is what makes doing it speculatively fair.
+
+   M202: one second, not ten. "Nobody likely to be launching anything yet"
+   was wrong the first time it was tested - the laptop's owner clicked
+   Browser five seconds after the desktop appeared, found the prefetch not
+   yet started, and watched a black window while the stick was read. A
+   click that arrives while the prefetch is reading joins that read rather
+   than starting its own, so starting early costs the click nothing. */
+#define PREFETCH_DELAY_MS 1000u
 #define PREFETCH_MINIMUM_FRAMES (8ull * 1024 * 1024 * 1024 / 4096)
 
 static void prefetch_task(void *arg) {
@@ -9626,8 +9633,11 @@ static void boot_selftests_system(void) {
             panic("M140 self-test: /bin/posixtest is not on this disk");
         }
         const char *px_argv[] = {PATH_BIN_DIRECTORY "posixtest", 0};
+        syscall_counters_entry_t gettid_before, gettid_after;
+        syscall_counters_get(SYS_gettid, &gettid_before);
         task_t *px = process_spawnv("posixtest", px_img, px_bytes, px_argv);
         long rc = px ? do_syscall(SYS_wait, (uint64_t)px->id, 0, 0) : -1;
+        syscall_counters_get(SYS_gettid, &gettid_after);
         kfree(px_img);
         if (rc != 0) {
             kernel_log_puts("[m140] posixtest exited ");
@@ -9653,6 +9663,23 @@ static void boot_selftests_system(void) {
                   "and dup and F_DUPFD past a hundred and twenty-eight "
                   "descriptors; and an anonymous mapping that ignores its "
                   "descriptor - self-test passed.\n\n");
+
+        /* M202: posixtest asks for its thread id twenty thousand times in
+           one loop. Each ask used to be a system call; the laptop's browser
+           spent most of three processors on exactly that. A handful are
+           left - the first ask in each thread and the checks that compare
+           against the kernel on purpose. */
+        uint64_t gettid_calls = gettid_after.calls - gettid_before.calls;
+        if (gettid_calls >= 1000u) {
+            kernel_log_puts("[m202] posixtest made ");
+            kernel_log_put_dec((uint32_t)gettid_calls);
+            kernel_log_puts(" gettid system calls for twenty thousand asks\n");
+            panic("M202 self-test: pthread_self and gettid still enter the kernel every time");
+        }
+        kernel_log_puts("[m202] twenty thousand pthread_self and gettid asks made ");
+        kernel_log_put_dec((uint32_t)gettid_calls);
+        kernel_log_puts(" system calls, and the answers matched the kernel's in this thread, "
+                        "a second one and a forked child - self-test passed.\n\n");
     }
 
     {

@@ -234,6 +234,18 @@ TEST(dns, with_no_server_anywhere_the_answer_is_immediate_and_distinct) {
     CHECK_EQ(dns_resolve("example.com", &ip), -1);
 }
 
+TEST(dns, a_machine_with_no_network_fails_at_once_and_sends_nothing) {
+    fresh();
+    fake_user_net_set_dhcp_dns(0);
+    resolv("nameserver 1.1.1.1\n");
+    fake_user_net_add_server(PUBLIC_A, FAKE_DNS_ANSWER, ANSWER);
+    fake_user_net_set_netconf_fails(1);
+
+    uint32_t ip = 0;
+    CHECK_EQ(dns_resolve("example.com", &ip), -1);
+    CHECK_EQ(fake_user_net_queries_seen(PUBLIC_A), 0);
+}
+
 TEST(dns, a_socket_that_cannot_be_opened_is_reported_as_such) {
     fresh();
     fake_user_net_set_dhcp_dns(DHCP_DNS);

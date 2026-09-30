@@ -16,6 +16,12 @@ anything; given the file itself it reads that. The file is a ring - once it
 is full the kernel goes back to its start - so opened in an editor after it
 has wrapped, the newest text is at the top. This puts it back in order.
 
+A busy second's [t+] line names where the kernel's time went (M202):
+"sys#N" becomes the system call's name from system_api/include/syscall.h,
+and an address after "at" becomes function+offset from build/kernel.elf -
+which is only right while that file is the kernel the stick booted, so
+--raw leaves both alone.
+
 Two other forms are for tools/make-hardware-image.sh:
     --make-area <sectors>                           an empty area, to stdout
     --locate <image> <esp_lba> <esp_sectors> <file> the file's first LBA
@@ -26,6 +32,7 @@ import os
 import re
 import sys
 
+REPOSITORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SECTOR = 512
 MAGIC = b"LEAN_OS LOG AREA 1\n"
 
@@ -118,6 +125,65 @@ def in_order(area):
     return fields, text.strip(b"\n") + b"\n"
 
 
+def syscall_names():
+    names = {}
+    path = os.path.join(REPOSITORY, "system_api", "include", "syscall.h")
+    try:
+        with open(path) as f:
+            for line in f:
+                m = re.match(r"#define SYS_(\w+)\s+(\d+)\b", line)
+                if m:
+                    names[int(m.group(2))] = m.group(1)
+    except OSError:
+        pass
+    return names
+
+
+def kernel_symbols():
+    elf = os.path.join(REPOSITORY, "build", "kernel.elf")
+    if not os.path.exists(elf):
+        return []
+    import subprocess
+    for nm in ("x86_64-elf-nm", "nm"):
+        try:
+            out = subprocess.run([nm, "-n", elf], capture_output=True, text=True, check=True).stdout
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        symbols = []
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) == 3 and parts[1] in "tTwW":
+                symbols.append((int(parts[0], 16), parts[2]))
+        return symbols
+    return []
+
+
+def annotate(text):
+    names = syscall_names()
+    symbols = kernel_symbols()
+    import bisect
+    starts = [a for a, _ in symbols]
+
+    def where(address):
+        i = bisect.bisect_right(starts, address) - 1
+        if i < 0:
+            return "0x%x" % address
+        return "%s+0x%x" % (symbols[i][1], address - symbols[i][0])
+
+    def line(m):
+        body = m.group(0)
+        body = re.sub(r"sys#(\d+)", lambda n: names.get(int(n.group(1)), n.group(0)), body)
+        if symbols:
+            head, sep, tail = body.partition(", at ")
+            if sep:
+                at, rest_sep, rest = tail.partition(";")
+                at = re.sub(r"0x([0-9a-f]+)", lambda n: where(int(n.group(1), 16)), at)
+                body = head + sep + at + rest_sep + rest
+        return body
+
+    return re.sub(r"^\[t\+[^\n]*kernel samples[^\n]*$", line, text, flags=re.M)
+
+
 def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "--make-area":
         make_area(int(sys.argv[2]))
@@ -130,6 +196,7 @@ def main():
     parser.add_argument("source", help="/dev/diskN, an image, or a copied LEANOS.LOG")
     parser.add_argument("--last", action="store_true", help="only the most recent boot")
     parser.add_argument("-o", "--output", help="write here instead of to stdout")
+    parser.add_argument("--raw", action="store_true", help="leave sys#N and kernel addresses as numbers")
     arguments = parser.parse_args()
 
     fields, text = in_order(area_bytes(arguments.source))
@@ -137,6 +204,8 @@ def main():
         marks = [m.start() for m in re.finditer(rb"^===== lean_os boot \d+ =====$", text, re.M)]
         if marks:
             text = text[marks[-1]:]
+    if not arguments.raw:
+        text = annotate(text.decode("utf-8", "replace")).encode("utf-8")
     sys.stderr.write("%s: %d boots recorded%s\n" % (
         arguments.source, fields["boots"],
         ", the oldest text overwritten" if fields["wrapped"] else ""))

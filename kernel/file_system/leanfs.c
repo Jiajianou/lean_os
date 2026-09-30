@@ -17,6 +17,15 @@ static leanfs_superblock_t sb;
 static leanfs_inode_t *inodes;
 static uint8_t bitmap[BITMAP_BLOCKS * LEANFS_BLOCK_SIZE];
 
+/* M202: no block below this one is free. alloc_block tested every bit from
+   zero for every block it handed out - on a disk with a browser on it that
+   is a few hundred thousand tests per 4 KiB written, under the filesystem
+   lock, so each chrome process writing its profile held up every other
+   one's file operations. The answer is still the lowest free block; this
+   only remembers where the used run at the bottom ends. Anything that
+   rewrites the whole bitmap puts it back to zero. */
+static uint32_t lowest_free_hint;
+
 _Static_assert((sizeof(leanfs_inode_t) * LEANFS_MAX_INODES) % LEANFS_BLOCK_SIZE == 0,
                "the inode table must be a whole number of blocks so save_meta can write it in place");
 
@@ -256,6 +265,7 @@ static void format(void) {
 
     k_memset(inodes, 0, sizeof(inodes));
     k_memset(bitmap, 0, sizeof(bitmap));
+    lowest_free_hint = 0;
     bitmap[0] |= 1u;
     mark_block_bit(0);
 
@@ -314,6 +324,7 @@ void leanfs_init(void) {
     } else {
         read_run(sb.inode_table_block, sb.inode_table_blocks, (uint8_t *)inodes);
         read_run(sb.bitmap_block, sb.bitmap_blocks_field, bitmap);
+        lowest_free_hint = 0;
 
         if (inodes[ROOT_INODE].type != LEANFS_TYPE_DIRECTORY) {
             kernel_log_puts("[fs] leanfs root inode is not a directory - reformatting\n");
@@ -348,6 +359,9 @@ static void bitmap_set(uint32_t bit) {
 static void bitmap_clear(uint32_t bit) {
     bitmap[bit / 8] &= (uint8_t)~(1u << (bit % 8));
     mark_block_bit(bit);
+    if (bit < lowest_free_hint) {
+        lowest_free_hint = bit;
+    }
 }
 
 static int block_valid(uint32_t block) {
@@ -359,12 +373,20 @@ static int block_present(uint32_t block) {
 }
 
 static int alloc_block(void) {
-    for (uint32_t i = 0; i < sb.data_blocks; i++) {
+    uint32_t i = lowest_free_hint;
+    while (i < sb.data_blocks) {
+        if ((i % 8) == 0 && bitmap[i / 8] == 0xFFu) {
+            i += 8;
+            continue;
+        }
         if (!bitmap_test(i)) {
             bitmap_set(i);
+            lowest_free_hint = i + 1;
             return (int)i;
         }
+        i++;
     }
+    lowest_free_hint = sb.data_blocks;
     return -1;
 }
 
@@ -563,6 +585,7 @@ uint32_t leanfs_check(void) {
 
     if (orphans || missing) {
         k_memcpy(bitmap, check_bitmap, sizeof(bitmap));
+        lowest_free_hint = 0;
         mark_all_blocks();
         save_meta();
     }

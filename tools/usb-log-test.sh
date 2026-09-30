@@ -112,6 +112,18 @@ if wanted not in disk:
              % (at, wanted[at:at + 256]))
 PYTHON
 
+# M202: a busy second says where the kernel's time went, and the reader
+# names what it says. Booting is busy enough to produce one; a line that
+# still carries sys#N after reading means the syscall table was not found.
+grep -qE "^\[t\+[0-9]+\.[0-9]s\] .*; kernel samples [0-9]+ in " "$WORK/disk-1.log" \
+  && pass "a busy second's stamp names where the kernel's time went" \
+  || fail "no stamp line in the disk log carries '; kernel samples N in'"
+if grep -q "kernel samples.*sys#[0-9]" "$WORK/disk-1.log"; then
+  fail "read-usb-log.py left a system call as sys#N rather than naming it"
+else
+  pass "every system call in the profile is named"
+fi
+
 echo "Boot 2 of 4..."
 boot "$WORK/serial-2.log" || fail "boot 2 did not reach the desktop"
 tools/read-usb-log.py "$IMAGE" > "$WORK/disk-2.log" 2>/dev/null || true

@@ -484,8 +484,14 @@ void LeanOsWindow::DispatchMouse(int32_t x, int32_t y, uint8_t buttons,
   }
 
   // One record can, in principle, carry two buttons changing at once; each
-  // becomes its own press or release, and the flags on each say what is held
-  // AFTER it, which is what a ui::MouseEvent means by them.
+  // becomes its own press or release. The flags on each are what is held
+  // after it PLUS the button that changed - so a release still names the
+  // button being let go, which is Chromium's convention (Wayland's event
+  // source says so in as many words) and what views::Button asks: it fires
+  // on release only when event.flags() includes a button it answers to.
+  // M171 left the released button out, and every button that acts on
+  // release - New Tab, back, reload, a tab's close box - ignored every
+  // click, while everything that acts on press, and every page, worked.
   uint8_t applied = static_cast<uint8_t>(buttons_ ^ changed);
   for (int bit = 0; bit < 3 && weak_ptr; bit++) {
     uint8_t mask = static_cast<uint8_t>(1u << bit);
@@ -495,7 +501,7 @@ void LeanOsWindow::DispatchMouse(int32_t x, int32_t y, uint8_t buttons,
     bool pressed = (buttons & mask) != 0;
     MouseEvent event(pressed ? EventType::kMousePressed : EventType::kMouseReleased,
                      location, location, now,
-                     ButtonFlags(applied) | modifiers, ButtonFlags(mask));
+                     ButtonFlags(applied | mask) | modifiers, ButtonFlags(mask));
     if (pressed && bit == 0)
       event.SetClickCount(1);
     delegate_->DispatchEvent(&event);

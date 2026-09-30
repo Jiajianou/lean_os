@@ -335,6 +335,7 @@ void scheduler_resume_stopped(task_t *t) {
     spin_lock(&scheduler_lock);
     if (t->state == TASK_STOPPED) {
         t->state = TASK_READY;
+        t->ready_since_ms = clock_monotonic_ms();
         t->prio = PRIO_INTERACTIVE;
         t->full_slices = 0;
         t->wait_chan = (const void *)0;
@@ -672,6 +673,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->stack_base = stack_base;
     t->kernel_stack_top = (uint64_t)(stack_base + TASK_STACK_SIZE);
     t->home_cpu = -1;
+    t->kernel_activity = KERNEL_ACTIVITY_NONE;
 
     if (thread_of) {
         /* A thread. It does not get a copy of anything: it points at the
@@ -904,6 +906,7 @@ static int wake_expired_until(uint64_t now_ms, uint64_t *next_deadline_ms) {
         if (now_ms >= tasks[i].wake_deadline_ms) {
             blocked_count--;
             tasks[i].state = TASK_READY;
+            tasks[i].ready_since_ms = clock_monotonic_ms();
             tasks[i].prio = PRIO_INTERACTIVE;
             tasks[i].full_slices = 0;
             tasks[i].last_block_tick = pit_get_ticks();
@@ -1041,6 +1044,7 @@ int scheduler_wake_n(const void *chan, uint64_t space, int max) {
             tasks[i].wait_space == space) {
             blocked_count--;
             tasks[i].state = TASK_READY;
+            tasks[i].ready_since_ms = clock_monotonic_ms();
             tasks[i].prio = PRIO_INTERACTIVE;
             tasks[i].full_slices = 0;
             tasks[i].wait_chan = (const void *)0;
@@ -1111,6 +1115,7 @@ static int wake_pollers_locked(const void *first, const void *second) {
         t->watch_fired = 1;
         blocked_count--;
         t->state = TASK_READY;
+        t->ready_since_ms = clock_monotonic_ms();
         t->prio = PRIO_INTERACTIVE;
         t->full_slices = 0;
         t->wait_chan = (const void *)0;
@@ -1296,6 +1301,7 @@ void scheduler_wake_all(const void *chan) {
         if (tasks[i].state == TASK_BLOCKED && tasks[i].wait_chan == chan) {
             blocked_count--;
             tasks[i].state = TASK_READY;
+            tasks[i].ready_since_ms = clock_monotonic_ms();
             tasks[i].prio = PRIO_INTERACTIVE;
             tasks[i].full_slices = 0;
             tasks[i].wait_chan = (const void *)0;
@@ -1447,6 +1453,7 @@ void schedule(void) {
 
     if (previous->state == TASK_RUNNING) {
         previous->state = TASK_READY;
+        previous->ready_since_ms = clock_monotonic_ms();
     }
     next->state = TASK_RUNNING;
     current_task[cpu] = next;
@@ -1955,6 +1962,7 @@ void scheduler_reap_slot(task_t *t) {
     t->stack_base = NULL;
     t->kernel_stack_top = 0;
     t->home_cpu = -1;
+    t->kernel_activity = KERNEL_ACTIVITY_NONE;
     t->generation++;
     t->state = TASK_FREE;
     t->pending_signal = 0;
@@ -2041,6 +2049,7 @@ void scheduler_wake_task(task_t *t) {
     if (t->state == TASK_BLOCKED) {
         blocked_count--;
         t->state = TASK_READY;
+        t->ready_since_ms = clock_monotonic_ms();
         t->prio = PRIO_INTERACTIVE;
         t->full_slices = 0;
         t->wait_chan = (const void *)0;
@@ -2725,6 +2734,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->stack_base = stack_base;
     t->kernel_stack_top = (uint64_t)(stack_base + TASK_STACK_SIZE);
     t->home_cpu = -1;
+    t->kernel_activity = KERNEL_ACTIVITY_NONE;
 
     t->descriptor_table = fresh;
     for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {

@@ -168,7 +168,11 @@ int connect(int fd, const struct sockaddr *address, socklen_t length) {
             errno = ECONNREFUSED;
             return -1;
         }
-        sys_yield();
+        /* M202: a handshake is a network round trip, and yielding in a loop
+           for it kept a processor busy for the whole of it. A millisecond's
+           sleep between looks costs a connection at most that. */
+        int wait_on = fd;
+        sys_waitfds(&wait_on, 1, 1);
     }
 }
 

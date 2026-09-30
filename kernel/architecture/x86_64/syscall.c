@@ -5878,8 +5878,13 @@ void syscall_handler(isr_regs_t *regs) {
     uint64_t num = regs->rax;
     int timing = syscall_counters_timing_enabled();
     uint64_t started = timing ? tsc_read() : 0;
+    task_t *self = scheduler_current();
+    uint16_t outer = self->kernel_activity;
+    self->kernel_activity = (uint16_t)(num < SYSCALL_COUNT ? num + 1 : KERNEL_ACTIVITY_NONE);
 
     syscall_dispatch(regs);
+
+    self->kernel_activity = outer;
 
     syscall_counters_record((int)num, timing ? (tsc_read() - started) : 0);
 }

@@ -173,6 +173,43 @@ TEST(leanfs, slow_running_out_of_data_blocks_is_an_error_and_leaves_the_disk_usa
     fake_block_device_free();
 }
 
+/* M202: the allocator remembers where the used run at the bottom of the disk
+   ends rather than testing every bit from zero. A hint that stayed above a
+   block somebody freed would hand out nothing but the space above it - which
+   looks exactly like a full disk, so the disk is filled first. */
+TEST(leanfs, slow_a_block_freed_low_on_a_full_disk_is_found_again) {
+    fs_fixture();
+    char chunk[LEANFS_BLOCK_SIZE * 16];
+    memset(chunk, 'F', sizeof(chunk));
+    char name[64];
+    int files = 0;
+    while (files < 100000) {
+        snprintf(name, sizeof(name), "/fill%d", files);
+        if (leanfs_write(name, chunk, sizeof(chunk)) != 0) {
+            break;
+        }
+        files++;
+    }
+    REQUIRE(files > 1);
+    int small = 0;
+    while (small < 64) {
+        snprintf(name, sizeof(name), "/tail%d", small);
+        if (leanfs_write(name, "t", 1) != 0) {
+            break;
+        }
+        small++;
+    }
+    CHECK(leanfs_write("/one-more", "x", 1) != 0);
+
+    REQUIRE(leanfs_unlink("/fill0") == 0);
+    CHECK(leanfs_free_blocks() >= 16);
+    CHECK_EQ(leanfs_write("/fill0", chunk, sizeof(chunk)), 0);
+    char back[4];
+    CHECK_EQ(leanfs_read("/fill0", back, sizeof(back)), (int64_t)sizeof(chunk));
+    CHECK_MEMEQ(back, "FFFF", 4);
+    fake_block_device_free();
+}
+
 TEST(leanfs, a_superblock_with_the_wrong_magic_is_reformatted) {
     fs_fixture();
     CHECK_EQ(leanfs_write("/gone", "data", 4), 0);

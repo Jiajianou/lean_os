@@ -248,7 +248,15 @@ static void check_starved_tasks(uint64_t now_ms) {
     for (int i = 0; i < slots; i++) {
         task_t *t = scheduler_task_slot(i);
         if (!t || t->state != TASK_READY || t->is_idle || t->last_ran_ms == 0 ||
-            now_ms - t->last_ran_ms < HANG_READY_MS || t->starvation_reported) {
+            t->starvation_reported) {
+            continue;
+        }
+        /* M202: waiting starts when the task became ready, not when it last
+           ran - a task that slept three seconds and has just been woken is
+           not starved, and the first laptop log with this detector in it
+           reported exactly that. */
+        uint64_t waiting_since = t->ready_since_ms > t->last_ran_ms ? t->ready_since_ms : t->last_ran_ms;
+        if (now_ms < waiting_since || now_ms - waiting_since < HANG_READY_MS) {
             continue;
         }
         t->starvation_reported = 1;
@@ -257,7 +265,7 @@ static void check_starved_tasks(uint64_t now_ms) {
         kernel_log_puts("[hang] ");
         log_task(t);
         kernel_log_puts(" has been ready for ");
-        kernel_log_put_dec((uint32_t)((now_ms - t->last_ran_ms) / 1000u));
+        kernel_log_put_dec((uint32_t)((now_ms - waiting_since) / 1000u));
         kernel_log_puts(" s and no core has run it; bound to cpu ");
         if (t->home_cpu < 0) {
             kernel_log_puts("none");
