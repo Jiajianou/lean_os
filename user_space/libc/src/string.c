@@ -3,45 +3,6 @@
 #include <errno.h>
 #include <stdlib.h>
 
-void *memmove(void *destination, const void *source, size_t n) {
-    unsigned char *d = (unsigned char *)destination;
-    const unsigned char *s = (const unsigned char *)source;
-    if (d == s || n == 0) {
-        return destination;
-    }
-    if (d < s) {
-        for (size_t i = 0; i < n; i++) {
-            d[i] = s[i];
-        }
-    } else {
-        for (size_t i = n; i > 0; i--) {
-            d[i - 1] = s[i - 1];
-        }
-    }
-    return destination;
-}
-
-int memcmp(const void *a, const void *b, size_t n) {
-    const unsigned char *x = (const unsigned char *)a;
-    const unsigned char *y = (const unsigned char *)b;
-    for (size_t i = 0; i < n; i++) {
-        if (x[i] != y[i]) {
-            return (int)x[i] - (int)y[i];
-        }
-    }
-    return 0;
-}
-
-void *memchr(const void *s, int c, size_t n) {
-    const unsigned char *p = (const unsigned char *)s;
-    for (size_t i = 0; i < n; i++) {
-        if (p[i] == (unsigned char)c) {
-            return (void *)(p + i);
-        }
-    }
-    return (void *)0;
-}
-
 void *memrchr(const void *s, int c, size_t n) {
     const unsigned char *p = (const unsigned char *)s;
     for (size_t i = n; i > 0; i--) {

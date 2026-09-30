@@ -9,6 +9,7 @@
 #include "profile/sampler.h"
 #include "xhci.h"
 #include "scheduler/scheduler_diagnostics.h"
+#include "architecture/x86_64/timestamp_counter.h"
 
 #define PIT_CHANNEL0_DATA 0x40
 #define PIT_COMMAND       0x43
@@ -23,15 +24,17 @@ static volatile uint64_t ticks;
 static void (*tick_hook)(void);
 
 static void pit_irq(isr_regs_t *regs) {
+    uint64_t started = tsc_read();
     ticks++;
     profile_sample(regs);
     scheduler_account_tick((regs->cs & 3) != 0);
     pc_speaker_tick();
     xhci_poll();
+    scheduler_diagnostics_tick(ticks);
+    interrupt_time_account(tsc_read() - started);
     if (tick_hook) {
         tick_hook();
     }
-    scheduler_diagnostics_tick(ticks);
 }
 
 void pit_init(void) {

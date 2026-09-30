@@ -526,6 +526,10 @@ long sys_uptime_ms(void) {
     return do_syscall(SYS_uptime_ms, 0, 0, 0);
 }
 
+long sys_clock_ns(void) {
+    return do_syscall(SYS_clock_ns, 0, 0, 0);
+}
+
 long sys_kernel_log(uint64_t from, char *buffer, size_t max, uint64_t *next_out) {
     return do_syscall6(SYS_kernel_log, (long)from, (long)buffer, (long)max, (long)next_out, 0, 0);
 }

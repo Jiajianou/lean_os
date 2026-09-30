@@ -56,6 +56,8 @@ check $? "and it has the Linux half of its sub-repositories${MISSING:+ - missing
 APPLIED=0
 DRIFTED=0
 PATCH_FILES=$(ls "$ROOT/$PATCHES"/*.patch 2>/dev/null)
+KEEP_STATE="$ROOT/build/chromium-patched-mtimes.json"
+python3 "$ROOT/tools/keep-mtimes.py" save "$SRC" "$KEEP_STATE" $(sed -n 's|^--- a/||p' $PATCH_FILES | sort -u)
 for f in $(sed -n 's|^--- a/||p' $PATCH_FILES | sort -u); do
   if (cd "$SRC" && git ls-files --error-unmatch "$f" > /dev/null 2>&1); then
     (cd "$SRC" && git checkout -- "$f")
@@ -84,6 +86,7 @@ for p in $PATCH_FILES; do
   echo "chromium-test: $(basename "$p") does not apply to $REVISION" >&2
   DRIFTED=$((DRIFTED + 1))
 done
+python3 "$ROOT/tools/keep-mtimes.py" restore "$SRC" "$KEEP_STATE" >&2
 [ "$DRIFTED" = "0" ]
 check $? "all $APPLIED fork patches apply to the pinned revision, in order"
 

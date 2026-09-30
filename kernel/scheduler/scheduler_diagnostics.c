@@ -332,21 +332,71 @@ void scheduler_hang_statistics(hang_statistics_t *out) {
     *out = statistics;
 }
 
+/* What a core said when the detector sent it an NMI. The handler takes no
+   lock - the core it interrupted may be holding the log's, and a handler
+   that waited for it would turn a slow core into a dead one - so it only
+   fills this in, and the next check on cpu 0 prints it. */
+typedef struct {
+    volatile int ready;
+    uint64_t rip;
+    int user_mode;
+    const task_t *task;
+    uint32_t returns;
+    uint64_t return_addresses[HANG_RETURNS_SHOWN];
+} nmi_answer_t;
+
+static nmi_answer_t answers[MAX_CPUS];
+
 void scheduler_hang_report_this_cpu(int cpu, uint64_t rip, uint64_t rsp, int user_mode) {
     report_requested[cpu] = 0;
-    statistics.answers++;
-    statistics.last_answer_rip = rip;
+    nmi_answer_t *a = &answers[cpu];
+    if (a->ready) {
+        return;
+    }
     task_t *t = scheduler_cpu_current(cpu);
-    kernel_log_puts("[hang] cpu ");
-    kernel_log_put_dec((uint32_t)cpu);
-    kernel_log_puts(" answers: running ");
-    log_task(t);
-    kernel_log_puts(user_mode ? " in user mode" : " in the kernel");
-    kernel_log_puts(" at rip 0x");
-    kernel_log_put_hex64(rip);
-    kernel_log_putc('\n');
-    if (!user_mode) {
-        scheduler_log_kernel_returns(rsp, t ? t->kernel_stack_top : 0);
+    a->rip = rip;
+    a->user_mode = user_mode;
+    a->task = t;
+    a->returns = 0;
+    uint64_t stack_top = t ? t->kernel_stack_top : 0;
+    if (!user_mode && rsp != 0 && stack_top != 0 && rsp < stack_top) {
+        for (uint64_t at = rsp & ~7ull, words = 0;
+             at + 8 <= stack_top && words < HANG_STACK_WORDS && a->returns < HANG_RETURNS_SHOWN;
+             at += 8, words++) {
+            uint64_t word = *(const volatile uint64_t *)(uintptr_t)at;
+            if (is_kernel_text(word)) {
+                a->return_addresses[a->returns++] = word;
+            }
+        }
+    }
+    __atomic_store_n(&a->ready, 1, __ATOMIC_RELEASE);
+}
+
+static void print_answers(void) {
+    for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+        nmi_answer_t *a = &answers[cpu];
+        if (!__atomic_load_n(&a->ready, __ATOMIC_ACQUIRE)) {
+            continue;
+        }
+        statistics.answers++;
+        statistics.last_answer_rip = a->rip;
+        kernel_log_puts("[hang] cpu ");
+        kernel_log_put_dec((uint32_t)cpu);
+        kernel_log_puts(" answers: running ");
+        log_task(a->task);
+        kernel_log_puts(a->user_mode ? " in user mode" : " in the kernel");
+        kernel_log_puts(" at rip 0x");
+        kernel_log_put_hex64(a->rip);
+        kernel_log_putc('\n');
+        if (!a->user_mode) {
+            kernel_log_puts("  kernel return addresses:");
+            for (uint32_t i = 0; i < a->returns; i++) {
+                kernel_log_puts(" 0x");
+                kernel_log_put_hex32((uint32_t)a->return_addresses[i]);
+            }
+            kernel_log_puts(a->returns ? "\n" : " none\n");
+        }
+        __atomic_store_n(&a->ready, 0, __ATOMIC_RELEASE);
     }
 }
 
@@ -478,6 +528,7 @@ void scheduler_hang_check(void) {
         seen_switches[c] = switches;
         seen_sys_ticks[c] = sys;
     }
+    print_answers();
     check_lock_waits(clock_monotonic_ms());
     check_starved_tasks(clock_monotonic_ms());
     __atomic_store_n(&hang_check_running, 0, __ATOMIC_RELEASE);

@@ -20,6 +20,10 @@ uint64_t physical_memory_total_frame_count(void);
 uint64_t physical_memory_tracked_limit(void);
 
 uint64_t physical_memory_alloc_frame_above(uint64_t min_phys);
+/* M200: where the frame bitmap and reference counts end - they sit just past
+   the kernel, and a test that wants memory nothing else is writing to asks
+   for a frame above them. */
+uint64_t physical_memory_metadata_end(void);
 
 uint64_t physical_memory_alloc_contiguous(uint64_t count);
 

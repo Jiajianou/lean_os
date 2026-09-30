@@ -738,6 +738,27 @@ static void take_ownership(void) {
     }
 }
 
+/* The root ports' connections settle after the controller is started - a
+   device's debounce and power-good times, a few hundred milliseconds at the
+   outside. This was thirty million pause instructions, which is a length of
+   time only on the machine it was measured on: under QEMU a small fraction of
+   a second, and on the laptop's Tiger Lake, where pause is about 140 cycles,
+   1.4 s - for each of its two controllers, every boot. It is measured on the
+   TSC now, with the old count as the fallback for a clock that is not
+   calibrated. */
+#define PORT_SETTLE_US 300000u
+
+static void settle_ports(void) {
+    uint64_t start = tsc_read();
+    for (uint32_t i = 0; i < 30000000u; i++) {
+        uint64_t waited = tsc_to_us(tsc_read() - start);
+        if (waited >= PORT_SETTLE_US) {
+            return;
+        }
+        __asm__ volatile("pause");
+    }
+}
+
 int xhci_init(void) {
     pci_device_t dev;
     for (uint32_t index = 0; index < 4; index++) {
@@ -863,9 +884,7 @@ int xhci_init(void) {
         kernel_log_put_dec(context_size);
         kernel_log_puts("-byte contexts\n");
 
-        for (uint32_t i = 0; i < 30000000u; i++) {
-            __asm__ volatile("pause");
-        }
+        settle_ports();
 
         for (uint32_t port = 1; port <= max_ports; port++) {
             enumerate_port(port);

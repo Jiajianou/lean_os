@@ -141,8 +141,28 @@ int i2c_touchpad_init(void) {
         return 0;
     }
 
+    /* M200: where touchpads live, first. The sweep asks every address from
+       0x08 up and an address nobody answers costs tens of milliseconds, so
+       the laptop's Elan pad at 0x15 was found after fourteen of them - 0.6 s
+       of every boot. Elan and Synaptics parts are at 0x15 and 0x2C on almost
+       every machine; the sweep is still there for the ones that are not. */
+    static const uint8_t likely[] = {0x15, 0x2C, 0x10, 0x14, 0x20, 0x2A, 0x38, 0x5D};
+    const int likely_count = (int)(sizeof(likely) / sizeof(likely[0]));
     for (int controller = 0; controller < controllers && found_controller < 0; controller++) {
-        for (uint8_t address = FIRST_ADDRESS; address <= LAST_ADDRESS; address++) {
+        for (int step = 0; step < likely_count + (LAST_ADDRESS - FIRST_ADDRESS + 1); step++) {
+            uint8_t address;
+            if (step < likely_count) {
+                address = likely[step];
+            } else {
+                address = (uint8_t)(FIRST_ADDRESS + (step - likely_count));
+                int tried = 0;
+                for (int k = 0; k < likely_count; k++) {
+                    tried |= likely[k] == address;
+                }
+                if (tried) {
+                    continue;
+                }
+            }
             if (!address_answers(controller, address)) {
                 continue;
             }

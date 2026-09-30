@@ -403,8 +403,8 @@ int main(void) {
             fail("CLOCK_MONOTONIC went backwards");
         }
         struct timespec res;
-        if (clock_getres(CLOCK_MONOTONIC, &res) != 0 || res.tv_nsec != 1000000L) {
-            fail("clock_getres does not report a millisecond");
+        if (clock_getres(CLOCK_MONOTONIC, &res) != 0 || res.tv_sec != 0 || res.tv_nsec != 1L) {
+            fail("clock_getres does not report the nanosecond the clock reads in (M200)");
         }
         struct timeval tv;
         if (gettimeofday(&tv, 0) != 0 || tv.tv_usec < 0 || tv.tv_usec >= 1000000) {

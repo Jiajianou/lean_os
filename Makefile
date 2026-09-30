@@ -162,6 +162,12 @@ $(UOBJ)/%.o: user_space/init/%.c | $(UOBJ)
 $(UOBJ)/%.o: user_space/shell/%.c | $(UOBJ)
 	$(CC) $(USER_CFLAGS) $< -o $@
 
+# The program is /bin/sh and its source is shell.c: the cleanup that renamed
+# the file left nothing that builds sh.o, so every tree since reused whatever
+# build/sh.elf it already had and a fresh checkout could not build at all.
+$(UOBJ)/sh.o: user_space/shell/shell.c | $(UOBJ)
+	$(CC) $(USER_CFLAGS) $< -o $@
+
 .SECONDARY:
 
 $(BUILD)/%.elf: $(UOBJ)/%.o $(USER_LIBOBJS) $(USER_LD)
@@ -707,7 +713,7 @@ TEST_FAKES := tests/fakes/fake_panic.c tests/fakes/fake_klog.c \
               tests/fakes/fake_fwcfg.c tests/fakes/fake_pci.c \
               tests/fakes/fake_arch.c tests/fakes/fake_kernel_objects.c \
               tests/fakes/fake_user_syscalls.c tests/fakes/fake_user_fs.c \
-              tests/fakes/fake_user_net.c
+              tests/fakes/fake_user_net.c tests/fakes/fake_framebuffer.c
 
 TEST_KERNEL_SRCS := kernel/library/kernel_library.c kernel/memory_management/heap.c kernel/file_system/leanfs.c \
                     kernel/network/arp.c kernel/network/ip.c kernel/network/icmp.c \
@@ -722,7 +728,8 @@ TEST_KERNEL_SRCS := kernel/library/kernel_library.c kernel/memory_management/hea
                     kernel/process/resource_limits.c kernel/boot/boot_options.c \
                     kernel/drivers/hid_report.c kernel/drivers/i2c_hid.c \
                     kernel/drivers/designware_i2c_timing.c kernel/drivers/designware_i2c.c \
-                    kernel/drivers/usb_storage_protocol.c kernel/drivers/disk_log_area.c
+                    kernel/drivers/usb_storage_protocol.c kernel/drivers/disk_log_area.c \
+                    kernel/drivers/console.c
 
 TEST_USER_SRCS := user_space/library/symbol_table.c \
                   user_space/library/sha256.c user_space/library/os_package.c \

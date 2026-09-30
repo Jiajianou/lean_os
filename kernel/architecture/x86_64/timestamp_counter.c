@@ -39,6 +39,10 @@ uint64_t clock_monotonic_ms(void) {
     return clock_monotonic_ns() / 1000000ULL;
 }
 
+uint64_t clock_deadline_ms(uint64_t timeout_ms) {
+    return (clock_monotonic_ns() + timeout_ms * 1000000ULL + 999999ULL) / 1000000ULL;
+}
+
 uint64_t tsc_to_us(uint64_t cycles) {
     if (cycles_per_us == 0) {
         return 0;

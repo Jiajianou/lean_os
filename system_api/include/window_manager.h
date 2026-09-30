@@ -139,7 +139,19 @@ typedef enum {
        about a click outside itself. */
     WINDOW_MANAGER_ACTION_CAPTURE = 16,
     WINDOW_MANAGER_ACTION_RELEASE_CAPTURE = 17,
+    /* M200: a present of part of the window. A rectangle does not fit in one
+       action's value, so it is two actions keyed by the window: the origin,
+       then the size, which is what presents it. Actions from different
+       clients interleave in the one pipe; a window's own come in order. */
+    WINDOW_MANAGER_ACTION_PRESENT_ORIGIN = 18,
+    WINDOW_MANAGER_ACTION_PRESENT_SIZE = 19,
 } window_manager_action_type_t;
+
+static inline int32_t window_manager_pack_pair(uint32_t first, uint32_t second) {
+    return (int32_t)(((first & 0xFFFFu) << 16) | (second & 0xFFFFu));
+}
+static inline uint32_t window_manager_pair_first(int32_t value)  { return ((uint32_t)value >> 16) & 0xFFFFu; }
+static inline uint32_t window_manager_pair_second(int32_t value) { return (uint32_t)value & 0xFFFFu; }
 
 static inline int32_t window_manager_pack_mode(uint32_t width, uint32_t height) {
     return (int32_t)(((width & 0xFFFFu) << 16) | (height & 0xFFFFu));

@@ -1,5 +1,6 @@
 #include "disk_log.h"
 
+#include "architecture/x86_64/interrupt_service_routines.h"
 #include "architecture/x86_64/symmetric_multiprocessing.h"
 #include "architecture/x86_64/timestamp_counter.h"
 #include "boot/boot_options.h"
@@ -92,15 +93,16 @@ static uint64_t stamp_last_written_sectors;
 static uint64_t stamp_last_total[MAX_CPUS];
 static uint64_t stamp_last_idle[MAX_CPUS];
 static uint64_t stamp_last_halted_us[MAX_CPUS];
+static uint64_t stamp_last_interrupt_us[MAX_CPUS];
 static int at_line_start = 1;
 
 /* M199: who. A core at 100% for a minute after the browser closed was
    the whole of the evidence the laptop gave, and "cpu busy % 100" does not
-   say which task - so when any core is busy the line names the three tasks
+   say which task - so when any core is a tenth busy the line names the three tasks
    that used the most of the second, in hundredths of a core, and how much
    of it was in the kernel. */
 #define TOP_TASKS 3
-#define TOP_BUSY_PERCENT 50u
+#define TOP_BUSY_PERCENT 10u
 
 static int append_top_tasks(const uint32_t *busy_percent, int cpus) {
     int busy = 0;
@@ -221,6 +223,25 @@ static int append_stamp(int log_grew) {
             }
         }
     }
+    uint32_t interrupt_percent[MAX_CPUS];
+    int any_interrupts = 0;
+    for (int c = 0; c < cpus; c++) {
+        uint64_t spent = interrupt_time_us(c) - stamp_last_interrupt_us[c];
+        interrupt_percent[c] = elapsed_us ? (uint32_t)(spent * 100u / elapsed_us) : 0;
+        if (interrupt_percent[c] >= 5) {
+            any_interrupts = 1;
+        }
+    }
+    if (any_interrupts) {
+        if (append_text("; in interrupts %") != 0) {
+            return -1;
+        }
+        for (int c = 0; c < cpus; c++) {
+            if (append_text(" ") != 0 || append_decimal(interrupt_percent[c]) != 0) {
+                return -1;
+            }
+        }
+    }
     if (append_top_tasks(busy_percent, cpus) != 0 || append_text("\n") != 0) {
         return -1;
     }
@@ -231,6 +252,7 @@ static int append_stamp(int log_grew) {
         stamp_last_total[c] = scheduler_total_ticks(c);
         stamp_last_idle[c] = scheduler_idle_ticks(c);
         stamp_last_halted_us[c] = scheduler_halted_us(c);
+        stamp_last_interrupt_us[c] = interrupt_time_us(c);
     }
     return 0;
 }
@@ -314,6 +336,24 @@ static int flush_once(void) {
     return block_device_flush();
 }
 
+static volatile int flushing;
+static int started;
+
+/* M200. A panic stopped the machine with its last words on the screen and
+   not on the stick - the one place a laptop with no serial port keeps them.
+   The panicking core writes the log once more itself, but only when nothing
+   can be half-way through the same work: not while this writer is mid-flush
+   (its buffers are in pieces), and not while the block layer's lock is held
+   (a halted core holding it would never let go). Otherwise the panic stays
+   what it was, a picture. */
+int disk_log_flush_on_panic(void) {
+    if (!started || flushing || !block_device_idle()) {
+        return -1;
+    }
+    flushing = 1;
+    return flush_once();
+}
+
 static void disk_log_task(void *argument) {
     (void)argument;
     int failures = 0;
@@ -321,7 +361,10 @@ static void disk_log_task(void *argument) {
         /* A second is short enough that a machine which freezes still leaves
            the last thing it said on the stick, and long enough that the
            writes are a trickle on a 5 MB/s USB stick. */
-        if (flush_once() != 0) {
+        flushing = 1;
+        int flushed = flush_once();
+        flushing = 0;
+        if (flushed != 0) {
             failures++;
             if (failures == 3) {
                 kernel_log_puts("[disk-log] three writes to the log area failed - stopping.\n");
@@ -371,5 +414,6 @@ void disk_log_start(void) {
     task_t *writer = task_spawn("disk_log", disk_log_task, 0);
     if (writer) {
         writer->parent_id = -1;
+        started = 1;
     }
 }

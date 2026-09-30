@@ -14,6 +14,7 @@
 #include "scheduler/scheduler.h"
 #include "signal.h"
 #include "architecture/x86_64/syscall_entry.h"
+#include "timestamp_counter.h"
 
 #define PAGE_FAULT_VECTOR 14
 #define BREAKPOINT_VECTOR 3
@@ -327,6 +328,19 @@ void irq_enable_line(uint8_t irq) {
     }
 }
 
+static uint64_t interrupt_cycles[MAX_CPUS];
+
+void interrupt_time_account(uint64_t cycles) {
+    int cpu = smp_current_cpu();
+    if (cpu >= 0 && cpu < MAX_CPUS) {
+        interrupt_cycles[cpu] += cycles;
+    }
+}
+
+uint64_t interrupt_time_us(int cpu) {
+    return (cpu >= 0 && cpu < MAX_CPUS) ? tsc_to_us(interrupt_cycles[cpu]) : 0;
+}
+
 void irq_handler(isr_regs_t *r) {
     uint8_t irq = (uint8_t)(r->vector - 32);
     if (ioapic_available()) {
@@ -337,7 +351,11 @@ void irq_handler(isr_regs_t *r) {
     ioapic_count_irq(r->vector, smp_current_cpu());
     random_feed(&r->vector, 1);
     if (irq_handlers[irq]) {
+        uint64_t started = irq != 0 ? tsc_read() : 0;
         irq_handlers[irq](r);
+        if (irq != 0) {
+            interrupt_time_account(tsc_read() - started);
+        }
     } else {
         kernel_log_puts("[irq] unhandled IRQ ");
         kernel_log_put_hex64(irq);

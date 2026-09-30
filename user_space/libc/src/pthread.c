@@ -232,8 +232,7 @@ int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m) {
 }
 
 /* How long until an absolute deadline, on the clock this variable keeps its
-   deadlines on. The answer is in milliseconds because that is the futex
-   wait's unit and the resolution of every clock on this machine.
+   deadlines on, in nanoseconds.
 
    Getting the clock wrong here does not fail: it returns a number, and the
    number is enormous and negative, so the wait expires immediately and the
@@ -243,40 +242,40 @@ int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m) {
    on a single core for four hundred seconds and its renderer never drew
    anything. 227 million clock reads and 1,786 futex waits is what that looks
    like from underneath. */
-static long cond_remaining_ms(const pthread_cond_t *c,
-                              const struct timespec *abstime) {
+static long long cond_remaining_ns(const pthread_cond_t *c,
+                                   const struct timespec *abstime) {
     struct timespec now;
     if (clock_gettime(c->clock, &now) != 0) {
         return 0;
     }
-    long long left = ((long long)abstime->tv_sec - (long long)now.tv_sec) * 1000LL +
-                     ((long long)abstime->tv_nsec - (long long)now.tv_nsec) / 1000000LL;
-    if (left < 0) {
-        return 0;
-    }
-    if (left > 0x7FFFFFFFLL) {
-        left = 0x7FFFFFFFLL;
-    }
-    return (long)left;
+    return ((long long)abstime->tv_sec - (long long)now.tv_sec) * 1000000000LL +
+           ((long long)abstime->tv_nsec - (long long)now.tv_nsec);
 }
 
+/* M200: ETIMEDOUT only once the deadline has passed on the variable's own
+   clock. This compared whole milliseconds of a millisecond clock, rounded the
+   wait down, and so timed out up to a millisecond early - which a caller that
+   checks the time sees as a spurious timeout and waits again for. The futex
+   wait is still in milliseconds, so it is rounded UP and the loop looks at
+   the real clock each time it comes back. */
 int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m,
                             const struct timespec *abstime) {
     if (!c || !m || !abstime) {
         return 22;
     }
-    long remaining_ms = cond_remaining_ms(c, abstime);
-    long deadline = sys_uptime_ms() + remaining_ms;
-
     unsigned observed = c->seq;
     pthread_mutex_unlock(m);
     while (c->seq == observed) {
-        long left = deadline - sys_uptime_ms();
+        long long left = cond_remaining_ns(c, abstime);
         if (left <= 0) {
             pthread_mutex_lock(m);
             return 110;
         }
-        sys_futex(&c->seq, FUTEX_WAIT, observed, (unsigned int)left);
+        long long ms = (left + 999999LL) / 1000000LL;
+        if (ms > 0x7FFFFFFFLL) {
+            ms = 0x7FFFFFFFLL;
+        }
+        sys_futex(&c->seq, FUTEX_WAIT, observed, (unsigned int)ms);
     }
     pthread_mutex_lock(m);
     return 0;

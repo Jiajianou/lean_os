@@ -19,6 +19,17 @@ void LeanOsWindowBuffer::Present() {
   window_manager_send_action(window_id_, WINDOW_MANAGER_ACTION_PRESENT);
 }
 
+void LeanOsWindowBuffer::PresentRect(const gfx::Rect& damage) {
+  if (!alive())
+    return;
+  if (damage.IsEmpty() || damage.Contains(gfx::Rect(size()))) {
+    Present();
+    return;
+  }
+  window_manager_send_damage(window_id_, damage.x(), damage.y(), damage.width(),
+                             damage.height());
+}
+
 LeanOsWindowManager::LeanOsWindowManager() = default;
 
 LeanOsWindowManager::~LeanOsWindowManager() {

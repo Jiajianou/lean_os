@@ -80,6 +80,56 @@ static int monotonic_clock_moves_forward(void) {
     return 0;
 }
 
+/* M200: CLOCK_MONOTONIC was SYS_uptime_ms, and every read of it was a whole
+   millisecond - which Chromium's base::TimeTicks, its frame scheduler and
+   its animations all took for the time. And nanosleep cut its request to a
+   millisecond and could come back early. */
+static int the_monotonic_clock_reads_below_a_millisecond(void) {
+    struct timespec resolution;
+    if (clock_getres(CLOCK_MONOTONIC, &resolution) != 0 || resolution.tv_sec != 0 ||
+        resolution.tv_nsec >= 1000000L) {
+        return 83;
+    }
+    int below = 0;
+    long long smallest_step = 1000000000ll;
+    struct timespec before;
+    clock_gettime(CLOCK_MONOTONIC, &before);
+    for (int i = 0; i < 2000; i++) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_nsec % 1000000L != 0) {
+            below++;
+        }
+        long long step = (long long)(now.tv_sec - before.tv_sec) * 1000000000ll +
+                         ((long long)now.tv_nsec - (long long)before.tv_nsec);
+        if (step < 0) {
+            return 84;
+        }
+        if (step > 0 && step < smallest_step) {
+            smallest_step = step;
+        }
+        before = now;
+    }
+    if (below == 0 || smallest_step >= 1000000ll) {
+        return 85;
+    }
+    for (int i = 0; i < 5; i++) {
+        struct timespec start, end;
+        struct timespec nap = {0, 1500000L};
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        if (nanosleep(&nap, 0) != 0) {
+            return 86;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        long long slept = (long long)(end.tv_sec - start.tv_sec) * 1000000000ll +
+                          ((long long)end.tv_nsec - (long long)start.tv_nsec);
+        if (slept < 1500000ll) {
+            return 87;
+        }
+    }
+    return 0;
+}
+
 static int usable_size_covers_the_request(void) {
     void *p = malloc(100);
     if (!p) {
@@ -585,6 +635,10 @@ int main(int argc, char **argv) {
         return exec_probe(argc, argv);
     }
     int code = monotonic_clock_moves_forward();
+    if (code) {
+        return code;
+    }
+    code = the_monotonic_clock_reads_below_a_millisecond();
     if (code) {
         return code;
     }

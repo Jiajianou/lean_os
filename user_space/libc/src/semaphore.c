@@ -69,12 +69,13 @@ static int wait_until(sem_t *semaphore, const struct timespec *deadline) {
                 errno = EINVAL;
                 return -1;
             }
-            long long left = ((long long)deadline->tv_sec - now.tv_sec) * 1000LL +
-                             ((long long)deadline->tv_nsec - now.tv_nsec) / 1000000LL;
-            if (left <= 0) {
+            long long left_ns = ((long long)deadline->tv_sec - now.tv_sec) * 1000000000LL +
+                                ((long long)deadline->tv_nsec - now.tv_nsec);
+            if (left_ns <= 0) {
                 errno = ETIMEDOUT;
                 return -1;
             }
+            long long left = (left_ns + 999999LL) / 1000000LL;
             timeout_ms = left > 0x7FFFFFFF ? 0x7FFFFFFFu : (unsigned int)left;
         }
         __atomic_fetch_add(&semaphore->waiters, 1, __ATOMIC_RELAXED);

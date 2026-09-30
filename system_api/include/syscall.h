@@ -274,7 +274,10 @@ typedef struct {
    peek that consumed its byte cost this machine every https page. */
 #define SYS_peek                  136
 
-#define SYSCALL_COUNT 137
+/* M200: nanoseconds since boot, from the TSC - what CLOCK_MONOTONIC means.
+   SYS_uptime_ms is the same clock cut to a millisecond. */
+#define SYS_clock_ns              137
+#define SYSCALL_COUNT 138
 
 #ifdef __cplusplus
 }

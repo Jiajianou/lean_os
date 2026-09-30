@@ -74,7 +74,14 @@ class LeanOsCanvas : public SurfaceOzoneCanvas {
             row.minRowBytes(), 0, y);
       }
     }
-    buffer_->Present();
+    // The damage is what viz redrew this frame. Handing it on lets the
+    // compositor recomposite a caret, a spinner or a hover rather than the
+    // whole window - on the laptop's 2x panel a full present is
+    // 3200x2000 pixels written for every frame (M200).
+    if (wrapped_)
+      buffer_->PresentRect(damage);
+    else
+      buffer_->Present();
   }
 
   std::unique_ptr<gfx::VSyncProvider> CreateVSyncProvider() override {

@@ -18,3 +18,10 @@ void pit_set_tick_hook(void (*hook)(void));
    the tick only decides how often the kernel looks. */
 uint64_t clock_monotonic_ns(void);
 uint64_t clock_monotonic_ms(void);
+
+/* M200: the deadline for a wait of timeout_ms that starts now - the first
+   whole millisecond at or after now plus the timeout. Deadlines are kept in
+   milliseconds, and "now" cut to a millisecond made every timed wait end up
+   to a millisecond early, which POSIX does not allow and which a caller that
+   checks the time sees as a spurious timeout to wait again for. */
+uint64_t clock_deadline_ms(uint64_t timeout_ms);

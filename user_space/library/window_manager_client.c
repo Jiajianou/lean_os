@@ -295,6 +295,39 @@ int window_manager_present(window_manager_window_t *win) {
     return window_manager_send_action(win->window_id, WINDOW_MANAGER_ACTION_PRESENT);
 }
 
+int window_manager_present_rect(window_manager_window_t *win, int32_t x, int32_t y, int32_t w, int32_t h) {
+    if (!win || win->window_id < 0) {
+        return -1;
+    }
+    if (x <= 0 && y <= 0 && x + w >= (int32_t)win->width && y + h >= (int32_t)win->height) {
+        return window_manager_present(win);
+    }
+    return window_manager_send_damage(win->window_id, x, y, w, h);
+}
+
+int window_manager_send_damage(int32_t window_id, int32_t x, int32_t y, int32_t w, int32_t h) {
+    if (window_id < 0) {
+        return -1;
+    }
+    if (x < 0) {
+        w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        h += y;
+        y = 0;
+    }
+    if (w <= 0 || h <= 0) {
+        return 0;
+    }
+    if (window_manager_send_action_value(window_id, WINDOW_MANAGER_ACTION_PRESENT_ORIGIN,
+                                         window_manager_pack_pair((uint32_t)x, (uint32_t)y)) != 0) {
+        return -1;
+    }
+    return window_manager_send_action_value(window_id, WINDOW_MANAGER_ACTION_PRESENT_SIZE,
+                                            window_manager_pack_pair((uint32_t)w, (uint32_t)h));
+}
+
 int window_manager_wait_ms(window_manager_window_t *win, const int *extra_file_descriptors, int n_extra, int timeout_ms) {
     int file_descriptors[1 + 8];
     int n = 0;

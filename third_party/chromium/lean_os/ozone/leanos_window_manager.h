@@ -24,6 +24,7 @@
 #include "base/synchronization/lock.h"
 #include "base/threading/thread_checker.h"
 #include "ui/gfx/geometry/point.h"
+#include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/gfx/native_ui_types.h"
 
@@ -51,6 +52,9 @@ class LeanOsWindowBuffer : public base::RefCountedThreadSafe<LeanOsWindowBuffer>
   // any thread once the window has been shown - see LeanOsWindow::Show for
   // why that ordering matters.
   void Present();
+  // Presents only |damage| - the compositor recomposites that rectangle
+  // rather than the whole window.
+  void PresentRect(const gfx::Rect& damage);
 
  private:
   friend class base::RefCountedThreadSafe<LeanOsWindowBuffer>;

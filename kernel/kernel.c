@@ -929,6 +929,12 @@ static void m199_spinner_task(void *arg) {
     irq_restore(flags);
 }
 
+static void panic_test_task(void *arg) {
+    (void)arg;
+    scheduler_sleep_ms(3000);
+    panic("the harness asked for this panic (opt/leanos/panictest)");
+}
+
 static void smp_probe_task(void *arg) {
     volatile int *seen = (volatile int *)arg;
     for (int iter = 0; iter < 30; iter++) {
@@ -2365,7 +2371,7 @@ static void boot_selftests_system(void) {
                 task_t *me = scheduler_current();
                 me->woken_at_ns = 0;
                 me->woken_by_timer = 0;
-                uint64_t due_ns = (start / 1000000u + 3u) * 1000000u;
+                uint64_t due_ns = (start + 3000000u + 999999u) / 1000000u * 1000000u;
                 scheduler_sleep_ms(3);
                 uint64_t resumed = clock_monotonic_ns();
                 uint64_t slept = resumed - start;
@@ -4831,8 +4837,14 @@ static void boot_selftests_system(void) {
             panic("M55 session-resilience self-test: the clients never got their windows up");
         }
 
-        uint32_t a_before = framebuffer_get_pixel(120, 250);
-        uint32_t b_before = framebuffer_get_pixel(420, 320);
+        /* Settled, not sampled: the first match can be a frame of the second
+           window's opening animation passing over the first, and a pixel
+           caught mid-fade was then reported as the compositor's crash taking
+           a client with it. */
+        uint32_t a_before = selftest_pixel_settled(120, 250, 0x00A02020u,
+                                                   "the first client's window to settle");
+        uint32_t b_before = selftest_pixel_settled(420, 320, 0x002060C0u,
+                                                   "the second client's window to settle");
 
         do_syscall(SYS_kill, (uint64_t)comp1->id, SIGKILL, 0);
         do_syscall(SYS_wait, (uint64_t)comp1->id, 0, 0);
@@ -13507,7 +13519,25 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
     }
 
     {
-        uint64_t frame = physical_memory_alloc_frame_above(0x200000ULL);
+        /* M200: a block clear of the kernel and the allocator's own tables.
+           The first frame above 2 MiB is usually in the block the kernel's
+           .bss and the frame bitmap end in, and the two words this compares
+           are then whatever the kernel happens to be keeping there - a
+           counter an interrupt bumps, a bitmap byte the split's own page
+           table allocation flips. A kernel a few kilobytes bigger put the
+           last word on one of them, and a 1 GiB boot panicked here. */
+        extern char __kernel_end[];
+        uint64_t clear = physical_memory_metadata_end();
+        if ((uint64_t)(uintptr_t)__kernel_end > clear) {
+            clear = (uint64_t)(uintptr_t)__kernel_end;
+        }
+        clear = (clear + 0x3FFFFFULL) & ~0x1FFFFFULL;
+        if (clear < 0x200000ULL) {
+            clear = 0x200000ULL;
+        }
+        /* And a megabyte into that block, so the frame the test writes is
+           not the block's first word, which is one of the two it compares. */
+        uint64_t frame = physical_memory_alloc_frame_above(clear + 0x100000ULL);
         if (frame == 0) {
             panic("[m188] no frame to split the identity map around");
         }
@@ -13529,6 +13559,23 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
             panic("[m188] splitting a huge page lost part of the identity map");
         }
         if (probe[0] != 0x0188018801880188ULL || *first != first_before || *last != last_before) {
+            kernel_log_puts("[m188] frame 0x");
+            kernel_log_put_hex64(frame);
+            kernel_log_puts(" block 0x");
+            kernel_log_put_hex64(block);
+            kernel_log_puts(" probe 0x");
+            kernel_log_put_hex64(probe[0]);
+            kernel_log_puts(" first 0x");
+            kernel_log_put_hex64(first_before);
+            kernel_log_puts("->0x");
+            kernel_log_put_hex64(*first);
+            kernel_log_puts(" last 0x");
+            kernel_log_put_hex64(last_before);
+            kernel_log_puts("->0x");
+            kernel_log_put_hex64(*last);
+            kernel_log_puts(" metadata end 0x");
+            kernel_log_put_hex64(physical_memory_metadata_end());
+            kernel_log_putc('\n');
             panic("[m188] a split huge page reads back different memory");
         }
         virtual_memory_map_page(frame, frame, VIRTUAL_MEMORY_FLAG_WRITABLE);
@@ -14593,6 +14640,17 @@ display_self_test_done:
         kernel_log_puts(" s\n");
     }
     kernel_log_puts("[init] PID 1 spawned - handing off to the desktop shell.\n\n");
+
+    /* M200: tools/usb-log-test.sh asks for a panic after the desktop is up,
+       and requires what the machine said as it went down to be in the log
+       on the stick. Only from outside the image, through fw_cfg, the way
+       the self-test switch comes. */
+    {
+        char want[4] = {0};
+        if (fwcfg_read_file("opt/leanos/panictest", want, sizeof(want) - 1) == 1 && want[0] == '1') {
+            task_spawn("panic-test", panic_test_task, (void *)0);
+        }
+    }
 
     scheduler_mark_self_idle();
 

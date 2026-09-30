@@ -32,9 +32,14 @@ clock_t clock(void) {
 
 static wallclock_t realtime_clock;
 
-static long long realtime_ms(void) {
-    return wallclock_ms(&realtime_clock, (long long)sys_time((os_datetime_t *)0),
-                        (long long)sys_uptime_ms());
+/* M200: both clocks are nanoseconds now. They were milliseconds - the
+   monotonic one was SYS_uptime_ms - and every program linked against this
+   library measured time in whole milliseconds: Chromium's base::TimeTicks,
+   its frame scheduler and its animation curves among them, each asking with
+   a system call and getting an answer a millisecond wide. */
+static long long realtime_ns(void) {
+    return wallclock_ns(&realtime_clock, (long long)sys_time((os_datetime_t *)0),
+                        (long long)sys_clock_ns());
 }
 
 int gettimeofday(struct timeval *tv, void *tz) {
@@ -42,9 +47,9 @@ int gettimeofday(struct timeval *tv, void *tz) {
     if (!tv) {
         return -1;
     }
-    long long ms = realtime_ms();
-    tv->tv_sec = (time_t)(ms / 1000);
-    tv->tv_usec = (long)(ms % 1000) * 1000;
+    long long ns = realtime_ns();
+    tv->tv_sec = (time_t)(ns / 1000000000LL);
+    tv->tv_usec = (long)((ns % 1000000000LL) / 1000LL);
     return 0;
 }
 
@@ -58,11 +63,11 @@ int gettimeofday(struct timeval *tv, void *tz) {
    change with it.
 
    CLOCK_MONOTONIC_RAW differs where the monotonic clock is slewed by an
-   adjtime/NTP discipline. sys_uptime_ms is PIT ticks and nothing adjusts it.
+   adjtime/NTP discipline. SYS_clock_ns is the TSC and nothing adjusts it.
 
    The _COARSE pair are the cheap low-resolution reads of their neighbours.
-   Every clock here is already a millisecond, so there is no cheaper one to
-   offer and no resolution being claimed that is not there. */
+   Every read here is one system call whatever its resolution, so there is
+   no cheaper one to offer; they are the same nanosecond clock. */
 static int cpu_time_ns(int who, long long *out_ns) {
     os_rusage_t r;
     if (sys_rusage(who, &r) != 0) {
@@ -82,15 +87,15 @@ int clock_gettime(clockid_t clk, struct timespec *ts) {
     }
     if (clk == CLOCK_MONOTONIC || clk == CLOCK_MONOTONIC_RAW ||
         clk == CLOCK_MONOTONIC_COARSE || clk == CLOCK_BOOTTIME) {
-        long ms = sys_uptime_ms();
-        ts->tv_sec = ms / 1000;
-        ts->tv_nsec = (ms % 1000) * 1000000L;
+        long long ns = (long long)sys_clock_ns();
+        ts->tv_sec = (time_t)(ns / 1000000000LL);
+        ts->tv_nsec = (long)(ns % 1000000000LL);
         return 0;
     }
     if (clk == CLOCK_REALTIME || clk == CLOCK_REALTIME_COARSE) {
-        long long ms = realtime_ms();
-        ts->tv_sec = (time_t)(ms / 1000);
-        ts->tv_nsec = (long)(ms % 1000) * 1000000L;
+        long long ns = realtime_ns();
+        ts->tv_sec = (time_t)(ns / 1000000000LL);
+        ts->tv_nsec = (long)(ns % 1000000000LL);
         return 0;
     }
     if (clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID) {
@@ -129,7 +134,7 @@ int clock_getres(clockid_t clk, struct timespec *res) {
         return -1;
     }
     res->tv_sec = 0;
-    res->tv_nsec = 1000000L;
+    res->tv_nsec = 1L;
     return 0;
 }
 
@@ -295,17 +300,29 @@ static void sleep_ms(long ms) {
     (void)sys_waitfds(&dummy, 0, (int)ms);
 }
 
+/* POSIX says a sleep lasts at least as long as it was asked for. This one
+   took whole milliseconds off a clock the kernel reads in whole milliseconds
+   too, so 1.5 ms slept 1, and a deadline one millisecond out could come due
+   at once. It waits against the nanosecond clock until the time has really
+   passed. */
+static void sleep_ns(long long ns) {
+    long long until = (long long)sys_clock_ns() + ns;
+    for (;;) {
+        long long left = until - (long long)sys_clock_ns();
+        if (left <= 0) {
+            return;
+        }
+        sleep_ms((long)((left + 999999LL) / 1000000LL));
+    }
+}
+
 int nanosleep(const struct timespec *request, struct timespec *rem) {
     if (!request || request->tv_nsec < 0 || request->tv_nsec >= 1000000000L ||
         request->tv_sec < 0) {
         errno = EINVAL;
         return -1;
     }
-    long ms = request->tv_sec * 1000L + request->tv_nsec / 1000000L;
-    if (ms == 0 && (request->tv_sec != 0 || request->tv_nsec != 0)) {
-        ms = 1;
-    }
-    sleep_ms(ms);
+    sleep_ns((long long)request->tv_sec * 1000000000LL + request->tv_nsec);
     if (rem) {
         rem->tv_sec = 0;
         rem->tv_nsec = 0;
@@ -319,11 +336,7 @@ unsigned int sleep(unsigned int seconds) {
 }
 
 int usleep(unsigned int microseconds) {
-    long ms = (long)(microseconds / 1000u);
-    if (ms == 0 && microseconds != 0) {
-        ms = 1;
-    }
-    sleep_ms(ms);
+    sleep_ns((long long)microseconds * 1000LL);
     return 0;
 }
 

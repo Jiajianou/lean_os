@@ -154,6 +154,7 @@ typedef struct {
     int8_t workspace;
     uint8_t alive;
     uint8_t close_requested;
+    int32_t damage_x, damage_y;
     uint8_t confirm_close;
     long close_deadline_ms;
     int32_t client_pid;
@@ -2612,12 +2613,18 @@ static void clamp_window_on_screen(int idx) {
                         max_i32(content_top_limit(), content_bottom_limit() - win->h));
 }
 
-static void present_window(int id) {
+static void present_window_rect(int id, int32_t rx, int32_t ry, int32_t rw, int32_t rh) {
     const window_t *win = &windows[id];
     if (win->minimized || !window_here(win)) {
         return;
     }
-    int32_t x0 = win->x, y0 = win->y, x1 = win->x + win->w, y1 = win->y + win->h;
+    int32_t x0 = win->x + max_i32(rx, 0);
+    int32_t y0 = win->y + max_i32(ry, 0);
+    int32_t x1 = win->x + min_i32(rx + rw, win->w);
+    int32_t y1 = win->y + min_i32(ry + rh, win->h);
+    if (x1 <= x0 || y1 <= y0) {
+        return;
+    }
     if (!present_pending) {
         present_x0 = x0; present_y0 = y0; present_x1 = x1; present_y1 = y1;
         present_pending = 1;
@@ -2629,6 +2636,10 @@ static void present_window(int id) {
     present_y1 = max_i32(present_y1, y1);
 }
 
+static void present_window(int id) {
+    present_window_rect(id, 0, 0, windows[id].w, windows[id].h);
+}
+
 static void accept_one_action(int action_read_file_descriptor) {
     window_manager_action_request_t request;
     if (read_exact(action_read_file_descriptor, &request, sizeof(request)) != (long)sizeof(request)) {
@@ -2637,6 +2648,22 @@ static void accept_one_action(int action_read_file_descriptor) {
     if (request.action == WINDOW_MANAGER_ACTION_PRESENT) {
         if (request.window_id >= 0 && request.window_id < window_count && windows[request.window_id].alive) {
             present_window(request.window_id);
+        }
+        return;
+    }
+    if (request.action == WINDOW_MANAGER_ACTION_PRESENT_ORIGIN ||
+        request.action == WINDOW_MANAGER_ACTION_PRESENT_SIZE) {
+        if (request.window_id < 0 || request.window_id >= window_count || !windows[request.window_id].alive) {
+            return;
+        }
+        window_t *win = &windows[request.window_id];
+        if (request.action == WINDOW_MANAGER_ACTION_PRESENT_ORIGIN) {
+            win->damage_x = (int32_t)window_manager_pair_first(request.value);
+            win->damage_y = (int32_t)window_manager_pair_second(request.value);
+        } else {
+            present_window_rect(request.window_id, win->damage_x, win->damage_y,
+                                (int32_t)window_manager_pair_first(request.value),
+                                (int32_t)window_manager_pair_second(request.value));
         }
         return;
     }

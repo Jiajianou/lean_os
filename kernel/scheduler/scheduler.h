@@ -360,6 +360,14 @@ extern const int scheduler_poll_channel;
 #define SCHEDULER_POLL_CHAN (&scheduler_poll_channel)
 
 extern const int scheduler_keyboard_channel;
+/* M200: what a key or a mouse movement wakes. It used to wake every poller
+   on the machine - every Chromium thread in epoll_wait, every desktop
+   program - a hundred and twenty-five times a second while a finger moved
+   on the touchpad, each to find nothing for it and sleep again. Only a wait
+   that includes the console's input descriptor watches this now; a poller
+   that watches nothing in particular is still woken by it. */
+extern const int scheduler_input_object;
+#define SCHEDULER_INPUT_OBJECT ((const void *)&scheduler_input_object)
 #define SCHEDULER_SLEEP_CHAN (&scheduler_sleep_channel)
 #define SCHEDULER_KEYBOARD_CHAN (&scheduler_keyboard_channel)
 

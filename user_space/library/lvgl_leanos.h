@@ -22,6 +22,10 @@ typedef struct lvgl_window {
     int32_t pointer_x;
     int32_t pointer_y;
     uint8_t pointer_pressed;
+    /* M200: the union of the areas LVGL flushed this refresh, presented as
+       one rectangle on the last flush rather than the whole window. */
+    int32_t damage_x0, damage_y0, damage_x1, damage_y1;
+    uint8_t damage_pending;
     uint32_t key_ring[LVGL_KEY_RING_SIZE];
     uint8_t key_head;
     uint8_t key_tail;

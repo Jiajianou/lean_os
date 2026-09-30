@@ -86,7 +86,7 @@ static void buffer_push(char c) {
     mods_buffer[buffer_head] = (uint8_t)current_modifiers();
     buffer_head = next;
     scheduler_wake_all(SCHEDULER_KEYBOARD_CHAN);
-    scheduler_wake_all(SCHEDULER_POLL_CHAN);
+    scheduler_wake_object(SCHEDULER_INPUT_OBJECT);
 }
 
 static void keyboard_irq(isr_regs_t *regs) {
@@ -201,7 +201,7 @@ void keyboard_inject(char ch, int mods) {
     mods_buffer[buffer_head] = (uint8_t)mods;
     buffer_head = next;
     scheduler_wake_all(SCHEDULER_KEYBOARD_CHAN);
-    scheduler_wake_all(SCHEDULER_POLL_CHAN);
+    scheduler_wake_object(SCHEDULER_INPUT_OBJECT);
 }
 
 int keyboard_peek(void) {

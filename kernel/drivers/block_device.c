@@ -1270,6 +1270,13 @@ uint32_t block_device_journal_scratch_lba(uint32_t blocks) {
     return journal_lba(journal_blocks - blocks);
 }
 
+/* M200: whether anybody holds the block layer right now - asked by a panic
+   that wants to write the log to the stick, and must not spin for ever on a
+   lock a halted core took with it. */
+int block_device_idle(void) {
+    return __atomic_load_n(&block_device_lock.locked, __ATOMIC_ACQUIRE) == 0;
+}
+
 int block_device_flush(void) {
     uint64_t irq = spin_lock_irqsave(&block_device_lock);
     int r = flush_all_locked();

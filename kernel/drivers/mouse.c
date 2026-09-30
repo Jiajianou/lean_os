@@ -41,7 +41,7 @@ static void push_event(mouse_event_t ev) {
     }
     event_buffer[buffer_head] = ev;
     buffer_head = next;
-    scheduler_wake_all(SCHEDULER_POLL_CHAN);
+    scheduler_wake_object(SCHEDULER_INPUT_OBJECT);
 }
 
 static void mouse_irq(isr_regs_t *regs) {

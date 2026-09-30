@@ -135,6 +135,7 @@ run_stage "the PNG reader the browser's picture is graded by" \
 run_stage "what bindgen believes this target is, against gcc" \
   python3 ./tools/chromium-bindgen-test.py
 run_stage "realpath, against the host's" ./tools/realpath-test.sh
+run_stage "memory and string primitives, against the host's" ./tools/string-test.sh
 run_stage "where a thread_local is, against the linker's own answer" ./tools/tls-layout-test.sh
 run_stage "set-resolution's modes are the driver's" ./tools/set-resolution.sh --check
 

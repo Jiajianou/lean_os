@@ -189,6 +189,7 @@ long sys_keyboard_read(char *out);
 long sys_pipe_poll(int fd);
 
 long sys_uptime_ms(void);
+long sys_clock_ns(void);
 
 long sys_kernel_log(uint64_t from, char *buffer, size_t max, uint64_t *next_out);
 

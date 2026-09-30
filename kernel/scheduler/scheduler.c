@@ -102,6 +102,7 @@ static void block_on(const void *chan, uint64_t space, uint64_t deadline_ms, spi
 
 const int scheduler_poll_channel = 0;
 const int scheduler_keyboard_channel = 0;
+const int scheduler_input_object = 0;
 
 static uint64_t idle_ticks[MAX_CPUS];
 static uint64_t total_ticks[MAX_CPUS];
@@ -1366,8 +1367,7 @@ void scheduler_sleep_ms(uint32_t ms) {
     if (!self || self->is_idle) {
         return;
     }
-    uint64_t deadline = clock_monotonic_ms() +
-                        (uint64_t)(ms ? ms : 1);
+    uint64_t deadline = clock_deadline_ms((uint64_t)(ms ? ms : 1));
     uint64_t sflags = irq_save_disable();
     spin_lock(&scheduler_lock);
     self->wait_chan = (const void *)&sleep_channel;

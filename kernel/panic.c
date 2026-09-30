@@ -1,4 +1,5 @@
 #include "panic.h"
+#include "drivers/disk_log.h"
 
 #include "architecture/x86_64/symmetric_multiprocessing.h"
 #include "drivers/framebuffer.h"
@@ -61,6 +62,23 @@ static void panic_render_detail(const char *message, const char *detail) {
                      0x00FFC0C0u);
 }
 
+static int panic_log_flushed;
+
+/* Drawn under the band once the log has reached the stick, so a photograph
+   of the screen says whether there is more to read than the photograph. */
+static void panic_note_log_saved(void) {
+    uint32_t w = framebuffer_width();
+    uint32_t h = framebuffer_height();
+    if (w == 0 || h < 12 * FONT_HEIGHT) {
+        return;
+    }
+    uint32_t y = (h - 10 * FONT_HEIGHT) / 2 + 10 * FONT_HEIGHT;
+    framebuffer_fill_rect(0, y, w, 2 * FONT_HEIGHT, 0x00400000u);
+    panic_draw_text(16, y + FONT_HEIGHT / 2,
+                    "The kernel log up to this panic was saved to \\LOGS\\LEANOS.LOG on the boot stick.",
+                    0x00FFFFFFu);
+}
+
 void panic_render(const char *message) {
     panic_render_detail(message, (const char *)0);
 }
@@ -81,6 +99,10 @@ void panic_with_detail(const char *message, const char *detail) {
     panic_render_detail(message, detail);
     if (smp_is_initialized() && __atomic_exchange_n(&panic_broadcast_sent, 1, __ATOMIC_ACQ_REL) == 0) {
         smp_halt_other_cpus();
+    }
+    if (__atomic_exchange_n(&panic_log_flushed, 1, __ATOMIC_ACQ_REL) == 0 &&
+        disk_log_flush_on_panic() == 0) {
+        panic_note_log_saved();
     }
     for (;;) {
         __asm__ volatile("cli; hlt");

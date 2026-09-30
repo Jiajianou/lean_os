@@ -15,6 +15,7 @@
 
 extern uint8_t __kernel_end[];
 
+static uint64_t metadata_end;
 static uint8_t *bitmap;
 static uint64_t bitmap_bytes;
 
@@ -151,6 +152,7 @@ void physical_memory_init(const uint32_t *e820_map) {
         panic("pmm_init: no usable range large enough to hold the frame bitmap");
     }
 
+    metadata_end = meta_base + meta_bytes;
     bitmap = (uint8_t *)(uintptr_t)meta_base;
     frame_refs = bitmap + align_up(bitmap_bytes, 8);
 
@@ -189,6 +191,10 @@ void physical_memory_init(const uint32_t *e820_map) {
     kernel_log_puts(" MiB); bitmap+refcounts at 0x");
     kernel_log_put_hex64(meta_base);
     kernel_log_putc('\n');
+}
+
+uint64_t physical_memory_metadata_end(void) {
+    return metadata_end;
 }
 
 static uint64_t claim_first_free(uint64_t first, uint64_t limit) {

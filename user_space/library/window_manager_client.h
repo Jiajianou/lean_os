@@ -72,6 +72,11 @@ int window_manager_poll_event(window_manager_window_t *win, window_manager_event
 int window_manager_wait_ms(window_manager_window_t *win, const int *extra_file_descriptors, int n_extra, int timeout_ms);
 
 int window_manager_present(window_manager_window_t *win);
+/* M200: present only the part of the window that changed - a caret, a
+   spinner, a hover - so the compositor recomposites that and not the whole
+   window. */
+int window_manager_present_rect(window_manager_window_t *win, int32_t x, int32_t y, int32_t w, int32_t h);
+int window_manager_send_damage(int32_t window_id, int32_t x, int32_t y, int32_t w, int32_t h);
 
 int window_manager_reconnect_if_needed(window_manager_window_t *win);
 

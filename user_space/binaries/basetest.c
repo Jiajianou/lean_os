@@ -84,13 +84,14 @@ static int the_monotonic_family_is_one_clock(void) {
 }
 
 /* Processor time is accounted a scheduler tick at a time, so these two report
-   the tick and the wall clocks report the millisecond they actually carry. A
+   the tick, and the wall clocks report the nanosecond they actually carry -
+   the TSC, since M200; it was a millisecond while the clock was one. A
    resolution claim that is finer than the counter behind it is a lie that
    costs nothing to tell. */
 static int the_clocks_report_the_resolution_they_have(void) {
     struct timespec res;
     if (clock_getres(CLOCK_MONOTONIC, &res) != 0 || res.tv_sec != 0 ||
-        res.tv_nsec != 1000000L) {
+        res.tv_nsec != 1L) {
         return 9;
     }
     long hz = sysconf(_SC_CLK_TCK);

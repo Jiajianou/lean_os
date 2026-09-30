@@ -72,6 +72,8 @@ long window_manager_test_waitfds(const int *file_descriptors, int count, int tim
 static unsigned char written[256];
 static size_t written_length;
 static int written_file_descriptor;
+static window_manager_action_request_t actions[8];
+static int action_count;
 
 long sys_write(int fd, const void *buffer, size_t length) {
     if (fd == REQUEST_WRITE_END) {
@@ -89,6 +91,9 @@ long sys_write(int fd, const void *buffer, size_t length) {
     written_file_descriptor = fd;
     written_length = length < sizeof(written) ? length : sizeof(written);
     memcpy(written, buffer, written_length);
+    if (length == sizeof(window_manager_action_request_t) && action_count < 8) {
+        memcpy(&actions[action_count++], buffer, length);
+    }
     return (long)length;
 }
 
@@ -157,6 +162,7 @@ static void reset(void) {
     last_timeout = -99;
     waitfds_answer = -2;
     written_length = 0;
+    action_count = 0;
     written_file_descriptor = -1;
     pipe_open_calls = 0;
     action_file_descriptors[0] = -1;
@@ -311,4 +317,50 @@ TEST(window_manager_client, a_compositor_that_never_answers_is_given_up_on) {
     CHECK_EQ(window_manager_connect_desktop(&w), -1);
     CHECK_EQ(requests_sent, WINDOW_MANAGER_CONNECT_ATTEMPTS);
     CHECK_EQ(blocked_on_an_empty_pipe, 0);
+}
+
+/* M200: a present of part of a window is two actions - where, then how
+   big - and a present that covers the window is still the one. */
+TEST(window_manager_client, a_present_of_the_whole_window_is_one_present) {
+    reset();
+    window_manager_window_t w = window(12, 3);
+    w.width = 400;
+    w.height = 300;
+    CHECK_EQ(window_manager_present_rect(&w, 0, 0, 400, 300), 0);
+    CHECK_EQ(action_count, 1);
+    CHECK_EQ(actions[0].action, WINDOW_MANAGER_ACTION_PRESENT);
+    CHECK_EQ(actions[0].window_id, 3);
+}
+
+TEST(window_manager_client, a_present_of_part_of_a_window_names_the_part) {
+    reset();
+    window_manager_window_t w = window(12, 3);
+    w.width = 400;
+    w.height = 300;
+    CHECK_EQ(window_manager_present_rect(&w, 17, 250, 9, 16), 0);
+    CHECK_EQ(action_count, 2);
+    CHECK_EQ(actions[0].action, WINDOW_MANAGER_ACTION_PRESENT_ORIGIN);
+    CHECK_EQ(actions[1].action, WINDOW_MANAGER_ACTION_PRESENT_SIZE);
+    CHECK_EQ(actions[0].window_id, 3);
+    CHECK_EQ(actions[1].window_id, 3);
+    CHECK_EQ(window_manager_pair_first(actions[0].value), 17);
+    CHECK_EQ(window_manager_pair_second(actions[0].value), 250);
+    CHECK_EQ(window_manager_pair_first(actions[1].value), 9);
+    CHECK_EQ(window_manager_pair_second(actions[1].value), 16);
+}
+
+TEST(window_manager_client, a_part_hanging_off_the_top_left_is_cut_to_the_window) {
+    reset();
+    window_manager_window_t w = window(12, 3);
+    w.width = 400;
+    w.height = 300;
+    CHECK_EQ(window_manager_present_rect(&w, -5, -10, 20, 30), 0);
+    CHECK_EQ(action_count, 2);
+    CHECK_EQ(window_manager_pair_first(actions[0].value), 0);
+    CHECK_EQ(window_manager_pair_second(actions[0].value), 0);
+    CHECK_EQ(window_manager_pair_first(actions[1].value), 15);
+    CHECK_EQ(window_manager_pair_second(actions[1].value), 20);
+    reset();
+    CHECK_EQ(window_manager_present_rect(&w, -50, 10, 20, 30), 0);
+    CHECK_EQ(action_count, 0);
 }

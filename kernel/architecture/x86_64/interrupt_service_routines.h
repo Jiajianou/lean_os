@@ -34,4 +34,11 @@ void lapic_vector_handler(isr_regs_t *regs);
 
 void irq_register_handler(uint8_t irq, irq_handler_function handler);
 
+/* M200: TSC cycles each core has spent in interrupt handlers - the part of
+   a handler before any task switch, which is all of it for a device and all
+   but the scheduler for the timer. Ticks bill their whole slice to whatever
+   task they interrupted, so this is the only place that time shows up. */
+void interrupt_time_account(uint64_t cycles);
+uint64_t interrupt_time_us(int cpu);
+
 void irq_enable_line(uint8_t irq);

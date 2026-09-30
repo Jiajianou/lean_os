@@ -2,9 +2,11 @@
 # M189: the log a machine with no serial port leaves on the stick it booted
 # from. Boots an image made by tools/make-hardware-image.sh over usb-storage,
 # twice, and requires what tools/read-usb-log.py reads back off the image to
-# be what the serial port carried - then boots a third time with lean_os.cfg
-# pointing at sectors that are NOT the log area, and requires the kernel to
-# refuse and the sectors to come back unchanged.
+# be what the serial port carried - then boots a third time and has the
+# kernel panic once the desktop is up (M200), and requires the panic to be in
+# the log on the stick - then a fourth time with lean_os.cfg pointing at
+# sectors that are NOT the log area, and requires the kernel to refuse and
+# the sectors to come back unchanged.
 #
 # The serial port is the oracle here and only here: it is the channel the
 # log file exists to replace on a machine that does not have one.
@@ -31,7 +33,7 @@ LOG_OPTION=$(grep -E '^ *log=' "$WORK/make-image.log" | tr -d ' ')
 LOG_LBA=${LOG_OPTION#log=}; LOG_LBA=${LOG_LBA%+*}
 
 boot() {
-  local serial="$1" qemu_pid waited=0
+  local serial="$1" qemu_pid waited=0 extra="${2:-}"
   cp "$OVMF_VARS_TEMPLATE" "$WORK/vars.fd"
   : > "$serial"
   qemu-system-x86_64 -m 1024 -smp 1 -display none \
@@ -40,9 +42,12 @@ boot() {
     -device qemu-xhci,id=xhci0 \
     -drive "if=none,id=disk0,format=raw,file=$IMAGE" \
     -device usb-storage,bus=xhci0.0,drive=disk0 \
+    ${extra:+-fw_cfg "$extra"} \
     -serial "file:$serial" -monitor none &
   qemu_pid=$!
-  while ! grep -qF "$DESKTOP_MARKER" "$serial" 2>/dev/null; do
+  local until="$DESKTOP_MARKER"
+  [ -n "$extra" ] && until="KERNEL PANIC"
+  while ! grep -qF "$until" "$serial" 2>/dev/null; do
     if ! kill -0 "$qemu_pid" 2>/dev/null || [ "$waited" -ge "$BOOT_SECONDS" ]; then
       kill "$qemu_pid" 2>/dev/null || true
       wait "$qemu_pid" 2>/dev/null || true
@@ -60,7 +65,7 @@ boot() {
 
 tr_serial() { tr -d '\r' < "$1"; }
 
-echo "Boot 1 of 3 over usb-storage..."
+echo "Boot 1 of 4 over usb-storage..."
 boot "$WORK/serial-1.log" || fail "boot 1 did not reach '$DESKTOP_MARKER' within ${BOOT_SECONDS}s"
 tools/read-usb-log.py "$IMAGE" > "$WORK/disk-1.log" 2>/dev/null || fail "read-usb-log.py could not read the image after boot 1"
 
@@ -107,7 +112,7 @@ if wanted not in disk:
              % (at, wanted[at:at + 256]))
 PYTHON
 
-echo "Boot 2 of 3..."
+echo "Boot 2 of 4..."
 boot "$WORK/serial-2.log" || fail "boot 2 did not reach the desktop"
 tools/read-usb-log.py "$IMAGE" > "$WORK/disk-2.log" 2>/dev/null || true
 tools/read-usb-log.py "$IMAGE" --last > "$WORK/disk-2-last.log" 2>/dev/null || true
@@ -120,13 +125,22 @@ else
   fail "--last did not isolate boot 2"
 fi
 
-echo "Boot 3 of 3, with lean_os.cfg naming sectors that are not the log area..."
+echo "Boot 3 of 4, asked to panic once the desktop is up..."
+boot "$WORK/serial-panic.log" "name=opt/leanos/panictest,string=1" || fail "boot 3 did not panic when asked to"
+tools/read-usb-log.py "$IMAGE" --last > "$WORK/disk-panic.log" 2>/dev/null || true
+grep -qF "*** KERNEL PANIC: the harness asked for this panic" "$WORK/disk-panic.log" \
+  && pass "a panic's own message reaches the log on the stick" \
+  || fail "the panic is not in the stick's log - the machine went down with its last words on the screen"
+grep -qx "===== lean_os boot 3 =====" "$WORK/disk-panic.log" \
+  && pass "and it is recorded as the boot it happened in" || fail "the panicking boot is not boot 3 in the log"
+
+echo "Boot 4 of 4, with lean_os.cfg naming sectors that are not the log area..."
 ESP_START_LBA=$(make -s print-esp-start-lba)
 WRONG_LBA=$((LOG_LBA - 2048))
 printf 'video=1024x768\nlog=%d+49152\n' "$WRONG_LBA" > "$WORK/wrong.cfg"
 mcopy -i "$IMAGE@@$((ESP_START_LBA * 512))" -o "$WORK/wrong.cfg" ::EFI/BOOT/lean_os.cfg
 dd if="$IMAGE" of="$WORK/before.bin" bs=512 skip="$WRONG_LBA" count=2048 2>/dev/null
-boot "$WORK/serial-3.log" || fail "boot 3 did not reach the desktop"
+boot "$WORK/serial-3.log" || fail "boot 4 did not reach the desktop"
 dd if="$IMAGE" of="$WORK/after.bin" bs=512 skip="$WRONG_LBA" count=2048 2>/dev/null
 grep -q "^\[disk-log\] LBA $WRONG_LBA does not start with the log area's header" <(tr_serial "$WORK/serial-3.log") \
   && pass "a log= that names the wrong sectors is refused, and says so" \

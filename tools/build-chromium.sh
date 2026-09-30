@@ -90,6 +90,10 @@ fi
 PATCH_FILES=$(ls "$ROOT"/tools/chromium-port/*.patch 2>/dev/null)
 if [ -n "$PATCH_FILES" ]; then
   TOUCHED=$(sed -n 's|^--- a/||p' $PATCH_FILES | sort -u)
+  # M200: reset-and-reapply writes every file the series touches, and the
+  # build takes a new time for a change - see tools/keep-mtimes.py.
+  KEEP_STATE="$ROOT/build/chromium-patched-mtimes.json"
+  python3 "$ROOT/tools/keep-mtimes.py" save "$SRC" "$KEEP_STATE" $TOUCHED
   for f in $TOUCHED; do
     if (cd "$SRC" && git ls-files --error-unmatch "$f" > /dev/null 2>&1); then
       (cd "$SRC" && git checkout -- "$f") || exit 1
@@ -125,6 +129,9 @@ for patch in $PATCH_FILES; do
     exit 1
   fi
 done
+if [ -n "$PATCH_FILES" ]; then
+  python3 "$ROOT/tools/keep-mtimes.py" restore "$SRC" "$KEEP_STATE"
+fi
 
 # Rust. Chromium builds the standard library from the rust-src beside its own
 # rustc, and that is the configuration it supports: an external sysroot turns

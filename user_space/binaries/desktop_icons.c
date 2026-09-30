@@ -1,6 +1,7 @@
 #include "icon.h"
 #include "icons.h"
 #include "children.h"
+#include "malloc.h"
 #include "paths.h"
 #define LABEL_H UI_FONT_UI_HEIGHT
 #include "string_utilities.h"
@@ -163,7 +164,7 @@ static int point_in_icon(int i, int32_t x, int32_t y) {
                               ICON_SIZE, ICON_SIZE + 2 * (LABEL_H + 4));
 }
 
-static void redraw_icon(window_manager_window_t *self, int i, int pressed) {
+static void redraw_icon(graphics_context_t *target, int i, int pressed) {
     int32_t label_w = graphics_text_width(graphics_ui_font(), ICONS[i].label);
     int32_t label_x = icon_x[i] + ICON_SIZE / 2 - label_w / 2;
     int32_t label_y = icon_y[i] + ICON_SIZE + 4;
@@ -179,28 +180,49 @@ static void redraw_icon(window_manager_window_t *self, int i, int pressed) {
         }
         int32_t top = icon_y[i] - SELECTION_PAD / 2;
         int32_t bottom = label_y + LABEL_H + SELECTION_PAD / 2;
-        graphics_fill_rounded(&self->graphics, left, top, right - left, bottom - top,
+        graphics_fill_rounded(target, left, top, right - left, bottom - top,
                               SELECTION_RADIUS, SELECTION_COLOR, SELECTION_ALPHA);
-        graphics_stroke_rounded(&self->graphics, left, top, right - left, bottom - top,
+        graphics_stroke_rounded(target, left, top, right - left, bottom - top,
                                 SELECTION_RADIUS, SELECTION_COLOR, SELECTION_EDGE_ALPHA);
     }
 
-    icon_draw(&self->graphics, icon_x[i], icon_y[i], icon_image[i], ICON_IMAGE_SCALE);
+    icon_draw(target, icon_x[i], icon_y[i], icon_image[i], ICON_IMAGE_SCALE);
 
-    graphics_draw_text_shadowed(&self->graphics, label_x, label_y, ICONS[i].label,
+    graphics_draw_text_shadowed(target, label_x, label_y, ICONS[i].label,
                                 LABEL_COLOR, LABEL_SHADOW_COLOR, LABEL_SHADOW_ALPHA);
 }
 
+/* M200. The redraw painted the wallpaper over the whole window and then put
+   the icons back, in the pixels the compositor composites from - so a
+   composite that landed in between showed a desktop with no icons on it for
+   a frame. Nothing noticed while the compositor drew twenty frames a second;
+   at sixty, the input suite caught the icon column blinking out when an
+   application opened. The desktop is drawn off to one side and copied over
+   finished, which the fast memcpy makes about a millisecond. */
+static uint32_t *offscreen;
+static size_t offscreen_pixels;
+
 static void redraw(window_manager_window_t *self, int pressed_icon) {
-    wallpaper_fill(&self->graphics, 0, 0, (int32_t)self->width, (int32_t)self->height,
+    size_t pixels = (size_t)self->width * (size_t)self->height;
+    if (pixels != offscreen_pixels) {
+        free(offscreen);
+        offscreen = (uint32_t *)malloc(pixels * sizeof(uint32_t));
+        offscreen_pixels = offscreen ? pixels : 0;
+    }
+    graphics_context_t back = {offscreen, (int32_t)self->width, (int32_t)self->height};
+    graphics_context_t *target = offscreen ? &back : &self->graphics;
+    wallpaper_fill(target, 0, 0, (int32_t)self->width, (int32_t)self->height,
                     theme_wallpaper, theme_bg);
     for (int i = 0; i < ICON_COUNT; i++) {
-        redraw_icon(self, i, i == pressed_icon);
+        redraw_icon(target, i, i == pressed_icon);
     }
     if (context_menu_open) {
-        graphics_draw_menu(&self->graphics, context_menu_x, context_menu_y, CONTEXT_MENU_ITEM_W, CONTEXT_MENU_ITEM_H,
+        graphics_draw_menu(target, context_menu_x, context_menu_y, CONTEXT_MENU_ITEM_W, CONTEXT_MENU_ITEM_H,
                       CONTEXT_MENU_ITEMS, CONTEXT_MENU_COUNT, -1,
                       CONTEXT_MENU_BG, CONTEXT_MENU_HOVER, CONTEXT_MENU_BORDER, CONTEXT_MENU_TEXT);
+    }
+    if (offscreen) {
+        memcpy(self->graphics.pixels, offscreen, pixels * sizeof(uint32_t));
     }
 }
 

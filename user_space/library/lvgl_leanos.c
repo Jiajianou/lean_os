@@ -18,11 +18,32 @@ static void lvgl_log_print(lv_log_level_t level, const char *text) {
 }
 
 static void lvgl_flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels) {
-    (void)area;
     (void)pixels;
     lvgl_window_t *window = (lvgl_window_t *)lv_display_get_user_data(display);
+    if (window && area) {
+        int32_t x0 = area->x1, y0 = area->y1, x1 = area->x2 + 1, y1 = area->y2 + 1;
+        if (!window->damage_pending) {
+            window->damage_x0 = x0;
+            window->damage_y0 = y0;
+            window->damage_x1 = x1;
+            window->damage_y1 = y1;
+            window->damage_pending = 1;
+        } else {
+            window->damage_x0 = x0 < window->damage_x0 ? x0 : window->damage_x0;
+            window->damage_y0 = y0 < window->damage_y0 ? y0 : window->damage_y0;
+            window->damage_x1 = x1 > window->damage_x1 ? x1 : window->damage_x1;
+            window->damage_y1 = y1 > window->damage_y1 ? y1 : window->damage_y1;
+        }
+    }
     if (window && lv_display_flush_is_last(display)) {
-        window_manager_present(&window->window);
+        if (window->damage_pending) {
+            window_manager_present_rect(&window->window, window->damage_x0, window->damage_y0,
+                                        window->damage_x1 - window->damage_x0,
+                                        window->damage_y1 - window->damage_y0);
+        } else {
+            window_manager_present(&window->window);
+        }
+        window->damage_pending = 0;
     }
     lv_display_flush_ready(display);
 }

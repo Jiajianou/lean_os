@@ -462,7 +462,7 @@ static long sys_read(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4,
                 if (ms < 0) {
                     deadline = 0;
                 } else {
-                    deadline = clock_monotonic_ms() + (uint64_t)ms;
+                    deadline = clock_deadline_ms((uint64_t)ms);
                 }
             }
             scheduler_watch_block(deadline);
@@ -1463,7 +1463,7 @@ static long sys_futex(uint64_t address, uint64_t op, uint64_t val,
     }
     uint64_t deadline = 0;
     if (timeout_ms > 0) {
-        deadline = clock_monotonic_ms() + timeout_ms;
+        deadline = clock_deadline_ms(timeout_ms);
     }
     scheduler_block_on_in_space((const void *)address, scheduler_current()->pml4_phys, deadline,
                                 &futex_lock, &flags);
@@ -2193,6 +2193,16 @@ static long sys_uptime_ms(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, ui
     (void)a5;
     (void)a6;
     return (long)(clock_monotonic_ms());
+}
+
+static long sys_clock_ns(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    return (long)clock_monotonic_ns();
 }
 
 static uint32_t slot_inode(const file_descriptor_slot_t *slot) {
@@ -4517,7 +4527,7 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxeven
     struct epoll *ep = self->descriptor_table->slots[epfd].epoll;
     long timeout = (long)timeout_ms;
     uint64_t now = clock_monotonic_ms();
-    uint64_t deadline = (timeout < 0) ? 0 : now + (uint64_t)timeout;
+    uint64_t deadline = (timeout < 0) ? 0 : clock_deadline_ms((uint64_t)timeout);
     epoll_ev_t evs[EPOLL_MAX_WATCH];
     int watched_fds[EPOLL_MAX_WATCH];
     const void *watched_objects[EPOLL_MAX_WATCH];
@@ -4526,7 +4536,13 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxeven
         scheduler_watch_add(ep);
         int watched = epoll_objects(ep, watched_fds, watched_objects, EPOLL_MAX_WATCH);
         for (int i = 0; i < watched; i++) {
-            scheduler_watch_add(watched_objects[i]);
+            int fd = watched_fds[i];
+            if (fd >= 0 && fd < MAX_FILE_DESCRIPTORS &&
+                self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_STDIN) {
+                scheduler_watch_add(SCHEDULER_INPUT_OBJECT);
+            } else {
+                scheduler_watch_add(watched_objects[i]);
+            }
         }
         int n = epoll_scan(ep, epoll_mask_callback, self, evs, (int)maxevents);
         if (n > 0) {
@@ -4561,7 +4577,7 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxeven
             if (ms < 0) {
                 continue;
             }
-            uint64_t when = now + (uint64_t)ms;
+            uint64_t when = clock_deadline_ms((uint64_t)ms);
             if (park_until == 0 || when < park_until) {
                 park_until = when;
             }
@@ -4585,16 +4601,24 @@ static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint6
     task_t *self = scheduler_current();
 
     long timeout = (long)timeout_ms;
-    uint64_t now = clock_monotonic_ms();
-    uint64_t deadline = (timeout < 0) ? 0 : now + (uint64_t)timeout;
+    uint64_t deadline = (timeout < 0) ? 0 : clock_deadline_ms((uint64_t)timeout);
 
     for (;;) {
         scheduler_watch_begin();
         for (uint64_t i = 0; i < count; i++) {
             int fd = file_descriptors[i];
             if (fd >= 0 && fd < MAX_FILE_DESCRIPTORS) {
-                scheduler_watch_add((const void *)self->descriptor_table->slots[fd].pipe);
+                if (self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_STDIN) {
+                    scheduler_watch_add(SCHEDULER_INPUT_OBJECT);
+                } else {
+                    scheduler_watch_add((const void *)self->descriptor_table->slots[fd].pipe);
+                }
             }
+        }
+        /* The pointer is not a descriptor, and its one reader ends this wait
+           on movement below - so it watches input whatever it passed. */
+        if (self->caps & CAP_FRAMEBUFFER) {
+            scheduler_watch_add(SCHEDULER_INPUT_OBJECT);
         }
         for (uint64_t i = 0; i < count; i++) {
             if (file_descriptor_is_ready(self, file_descriptors[i])) {
@@ -5484,6 +5508,7 @@ static const syscall_function_t syscall_table[SYSCALL_COUNT] = {
     [SYS_munmap] = sys_munmap,
     [SYS_thread_create] = sys_thread_create,
     [SYS_peek] = sys_peek,
+    [SYS_clock_ns] = sys_clock_ns,
     [SYS_getrlimit] = sys_getrlimit,
     [SYS_setrlimit] = sys_setrlimit,
     [SYS_thread_setname] = sys_thread_setname,

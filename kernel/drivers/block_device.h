@@ -39,6 +39,7 @@ typedef struct {
 void block_device_statistics(block_device_statistics_t *out);
 
 int block_device_flush(void);
+int block_device_idle(void);
 
 void block_device_set_readahead(uint32_t lines);
 
