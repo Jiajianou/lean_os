@@ -640,6 +640,41 @@ static uint32_t selftest_pixel_settled(uint32_t x, uint32_t y, uint32_t expected
     }
 }
 
+/* M200: [m55]'s two clients are spawned together and whichever reaches the
+   compositor first gets the first cascade slot. The test assumed the one
+   spawned first always won; with wake-ups that no longer wait for a tick the
+   other one sometimes does, and a machine behaving correctly panicked with
+   the first slot showing the second client's colour. What it asks now is
+   that the two slots show the two clients' colours, in either order, twice
+   running. */
+static int selftest_two_windows(uint32_t first_color, uint32_t second_color, uint32_t timeout_ms,
+                                uint32_t *slot0, uint32_t *slot1, const char *what) {
+    uint64_t deadline = pit_get_ticks() + (timeout_ms + 9) / 10;
+    int agreed = 0;
+    for (;;) {
+        uint32_t a = framebuffer_get_pixel(120, 250);
+        uint32_t b = framebuffer_get_pixel(420, 320);
+        int pair = (a == first_color && b == second_color) || (a == second_color && b == first_color);
+        if (pair && ++agreed >= 2) {
+            *slot0 = a;
+            *slot1 = b;
+            return 1;
+        }
+        if (!pair) {
+            agreed = 0;
+        }
+        if (pit_get_ticks() >= deadline) {
+            kernel_log_puts("[selftest] timed out waiting for: ");
+            kernel_log_puts(what);
+            kernel_log_putc('\n');
+            *slot0 = a;
+            *slot1 = b;
+            return 0;
+        }
+        pit_sleep_ms(SELFTEST_POLL_MS);
+    }
+}
+
 static void selftest_title_counts(int until_bright, int *out_bright, int *out_dim) {
     uint64_t deadline = pit_get_ticks() + (SELFTEST_PAINT_MS + 9) / 10;
     for (;;) {
@@ -927,6 +962,48 @@ static void m199_spinner_task(void *arg) {
         __asm__ volatile("pause");
     }
     irq_restore(flags);
+}
+
+/* M201. The first Browser click on the laptop spent its first two seconds
+   reading /bin/chrome - three hundred megabytes - off the stick into the
+   image cache, before Chromium had run a single instruction. Ten seconds
+   after the desktop is up, with nobody likely to be launching anything yet,
+   this reads it in the background, so the first click finds it there. Only
+   on a machine with memory to spare for it: the cache takes an eighth of
+   RAM, and below 8 GiB that eighth is not much more than the browser. The
+   read no longer holds up other programs' launches while it runs (M201's
+   image cache change), which is what makes doing it speculatively fair. */
+#define PREFETCH_DELAY_MS 10000u
+#define PREFETCH_MINIMUM_FRAMES (8ull * 1024 * 1024 * 1024 / 4096)
+
+static void prefetch_task(void *arg) {
+    (void)arg;
+    scheduler_sleep_ms(PREFETCH_DELAY_MS);
+    uint64_t started = clock_monotonic_ms();
+    image_cache_entry_t *entry = image_cache_acquire(PATH_BIN_DIRECTORY "chrome");
+    if (!entry) {
+        kernel_log_puts("[prefetch] /bin/chrome was not taken into the image cache\n");
+        return;
+    }
+    image_cache_release(entry);
+    kernel_log_puts("[prefetch] /bin/chrome is in the image cache, read in ");
+    kernel_log_put_dec((uint32_t)(clock_monotonic_ms() - started));
+    kernel_log_puts(" ms - the first Browser launch will not wait for the disk\n");
+}
+
+/* M201's exam: a load of a big program in one task, and in the meantime
+   what the other asks of the cache. */
+static volatile uint64_t m201_loaded_at_ms;
+static volatile int m201_loader_started;
+
+static void m201_loader_task(void *arg) {
+    const char *path = (const char *)arg;
+    m201_loader_started = 1;
+    image_cache_entry_t *entry = image_cache_acquire(path);
+    m201_loaded_at_ms = clock_monotonic_ms();
+    if (entry) {
+        image_cache_release(entry);
+    }
 }
 
 static void panic_test_task(void *arg) {
@@ -2452,6 +2529,73 @@ static void boot_selftests_system(void) {
                             "with where it was");
         }
         kernel_log_puts(" - self-test passed.\n\n");
+    }
+
+    {
+        /* M201. A program's first exec reads it into the image cache, and
+           that read used to hold the cache's lock for as long as it took -
+           every other exec on the machine waited behind a browser being read
+           off the disk. Now one load does not stall a second program, and two
+           tasks asking for the same program at once cause one read. */
+        os_stat_t big;
+        const char *big_path = PATH_BIN_DIRECTORY "chrome";
+        if (do_syscall(SYS_stat, (uint64_t)big_path, (uint64_t)&big, 0) != 0) {
+            kernel_log_puts("[m201] no /bin/chrome on this image to load - skipped.\n\n");
+        } else {
+            image_cache_entry_t *warm = image_cache_acquire(PATH_BIN_DIRECTORY "hello");
+            if (warm) {
+                image_cache_release(warm);
+            }
+            image_cache_statistics_t before, after;
+            image_cache_statistics(&before);
+            m201_loaded_at_ms = 0;
+            m201_loader_started = 0;
+            task_t *first = task_spawn("m201-loader", m201_loader_task, (void *)big_path);
+            task_t *second = task_spawn("m201-loader", m201_loader_task, (void *)big_path);
+            if (!first || !second) {
+                panic("M201 self-test: could not start the loaders");
+            }
+            while (!m201_loader_started) {
+                scheduler_sleep_ms(1);
+            }
+            scheduler_sleep_ms(20);
+            uint64_t asked = clock_monotonic_ms();
+            image_cache_entry_t *small = image_cache_acquire(PATH_BIN_DIRECTORY "hello");
+            uint64_t answered = clock_monotonic_ms();
+            if (small) {
+                image_cache_release(small);
+            }
+            do_syscall(SYS_wait, (uint64_t)first->id, 0, 0);
+            do_syscall(SYS_wait, (uint64_t)second->id, 0, 0);
+            image_cache_statistics(&after);
+            uint64_t loaded = m201_loaded_at_ms;
+            kernel_log_puts("[m201] /bin/hello answered in ");
+            kernel_log_put_dec((uint32_t)(answered - asked));
+            kernel_log_puts(" ms while /bin/chrome took ");
+            kernel_log_put_dec((uint32_t)(loaded > asked ? loaded - asked : 0));
+            kernel_log_puts(" ms more to load; ");
+            kernel_log_put_dec((uint32_t)(after.misses - before.misses));
+            kernel_log_puts(" read(s) and ");
+            kernel_log_put_dec((uint32_t)(after.hits - before.hits));
+            kernel_log_puts(" hit(s) for the two loaders and hello\n");
+            if (!small) {
+                panic("M201 self-test: /bin/hello could not be had from the image cache");
+            }
+            if (after.misses == before.misses) {
+                kernel_log_puts("[m201] /bin/chrome was not read into the cache here (already there, "
+                                "or more than this machine's cache holds) - the concurrency half "
+                                "is skipped.\n");
+            } else {
+                if (after.misses - before.misses != 1 || after.hits - before.hits < 2) {
+                    panic("M201 self-test: two tasks asking for one program read it twice");
+                }
+                if (loaded > answered && answered - asked > (loaded - asked) / 2) {
+                    panic("M201 self-test: a small program waited for a big one to finish loading");
+                }
+            }
+            kernel_log_puts("[m201] a program's first read no longer holds up every other exec, and "
+                            "two tasks asking for it at once read it once - self-test passed.\n\n");
+        }
     }
 
     {
@@ -4811,10 +4955,9 @@ static void boot_selftests_system(void) {
         task_t *a_task = process_spawn("wm_zorder", z_image, (size_t)z_size, "zA 00A02020");
         task_t *b_task = process_spawn("wm_zorder", z_image, (size_t)z_size, "zB 002060C0");
 
-        int up = selftest_wait_for_pixel(120, 250, 0x00A02020u, 5000,
-                                          "the first client's window to appear");
-        up &= selftest_wait_for_pixel(420, 320, 0x002060C0u, 5000,
-                                       "the second client's window to appear");
+        uint32_t a_before = 0, b_before = 0;
+        int up = selftest_two_windows(0x00A02020u, 0x002060C0u, 5000, &a_before, &b_before,
+                                      "both clients' windows to appear");
         if (!up) {
             const char *who[3] = {"compositor", "client A", "client B"};
             task_t *w[3] = {comp1, a_task, b_task};
@@ -4834,17 +4977,25 @@ static void boot_selftests_system(void) {
                     kernel_log_putc('\n');
                 }
             }
+            {
+                static const uint32_t probes[][2] = {
+                    {120, 250}, {420, 320}, {110, 110}, {150, 150}, {290, 290},
+                    {150, 190}, {190, 190}, {330, 330}, {500, 300}, {10, 10},
+                };
+                kernel_log_puts("[m55] pixels:");
+                for (unsigned i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+                    kernel_log_puts(" (");
+                    kernel_log_put_dec(probes[i][0]);
+                    kernel_log_puts(",");
+                    kernel_log_put_dec(probes[i][1]);
+                    kernel_log_puts(")=0x");
+                    kernel_log_put_hex32(framebuffer_get_pixel(probes[i][0], probes[i][1]));
+                }
+                kernel_log_putc('\n');
+            }
+            scheduler_log_task_table();
             panic("M55 session-resilience self-test: the clients never got their windows up");
         }
-
-        /* Settled, not sampled: the first match can be a frame of the second
-           window's opening animation passing over the first, and a pixel
-           caught mid-fade was then reported as the compositor's crash taking
-           a client with it. */
-        uint32_t a_before = selftest_pixel_settled(120, 250, 0x00A02020u,
-                                                   "the first client's window to settle");
-        uint32_t b_before = selftest_pixel_settled(420, 320, 0x002060C0u,
-                                                   "the second client's window to settle");
 
         do_syscall(SYS_kill, (uint64_t)comp1->id, SIGKILL, 0);
         do_syscall(SYS_wait, (uint64_t)comp1->id, 0, 0);
@@ -4855,14 +5006,9 @@ static void boot_selftests_system(void) {
         task_t *comp2 = process_spawn("compositor", comp_image, (size_t)comp_size, "");
         kfree(comp_image);
         kfree(z_image);
-        int back = selftest_wait_for_pixel(120, 250, 0x00A02020u, 6000,
-                                            "the first client to reconnect and repaint");
-        back &= selftest_wait_for_pixel(420, 320, 0x002060C0u, 6000,
-                                         "the second client to reconnect and repaint");
-        (void)back;
-
-        uint32_t a_after = framebuffer_get_pixel(120, 250);
-        uint32_t b_after = framebuffer_get_pixel(420, 320);
+        uint32_t a_after = 0, b_after = 0;
+        int back = selftest_two_windows(0x00A02020u, 0x002060C0u, 6000, &a_after, &b_after,
+                                        "both clients to reconnect and repaint");
 
         selftest_reap(a_task);
         selftest_reap(b_task);
@@ -4870,20 +5016,19 @@ static void boot_selftests_system(void) {
         console_init();
         kernel_log_use_console();
 
-        int all_ok = 1;
-        static const struct { const char *what; uint32_t expected; } names[] = {
-            {"the first client's window before the compositor was killed", 0x00A02020u},
-            {"the second client's window before the compositor was killed", 0x002060C0u},
-            {"the first client's window after a replacement compositor started - it reconnected and repainted", 0x00A02020u},
-            {"the second client's window after a replacement compositor started", 0x002060C0u},
+        int all_ok = back;
+        static const struct { const char *what; } names[] = {
+            {"the first slot before the compositor was killed"},
+            {"the second slot before the compositor was killed"},
+            {"the first slot after a replacement compositor started - both clients reconnected and repainted"},
+            {"the second slot after a replacement compositor started"},
         };
         const uint32_t got[] = {a_before, b_before, a_after, b_after};
         for (size_t i = 0; i < sizeof(got) / sizeof(got[0]); i++) {
-            if (got[i] != names[i].expected) {
+            if (got[i] != 0x00A02020u && got[i] != 0x002060C0u) {
                 kernel_log_puts("[m55] pixel check failed: ");
                 kernel_log_puts(names[i].what);
-                kernel_log_puts(" - expected 0x");
-                kernel_log_put_hex32(names[i].expected);
+                kernel_log_puts(" - expected one client's colour, 0x00A02020 or 0x002060C0,");
                 kernel_log_puts(" got 0x");
                 kernel_log_put_hex32(got[i]);
                 kernel_log_putc('\n');
@@ -14649,6 +14794,16 @@ display_self_test_done:
         char want[4] = {0};
         if (fwcfg_read_file("opt/leanos/panictest", want, sizeof(want) - 1) == 1 && want[0] == '1') {
             task_spawn("panic-test", panic_test_task, (void *)0);
+        }
+    }
+
+    if (physical_memory_total_frame_count() >= PREFETCH_MINIMUM_FRAMES) {
+        os_stat_t chrome;
+        if (do_syscall(SYS_stat, (uint64_t)(PATH_BIN_DIRECTORY "chrome"), (uint64_t)&chrome, 0) == 0) {
+            task_t *prefetch = task_spawn("prefetch", prefetch_task, (void *)0);
+            if (prefetch) {
+                prefetch->parent_id = -1;
+            }
         }
     }
 

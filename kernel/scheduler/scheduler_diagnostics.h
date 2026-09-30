@@ -27,3 +27,4 @@ void scheduler_hang_set_thresholds(uint32_t tickless_seconds, uint32_t kernel_se
                                    uint32_t lock_wait_ms);
 void scheduler_hang_statistics(hang_statistics_t *out);
 int scheduler_hang_lock_was_reported(const void *lock, int holder);
+void scheduler_log_task_table(void);

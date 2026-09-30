@@ -83,6 +83,10 @@ typedef struct {
 
 struct image_cache_entry {
     int used;
+    /* M201: being read, outside cache_lock. Its users count holds it against
+       eviction; anybody asking for the same file waits for it to finish. */
+    int loading;
+    uint64_t reserved_pages;
     uint32_t inode;
     uint32_t generation;
     uint32_t size;
@@ -104,7 +108,10 @@ static uint64_t budget_pages(void) {
     return physical_memory_total_frame_count() / 8u;
 }
 
-static void free_entry(image_cache_entry_t *e) {
+/* Gives back an entry's frames and tables without touching cached_pages,
+   which is the caller's to settle - a loading entry's pages are counted in
+   its reservation, a published one's in cached_pages itself. */
+static void release_frames(image_cache_entry_t *e) {
     for (int s = 0; s < e->segment_count; s++) {
         image_segment_t *segment = &e->segments[s];
         if (segment->frames) {
@@ -115,14 +122,16 @@ static void free_entry(image_cache_entry_t *e) {
             }
             physical_memory_free_contiguous((uint64_t)(uintptr_t)segment->frames,
                                             segment->frames_table_pages);
-            e->pages -= segment->frames_table_pages;
-            cached_pages -= segment->frames_table_pages;
             segment->frames = (uint64_t *)0;
         }
     }
-    cached_pages -= e->pages;
     e->pages = 0;
     e->segment_count = 0;
+}
+
+static void free_entry(image_cache_entry_t *e) {
+    cached_pages -= e->pages;
+    release_frames(e);
     e->used = 0;
 }
 
@@ -130,7 +139,8 @@ static int evict_one(void) {
     image_cache_entry_t *victim = (image_cache_entry_t *)0;
     for (int i = 0; i < IMAGE_CACHE_ENTRIES; i++) {
         image_cache_entry_t *e = &entries[i];
-        if (e->used && e->users == 0 && (!victim || e->last_used < victim->last_used)) {
+        if (e->used && !e->loading && e->users == 0 &&
+            (!victim || e->last_used < victim->last_used)) {
             victim = e;
         }
     }
@@ -198,25 +208,28 @@ static int fill_segment(int handle, image_segment_t *segment, const image_phdr_t
     return 0;
 }
 
-static int build_entry(image_cache_entry_t *e, int handle, const leanfs_stat_t *st) {
-    k_memset(e, 0, sizeof(*e));
+/* Reads the header and lays the segments out; returns the pages the entry
+   will take - frames and frame tables - or 0 for a program this cache does
+   not take. Nothing is allocated. */
+static uint64_t plan_entry(image_cache_entry_t *e, int handle, const leanfs_stat_t *st) {
     uint32_t header_bytes = st->size < IMAGE_CACHE_HEADER_BYTES ? st->size : IMAGE_CACHE_HEADER_BYTES;
     if (header_bytes < sizeof(image_ehdr_t) ||
         read_exact_at(handle, e->header, header_bytes, 0) != 0) {
-        return -1;
+        return 0;
     }
     const image_ehdr_t *eh = (const image_ehdr_t *)e->header;
     if (eh->e_ident[0] != 0x7F || eh->e_ident[1] != 'E' || eh->e_ident[2] != 'L' ||
         eh->e_ident[3] != 'F' || eh->e_type != ET_EXEC ||
         eh->e_phentsize != sizeof(image_phdr_t) ||
         eh->e_phoff + (uint64_t)eh->e_phnum * sizeof(image_phdr_t) > header_bytes) {
-        return -1;
+        return 0;
     }
     const image_phdr_t *ph = (const image_phdr_t *)(e->header + eh->e_phoff);
     uint64_t pages = 0;
     for (uint16_t i = 0; i < eh->e_phnum; i++) {
         if (ph[i].p_type == PT_INTERP) {
-            return -1;
+            e->segment_count = 0;
+            return 0;
         }
         if (ph[i].p_type != PT_LOAD || ph[i].p_memsz == 0) {
             continue;
@@ -224,7 +237,8 @@ static int build_entry(image_cache_entry_t *e, int handle, const leanfs_stat_t *
         if (e->segment_count == IMAGE_CACHE_MAX_SEGMENTS || ph[i].p_filesz > ph[i].p_memsz ||
             ph[i].p_offset + ph[i].p_filesz > st->size || ph[i].p_vaddr < USER_IMAGE_BASE ||
             ph[i].p_memsz > USER_IMAGE_LIMIT - ph[i].p_vaddr) {
-            return -1;
+            e->segment_count = 0;
+            return 0;
         }
         image_segment_t *segment = &e->segments[e->segment_count];
         segment->start = ph[i].p_vaddr & ~(uint64_t)(PAGE_SIZE - 1);
@@ -236,22 +250,20 @@ static int build_entry(image_cache_entry_t *e, int handle, const leanfs_stat_t *
             const image_segment_t *o = &e->segments[other];
             if (segment->start < o->start + o->pages * PAGE_SIZE &&
                 o->start < segment->start + segment->pages * PAGE_SIZE) {
-                return -1;
+                e->segment_count = 0;
+                return 0;
             }
         }
-        pages += segment->pages;
+        pages += segment->pages + (segment->pages * sizeof(uint64_t) + PAGE_SIZE - 1) / PAGE_SIZE;
         e->segment_count++;
     }
-    if (e->segment_count == 0) {
-        return -1;
-    }
-    while (cached_pages + pages > budget_pages()) {
-        if (!evict_one()) {
-            e->segment_count = 0;
-            return -1;
-        }
-    }
+    return e->segment_count ? pages : 0;
+}
 
+/* Allocates the frames the plan asked for and reads the file into them.
+   Runs without cache_lock: the entry is the loader's alone until it is
+   published, and its pages are already counted in its reservation. */
+static int fill_entry(image_cache_entry_t *e, int handle) {
     /* The bounce buffer is frames, not heap: the kernel heap keeps whatever
        it grows to, and a megabyte of it per first exec is a megabyte the
        machine never gets back. A fragmented machine gets a smaller one. */
@@ -265,11 +277,12 @@ static int build_entry(image_cache_entry_t *e, int handle, const leanfs_stat_t *
         bounce_pages /= 4;
     }
     if (!bounce_phys) {
-        e->segment_count = 0;
         return -1;
     }
     uint8_t *bounce = (uint8_t *)(uintptr_t)bounce_phys;
     uint64_t bounce_bytes = bounce_pages * PAGE_SIZE;
+    const image_ehdr_t *eh = (const image_ehdr_t *)e->header;
+    const image_phdr_t *ph = (const image_phdr_t *)(e->header + eh->e_phoff);
     int failed = 0;
     int load = 0;
     for (uint16_t i = 0; i < eh->e_phnum && !failed; i++) {
@@ -291,7 +304,6 @@ static int build_entry(image_cache_entry_t *e, int handle, const leanfs_stat_t *
         }
         k_memset(segment->frames, 0, segment->frames_table_pages * PAGE_SIZE);
         e->pages += segment->frames_table_pages;
-        cached_pages += segment->frames_table_pages;
         for (uint64_t p = 0; p < segment->pages; p++) {
             segment->frames[p] = physical_memory_try_alloc_frame();
             if (!segment->frames[p]) {
@@ -299,7 +311,6 @@ static int build_entry(image_cache_entry_t *e, int handle, const leanfs_stat_t *
                 break;
             }
             e->pages++;
-            cached_pages++;
             k_memset((void *)segment->frames[p], 0, PAGE_SIZE);
         }
         if (!failed && fill_segment(handle, segment, &ph[i], bounce, bounce_bytes) != 0) {
@@ -307,16 +318,17 @@ static int build_entry(image_cache_entry_t *e, int handle, const leanfs_stat_t *
         }
     }
     physical_memory_free_contiguous(bounce_phys, bounce_pages);
-    if (failed) {
-        free_entry(e);
-        return -1;
-    }
-    e->inode = st->inode;
-    e->generation = st->generation;
-    e->size = st->size;
-    e->used = 1;
-    return 0;
+    return failed ? -1 : 0;
 }
+
+/* M201. The whole program used to be read with cache_lock held - three
+   hundred megabytes of browser, a couple of seconds off a USB stick - and
+   every other exec on the machine waited behind it, whatever it was
+   launching. The slot is claimed and its pages reserved under the lock, the
+   file is read without it, and the entry is published under it again.
+   Anybody asking for the same file meanwhile waits for that one load rather
+   than starting a second. */
+#define IMAGE_CACHE_LOAD_POLL_MS 2u
 
 image_cache_entry_t *image_cache_acquire(const char *path) {
     if (!path || !path_is_on_leanfs(path)) {
@@ -334,52 +346,106 @@ image_cache_entry_t *image_cache_acquire(const char *path) {
 
     sleep_lock_acquire(&cache_lock);
     image_cache_entry_t *found = (image_cache_entry_t *)0;
-    for (int i = 0; i < IMAGE_CACHE_ENTRIES; i++) {
-        image_cache_entry_t *e = &entries[i];
-        if (!e->used || e->inode != st.inode) {
-            continue;
+    for (;;) {
+        int waiting = 0;
+        for (int i = 0; i < IMAGE_CACHE_ENTRIES; i++) {
+            image_cache_entry_t *e = &entries[i];
+            if (!e->used || e->inode != st.inode) {
+                continue;
+            }
+            if (e->generation == st.generation && e->size == st.size) {
+                if (e->loading) {
+                    waiting = 1;
+                } else {
+                    found = e;
+                }
+                break;
+            }
+            if (e->users == 0 && !e->loading) {
+                free_entry(e);
+            }
         }
-        if (e->generation == st.generation && e->size == st.size) {
-            found = e;
+        if (!waiting) {
             break;
         }
-        if (e->users == 0) {
-            free_entry(e);
-        }
+        sleep_lock_release(&cache_lock);
+        scheduler_sleep_ms(IMAGE_CACHE_LOAD_POLL_MS);
+        sleep_lock_acquire(&cache_lock);
     }
     if (found) {
         statistics.hits++;
-    } else {
-        image_cache_entry_t *slot = (image_cache_entry_t *)0;
+        found->users++;
+        found->last_used = ++use_clock;
+        sleep_lock_release(&cache_lock);
+        virtual_file_system_handle_close(handle);
+        return found;
+    }
+
+    image_cache_entry_t *slot = (image_cache_entry_t *)0;
+    for (int i = 0; i < IMAGE_CACHE_ENTRIES && !slot; i++) {
+        if (!entries[i].used) {
+            slot = &entries[i];
+        }
+    }
+    if (!slot && evict_one()) {
         for (int i = 0; i < IMAGE_CACHE_ENTRIES && !slot; i++) {
             if (!entries[i].used) {
                 slot = &entries[i];
             }
         }
-        if (!slot && evict_one()) {
-            for (int i = 0; i < IMAGE_CACHE_ENTRIES && !slot; i++) {
-                if (!entries[i].used) {
-                    slot = &entries[i];
-                }
-            }
-        }
-        if (slot && build_entry(slot, handle, &st) == 0) {
-            leanfs_stat_t after;
-            if (virtual_file_system_handle_stat(handle, &after) == 0 &&
-                after.generation == st.generation && after.size == st.size) {
-                found = slot;
-                statistics.misses++;
-            } else {
-                free_entry(slot);
-            }
-        }
-        if (!found) {
-            statistics.refusals++;
-        }
     }
-    if (found) {
-        found->users++;
-        found->last_used = ++use_clock;
+    if (!slot) {
+        statistics.refusals++;
+        sleep_lock_release(&cache_lock);
+        virtual_file_system_handle_close(handle);
+        return (image_cache_entry_t *)0;
+    }
+    k_memset(slot, 0, sizeof(*slot));
+    slot->used = 1;
+    slot->loading = 1;
+    slot->users = 1;
+    slot->inode = st.inode;
+    slot->generation = st.generation;
+    slot->size = st.size;
+    sleep_lock_release(&cache_lock);
+
+    int ok = 0;
+    uint64_t pages = plan_entry(slot, handle, &st);
+    if (pages) {
+        sleep_lock_acquire(&cache_lock);
+        while (cached_pages + pages > budget_pages() && evict_one()) {
+        }
+        if (cached_pages + pages <= budget_pages()) {
+            cached_pages += pages;
+            slot->reserved_pages = pages;
+            ok = 1;
+        }
+        sleep_lock_release(&cache_lock);
+    }
+    if (ok && fill_entry(slot, handle) != 0) {
+        ok = 0;
+    }
+    if (ok) {
+        leanfs_stat_t after;
+        ok = virtual_file_system_handle_stat(handle, &after) == 0 &&
+             after.generation == st.generation && after.size == st.size;
+    }
+
+    sleep_lock_acquire(&cache_lock);
+    cached_pages -= slot->reserved_pages;
+    slot->reserved_pages = 0;
+    if (ok) {
+        cached_pages += slot->pages;
+        slot->loading = 0;
+        slot->last_used = ++use_clock;
+        statistics.misses++;
+        found = slot;
+    } else {
+        release_frames(slot);
+        slot->loading = 0;
+        slot->users = 0;
+        slot->used = 0;
+        statistics.refusals++;
     }
     sleep_lock_release(&cache_lock);
     virtual_file_system_handle_close(handle);
@@ -445,7 +511,7 @@ uint64_t image_cache_private_pages(void) {
     uint64_t count = 0;
     for (int i = 0; i < IMAGE_CACHE_ENTRIES; i++) {
         const image_cache_entry_t *e = &entries[i];
-        if (!e->used) {
+        if (!e->used || e->loading) {
             continue;
         }
         for (int s = 0; s < e->segment_count; s++) {

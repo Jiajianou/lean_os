@@ -321,6 +321,7 @@ REQUIRED_MARKERS=(
   "[m198] one program, two processes, one copy of its text:"
   "[m199] a 3 ms sleep wakes "
   "[m199] the hang detector named the holder of a sleep lock"
+  "[m201] a program's first read no longer holds up every other exec"
   "[m91] an address space that is a set of mappings:"
   "a file mapped MAP_PRIVATE reading back as its own bytes"
   "the same file mapped MAP_SHARED twice as one piece of memory"
