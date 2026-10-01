@@ -27,7 +27,7 @@ extern "C" {
 
 #define TASK_INFO_NAME_MAX 24
 
-#define TASK_INFO_MAX 256
+#define TASK_INFO_MAX 512
 
 #define TASK_INFO_READY      0
 #define TASK_INFO_RUNNING    1

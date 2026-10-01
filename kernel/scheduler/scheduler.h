@@ -113,10 +113,14 @@ typedef struct {
    thread pools in each: a child's pthread_create failed and it stopped on a
    CHECK in base::SimpleThread. 256 is the most PID_SLOT_BITS can name, and
    the table comes from the page allocator rather than the image (M187: 1.1 MB
-   more BSS was enough to stop the loader reserving the kernel's address). */
-#define MAX_TASKS 256
+   more BSS was enough to stop the loader reserving the kernel's address).
+   512 since M205: on the laptop's eight threads Chromium sizes its pools to
+   the processor count, and a renderer a site is fifteen or twenty threads -
+   one browser with a handful of sites open came within a few slots of 256
+   once the slots of dead threads came back at all. Three megabytes. */
+#define MAX_TASKS 512
 
-#define PID_SLOT_BITS 8
+#define PID_SLOT_BITS 9
 _Static_assert(MAX_TASKS <= (1 << PID_SLOT_BITS), "a pid names its slot in PID_SLOT_BITS bits");
 _Static_assert(TASK_INFO_MAX >= MAX_TASKS, "SYS_taskinfo must be able to name every task there can be");
 #define PID_SLOT_MASK ((1 << PID_SLOT_BITS) - 1)
@@ -320,6 +324,9 @@ typedef struct task {
     spinlock_t mmap_lock;
     int tgid;
     uint8_t is_thread;
+    /* M205: nobody will join this thread - pthread_detach said so - so once
+       it has terminated its slot is anybody's. */
+    uint8_t detached;
     uint8_t exiting;
     char name[TASK_NAME_MAX];
 } task_t;
@@ -523,6 +530,10 @@ int scheduler_peak_live_tasks(void);
 int scheduler_file_descriptor_high_water(int *which_task_out);
 
 void scheduler_reap_slot(task_t *t);
+
+int scheduler_detach_thread(task_t *caller, int thread_id);
+
+void scheduler_release_finished_tasks(void);
 void scheduler_dump_cpus(void);
 
 void scheduler_deadline_timer_fired(void);

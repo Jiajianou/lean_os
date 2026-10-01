@@ -51,7 +51,20 @@ static void fill(pci_device_t *out, uint8_t bus, uint8_t slot, uint8_t func,
     out->prog_if = (uint8_t)(rev >> 8);
 }
 
-void pci_enumerate(pci_visitor_t visit, void *context) {
+/* M205. Every probe used to walk all 65,536 bus/slot/function triples, two
+   port accesses each, and a driver looking for something absent walked them
+   all. On the laptop's chipset that is half a second a walk, and booting made
+   eight of them before the desktop. A function other than 0 is only looked
+   for where function 0 answered, which the specification requires of every
+   device, and the machine is walked once. */
+#define PCI_MAX_FUNCTIONS 256
+
+static pci_device_t found_functions[PCI_MAX_FUNCTIONS];
+static uint32_t found_count;
+static int scanned;
+
+static void scan(void) {
+    found_count = 0;
     for (uint32_t bus = 0; bus < 256; bus++) {
         for (uint32_t slot = 0; slot < 32; slot++) {
             for (uint32_t func = 0; func < 8; func++) {
@@ -59,32 +72,46 @@ void pci_enumerate(pci_visitor_t visit, void *context) {
                     config_read32((uint8_t)bus, (uint8_t)slot, (uint8_t)func, PCI_REG_VENDOR_DEVICE);
                 uint16_t vid = (uint16_t)(vendor_device & 0xFFFF);
                 if (vid == 0xFFFF) {
+                    if (func == 0) {
+                        break;
+                    }
                     continue;
                 }
-                pci_device_t device;
-                fill(&device, (uint8_t)bus, (uint8_t)slot, (uint8_t)func, vid,
+                if (found_count == PCI_MAX_FUNCTIONS) {
+                    return;
+                }
+                fill(&found_functions[found_count++], (uint8_t)bus, (uint8_t)slot, (uint8_t)func, vid,
                      (uint16_t)(vendor_device >> 16));
-                visit(&device, context);
             }
         }
     }
 }
 
+static void ensure_scanned(void) {
+    if (!scanned) {
+        scan();
+        scanned = 1;
+    }
+}
+
+void pci_rescan(void) {
+    scanned = 0;
+}
+
+void pci_enumerate(pci_visitor_t visit, void *context) {
+    ensure_scanned();
+    for (uint32_t i = 0; i < found_count; i++) {
+        pci_device_t device = found_functions[i];
+        visit(&device, context);
+    }
+}
+
 int pci_find_device(uint16_t vendor_id, uint16_t device_id, pci_device_t *out) {
-    for (uint32_t bus = 0; bus < 256; bus++) {
-        for (uint32_t slot = 0; slot < 32; slot++) {
-            for (uint32_t func = 0; func < 8; func++) {
-                uint32_t vendor_device = config_read32((uint8_t)bus, (uint8_t)slot, (uint8_t)func, PCI_REG_VENDOR_DEVICE);
-                uint16_t vid = (uint16_t)(vendor_device & 0xFFFF);
-                if (vid == 0xFFFF) {
-                    continue;
-                }
-                uint16_t did = (uint16_t)(vendor_device >> 16);
-                if (vid == vendor_id && did == device_id) {
-                    fill(out, (uint8_t)bus, (uint8_t)slot, (uint8_t)func, vid, did);
-                    return 1;
-                }
-            }
+    ensure_scanned();
+    for (uint32_t i = 0; i < found_count; i++) {
+        if (found_functions[i].vendor_id == vendor_id && found_functions[i].device_id == device_id) {
+            *out = found_functions[i];
+            return 1;
         }
     }
     return 0;
@@ -117,34 +144,21 @@ void pci_enable_device(const pci_device_t *dev) {
 
 int pci_find_class(uint8_t class_code, uint8_t subclass, uint8_t prog_if,
                    uint32_t index, pci_device_t *out) {
+    ensure_scanned();
     uint32_t seen = 0;
-    for (uint32_t bus = 0; bus < 256; bus++) {
-        for (uint32_t slot = 0; slot < 32; slot++) {
-            for (uint32_t func = 0; func < 8; func++) {
-                uint32_t vendor_device =
-                    config_read32((uint8_t)bus, (uint8_t)slot, (uint8_t)func, PCI_REG_VENDOR_DEVICE);
-                uint16_t vid = (uint16_t)(vendor_device & 0xFFFF);
-                if (vid == 0xFFFF) {
-                    continue;
-                }
-                uint32_t rev = config_read32((uint8_t)bus, (uint8_t)slot, (uint8_t)func, PCI_REG_REVISION);
-                uint8_t dev_class = (uint8_t)(rev >> 24);
-                uint8_t dev_sub = (uint8_t)(rev >> 16);
-                uint8_t dev_prog = (uint8_t)(rev >> 8);
-                if (dev_class != class_code || dev_sub != subclass) {
-                    continue;
-                }
-                if (prog_if != PCI_PROG_IF_ANY && dev_prog != prog_if) {
-                    continue;
-                }
-                if (seen++ != index) {
-                    continue;
-                }
-                fill(out, (uint8_t)bus, (uint8_t)slot, (uint8_t)func, vid,
-                     (uint16_t)(vendor_device >> 16));
-                return 1;
-            }
+    for (uint32_t i = 0; i < found_count; i++) {
+        const pci_device_t *device = &found_functions[i];
+        if (device->class_code != class_code || device->subclass != subclass) {
+            continue;
         }
+        if (prog_if != PCI_PROG_IF_ANY && device->prog_if != prog_if) {
+            continue;
+        }
+        if (seen++ != index) {
+            continue;
+        }
+        *out = *device;
+        return 1;
     }
     return 0;
 }

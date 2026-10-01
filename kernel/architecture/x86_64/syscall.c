@@ -692,6 +692,16 @@ static long sys_thread_create(uint64_t entry, uint64_t arg, uint64_t stack_top,
     return t ? (long)t->id : -1;
 }
 
+static long sys_thread_detach(uint64_t thread_id, uint64_t a2, uint64_t a3, uint64_t a4,
+                              uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    return scheduler_detach_thread(scheduler_current(), (int)thread_id);
+}
+
 static long sys_thread_exit(uint64_t value, uint64_t a2, uint64_t a3, uint64_t a4,
                              uint64_t a5, uint64_t a6) {
     (void)a2;
@@ -5581,6 +5591,7 @@ static const syscall_function_t syscall_table[SYSCALL_COUNT] = {
     [SYS_thread_create] = sys_thread_create,
     [SYS_peek] = sys_peek,
     [SYS_clock_ns] = sys_clock_ns,
+    [SYS_thread_detach] = sys_thread_detach,
     [SYS_getrlimit] = sys_getrlimit,
     [SYS_setrlimit] = sys_setrlimit,
     [SYS_thread_setname] = sys_thread_setname,

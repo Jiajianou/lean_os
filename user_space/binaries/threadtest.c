@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -273,6 +274,72 @@ static void *outlives_the_leader(void *unused) {
     return 0;
 }
 
+static unsigned long count_argument(const char *text, unsigned long fallback) {
+    unsigned long n = 0;
+    for (const char *c = text ? text : ""; *c >= '0' && *c <= '9'; c++) {
+        n = n * 10 + (unsigned long)(*c - '0');
+    }
+    return n ? n : fallback;
+}
+
+static volatile int retired;
+
+static void *retire(void *argument) {
+    (void)argument;
+    __atomic_store_n(&retired, 1, __ATOMIC_RELEASE);
+    return 0;
+}
+
+/* M205: what a thread pool does all day - start a worker nobody will join,
+   let it finish, start another. Every one of them used to keep its slot in
+   the kernel's task table, and this process alone would run out of them
+   before the 230th. */
+static int detached_mode(const char *count_text) {
+    unsigned long count = count_argument(count_text, 600);
+    for (unsigned long i = 0; i < count; i++) {
+        __atomic_store_n(&retired, 0, __ATOMIC_RELEASE);
+        pthread_attr_t attributes;
+        pthread_attr_init(&attributes);
+        pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+        pthread_t worker;
+        int rc = pthread_create(&worker, &attributes, retire, 0);
+        pthread_attr_destroy(&attributes);
+        if (rc != 0) {
+            printf("threadtest: detached thread %lu of %lu could not be created (%d)\n",
+                   i + 1, count, rc);
+            return 40;
+        }
+        while (!__atomic_load_n(&retired, __ATOMIC_ACQUIRE)) {
+            sched_yield();
+        }
+    }
+    return 0;
+}
+
+static volatile int abandoned_finished;
+
+static void *abandoned(void *argument) {
+    (void)argument;
+    __atomic_add_fetch(&abandoned_finished, 1, __ATOMIC_ACQ_REL);
+    return 0;
+}
+
+/* M205: joinable threads that finish and are never joined, in a process that
+   then exits. Nobody is left who could join them. */
+static int abandon_mode(const char *count_text) {
+    unsigned long count = count_argument(count_text, 40);
+    for (unsigned long i = 0; i < count; i++) {
+        pthread_t worker;
+        if (pthread_create(&worker, 0, abandoned, 0) != 0) {
+            return 41;
+        }
+    }
+    while (__atomic_load_n(&abandoned_finished, __ATOMIC_ACQUIRE) < (int)count) {
+        sched_yield();
+    }
+    return 0;
+}
+
 static int leader_exit_mode(const char *pages_text) {
     if (pages_text) {
         unsigned long n = 0;
@@ -378,6 +445,12 @@ static int as_many_threads_as_promised(void) {
 int main(int argc, char **argv) {
     if (argc > 1 && argv[1] && strcmp(argv[1], "leaderexit") == 0) {
         return leader_exit_mode(argc > 2 ? argv[2] : 0);
+    }
+    if (argc > 1 && argv[1] && strcmp(argv[1], "detached") == 0) {
+        return detached_mode(argc > 2 ? argv[2] : 0);
+    }
+    if (argc > 1 && argv[1] && strcmp(argv[1], "abandon") == 0) {
+        return abandon_mode(argc > 2 ? argv[2] : 0);
     }
 
     double alone = fp_work(1.0);

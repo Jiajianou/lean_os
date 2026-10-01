@@ -598,7 +598,7 @@ void scheduler_init_ap(int cpu_id) {
 static int thread_group_has_live_members(int group, const task_t *except);
 
 /* Reset the slots of leaders whose groups have finished since they were
-   last looked at.
+   last looked at - and, since M205, of threads nobody is ever going to join.
 
    scheduler_reap_slot holds a leader's slot while its threads are still
    running, and releases it when the last of them is reaped. A thread nobody
@@ -609,8 +609,27 @@ static int thread_group_has_live_members(int group, const task_t *except);
    Here because it has to run somewhere that can take a lock and wait, and a
    spawn is the moment the answer matters. task_exit cannot do it: a fatal
    signal is delivered on the timer interrupt, and scheduler_reap_slot waits
-   for a task to leave its kernel stack. */
-static void release_finished_leaders(void) {
+   for a task to leave its kernel stack.
+
+   A terminated thread is only ever reaped by a pthread_join, so two kinds
+   were never reaped at all: a detached one, and every thread of a process
+   that has died - nobody is left to join them. Chromium's thread pools make
+   their workers detached and retire them when idle, and a browser that
+   exits leaves a hundred and fifty threads behind it. Both stayed in the
+   table until the machine stopped; the laptop's second Browser launch found
+   it full, and its renderers died on "pthread_create: EAGAIN". */
+static int nobody_will_join(const task_t *thread) {
+    return thread->detached || !thread_group_has_live_members(thread->tgid, (const task_t *)0);
+}
+
+void scheduler_release_finished_tasks(void) {
+    for (int i = 0; i < task_count; i++) {
+        task_t *o = &tasks[i];
+        if (o->state != TASK_TERMINATED || !o->is_thread || !nobody_will_join(o)) {
+            continue;
+        }
+        scheduler_reap_slot(o);
+    }
     for (int i = 0; i < task_count; i++) {
         task_t *o = &tasks[i];
         if (o->state != TASK_TERMINATED || o->is_thread) {
@@ -623,10 +642,19 @@ static void release_finished_leaders(void) {
     }
 }
 
+int scheduler_detach_thread(task_t *caller, int thread_id) {
+    task_t *t = scheduler_task_by_id(thread_id);
+    if (!t || !caller || !t->is_thread || t->tgid != caller->tgid) {
+        return -1;
+    }
+    t->detached = 1;
+    return 0;
+}
+
 static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
                                   uint64_t heap_start, uint64_t shared_memory_base, task_t *thread_of) {
     _Static_assert(TASK_STACK_SIZE % 4096 == 0, "a kernel stack must be a whole number of frames");
-    release_finished_leaders();
+    scheduler_release_finished_tasks();
     uint8_t *stack_base = (uint8_t *)(uintptr_t)physical_memory_try_alloc_contiguous_anywhere(TASK_STACK_SIZE / 4096);
     if (!stack_base) {
         return (task_t *)0;
@@ -746,6 +774,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->fs_base = 0;
     t->tgid = thread_of ? thread_of->tgid : t->id;
     t->is_thread = thread_of ? 1 : 0;
+    t->detached = 0;
     t->exiting = 0;
     t->caps = caller->caps;
     t->prio = PRIO_INTERACTIVE;
@@ -2012,6 +2041,7 @@ void scheduler_reap_slot(task_t *t) {
     scheduler_regions_release(t);
     t->fs_base = 0;
     t->is_thread = 0;
+    t->detached = 0;
     t->exiting = 0;
     t->tgid = 0;
     t->cwd[0] = '/';
@@ -2844,6 +2874,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
 
     t->tgid = t->id;
     t->is_thread = 0;
+    t->detached = 0;
     t->exiting = 0;
     t->caps = parent->caps;
 

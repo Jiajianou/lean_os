@@ -59,7 +59,7 @@ static void q13_tick(int cpu) {
 }
 
 TEST(scheduler, the_constants_are_the_kernels_own) {
-    CHECK_EQ(MAX_TASKS, 256);
+    CHECK_EQ(MAX_TASKS, 512);
     CHECK_EQ(MAX_CPUS, 16);
     CHECK(MAX_FILE_DESCRIPTORS >= 1024);
     q13_boot();
@@ -322,6 +322,71 @@ TEST(scheduler, a_dead_task_absorbs_a_signal_rather_than_taking_it) {
     CHECK_EQ(t->pending_signal, 0);
     CHECK_EQ(t->pending_stop, 0);
     scheduler_reap_slot(t);
+}
+
+TEST(scheduler, a_finished_thread_nobody_will_join_gives_its_slot_back) {
+    q13_boot();
+    task_t *leader = q13_spawn("pool");
+    REQUIRE(leader != NULL);
+    task_t *worker = task_spawn_thread("worker", leader, q13_body, (void *)0);
+    task_t *joinable = task_spawn_thread("joinable", leader, q13_body, (void *)0);
+    REQUIRE(worker != NULL);
+    REQUIRE(joinable != NULL);
+    int worker_id = worker->id;
+    int joinable_id = joinable->id;
+    CHECK_EQ(scheduler_detach_thread(leader, worker_id), 0);
+
+    worker->state = TASK_TERMINATED;
+    joinable->state = TASK_TERMINATED;
+    scheduler_release_finished_tasks();
+
+    CHECK(scheduler_task_by_id(worker_id) == NULL);
+    CHECK(scheduler_task_by_id(joinable_id) == joinable);
+
+    scheduler_reap_slot(joinable);
+    q13_kill(leader);
+}
+
+TEST(scheduler, the_threads_of_a_process_that_died_are_nobodys_to_join) {
+    q13_boot();
+    int live_before = scheduler_live_task_count();
+    task_t *leader = q13_spawn("gone");
+    REQUIRE(leader != NULL);
+    task_t *threads[5];
+    for (int i = 0; i < 5; i++) {
+        threads[i] = task_spawn_thread("orphan", leader, q13_body, (void *)0);
+        REQUIRE(threads[i] != NULL);
+    }
+    for (int i = 0; i < 5; i++) {
+        threads[i]->state = TASK_TERMINATED;
+    }
+    CHECK_EQ(scheduler_live_task_count(), live_before + 6);
+    scheduler_release_finished_tasks();
+    CHECK_EQ(scheduler_live_task_count(), live_before + 6);
+
+    leader->state = TASK_TERMINATED;
+    scheduler_release_finished_tasks();
+    CHECK_EQ(scheduler_live_task_count(), live_before);
+}
+
+TEST(scheduler, only_a_thread_of_ones_own_process_can_be_detached) {
+    q13_boot();
+    task_t *mine = q13_spawn("mine");
+    task_t *theirs = q13_spawn("theirs");
+    REQUIRE(mine != NULL);
+    REQUIRE(theirs != NULL);
+    task_t *their_thread = task_spawn_thread("their-thread", theirs, q13_body, (void *)0);
+    REQUIRE(their_thread != NULL);
+
+    CHECK_EQ(scheduler_detach_thread(mine, their_thread->id), -1);
+    CHECK_EQ(scheduler_detach_thread(mine, theirs->id), -1);
+    CHECK_EQ(scheduler_detach_thread(theirs, their_thread->id), 0);
+    CHECK_EQ(scheduler_detach_thread(theirs, 0x7FFFFF00), -1);
+
+    their_thread->state = TASK_TERMINATED;
+    scheduler_reap_slot(their_thread);
+    q13_kill(theirs);
+    q13_kill(mine);
 }
 
 TEST(scheduler, a_group_signal_reaches_every_member_and_nobody_else) {

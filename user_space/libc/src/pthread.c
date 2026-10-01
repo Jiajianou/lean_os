@@ -42,6 +42,8 @@ static struct {
 
 static pthread_mutex_t registry_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static void release_detached_threads_that_have_gone(void);
+
 static inline int atomic_xchg(volatile int *p, int v) {
     __asm__ volatile("lock xchgl %0, %1" : "+r"(v), "+m"(*p) : : "memory");
     return v;
@@ -556,6 +558,7 @@ int pthread_create(pthread_t *out, const pthread_attr_t *attribute,
     if (!out || !start) {
         return 22;
     }
+    release_detached_threads_that_have_gone();
     size_t want = (attribute && attribute->stack_size) ? attribute->stack_size : PTHREAD_STACK_DEFAULT;
     size_t bytes = (want + sizeof(thread_block_t) + 4095u) & ~(size_t)4095u;
     void *memory = mmap(0, bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
@@ -718,19 +721,59 @@ int pthread_setschedparam(pthread_t thread, int policy,
     return 0;
 }
 
+/* M205. A detached thread's stack and thread-local block were forgotten the
+   moment it was detached - pthread_join is what gave them back, and nobody
+   joins a detached thread - and its slot in the kernel's task table was
+   never reaped either. The kernel is told now, and the memory waits here
+   until the kernel says the thread has gone: a thread cannot unmap the stack
+   it is standing on, and until it has left the system call that ends it, it
+   is still standing on it. */
+static struct {
+    pthread_t tid;
+    thread_block_t *block;
+} detached[MAX_THREADS];
+
+static void release_detached_threads_that_have_gone(void) {
+    pthread_mutex_lock(&registry_lock);
+    for (int i = 0; i < MAX_THREADS; i++) {
+        thread_block_t *tb = detached[i].block;
+        if (!tb || sys_wait_nb((long)detached[i].tid) == -2) {
+            continue;
+        }
+        detached[i].block = 0;
+        detached[i].tid = 0;
+        __lean_tls_release(tb->tls);
+        munmap(tb->stack_base, tb->stack_bytes);
+    }
+    pthread_mutex_unlock(&registry_lock);
+}
+
 int pthread_detach(pthread_t thread) {
     pthread_mutex_lock(&registry_lock);
-    int found = 0;
+    thread_block_t *tb = 0;
     for (int i = 0; i < MAX_THREADS; i++) {
         if (registry[i].block && registry[i].tid == thread) {
+            tb = registry[i].block;
             registry[i].block = 0;
             registry[i].tid = 0;
-            found = 1;
             break;
         }
     }
+    if (tb) {
+        for (int i = 0; i < MAX_THREADS; i++) {
+            if (!detached[i].block) {
+                detached[i].block = tb;
+                detached[i].tid = thread;
+                break;
+            }
+        }
+    }
     pthread_mutex_unlock(&registry_lock);
-    return found ? 0 : 3;
+    if (!tb) {
+        return 3;
+    }
+    sys_thread_detach((long)thread);
+    return 0;
 }
 
 int pthread_join(pthread_t thread, void **retval) {

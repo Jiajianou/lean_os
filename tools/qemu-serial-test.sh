@@ -300,6 +300,7 @@ REQUIRED_MARKERS=(
   "chromiumcontent: done"
   "[m167] Chromium's own browser on this machine:"
   "[m167] a process outliving its first thread:"
+  "[m205] twelve hundred detached threads started and retired one after"
   "chromiumshell: done"
   "mathltest: done"
   "[m125] lvgl rendered"

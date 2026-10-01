@@ -11930,6 +11930,45 @@ static void boot_selftests_system(void) {
                        "the owner keeping its page table means.\n");
         }
 
+        /* M205: threads nobody will join give their slots back. Both runs
+           are measured against the live-task count from before them, with
+           nothing reaped by hand: the sweep a spawn runs is what has to do
+           it. */
+        {
+            size_t m205_bytes = 0;
+            uint8_t *m205_img = read_program(PATH_BIN_DIRECTORY "threadtest", &m205_bytes);
+            if (!m205_img) {
+                panic("M205 self-test: /bin/threadtest vanished mid-test");
+            }
+            static const char *const modes[2][4] = {
+                {PATH_BIN_DIRECTORY "threadtest", "detached", "1200", 0},
+                {PATH_BIN_DIRECTORY "threadtest", "abandon", "40", 0},
+            };
+            for (int mode = 0; mode < 2; mode++) {
+                scheduler_release_finished_tasks();
+                int live_before = scheduler_live_task_count();
+                task_t *run = process_spawnv("threadtest", m205_img, m205_bytes, modes[mode]);
+                long run_rc = run ? do_syscall(SYS_wait, (uint64_t)run->id, 0, 0) : -1;
+                scheduler_release_finished_tasks();
+                int live_after = scheduler_live_task_count();
+                if (run_rc != 0 || live_after != live_before) {
+                    kernel_log_puts("[m205] threadtest ");
+                    kernel_log_puts(modes[mode][1]);
+                    kernel_log_puts(" exited ");
+                    kernel_log_put_dec((uint32_t)(run_rc < 0 ? 99 : run_rc));
+                    kernel_log_puts(" and left ");
+                    kernel_log_put_dec((uint32_t)(live_after > live_before ? live_after - live_before : 0));
+                    kernel_log_puts(" task slot(s) behind it\n");
+                    panic("M205 self-test: a thread nobody will join kept its task slot");
+                }
+            }
+            kfree(m205_img);
+            kernel_log_puts("[m205] twelve hundred detached threads started and retired one after "
+                       "another, more than the table holds, and forty never joined by a process that "
+                       "then exited - every slot came back without anybody reaping one by hand "
+                       "- self-test passed.\n");
+        }
+
         kernel_log_puts("[m79] two threads, one address space: three tasks on one page table at "
                    "once, two million increments through a mutex arriving as exactly two "
                    "million, memory written by one thread read by the other, separate tids "
@@ -14010,7 +14049,7 @@ display_self_test_done:
     }
 
     kernel_log_use_console();
-    kernel_log_puts("[console] framebuffer text console active - logging switched over from VGA text mode.\n\n");
+    kernel_log_puts("[console] framebuffer text console active - the log reaches the screen from here on.\n\n");
 
     __asm__ volatile("sti");
 

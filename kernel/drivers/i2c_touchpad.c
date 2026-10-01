@@ -117,6 +117,7 @@ static int poll_once(void) {
    full rate back. */
 static void poll_task(void *argument) {
     (void)argument;
+    designware_i2c_sleep_while_clocking(1);
     uint64_t last_report_ms = 0;
     for (;;) {
         uint64_t now_ms = clock_monotonic_ms();
@@ -218,7 +219,9 @@ int i2c_touchpad_init(void) {
     kernel_log_put_dec(layout.report_bits);
     kernel_log_puts(" bits, wheel ");
     kernel_log_puts(layout.has_wheel ? "yes" : "no");
-    kernel_log_puts(".\n");
+    kernel_log_puts(", every poll reads ");
+    kernel_log_put_dec(descriptor.max_input_length);
+    kernel_log_puts(" bytes.\n");
 
     present = 1;
     return 1;

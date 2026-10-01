@@ -223,22 +223,60 @@ TEST(pci, enumeration_visits_every_function_in_order_with_its_class) {
     reset();
     fake_pci_add(1, 0, 0, 0x3333, 0x0003, 0x0C, 0x03, 0x30);
     fake_pci_add(0, 5, 2, 0x2222, 0x0002, 0x02, 0x00, 0x00);
+    fake_pci_add(0, 5, 0, 0x2222, 0x0005, 0x06, 0x01, 0x00);
     fake_pci_add(0, 2, 0, 0x1111, 0x0001, AHCI_CLASS, AHCI_SUB, AHCI_PROG);
 
     visit_log_t log = {0};
     pci_enumerate(remember, &log);
-    REQUIRE(log.count == 3);
+    REQUIRE(log.count == 4);
     CHECK_EQ(log.seen[0].vendor_id, 0x1111);
     CHECK_EQ(log.seen[0].class_code, AHCI_CLASS);
     CHECK_EQ(log.seen[0].subclass, AHCI_SUB);
     CHECK_EQ(log.seen[0].prog_if, AHCI_PROG);
-    CHECK_EQ(log.seen[1].vendor_id, 0x2222);
-    CHECK_EQ(log.seen[1].slot, 5);
-    CHECK_EQ(log.seen[1].func, 2);
-    CHECK_EQ(log.seen[2].vendor_id, 0x3333);
-    CHECK_EQ(log.seen[2].bus, 1);
-    CHECK_EQ(log.seen[2].device_id, 0x0003);
-    CHECK_EQ(log.seen[2].prog_if, 0x30);
+    CHECK_EQ(log.seen[1].device_id, 0x0005);
+    CHECK_EQ(log.seen[1].func, 0);
+    CHECK_EQ(log.seen[2].vendor_id, 0x2222);
+    CHECK_EQ(log.seen[2].slot, 5);
+    CHECK_EQ(log.seen[2].func, 2);
+    CHECK_EQ(log.seen[3].vendor_id, 0x3333);
+    CHECK_EQ(log.seen[3].bus, 1);
+    CHECK_EQ(log.seen[3].device_id, 0x0003);
+    CHECK_EQ(log.seen[3].prog_if, 0x30);
+}
+
+TEST(pci, a_slot_whose_function_0_is_absent_is_empty) {
+    reset();
+    fake_pci_add(0, 7, 3, 0x4444, 0x0004, AHCI_CLASS, AHCI_SUB, AHCI_PROG);
+
+    visit_log_t log = {0};
+    pci_enumerate(remember, &log);
+    CHECK_EQ(log.count, 0);
+    pci_device_t dev;
+    CHECK_EQ(pci_find_class(AHCI_CLASS, AHCI_SUB, AHCI_PROG, 0, &dev), 0);
+}
+
+static uint32_t config_reads;
+
+static void count_reads(const pci_device_t *device, void *context) {
+    (void)device;
+    (void)context;
+    config_reads++;
+}
+
+TEST(pci, the_machine_is_walked_once_however_often_a_driver_asks) {
+    reset();
+    fake_pci_add(0, 3, 0, 0x8086, 0x2922, AHCI_CLASS, AHCI_SUB, AHCI_PROG);
+    pci_device_t dev;
+    REQUIRE(pci_find_class(AHCI_CLASS, AHCI_SUB, AHCI_PROG, 0, &dev) == 1);
+    uint32_t before = fake_pci_config_reads();
+    for (int i = 0; i < 8; i++) {
+        CHECK_EQ(pci_find_device(0x1AF4, 0x1001, &dev), 0);
+        CHECK_EQ(pci_find_class(0x01, 0x08, 0x02, 0, &dev), 0);
+    }
+    config_reads = 0;
+    pci_enumerate(count_reads, 0);
+    CHECK_EQ(config_reads, 1);
+    CHECK_EQ(fake_pci_config_reads(), before);
 }
 
 TEST(pci, enumeration_of_an_empty_bus_visits_nothing) {

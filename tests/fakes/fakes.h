@@ -44,6 +44,7 @@ void fake_fwcfg_set_item(uint16_t selector, const uint8_t *data, uint32_t length
 void fake_fwcfg_append_item(uint16_t selector, const uint8_t *data, uint32_t length);
 
 void fake_pci_reset(void);
+uint32_t fake_pci_config_reads(void);
 int fake_pci_add(uint8_t bus, uint8_t slot, uint8_t func, uint16_t vendor, uint16_t device,
                  uint8_t class_code, uint8_t subclass, uint8_t prog_if);
 void fake_pci_set_config(int handle, uint8_t offset, uint32_t value);

@@ -2,6 +2,17 @@
 
 #include <string.h>
 
+#include "drivers/pci.h"
+
+/* Weak because several test binaries link these fakes without the PCI driver,
+   and the driver remembers what it found until it is told the machine changed. */
+__attribute__((weak)) void pci_rescan(void) {
+}
+
+static void forget_what_was_found(void) {
+    pci_rescan();
+}
+
 #define CONFIG_ADDRESS 0xCF8
 #define CONFIG_DATA    0xCFC
 
@@ -19,6 +30,7 @@ static uint32_t selected;
 void fake_pci_reset(void) {
     memset(devices, 0, sizeof(devices));
     selected = 0;
+    forget_what_was_found();
 }
 
 static fake_pci_device_t *find(uint8_t bus, uint8_t slot, uint8_t func) {
@@ -45,6 +57,7 @@ int fake_pci_add(uint8_t bus, uint8_t slot, uint8_t func, uint16_t vendor, uint1
         devices[i].config[0] = ((uint32_t)device << 16) | vendor;
         devices[i].config[2] = ((uint32_t)class_code << 24) | ((uint32_t)subclass << 16) |
                                ((uint32_t)prog_if << 8);
+        forget_what_was_found();
         return i;
     }
     return -1;
@@ -80,7 +93,14 @@ static int device_index(const fake_pci_device_t *d) {
     return (int)(d - devices);
 }
 
+static uint32_t reads;
+
+uint32_t fake_pci_config_reads(void) {
+    return reads;
+}
+
 uint32_t fake_port_inl(uint16_t port) {
+    reads++;
     if (port != CONFIG_DATA || !(selected & (1u << 31))) {
         return 0xFFFFFFFFu;
     }

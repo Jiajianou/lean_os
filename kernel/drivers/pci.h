@@ -24,6 +24,8 @@ typedef void (*pci_visitor_t)(const pci_device_t *device, void *context);
 
 void pci_enumerate(pci_visitor_t visit, void *context);
 
+void pci_rescan(void);
+
 uint16_t pci_bar0_io_base(const pci_device_t *dev);
 
 uint16_t pci_bar1_io_base(const pci_device_t *dev);

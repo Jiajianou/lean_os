@@ -59,7 +59,17 @@ typedef struct {
     uint32_t read_tail;
     int aborted;
     uint32_t transfers;
+    uint32_t reads_asked;
+    uint32_t reads_taken;
+    uint32_t delivered;
+    uint32_t clock;
+    int overrun;
 } model_t;
+
+/* A real receive queue is eight entries here so that a read longer than it
+   has to be paced: a byte asked for with the queue already full is a byte the
+   controller drops. */
+#define MODEL_RECEIVE_DEPTH 8u
 
 static model_t model;
 static uint8_t slave_input_report[8];
@@ -117,28 +127,45 @@ static void slave_produce(void) {
     }
 }
 
+/* The bus is slower than the processor asking it: a byte arrives every few
+   register reads rather than the moment it is asked for, which is what lets a
+   driver that does not pace itself get ahead of the receive queue. */
+static void bus_tick(void) {
+    if (++model.clock % 8 == 0 && model.delivered < model.reads_asked) {
+        model.delivered++;
+    }
+}
+
+static uint32_t receive_level(void) {
+    uint32_t level = model.delivered - model.reads_taken;
+    uint32_t queued = model.read_tail - model.read_head;
+    return level < queued ? level : queued;
+}
+
 uint32_t designware_i2c_host_read(uint64_t base, uint32_t offset) {
     if (base != CONTROLLER_BASE) {
         return 0;
     }
+    bus_tick();
     switch (offset) {
         case REGISTER_COMPONENT_TYPE:
             return model.in_reset ? 0 : DESIGNWARE_I2C_COMPONENT_TYPE;
         case REGISTER_COMPONENT_PARAM:
-            return (63u << 16);
+            return (63u << 16) | ((MODEL_RECEIVE_DEPTH - 1u) << 8);
         case REGISTER_ENABLE_STATUS:
             return model.enabled ? 1u : 0u;
         case REGISTER_STATUS: {
             uint32_t status = STATUS_TX_FIFO_NOT_FULL;
-            if (model.read_head < model.read_tail) {
+            if (receive_level() > 0) {
                 status |= STATUS_RX_FIFO_NOT_EMPTY;
             }
             return status;
         }
         case REGISTER_RX_LEVEL:
-            return model.read_tail - model.read_head;
+            return receive_level();
         case REGISTER_DATA_COMMAND:
-            if (model.read_head < model.read_tail) {
+            if (receive_level() > 0) {
+                model.reads_taken++;
                 return model.read_queue[model.read_head++];
             }
             return 0;
@@ -167,6 +194,9 @@ void designware_i2c_host_write(uint64_t base, uint32_t offset, uint32_t value) {
                 model.read_head = 0;
                 model.read_tail = 0;
                 model.aborted = 0;
+                model.reads_asked = 0;
+                model.reads_taken = 0;
+                model.delivered = 0;
             } else {
                 model.enabled = 0;
             }
@@ -181,6 +211,9 @@ void designware_i2c_host_write(uint64_t base, uint32_t offset, uint32_t value) {
                 break;
             }
             if (value & DATA_COMMAND_READ) {
+                if (++model.reads_asked - model.reads_taken > MODEL_RECEIVE_DEPTH) {
+                    model.overrun = 1;
+                }
                 if (model.read_tail == 0) {
                     slave_produce();
                 }
@@ -259,6 +292,7 @@ TEST(designware_i2c, a_read_longer_than_the_fifo_still_comes_back_whole) {
     CHECK_EQ(designware_i2c_transfer(0, SLAVE_ADDRESS, address, 2, descriptor,
                                      sizeof(mouse_report_descriptor)), 1);
     CHECK_EQ(memcmp(descriptor, mouse_report_descriptor, sizeof(mouse_report_descriptor)), 0);
+    CHECK_EQ(model.overrun, 0);
 }
 
 TEST(designware_i2c, a_write_with_no_read_leaves_the_bytes_at_the_slave) {

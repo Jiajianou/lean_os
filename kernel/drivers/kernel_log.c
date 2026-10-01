@@ -9,14 +9,12 @@
 #include "console.h"
 #include "library/spinlock.h"
 #include "serial.h"
-#include "vga.h"
 
 static int use_console = 0;
 
 static int console_released = 0;
 
 void kernel_log_init(void) {
-    vga_clear();
     serial_init();
 }
 
@@ -89,12 +87,8 @@ static void kernel_log_emit_locked(char c, int also_console) {
         kernel_log_lines++;
     }
     kernel_log_mid_line = c != '\n';
-    if (also_console && !console_released) {
-        if (use_console) {
-            console_putc(c);
-        } else {
-            vga_putc(c);
-        }
+    if (also_console && use_console && !console_released) {
+        console_putc(c);
     }
     serial_putc(c);
     kernel_log_ring[kernel_log_written % KERNEL_LOG_RING_SIZE] = c;

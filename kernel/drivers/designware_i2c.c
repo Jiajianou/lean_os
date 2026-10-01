@@ -6,6 +6,7 @@
 #include "drivers/pit.h"
 #include "memory_management/virtual_memory.h"
 #ifndef LEANOS_HOST_TEST
+#include "scheduler/scheduler.h"
 #include "architecture/x86_64/io.h"
 #include "architecture/x86_64/timestamp_counter.h"
 #endif
@@ -55,13 +56,39 @@
 
 #define POLL_LIMIT 50000
 
+/* Fast mode clocks nine bits a byte at 400 kHz: 22.5 us. A millisecond is
+   the shortest sleep the scheduler offers, so a transfer only gives the
+   processor up while at least that much is still on the wire. */
+#define BYTES_PER_MILLISECOND 44u
+
 typedef struct {
     volatile uint8_t *base;
     uint32_t transmit_depth;
+    uint32_t receive_depth;
 } controller_t;
 
 static controller_t controllers[DESIGNWARE_I2C_MAX_CONTROLLERS];
 static int controller_count;
+static int sleep_while_clocking;
+
+/* M205. A transfer used to spin on the status register for every byte, and
+   the touchpad is read forty times a second with nobody touching it - a
+   tenth of a core on the laptop, all of it waiting for a 400 kHz bus. Only
+   the poller opts in: the probe runs at boot, before there is a scheduler
+   to give the processor to. */
+void designware_i2c_sleep_while_clocking(int enabled) {
+    sleep_while_clocking = enabled;
+}
+
+static void wait_for_the_bus(uint32_t bytes_on_the_wire) {
+#ifdef LEANOS_HOST_TEST
+    (void)bytes_on_the_wire;
+#else
+    if (sleep_while_clocking && bytes_on_the_wire >= BYTES_PER_MILLISECOND) {
+        scheduler_sleep_ms(1);
+    }
+#endif
+}
 
 #ifdef LEANOS_HOST_TEST
 /* A DesignWare register is not memory: reading the data register pops the
@@ -156,7 +183,10 @@ int designware_i2c_transfer(int controller, uint8_t address, const uint8_t *writ
                 spins = 0;
                 continue;
             }
-            if (read_commands < read_length) {
+            /* Never more reads asked for than the receive queue holds: the
+               controller clocks a byte for each, and while this side sleeps
+               nobody drains it - an overrun loses the byte and says nothing. */
+            if (read_commands < read_length && read_commands - received < c->receive_depth) {
                 uint32_t command = DATA_COMMAND_READ;
                 if (read_commands == 0 && write_length > 0) {
                     command |= DATA_COMMAND_RESTART;
@@ -171,6 +201,17 @@ int designware_i2c_transfer(int controller, uint8_t address, const uint8_t *writ
             }
         }
 
+        /* Only once the last command - the one carrying STOP - is queued: a
+           controller built without IC_EMPTYFIFO_HOLD_MASTER_EN ends the
+           transaction itself when its transmit queue runs dry, and nothing
+           in its registers says which kind this is. */
+        uint32_t outstanding = read_commands - received;
+        if (written == write_length && read_commands == read_length &&
+            outstanding >= BYTES_PER_MILLISECOND && sleep_while_clocking) {
+            wait_for_the_bus(outstanding);
+            spins = 0;
+            continue;
+        }
         if (++spins > POLL_LIMIT) {
             disable_controller(c);
             return 0;
@@ -273,6 +314,7 @@ int designware_i2c_init(void) {
         controller_t candidate;
         candidate.base = registers;
         candidate.transmit_depth = 0;
+        candidate.receive_depth = 1;
 
         uint32_t component = read_register(&candidate, REGISTER_COMPONENT_TYPE);
         kernel_log_puts(", component ");
@@ -296,6 +338,7 @@ int designware_i2c_init(void) {
 
         uint32_t parameters = read_register(&candidate, REGISTER_COMPONENT_PARAM);
         candidate.transmit_depth = ((parameters >> 16) & 0xFFu) + 1u;
+        candidate.receive_depth = ((parameters >> 8) & 0xFFu) + 1u;
 
         controllers[controller_count++] = candidate;
 

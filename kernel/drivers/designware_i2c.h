@@ -12,3 +12,5 @@ int designware_i2c_controller_count(void);
 
 int designware_i2c_transfer(int controller, uint8_t address, const uint8_t *write, uint32_t write_length,
                             uint8_t *read, uint32_t read_length);
+
+void designware_i2c_sleep_while_clocking(int enabled);

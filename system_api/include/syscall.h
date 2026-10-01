@@ -277,7 +277,12 @@ typedef struct {
 /* M200: nanoseconds since boot, from the TSC - what CLOCK_MONOTONIC means.
    SYS_uptime_ms is the same clock cut to a millisecond. */
 #define SYS_clock_ns              137
-#define SYSCALL_COUNT 138
+
+/* M205: pthread_detach(3). The thread's slot in the kernel's task table goes
+   back once it has terminated, because nobody will ever wait for it - which
+   until this call only the C library knew. */
+#define SYS_thread_detach         138
+#define SYSCALL_COUNT 139
 
 #ifdef __cplusplus
 }
