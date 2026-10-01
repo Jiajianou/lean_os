@@ -1898,6 +1898,25 @@ void scheduler_reap_slot(task_t *t) {
     if (!t->is_thread && thread_group_has_live_members(t->tgid, t)) {
         return;
     }
+    /* M206: one reaper per slot. The state was read above without the lock,
+       and between that read and the work below a second reaper - a spawn's
+       sweep on another processor, or the same one after a preemption - could
+       read it too: two of them freed the same kernel stack, which the next
+       two tasks were then both given, and a terminated task came back to
+       life on somebody else's stack. */
+    {
+        uint64_t claim = irq_save_disable();
+        spin_lock(&scheduler_lock);
+        int ours = t->state == TASK_TERMINATED && !t->reaping;
+        if (ours) {
+            t->reaping = 1;
+        }
+        spin_unlock(&scheduler_lock);
+        irq_restore(claim);
+        if (!ours) {
+            return;
+        }
+    }
     /* M203: announced only once the slot really goes. It was announced
        before the check above, so every attempt to reap a leader whose
        threads were still running told every poller on the machine that a
@@ -1998,6 +2017,7 @@ void scheduler_reap_slot(task_t *t) {
     t->stamp_syscalls_seen = 0;
     t->generation++;
     t->state = TASK_FREE;
+    t->reaping = 0;
     t->pending_signal = 0;
     t->pending_stop = 0;
     t->stopped_sig = 0;

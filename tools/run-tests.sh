@@ -134,6 +134,7 @@ run_stage "the PNG reader the browser's picture is graded by" \
   python3 ./tools/browser-shot.py --self-test
 run_stage "what bindgen believes this target is, against gcc" \
   python3 ./tools/chromium-bindgen-test.py
+run_stage "the wireless driver's structures, against Linux's" ./tools/intel-wireless-test.sh
 run_stage "realpath, against the host's" ./tools/realpath-test.sh
 run_stage "memory and string primitives, against the host's" ./tools/string-test.sh
 run_stage "where a thread_local is, against the linker's own answer" ./tools/tls-layout-test.sh

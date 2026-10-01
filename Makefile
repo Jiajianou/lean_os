@@ -717,7 +717,7 @@ TEST_FAKES := tests/fakes/fake_panic.c tests/fakes/fake_klog.c \
 
 TEST_KERNEL_SRCS := kernel/library/kernel_library.c kernel/memory_management/heap.c kernel/file_system/leanfs.c \
                     kernel/network/arp.c kernel/network/ip.c kernel/network/icmp.c \
-                    kernel/network/udp.c kernel/network/ethernet.c kernel/network/tcp.c \
+                    kernel/network/udp.c kernel/network/ethernet.c kernel/network/tcp.c kernel/network/ieee80211.c \
                     kernel/device/fwcfg.c kernel/device/tty.c kernel/device/pty.c \
                     kernel/scheduler/scheduler.c kernel/file_system/flock.c kernel/device/random.c \
                     kernel/drivers/rtl8139_ring.c kernel/inter_process_communication/unix_socket.c \
@@ -727,7 +727,7 @@ TEST_KERNEL_SRCS := kernel/library/kernel_library.c kernel/memory_management/hea
                     kernel/inter_process_communication/memfd.c \
                     kernel/process/resource_limits.c kernel/boot/boot_options.c \
                     kernel/drivers/hid_report.c kernel/drivers/i2c_hid.c \
-                    kernel/drivers/designware_i2c_timing.c kernel/drivers/designware_i2c.c \
+                    kernel/drivers/designware_i2c_timing.c kernel/drivers/designware_i2c.c kernel/drivers/intel_wireless_firmware.c kernel/drivers/intel_wireless_transport.c kernel/drivers/intel_wireless.c \
                     kernel/drivers/usb_storage_protocol.c kernel/drivers/disk_log_area.c \
                     kernel/drivers/console.c
 

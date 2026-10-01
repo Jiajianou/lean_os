@@ -1029,12 +1029,18 @@ static long sys_wait(uint64_t pid_argument, uint64_t a2, uint64_t a3, uint64_t a
     if (!t) {
         return -1;
     }
-    while (t->state != TASK_TERMINATED) {
+    /* M206: the slot can be reaped from under this wait - by the sweep a
+       spawn runs - and given to a new task, whose id is not this one. Waiting
+       on the slot would then wait on the newcomer and reap it. */
+    while (t->state != TASK_TERMINATED && t->id == (int)pid_argument) {
         uint64_t seq = scheduler_event_sequence();
-        if (t->state == TASK_TERMINATED) {
+        if (t->state == TASK_TERMINATED || t->id != (int)pid_argument) {
             break;
         }
         scheduler_block_on_sequence((const void *)t, clock_monotonic_ms() + 200, seq);
+    }
+    if (t->id != (int)pid_argument) {
+        return -1;
     }
     t->reaped = 1;
     int code = t->exit_code;

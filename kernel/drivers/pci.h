@@ -32,6 +32,8 @@ uint16_t pci_bar1_io_base(const pci_device_t *dev);
 
 void pci_enable_device(const pci_device_t *dev);
 
+void pci_disable_legacy_interrupt(const pci_device_t *dev);
+
 uint64_t pci_bar_memory_base(const pci_device_t *dev, uint8_t index);
 
 uint64_t pci_bar_memory_size(const pci_device_t *dev, uint8_t index);

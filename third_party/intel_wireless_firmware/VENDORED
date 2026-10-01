@@ -1,0 +1,5 @@
+SOURCE https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain
+LICENCE LICENSES/LICENCE.iwlwifi_firmware 16d5040c7cf851fc693b7542e20870935b99802533ea1bfd231c377a2305e5c5
+FILE intel/iwlwifi/iwlwifi-QuZ-a0-hr-b0-77.ucode 39d79587dd035bc84172b6bcf6de81217560088b0ceb06304d5121ba56db8d83
+FILE intel/iwlwifi/iwlwifi-Qu-b0-hr-b0-77.ucode df005896aafdf5eb9c427033781890a58c7ab97a8dc1e1ea6b8df4eefc033a9d
+FILE intel/iwlwifi/iwlwifi-Qu-c0-hr-b0-77.ucode a250e179666288396e19ff15c307edfe8f089341c8713a22b457b7304fc1a6fe

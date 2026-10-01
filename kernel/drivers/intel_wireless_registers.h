@@ -1,0 +1,115 @@
+#pragma once
+
+/* The control and status registers of Intel's 22000-family wireless devices,
+   and the periphery addresses reached through them. The names follow the
+   hardware's own documentation as Linux's iwlwifi spells it (iwl-csr.h,
+   iwl-prph.h, iwl-fh.h - all dual GPL/BSD), because those headers are the
+   only description of this device anybody publishes, and a register whose
+   name matches theirs can be looked up. */
+
+#define CSR_HW_IF_CONFIG_REG   0x000
+#define CSR_INT_COALESCING     0x004
+#define CSR_INT_PERIODIC_REG   0x005
+#define CSR_INT                0x008
+#define CSR_INT_MASK           0x00C
+#define CSR_FH_INT_STATUS      0x010
+#define CSR_RESET              0x020
+#define CSR_GP_CNTRL           0x024
+#define CSR_HW_REV             0x028
+#define CSR_GIO_REG            0x03C
+#define CSR_CTXT_INFO_BA       0x040
+#define CSR_UCODE_DRV_GP1      0x054
+#define CSR_UCODE_DRV_GP1_SET  0x058
+#define CSR_UCODE_DRV_GP1_CLR  0x05C
+#define CSR_MBOX_SET_REG       0x088
+#define CSR_HW_RF_ID           0x09C
+#define CSR_MAC_SHADOW_REG_CTRL 0x0A8
+#define CSR_GIO_CHICKEN_BITS   0x100
+#define CSR_DBG_HPET_MEM_REG   0x240
+#define CSR_DBG_LINK_PWR_MGMT_REG 0x250
+
+#define CSR_HW_IF_CONFIG_REG_HAP_WAKE      0x00080000u
+#define CSR_HW_IF_CONFIG_REG_PCI_OWN_SET   0x00400000u
+#define CSR_HW_IF_CONFIG_REG_WAKE_ME       0x08000000u
+#define CSR_HW_IF_CONFIG_REG_MSK_MAC_STEP_DASH 0x0000000Fu
+#define CSR_HW_IF_CONFIG_REG_MSK_PHY_TYPE  0x00000C00u
+#define CSR_HW_IF_CONFIG_REG_MSK_PHY_DASH  0x00003000u
+#define CSR_HW_IF_CONFIG_REG_MSK_PHY_STEP  0x0000C000u
+#define CSR_HW_IF_CONFIG_REG_BIT_MAC_SI    0x00000100u
+#define CSR_HW_IF_CONFIG_REG_BIT_RADIO_SI  0x00000200u
+#define CSR_HW_IF_CONFIG_REG_POS_PHY_TYPE  10
+#define CSR_HW_IF_CONFIG_REG_POS_PHY_DASH  12
+#define CSR_HW_IF_CONFIG_REG_POS_PHY_STEP  14
+
+#define CSR_MBOX_SET_REG_OS_ALIVE          0x00000020u
+
+#define CSR_INT_BIT_FH_RX       0x80000000u
+#define CSR_INT_BIT_HW_ERR      0x20000000u
+#define CSR_INT_BIT_RX_PERIODIC 0x10000000u
+#define CSR_INT_BIT_FH_TX       0x08000000u
+#define CSR_INT_BIT_SCD         0x04000000u
+#define CSR_INT_BIT_SW_ERR      0x02000000u
+#define CSR_INT_BIT_RF_KILL     0x00000080u
+#define CSR_INT_BIT_CT_KILL     0x00000040u
+#define CSR_INT_BIT_SW_RX       0x00000008u
+#define CSR_INT_BIT_RESET_DONE  0x00000004u
+#define CSR_INT_BIT_WAKEUP      0x00000002u
+#define CSR_INT_BIT_ALIVE       0x00000001u
+#define CSR_INI_SET_MASK (CSR_INT_BIT_FH_RX | CSR_INT_BIT_HW_ERR | CSR_INT_BIT_FH_TX | CSR_INT_BIT_SW_ERR | \
+                          CSR_INT_BIT_RF_KILL | CSR_INT_BIT_SW_RX | CSR_INT_BIT_WAKEUP | CSR_INT_BIT_RESET_DONE | \
+                          CSR_INT_BIT_ALIVE | CSR_INT_BIT_RX_PERIODIC)
+
+#define CSR_FH_INT_RX_MASK 0x40030000u
+
+#define CSR_RESET_REG_FLAG_SW_RESET      0x00000080u
+#define CSR_RESET_REG_FLAG_STOP_MASTER   0x00000200u
+#define CSR_RESET_REG_FLAG_MASTER_DISABLED 0x00000100u
+#define CSR_RESET_LINK_PWR_MGMT_DISABLED 0x80000000u
+
+#define CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY 0x00000001u
+#define CSR_GP_CNTRL_REG_FLAG_INIT_DONE       0x00000004u
+#define CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ  0x00000008u
+#define CSR_GP_CNTRL_REG_FLAG_GOING_TO_SLEEP  0x00000010u
+#define CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW   0x08000000u
+
+#define CSR_GIO_REG_VAL_L0S_DISABLED              0x00000002u
+#define CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX 0x00800000u
+#define CSR_DBG_HPET_MEM_REG_VAL                  0xFFFF0000u
+
+#define CSR_UCODE_SW_BIT_RFKILL           0x00000002u
+#define CSR_UCODE_DRV_GP1_BIT_CMD_BLOCKED 0x00000004u
+
+#define CSR_LTR_LONG_VAL_AD_NO_SNOOP_REQ   0x80000000u
+#define CSR_LTR_LONG_VAL_AD_SNOOP_REQ      0x00008000u
+#define CSR_LTR_LONG_VAL_AD_SCALE_USEC     2u
+
+#define IWL_HOST_INT_TIMEOUT_DEF 0x40
+
+#define HBUS_TARG_PRPH_WADDR 0x444
+#define HBUS_TARG_PRPH_RADDR 0x448
+#define HBUS_TARG_PRPH_WDAT  0x44C
+#define HBUS_TARG_PRPH_RDAT  0x450
+#define HBUS_TARG_WRPTR      0x460
+
+#define PERIPHERY_ADDRESS_MASK 0x000FFFFFu
+
+#define RFH_Q0_FRBDCB_WIDX_TRG 0x1C80
+
+#define UREG_CPU_INIT_RUN      0xA05C44u
+#define HPM_MAC_LTR_CSR        0xA0348Cu
+#define HPM_MAC_LRT_ENABLE_ALL 0xFu
+#define HPM_UMAC_LTR           0xA03480u
+#define HPM_DEBUG              0xA03440u
+#define HPM_PERSISTENCE_BIT    0x00001000u
+#define PREG_PRPH_WPROT_22000  0xA04D00u
+#define PREG_WFPM_ACCESS       0x00001000u
+#define HPM_HIPM_GEN_CFG       0xA03458u
+#define HPM_HIPM_GEN_CFG_CR_PG_EN        0x00000001u
+#define HPM_HIPM_GEN_CFG_CR_SLP_EN       0x00000002u
+#define HPM_HIPM_GEN_CFG_CR_FORCE_ACTIVE 0x00000400u
+#define WFPM_CTRL_REG          0xA03030u
+#define WFPM_AUX_CTL_AUX_IF_MAC_OWNER_MSK 0x80000000u
+#define SD_REG_VER             0xA29600u
+#define CNVI_AUX_MISC_CHIP     0xA200B0u
+#define UMAG_SB_CPU_1_STATUS   0xA038C0u
+#define UMAG_SB_CPU_2_STATUS   0xA038C4u

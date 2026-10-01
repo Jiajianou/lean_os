@@ -142,6 +142,15 @@ void pci_enable_device(const pci_device_t *dev) {
     config_write32(dev->bus, dev->slot, dev->func, PCI_REG_COMMAND, command);
 }
 
+/* For a device this kernel polls rather than takes interrupts from: the
+   device's own cause register still latches, but the line it would raise
+   stays quiet, so nothing reaches an interrupt controller that has no
+   handler for it. */
+void pci_disable_legacy_interrupt(const pci_device_t *dev) {
+    uint32_t command = config_read32(dev->bus, dev->slot, dev->func, PCI_REG_COMMAND);
+    config_write32(dev->bus, dev->slot, dev->func, PCI_REG_COMMAND, (command & 0xFFFFu) | (1u << 10));
+}
+
 int pci_find_class(uint8_t class_code, uint8_t subclass, uint8_t prog_if,
                    uint32_t index, pci_device_t *out) {
     ensure_scanned();

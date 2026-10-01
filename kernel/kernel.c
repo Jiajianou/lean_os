@@ -37,6 +37,7 @@
 #include "boot/boot_options.h"
 #include "drivers/hardware_inventory.h"
 #include "drivers/i2c_touchpad.h"
+#include "drivers/intel_wireless.h"
 #include "drivers/disk_log.h"
 #include "drivers/usb_storage.h"
 #include "device/fwcfg.h"
@@ -14724,6 +14725,10 @@ display_self_test_done:
         kernel_log_puts("[net] no RTL8139 NIC found - networking unavailable this boot "
                    "(expected on real hardware).\n\n");
     }
+
+    /* M206: the laptop's radio, on a task of its own - a firmware that takes
+       a second to come up, or never does, holds up nothing else. */
+    intel_wireless_start();
 
     if (boot_selftests_enabled()) {
         boot_selftests_system();

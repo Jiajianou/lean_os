@@ -89,6 +89,19 @@ fi
 
 mcopy -i "$ESP" -o "$CONFIG" ::EFI/BOOT/lean_os.cfg
 
+# M206: Intel's firmware for the laptop's wireless card, which cannot run
+# without it. Only the hardware image carries it - QEMU has no such device -
+# and it goes in /lib/firmware, where kernel/drivers/intel_wireless.c looks,
+# beside the licence it is redistributed under.
+tools/fetch-wifi-firmware.sh >/dev/null || { echo "make-hardware-image: could not fetch the wireless firmware" >&2; exit 1; }
+FIRMWARE_STAGE=build/firmware-stage
+rm -rf "$FIRMWARE_STAGE"
+mkdir -p "$FIRMWARE_STAGE"
+cp build/firmware/iwlwifi-*.ucode build/firmware/LICENCE.iwlwifi_firmware "$FIRMWARE_STAGE/"
+[ -x build/leanfs-put ] || make -s leanfs-put || exit 1
+build/leanfs-put -r "$OUTPUT" "$FIRMWARE_STAGE" /lib/firmware >/dev/null || { echo "make-hardware-image: could not write /lib/firmware" >&2; exit 1; }
+echo "Wrote /lib/firmware: $(ls "$FIRMWARE_STAGE" | tr '\n' ' ')"
+
 echo "Wrote \\EFI\\BOOT\\lean_os.cfg:"
 sed 's/^/    /' "$CONFIG"
 echo

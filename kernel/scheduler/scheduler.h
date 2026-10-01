@@ -327,6 +327,11 @@ typedef struct task {
     /* M205: nobody will join this thread - pthread_detach said so - so once
        it has terminated its slot is anybody's. */
     uint8_t detached;
+    /* M206: somebody is reaping this slot right now. Since M205 a slot has
+       three reapers - wait(), the sweep a spawn runs, and the reap of a
+       group's last thread - and on a machine that preempts them the first
+       could free the kernel stack while a second was still deciding to. */
+    uint8_t reaping;
     uint8_t exiting;
     char name[TASK_NAME_MAX];
 } task_t;
