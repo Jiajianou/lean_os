@@ -67,6 +67,10 @@ long sys_thread_create(void *entry, void *arg, unsigned long stack_top) {
     return do_syscall(SYS_thread_create, (long)entry, (long)arg, (long)stack_top);
 }
 
+long sys_wireless(int operation, void *argument, unsigned long count) {
+    return do_syscall(SYS_wireless, (uint64_t)operation, (uint64_t)argument, count);
+}
+
 long sys_thread_detach(long thread_id) {
     return do_syscall(SYS_thread_detach, (uint64_t)thread_id, 0, 0);
 }

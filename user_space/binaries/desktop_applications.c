@@ -11,12 +11,14 @@ static const char *const DESKTOP_APPLICATION_NAMES[] = {
     "settings",
     "task_manager",
     "lvgl_demo",
+    "wifi",
 };
 
 static const desktop_application_entry_t DESKTOP_APPLICATION_ENTRIES[] = {
     desktop_application_settings,
     desktop_application_task_manager,
     desktop_application_widgets,
+    desktop_application_wireless,
 };
 
 #define DESKTOP_APPLICATION_COUNT \

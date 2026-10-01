@@ -20,6 +20,9 @@
 #define INTEL_WIRELESS_COMMAND_QUEUE 0
 #define INTEL_WIRELESS_TFD_QUEUE_SIZE_MAX 256
 #define INTEL_WIRELESS_FIRST_TB_SIZE 20
+#define INTEL_WIRELESS_DATA_SLOTS 64
+#define INTEL_WIRELESS_BYTE_COUNT_ENTRIES 320
+#define INTEL_WIRELESS_DATA_PAYLOAD_OFFSET 256
 
 enum {
     INTEL_WIRELESS_OK = 0,
@@ -50,6 +53,10 @@ typedef struct {
     uint32_t interrupt_causes_seen;
     uint32_t last_interrupt_causes;
     uint32_t firmware_errors;
+    uint32_t cause_reads;
+    uint32_t polls;
+    uint32_t frames_queued;
+    uint32_t frames_completed;
 } intel_wireless_transport_statistics_t;
 
 void intel_wireless_transport_attach(volatile uint8_t *registers);
@@ -75,6 +82,19 @@ void intel_wireless_set_packet_handler(intel_wireless_packet_handler_t handler);
    The reply's payload, not its header. */
 int intel_wireless_send(uint8_t group, uint8_t command, uint8_t version, const void *payload, uint32_t length,
                         void *response, uint32_t capacity, uint32_t *response_length, uint32_t timeout_ms);
+
+/* The one transmit queue a joined network uses: its ring and byte-count
+   table, which the firmware is told about by address, then the number it
+   gave the queue. A frame goes out as the TX command, the 802.11 header and
+   the payload, in three transfer buffers. */
+int intel_wireless_data_queue_memory(uint64_t *tfds, uint64_t *byte_counts, uint32_t *cb_size);
+void intel_wireless_data_queue_start(uint16_t queue, uint16_t write_pointer);
+void intel_wireless_data_queue_stop(void);
+int intel_wireless_data_queue_number(void);
+int intel_wireless_data_send(const intel_wireless_tx_command_t *command, const uint8_t *header,
+                             uint32_t header_length, const uint8_t *payload, uint32_t payload_length);
+void intel_wireless_data_completed(uint32_t frames);
+uint32_t intel_wireless_data_in_flight(void);
 
 /* Drains the receive ring once: every waiting packet goes to the handler, and
    whatever the device has finished with is handed back to it. Returns a

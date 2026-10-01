@@ -108,6 +108,32 @@ UEFI firmware
   nameserver that accepts queries and answers none is a common failure,
   and a resolver with one server cannot tell that apart from a network
   that is down.
+- **Wi-Fi, from a wizard.** Four bars in the taskbar, beside the clock,
+  on a machine with a radio; click them and a three-page wizard opens:
+  the networks the radio hears, strongest first and one row per name
+  however many access points carry it; the password, with a switch to
+  show it and a choice to remember the network; and the join itself,
+  one step at a time - associating, checking the password, getting an
+  address - ending in the address the network gave or in what went
+  wrong, said plainly. A wrong password comes back to the password page.
+  A network that cannot be joined - WPA3-only, enterprise, WEP - says so
+  before anything is sent rather than failing halfway.
+
+  Underneath is WPA2-Personal written here: PBKDF2, the 802.11 key
+  hierarchy, AES key wrap and the four-way and group-key handshakes,
+  graded against an authenticator written in Python. The radio is
+  Intel's AX201, driven with **Intel's own firmware** - the one blob in
+  this image, because the card cannot run without it. A network joined
+  once is remembered, as its key rather than its password, and rejoined
+  by itself after a reboot.
+
+  QEMU emulates no wireless card, so the harnesses switch on a
+  **simulated one** from outside the image: five access points, each
+  holding its own passphrase and running the authenticator's half of the
+  handshake with the same cryptography, plus a router answering ARP,
+  DHCP and ping. A wrong password fails there exactly as it does on a
+  real network - a MIC that does not verify, three tries, and a
+  deauthentication - and the input suite drives the wizard through it.
 - **The devices a real machine has.** AHCI, **NVMe** and **xHCI with USB
   HID** - three controllers found by PCI *class* rather than by vendor,
   which is what lets one driver drive everybody's silicon. The block

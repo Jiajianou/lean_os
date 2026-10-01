@@ -284,7 +284,7 @@ def build_snapshot(painted, boot_timeout=300, quiet=False):
 class Machine:
 
     def __init__(self, extra_args=(), quiet=False, boot_timeout=None,
-                 snapshot=None, snapshot_build=None):
+                 snapshot=None, snapshot_build=None, wired_network=True):
         if not os.path.exists(IMAGE):
             raise RuntimeError("no image at %s - run 'make' first" % IMAGE)
         if not os.path.exists(OVMF_CODE):
@@ -340,9 +340,9 @@ class Machine:
             *disk_args,
             "-display", "none",
             "-m", os.environ.get("LEANOS_QEMU_MEM", "4096"),
-            "-netdev", "user,id=net0,guestfwd=tcp:10.0.2.100:%d-cmd:%s"
-                       % (NET_PAGE_PORT, net_page_server()),
-            "-device", "rtl8139,netdev=net0",
+            *(["-netdev", "user,id=net0,guestfwd=tcp:10.0.2.100:%d-cmd:%s"
+                         % (NET_PAGE_PORT, net_page_server()),
+               "-device", "rtl8139,netdev=net0"] if wired_network else ["-nic", "none"]),
             "-audiodev", "none,id=snd0", "-device", "AC97,audiodev=snd0",
             "-serial", "file:" + self.log_path,
             "-monitor", "unix:" + self._mon_path + ",server,nowait",

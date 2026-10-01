@@ -73,6 +73,11 @@ static const cap_grant_t CAP_GRANTS[] = {
     {"profile",       CAP_APP_DEFAULT | CAP_PROCESS_LIST},
     {"proftest",      CAP_APP_DEFAULT | CAP_PROCESS_LIST},
     {"settings",      CAP_APP_DEFAULT | CAP_DISPLAY_MODE | CAP_CLIPBOARD},
+    {"wifi",          CAP_APP_DEFAULT | CAP_NETWORK},
+    /* M207: the taskbar opens the Wi-Fi wizard, and a child holds only what
+       its parent holds - so the taskbar holds network, and nothing else
+       beyond an ordinary application's. */
+    {"desktop_shell", CAP_APP_DEFAULT | CAP_NETWORK},
     {"sh",            CAP_ALL},
     {"gui_terminal",  CAP_ALL},
     {"desktop_icons", CAP_ALL},

@@ -5,6 +5,7 @@
 #define ETH_ADDRESS_LENGTH    6
 #define ETH_HEADER_LENGTH  14
 #define ETH_MIN_FRAME   60
+#define ETH_MAX_FRAME   1514
 
 #define ETH_TYPE_IPV4 0x0800
 #define ETH_TYPE_ARP  0x0806

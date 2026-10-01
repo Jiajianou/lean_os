@@ -37,6 +37,7 @@
 #include "boot/boot_options.h"
 #include "drivers/hardware_inventory.h"
 #include "drivers/i2c_touchpad.h"
+#include "network/wireless_simulator.h"
 #include "drivers/intel_wireless.h"
 #include "drivers/disk_log.h"
 #include "drivers/usb_storage.h"
@@ -14566,6 +14567,7 @@ display_self_test_done:
             {"settings", PATH_BIN_DIRECTORY "desktop_applications"},
             {"task_manager", PATH_BIN_DIRECTORY "desktop_applications"},
             {"lvgl_demo", PATH_BIN_DIRECTORY "desktop_applications"},
+            {"wifi", PATH_BIN_DIRECTORY "desktop_applications"},
         };
         for (size_t i = 0; i < sizeof(PROGRAM_ALIASES) / sizeof(PROGRAM_ALIASES[0]); i++) {
             char path[PATH_MAX_LENGTH];
@@ -14728,7 +14730,9 @@ display_self_test_done:
 
     /* M206: the laptop's radio, on a task of its own - a firmware that takes
        a second to come up, or never does, holds up nothing else. */
-    intel_wireless_start();
+    if (!intel_wireless_start()) {
+        wireless_simulator_start();
+    }
 
     if (boot_selftests_enabled()) {
         boot_selftests_system();

@@ -16,6 +16,10 @@ typedef struct {
     int8_t signal_dbm;
     uint8_t band;
     uint32_t seen;
+    /* The device's clock when this network's last beacon arrived, beside the
+       beacon's own timestamp - what an association tells the firmware so it
+       knows when to wake for the next one. */
+    uint32_t sync_device_time;
 } intel_wireless_network_t;
 
 enum {
@@ -27,8 +31,9 @@ enum {
     INTEL_WIRELESS_STATE_RADIO_OFF,
 };
 
-/* Spawns the driver's task when the machine has one of these devices. */
-void intel_wireless_start(void);
+/* Spawns the driver's task when the machine has one of these devices, and
+   says whether it did. */
+int intel_wireless_start(void);
 
 int intel_wireless_state(void);
 
@@ -47,3 +52,7 @@ void intel_wireless_request_scan(void);
 int intel_wireless_bring_up(volatile uint8_t *registers, uint32_t pci_device_id, const uint8_t *firmware_file,
                             uint32_t firmware_length);
 int intel_wireless_scan(void);
+
+/* The radio as the wireless manager drives it - network/wireless_manager.h. */
+#include "network/wireless_manager.h"
+const wireless_backend_t *intel_wireless_backend(void);

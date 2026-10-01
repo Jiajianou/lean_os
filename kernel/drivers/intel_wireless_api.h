@@ -34,6 +34,7 @@ enum {
     SCAN_COMPLETE_UMAC = 0x0F,
     ADD_STA_KEY = 0x17,
     ADD_STA = 0x18,
+    REMOVE_STA = 0x19,
     TX_CMD = 0x1C,
     MAC_CONTEXT_CMD = 0x28,
     BINDING_CONTEXT_CMD = 0x2B,
@@ -45,6 +46,14 @@ enum {
     MCC_UPDATE_CMD = 0xC8,
     MCC_CHUB_UPDATE_CMD = 0xC9,
 };
+
+/* Commands in the MAC configuration and data path groups, whose numbers
+   overlap the legacy ones and each other - the group is half the name. */
+#define SESSION_PROTECTION_CMD 0x05
+#define SESSION_PROTECTION_NOTIF 0xFB
+#define RLC_CONFIG_CMD 0x08
+#define TLC_MNG_CONFIG_CMD 0x0F
+#define SCD_QUEUE_CONFIG_CMD 0x17
 
 enum {
     INIT_EXTENDED_CFG_CMD = 0x03,
@@ -312,6 +321,7 @@ enum {
 
 #define MAC_FILTER_ACCEPT_GRP 0x00000004u
 #define MAC_FILTER_IN_BEACON  0x00000040u
+#define MAC_FLG_SHORT_SLOT    0x00000010u
 
 typedef struct {
     uint16_t cw_min;
@@ -515,4 +525,265 @@ _Static_assert(sizeof(intel_wireless_rx_mpdu_v1_t) == 48, "IWL_RX_DESC_SIZE_V1")
 
 #define IWL_RX_MPDU_STATUS_CRC_OK     0x1u
 #define IWL_RX_MPDU_STATUS_OVERRUN_OK 0x2u
+#define IWL_RX_MPDU_STATUS_MIC_OK     0x40u
+#define IWL_RX_MPDU_STATUS_SEC_MASK   0x700u
+#define IWL_RX_MPDU_STATUS_SEC_NONE   0x000u
+#define IWL_RX_MPDU_STATUS_SEC_CCM    0x200u
+#define IWL_RX_MPDU_MFLG1_MIC_CRC_LEN_MASK 0xF0u
 #define IWL_RX_MPDU_MFLG2_PAD         0x20u
+#define IWL_RX_MPDU_MFLG2_AMSDU       0x40u
+
+/* What joining a network takes, in the order it is sent: a PHY context on
+   the network's channel, the receive chains for it, a binding of the station
+   MAC to that PHY, a station entry for the access point, a transmit queue to
+   it, and time on the channel while the frames go back and forth. */
+
+#define FW_CTXT_INVALID 0xFFFFFFFFu
+#define PHY_CONTEXT_ID 0
+#define PHY_CHANNEL_WIDTH_20 0
+#define PHY_CONTROL_POSITION_BELOW 0
+
+typedef struct {
+    uint32_t channel;
+    uint8_t band;
+    uint8_t width;
+    uint8_t control_position;
+    uint8_t reserved;
+} INTEL_WIRELESS_PACKED intel_wireless_channel_info_t;
+_Static_assert(sizeof(intel_wireless_channel_info_t) == 8, "iwl_fw_channel_info");
+
+/* PHY_CONTEXT_CMD versions 3 and 4: the receive chains moved to the RLC
+   command and this field is reserved. */
+typedef struct {
+    uint32_t id_and_color;
+    uint32_t action;
+    intel_wireless_channel_info_t channel;
+    uint32_t lmac_id;
+    uint32_t reserved_rx_chain;
+    uint32_t dsp_flags;
+    uint8_t secondary_control_position;
+    uint8_t reserved[3];
+} INTEL_WIRELESS_PACKED intel_wireless_phy_context_t;
+_Static_assert(sizeof(intel_wireless_phy_context_t) == 32, "iwl_phy_context_cmd");
+
+#define PHY_RX_CHAIN_VALID_POSITION 1
+#define PHY_RX_CHAIN_COUNT_POSITION 10
+#define PHY_RX_CHAIN_MIMO_COUNT_POSITION 12
+
+typedef struct {
+    uint32_t phy_id;
+    uint32_t rx_chain_info;
+    uint32_t reserved_rlc;
+    uint32_t chain_a_sad_mode;
+    uint32_t chain_b_sad_mode;
+    uint32_t sad_mac_id;
+    uint32_t reserved_sad;
+    uint8_t flags;
+    uint8_t reserved[3];
+} INTEL_WIRELESS_PACKED intel_wireless_rlc_config_t;
+_Static_assert(sizeof(intel_wireless_rlc_config_t) == 32, "iwl_rlc_config_cmd");
+
+#define MAX_MACS_IN_BINDING 3
+
+typedef struct {
+    uint32_t id_and_color;
+    uint32_t action;
+    uint32_t macs[MAX_MACS_IN_BINDING];
+    uint32_t phy;
+    uint32_t lmac_id;
+} INTEL_WIRELESS_PACKED intel_wireless_binding_t;
+_Static_assert(sizeof(intel_wireless_binding_t) == 28, "iwl_binding_cmd");
+
+#define STA_MODE_ADD 0
+#define STA_MODE_MODIFY 1
+#define IWL_STA_LINK 0
+#define ADD_STA_SUCCESS 0x1u
+#define IWL_ADD_STA_STATUS_MASK 0xFFu
+#define STA_FLG_FAT_EN_MSK (3u << 26)
+#define STA_FLG_MIMO_EN_MSK (3u << 28)
+#define STA_FLG_RTS_MIMO_PROT (1u << 17)
+
+/* ADD_STA, whose layout is version 10's up to version 12. */
+typedef struct {
+    uint8_t add_modify;
+    uint8_t awake_acs;
+    uint16_t tid_disable_tx;
+    uint32_t mac_id_n_color;
+    uint8_t address[6];
+    uint16_t reserved2;
+    uint8_t station_id;
+    uint8_t modify_mask;
+    uint16_t reserved3;
+    uint32_t station_flags;
+    uint32_t station_flags_mask;
+    uint8_t add_immediate_ba_tid;
+    uint8_t remove_immediate_ba_tid;
+    uint16_t add_immediate_ba_ssn;
+    uint16_t sleep_tx_count;
+    uint8_t sleep_state_flags;
+    uint8_t station_type;
+    uint16_t association_id;
+    uint16_t beamform_flags;
+    uint32_t tfd_queue_mask;
+    uint16_t rx_ba_window;
+    uint8_t sp_length;
+    uint8_t uapsd_acs;
+} INTEL_WIRELESS_PACKED intel_wireless_add_station_t;
+_Static_assert(sizeof(intel_wireless_add_station_t) == 48, "iwl_mvm_add_sta_cmd");
+
+typedef struct {
+    uint8_t station_id;
+    uint8_t reserved[3];
+} INTEL_WIRELESS_PACKED intel_wireless_remove_station_t;
+
+#define STA_KEY_FLG_CCM 2u
+#define STA_KEY_FLG_WEP_KEY_MAP 0x0008u
+#define STA_KEY_FLG_KEYID_POSITION 8
+#define STA_KEY_MULTICAST 0x4000u
+
+/* ADD_STA_KEY versions 2 and 3; version 3 has no hole in the sequence
+   counter. */
+typedef struct {
+    uint8_t station_id;
+    uint8_t key_offset;
+    uint16_t key_flags;
+    uint8_t key[32];
+    uint8_t rx_sequence[16];
+    uint64_t rx_mic_key;
+    uint64_t tx_mic_key;
+    uint64_t transmit_sequence;
+} INTEL_WIRELESS_PACKED intel_wireless_add_station_key_t;
+_Static_assert(sizeof(intel_wireless_add_station_key_t) == 76, "iwl_mvm_add_sta_key_cmd");
+
+#define IWL_SCD_QUEUE_ADD 0
+#define IWL_SCD_QUEUE_REMOVE 1
+#define IWL_MGMT_TID 15
+
+/* SCD_QUEUE_CONFIG_CMD version 3: a queue belongs to a set of stations and a
+   traffic identifier, and the firmware answers with its number. Removing one
+   names the same two things, the identifier as 32 bits where adding has 8
+   and three reserved bytes - the same little-endian value when those are
+   zero, so one layout serves both. */
+typedef struct {
+    uint32_t operation;
+    uint32_t station_mask;
+    uint8_t tid;
+    uint8_t reserved[3];
+    uint32_t flags;
+    uint32_t cb_size;
+    uint64_t byte_count_address;
+    uint64_t tfd_queue_address;
+} INTEL_WIRELESS_PACKED intel_wireless_queue_config_t;
+_Static_assert(sizeof(intel_wireless_queue_config_t) == 36, "iwl_scd_queue_cfg_cmd");
+
+typedef struct {
+    uint16_t queue_number;
+    uint16_t flags;
+    uint16_t write_pointer;
+    uint16_t reserved;
+} INTEL_WIRELESS_PACKED intel_wireless_queue_config_response_t;
+_Static_assert(sizeof(intel_wireless_queue_config_response_t) == 8, "iwl_tx_queue_cfg_rsp");
+
+#define SESSION_PROTECT_CONF_ASSOC 0
+
+typedef struct {
+    uint32_t id_and_color;
+    uint32_t action;
+    uint32_t configuration;
+    uint32_t duration_tu;
+    uint32_t repetition_count;
+    uint32_t interval;
+} INTEL_WIRELESS_PACKED intel_wireless_session_protection_t;
+_Static_assert(sizeof(intel_wireless_session_protection_t) == 24, "iwl_session_prot_cmd");
+
+typedef struct {
+    uint32_t mac_link_id;
+    uint32_t status;
+    uint32_t start;
+    uint32_t configuration;
+} INTEL_WIRELESS_PACKED intel_wireless_session_protection_notification_t;
+_Static_assert(sizeof(intel_wireless_session_protection_notification_t) == 16, "iwl_session_prot_notif");
+
+#define IWL_TX_FLAGS_CMD_RATE 0x1u
+#define IWL_TX_FLAGS_ENCRYPT_DIS 0x2u
+#define IWL_TX_FLAGS_HIGH_PRI 0x4u
+#define TX_CMD_OFFLD_MH_SIZE 8
+#define TX_CMD_OFFLD_PAD 13
+#define TX_STATUS_MSK 0xFFu
+#define TX_STATUS_SUCCESS 0x01u
+#define TX_STATUS_DIRECT_DONE 0x02u
+
+/* The rates a frame goes out at when the driver chooses - rate format 2,
+   which is this firmware's: the modulation in bits 8-10, the legacy rate's
+   index below it, the antenna at bit 14. */
+#define RATE_MCS_ANT_POSITION 14
+#define RATE_MCS_MOD_TYPE_CCK (0u << 8)
+#define RATE_MCS_MOD_TYPE_LEGACY_OFDM (1u << 8)
+
+/* TX_CMD versions 7 to 9 - the 22000 family's - followed by the 802.11
+   header. The radio adds the security header and encrypts when the station
+   has a key and ENCRYPT_DIS is clear. */
+typedef struct {
+    uint16_t length;
+    uint16_t offload_assist;
+    uint32_t flags;
+    uint32_t pn_low;
+    uint16_t pn_high;
+    uint16_t aux_info;
+    uint32_t rate_n_flags;
+} INTEL_WIRELESS_PACKED intel_wireless_tx_command_t;
+_Static_assert(sizeof(intel_wireless_tx_command_t) == 20, "iwl_tx_cmd_v9");
+
+/* The command header data-queue frames carry: no version, no length. */
+typedef struct {
+    uint8_t command;
+    uint8_t group;
+    uint16_t sequence;
+} INTEL_WIRELESS_PACKED intel_wireless_short_header_t;
+_Static_assert(sizeof(intel_wireless_short_header_t) == 4, "iwl_cmd_header");
+
+typedef struct {
+    uint8_t frame_count;
+    uint8_t bt_kill_count;
+    uint8_t failure_rts;
+    uint8_t failure_frame;
+    uint32_t initial_rate;
+    uint16_t wireless_media_time;
+    uint8_t pa_status;
+    uint8_t pa_integ_res_a[3];
+    uint8_t pa_integ_res_b[3];
+    uint8_t pa_integ_res_c[3];
+    uint16_t measurement_request_id;
+    uint8_t reduced_tpc;
+    uint8_t reserved;
+    uint32_t tfd_info;
+    uint16_t sequence_control;
+    uint16_t byte_count;
+    uint8_t tlc_info;
+    uint8_t ra_tid;
+    uint16_t frame_control;
+    uint16_t tx_queue;
+    uint16_t reserved2;
+    uint16_t status;
+    uint16_t status_sequence;
+} INTEL_WIRELESS_PACKED intel_wireless_tx_response_t;
+
+#define IWL_TLC_MNG_MODE_NON_HT 0
+#define IWL_TLC_MNG_CH_WIDTH_20MHZ 0
+#define IWL_TLC_NSS_MAX 2
+#define IWL_TLC_MCS_PER_BW_NUM_V4 3
+
+typedef struct {
+    uint8_t station_id;
+    uint8_t reserved1[3];
+    uint8_t max_channel_width;
+    uint8_t mode;
+    uint8_t chains;
+    uint8_t sgi_channel_width_supported;
+    uint16_t flags;
+    uint16_t non_ht_rates;
+    uint16_t ht_rates[IWL_TLC_NSS_MAX][IWL_TLC_MCS_PER_BW_NUM_V4];
+    uint16_t max_mpdu_length;
+    uint16_t max_tx_op;
+} INTEL_WIRELESS_PACKED intel_wireless_tlc_config_t;
+_Static_assert(sizeof(intel_wireless_tlc_config_t) == 28, "iwl_tlc_config_cmd_v4");

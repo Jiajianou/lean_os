@@ -51,12 +51,21 @@ typedef struct {
     uint32_t paging_pages[INTEL_WIRELESS_MAX_SECTIONS];
     uint32_t paging_count;
 
+    intel_wireless_tfd_t *data_tfds;
+    uint16_t *byte_counts;
+    uint8_t *data_buffer[INTEL_WIRELESS_DATA_SLOTS];
+    int data_queue;
+    uint32_t data_write;
+    uint32_t data_read;
+
+    uint64_t next_cause_check;
+
     int error_seen;
     intel_wireless_packet_handler_t handler;
     intel_wireless_transport_statistics_t statistics;
 } transport_t;
 
-static transport_t transport;
+static transport_t transport = {.data_queue = -1};
 
 #ifdef LEANOS_HOST_TEST
 /* The device is a model in the host tests; the registers are calls into it,
@@ -626,7 +635,39 @@ static void handle_receive_ring(void) {
     }
 }
 
+/* Reading a register on this device costs about a millisecond - measured on
+   the laptop, where a scan that polled the interrupt cause every millisecond
+   kept a processor 90% busy inside that one load. Everything the firmware
+   sends arrives through the receive ring, whose progress the device writes
+   into host memory; so once the ring is stocked, the cause register is read
+   only now and then, to notice a firmware that has stopped. */
+#define CAUSE_CHECK_US 100000u
+#define CAUSE_CHECK_POLLS 16u
+
+static int cause_check_due(void) {
+#ifdef LEANOS_HOST_TEST
+    return transport.statistics.polls % CAUSE_CHECK_POLLS == 0;
+#else
+    uint64_t now = tsc_to_us(tsc_read());
+    if (now < transport.next_cause_check) {
+        return 0;
+    }
+    transport.next_cause_check = now + CAUSE_CHECK_US;
+    return 1;
+#endif
+}
+
 int intel_wireless_poll(void) {
+    transport.statistics.polls++;
+    if (transport.rx_stocked && !cause_check_due()) {
+        __asm__ volatile("" ::: "memory");
+        uint32_t closed = ((volatile intel_wireless_rb_status_t *)transport.rb_status)->closed_rb_number & 0xFFFu;
+        if ((closed & RX_MASK) != transport.rx_read) {
+            handle_receive_ring();
+        }
+        return INTEL_WIRELESS_OK;
+    }
+    transport.statistics.cause_reads++;
     uint32_t causes = intel_wireless_read32(CSR_INT);
     if (causes == 0xFFFFFFFFu || is_error_value(causes)) {
         return INTEL_WIRELESS_HARDWARE_ERROR;
@@ -776,6 +817,126 @@ int intel_wireless_send(uint8_t group, uint8_t command, uint8_t version, const v
     return result;
 }
 
+int intel_wireless_data_queue_memory(uint64_t *tfds, uint64_t *byte_counts, uint32_t *cb_size) {
+    if (!transport.data_tfds) {
+        transport.data_tfds = dma_pages(pages_for(INTEL_WIRELESS_DATA_SLOTS * sizeof(intel_wireless_tfd_t)));
+        transport.byte_counts = dma_pages(1);
+        if (!transport.data_tfds || !transport.byte_counts) {
+            return INTEL_WIRELESS_NO_MEMORY;
+        }
+        for (uint32_t i = 0; i < INTEL_WIRELESS_DATA_SLOTS; i++) {
+            transport.data_buffer[i] = dma_pages(1);
+            if (!transport.data_buffer[i]) {
+                return INTEL_WIRELESS_NO_MEMORY;
+            }
+        }
+    }
+    uint8_t *bytes = (uint8_t *)transport.data_tfds;
+    for (uint32_t i = 0; i < INTEL_WIRELESS_DATA_SLOTS * sizeof(intel_wireless_tfd_t); i++) {
+        bytes[i] = 0;
+    }
+    for (uint32_t i = 0; i < INTEL_WIRELESS_BYTE_COUNT_ENTRIES; i++) {
+        transport.byte_counts[i] = 0;
+    }
+    *tfds = physical(transport.data_tfds);
+    *byte_counts = physical(transport.byte_counts);
+    *cb_size = (uint32_t)log2_of(INTEL_WIRELESS_DATA_SLOTS) - 3;
+    return INTEL_WIRELESS_OK;
+}
+
+void intel_wireless_data_queue_start(uint16_t queue, uint16_t write_pointer) {
+    transport.data_queue = queue;
+    transport.data_write = write_pointer & (INTEL_WIRELESS_TFD_QUEUE_SIZE_MAX - 1);
+    transport.data_read = transport.data_write;
+}
+
+void intel_wireless_data_queue_stop(void) {
+    transport.data_queue = -1;
+}
+
+int intel_wireless_data_queue_number(void) {
+    return transport.data_queue;
+}
+
+uint32_t intel_wireless_data_in_flight(void) {
+    return (transport.data_write - transport.data_read) & (INTEL_WIRELESS_TFD_QUEUE_SIZE_MAX - 1);
+}
+
+void intel_wireless_data_completed(uint32_t frames) {
+    if (frames > intel_wireless_data_in_flight()) {
+        frames = intel_wireless_data_in_flight();
+    }
+    transport.data_read = (transport.data_read + frames) & (INTEL_WIRELESS_TFD_QUEUE_SIZE_MAX - 1);
+    transport.statistics.frames_completed += frames;
+}
+
+/* Linux's layout for this family, iwl_txq_gen2_build_tx: the first transfer
+   buffer is exactly the first twenty bytes of the command header and TX
+   command, the second the rest of them with the 802.11 header, padded to a
+   word, and the third the payload. The byte-count table tells the scheduler
+   the frame's length in words and how many 64-byte pieces of the TFD to
+   fetch, less one. */
+int intel_wireless_data_send(const intel_wireless_tx_command_t *command, const uint8_t *header,
+                             uint32_t header_length, const uint8_t *payload, uint32_t payload_length) {
+    if (transport.data_queue < 0) {
+        return INTEL_WIRELESS_NOT_READY;
+    }
+    if (intel_wireless_data_in_flight() >= INTEL_WIRELESS_DATA_SLOTS - 2) {
+        return INTEL_WIRELESS_QUEUE_FULL;
+    }
+    if (header_length > 32 || payload_length > PAGE_BYTES - INTEL_WIRELESS_DATA_PAYLOAD_OFFSET) {
+        return INTEL_WIRELESS_TOO_LARGE;
+    }
+    uint32_t index = transport.data_write & (INTEL_WIRELESS_DATA_SLOTS - 1);
+    uint8_t *buffer = transport.data_buffer[index];
+    intel_wireless_short_header_t *short_header = (intel_wireless_short_header_t *)buffer;
+    short_header->command = TX_CMD;
+    short_header->group = 0;
+    short_header->sequence = (uint16_t)(QUEUE_TO_SEQUENCE((uint32_t)transport.data_queue) | INDEX_TO_SEQUENCE(index));
+    const uint8_t *command_bytes = (const uint8_t *)command;
+    uint32_t at = sizeof(*short_header);
+    for (uint32_t i = 0; i < sizeof(*command); i++) {
+        buffer[at++] = command_bytes[i];
+    }
+    for (uint32_t i = 0; i < header_length; i++) {
+        buffer[at++] = header[i];
+    }
+    while (at % 4) {
+        buffer[at++] = 0;
+    }
+    for (uint32_t i = 0; i < payload_length; i++) {
+        buffer[INTEL_WIRELESS_DATA_PAYLOAD_OFFSET + i] = payload[i];
+    }
+
+    intel_wireless_tfd_t *tfd = &transport.data_tfds[index];
+    uint8_t *tfd_bytes = (uint8_t *)tfd;
+    for (uint32_t i = 0; i < sizeof(*tfd); i++) {
+        tfd_bytes[i] = 0;
+    }
+    tfd->buffers[0].address = physical(buffer);
+    tfd->buffers[0].length = INTEL_WIRELESS_FIRST_TB_SIZE;
+    tfd->buffers[1].address = physical(buffer) + INTEL_WIRELESS_FIRST_TB_SIZE;
+    tfd->buffers[1].length = (uint16_t)(at - INTEL_WIRELESS_FIRST_TB_SIZE);
+    uint32_t count = 2;
+    if (payload_length) {
+        tfd->buffers[2].address = physical(buffer) + INTEL_WIRELESS_DATA_PAYLOAD_OFFSET;
+        tfd->buffers[2].length = (uint16_t)payload_length;
+        count = 3;
+    }
+    tfd->buffer_count = (uint16_t)count;
+
+    uint32_t filled = 2 + count * (uint32_t)sizeof(intel_wireless_transfer_buffer_t);
+    uint32_t chunks = (filled + 63) / 64 - 1;
+    uint32_t words = ((uint32_t)command->length + 3) / 4;
+    transport.byte_counts[index] = (uint16_t)(words | chunks << 12);
+
+    transport.data_write = (transport.data_write + 1) & (INTEL_WIRELESS_TFD_QUEUE_SIZE_MAX - 1);
+    __asm__ volatile("" ::: "memory");
+    intel_wireless_write32(HBUS_TARG_WRPTR, transport.data_write | ((uint32_t)transport.data_queue << 16));
+    transport.statistics.frames_queued++;
+    return INTEL_WIRELESS_OK;
+}
+
 /* Puts the device back in reset - its DMA stops before any memory it was
    given goes back - and gives everything back. A firmware that misbehaved
    must not be left holding addresses this kernel will reuse. */
@@ -807,6 +968,17 @@ void intel_wireless_stop(void) {
         transport.used_ring = 0;
         transport.rb_status = 0;
     }
+    if (transport.data_tfds) {
+        free_pages(transport.data_tfds, pages_for(INTEL_WIRELESS_DATA_SLOTS * sizeof(intel_wireless_tfd_t)));
+        free_pages(transport.byte_counts, 1);
+        for (uint32_t i = 0; i < INTEL_WIRELESS_DATA_SLOTS; i++) {
+            free_pages(transport.data_buffer[i], 1);
+            transport.data_buffer[i] = 0;
+        }
+        transport.data_tfds = 0;
+        transport.byte_counts = 0;
+    }
+    transport.data_queue = -1;
     if (transport.tfds) {
         free_pages(transport.tfds, pages_for(INTEL_WIRELESS_COMMAND_SLOTS * sizeof(intel_wireless_tfd_t)));
         for (uint32_t i = 0; i < INTEL_WIRELESS_COMMAND_SLOTS; i++) {

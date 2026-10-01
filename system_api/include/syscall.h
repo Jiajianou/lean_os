@@ -282,7 +282,11 @@ typedef struct {
    back once it has terminated, because nobody will ever wait for it - which
    until this call only the C library knew. */
 #define SYS_thread_detach         138
-#define SYSCALL_COUNT 139
+
+/* M207: the wireless network - see system_api/include/wireless.h. One call,
+   an operation and two arguments, so the next operation is not a new number. */
+#define SYS_wireless              139
+#define SYSCALL_COUNT 140
 
 #ifdef __cplusplus
 }

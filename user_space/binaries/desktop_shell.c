@@ -2,6 +2,7 @@
 #include "string_utilities.h"
 #include "syscall_wrappers.h"
 #include "window_manager_client.h"
+#include "wireless.h"
 
 #define PANEL_HEIGHT      44
 
@@ -54,8 +55,32 @@ static int32_t clock_text_w(void) {
     return graphics_text_width(graphics_ui_font(), "00:00");
 }
 
+/* M207: the radio, as four bars beside the workspaces - lit by the signal
+   of the network joined, dark when none is - and a click on them opens the
+   Wi-Fi wizard. A machine with no radio shows nothing there, so its tray is
+   the width it always was. */
+#define WIFI_BARS     4
+#define WIFI_BAR_W    3
+#define WIFI_BAR_GAP  2
+#define WIFI_W        (WIFI_BARS * WIFI_BAR_W + (WIFI_BARS - 1) * WIFI_BAR_GAP)
+#define WIFI_TALLEST  14
+
+static os_wireless_status_t wifi_status;
+
+static int wifi_present(void) {
+    return wifi_status.state != WIRELESS_STATE_ABSENT;
+}
+
 static int32_t tray_w(void) {
-    return TRAY_ICONS_W + clock_text_w() + TRAY_PAD;
+    return TRAY_ICONS_W + clock_text_w() + TRAY_PAD + (wifi_present() ? WIFI_W + TRAY_PAD : 0);
+}
+
+static int wifi_bars_lit(void) {
+    if (wifi_status.state != WIRELESS_STATE_CONNECTED) {
+        return 0;
+    }
+    int8_t signal = wifi_status.signal_dbm;
+    return signal >= -55 ? 4 : signal >= -65 ? 3 : signal >= -75 ? 2 : 1;
 }
 
 #define REFRESH_INTERVAL_MS 300
@@ -211,6 +236,7 @@ static uint32_t panel_signature(void) {
     for (const char *c = clock_text; *c; c++) {
         hash = signature_mix(hash, (uint8_t)*c);
     }
+    hash = signature_mix(hash, (uint32_t)wifi_status.state << 8 | (uint32_t)wifi_bars_lit());
     return hash;
 }
 
@@ -356,8 +382,31 @@ static void draw_slot(const running_slot_t *slot, int hover) {
     }
 }
 
+static void draw_wifi(int32_t x) {
+    int lit = wifi_bars_lit();
+    int joining = wifi_status.state == WIRELESS_STATE_JOINING || wifi_status.state == WIRELESS_STATE_SECURING ||
+                  wifi_status.state == WIRELESS_STATE_ADDRESSING;
+    int32_t bottom = (PANEL_HEIGHT + WIFI_TALLEST) / 2;
+    for (int i = 0; i < WIFI_BARS; i++) {
+        int32_t height = 5 + i * 3;
+        int32_t bx = x + i * (WIFI_BAR_W + WIFI_BAR_GAP);
+        if (i < lit) {
+            graphics_fill_rounded(&bar_graphics, bx, bottom - height, WIFI_BAR_W, height, 1, CLOCK_FG, 255);
+        } else if (joining) {
+            graphics_fill_rounded(&bar_graphics, bx, bottom - height, WIFI_BAR_W, height, 1, ACCENT_COLOR, 200);
+        } else {
+            graphics_fill_rounded(&bar_graphics, bx, bottom - height, WIFI_BAR_W, height, 1, WS_DOT_OFF,
+                                  WS_DOT_OFF_ALPHA);
+        }
+    }
+}
+
 static void draw_tray(window_manager_window_t *self) {
     int32_t tray_x = (int32_t)self->width - tray_w();
+    if (wifi_present()) {
+        draw_wifi(tray_x + TRAY_PAD);
+        tray_x += WIFI_W + TRAY_PAD;
+    }
 
     int32_t dot_y = (PANEL_HEIGHT - WS_DOT_H) / 2;
     for (int i = 0; i < WINDOW_MANAGER_WORKSPACE_COUNT; i++) {
@@ -505,7 +554,31 @@ static void context_activate(int row) {
     }
 }
 
-static void handle_click(int32_t x, int32_t y) {
+static int wifi_hit(int32_t x, int32_t y, int32_t width) {
+    if (!wifi_present()) {
+        return 0;
+    }
+    int32_t left = width - tray_w() + TRAY_PAD / 2;
+    return x >= left && x < left + WIFI_W + TRAY_PAD && y >= 0 && y < PANEL_HEIGHT;
+}
+
+/* The wizard, or the one already open - two windows choosing networks for
+   one radio would only argue. */
+static void open_wifi(void) {
+    for (int i = 0; i < running_count; i++) {
+        if (strcmp(running_slots[i].name, "Wi-Fi") == 0) {
+            window_manager_send_action(running_slots[i].window_id, WINDOW_MANAGER_ACTION_FOCUS);
+            return;
+        }
+    }
+    sys_spawn("/bin/wifi", 0);
+}
+
+static void handle_click(int32_t x, int32_t y, int32_t width) {
+    if (wifi_hit(x, y, width)) {
+        open_wifi();
+        return;
+    }
     int hit = button_at(x, y);
     if (hit == HOVER_START) {
         start_pressed_until_ms = sys_uptime_ms() + PRESS_FLASH_MS;
@@ -556,7 +629,7 @@ int main(void) {
                 refresh_running_slots(&win);
                 changed = 1;
             } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_BUTTON && (ev.buttons & 1)) {
-                handle_click(ev.x, ev.y);
+                handle_click(ev.x, ev.y, (int32_t)win.width);
                 refresh_running_slots(&win);
                 changed = 1;
             } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_MOVE) {
@@ -577,6 +650,9 @@ int main(void) {
 
         long now = sys_uptime_ms();
         if (now >= next_refresh) {
+            if (sys_wireless(WIRELESS_OPERATION_STATUS, &wifi_status, 0) != 0) {
+                wifi_status.state = WIRELESS_STATE_ABSENT;
+            }
             refresh_running_slots(&win);
             next_refresh = now + REFRESH_INTERVAL_MS;
             uint32_t signature = panel_signature();

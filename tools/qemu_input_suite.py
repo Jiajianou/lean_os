@@ -2087,6 +2087,154 @@ def test_window_animations_stay_smooth(m):
                           "spinning again (see M117)" % (gaps[0], gaps[1]))
     check(gaps[-1] <= 250, "an animation had a %d ms gap between two frames - that is a stall, not motion" % gaps[-1])
 
+# M207: the Wi-Fi wizard, on a machine with no wired card and the simulated
+# radio fw_cfg switches on - five access points that hold their own
+# passphrases and run the authenticator's half of WPA2. The tray grows by the
+# radio's four bars, and only on a machine that has one.
+WIFI_MACHINE = dict(extra_args=["-fw_cfg", "name=opt/leanos/wireless,string=simulated"],
+                    wired_network=False)
+WIFI_TRAY_W = TRAY_W + 18 + TRAY_PAD
+WIFI_BARS = (1024 - WIFI_TRAY_W + TRAY_PAD, PANEL_TOP + PANEL_H // 2 - 7, 18, 14)
+WIFI_W, WIFI_H = 460, 500
+WIFI_PASSWORD = "lean os wireless"
+
+def is_red(c):
+    return ((c >> 16) & 255) > 170 and ((c >> 8) & 255) < 120 and (c & 255) < 120
+
+def is_green(c):
+    return ((c >> 8) & 255) > 150 and ((c >> 16) & 255) < 140
+
+def is_blue(c):
+    return (c & 255) > 180 and ((c >> 16) & 255) < 120
+
+def count_where(shot, test, x, y, w, h):
+    n = 0
+    for py in range(y, y + h):
+        for px in range(x, x + w):
+            if test(shot.px(px, py)):
+                n += 1
+    return n
+
+# Lit bars are the clock's ink, which reads 0xA9AEB9 through the panel - a
+# channel sum of 528; unlit ones are a faint white over the panel, about 250.
+def lit_wifi_bars(shot):
+    x, y, w, h = WIFI_BARS
+    return shot.count_brighter(450, x, y, w, h)
+
+def geometry_after(m, name, mark, timeout=25.0):
+    needle = "[geometry] %s " % name
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        log = m.read_log()
+        at = log.rfind(needle)
+        if at >= mark:
+            fields = log[at + len(needle):].split("\n", 1)[0].split()
+            if len(fields) >= 4:
+                return tuple(int(v) for v in fields[:4])
+        time.sleep(0.3)
+    raise Failure("%s: the wizard never reported where it put %r after that step (log: %s)"
+                  % (current_test(), name, m.save_log("no-geometry")))
+
+def wait_for_log(m, text, what, timeout=40.0, count=1):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if m.read_log().count(text) >= count:
+            return
+        time.sleep(0.3)
+    raise Failure("%s (log: %s)" % (what, m.save_log("wifi")))
+
+def open_wifi(m):
+    shot = m.screenshot()
+    x, y, w, h = WIFI_BARS
+    check(shot.count_brighter(150, x, y, w, h) > 0,
+          "the taskbar shows no radio, on a machine that has one")
+    m.click(x + w // 2, y + h // 2)
+    wait_for_windows(m, 1)
+    return app_origin(FIRST_APP_IDX, WIFI_H)
+
+def choose(m, origin, row):
+    x, y, w, h = geometry(m, "network%d" % row)
+    mark = len(m.read_log())
+    m.click(origin[0] + x + 60, origin[1] + y + h // 2)
+    return mark
+
+def join_workshop(m, origin):
+    mark = choose(m, origin, 0)
+    geometry_after(m, "password", mark)
+    m.type_text(WIFI_PASSWORD)
+    m.sendkey("ret")
+    wait_for_log(m, "[wifi] connected to Workshop", "the right password did not join Workshop")
+
+def test_wifi_wizard_joins_after_a_wrong_password(m):
+    boot(m)
+    check(lit_wifi_bars(m.screenshot()) == 0, "the radio's bars are lit before anything was joined")
+    origin = open_wifi(m)
+    x, y, w, h = geometry(m, "network0")
+    wait_for(m, lambda s: s.count_brighter(450, origin[0] + x + 40, origin[1] + y + 4, 120, h - 8) > 40,
+             "the strongest network's name was never drawn in the list")
+
+    mark = choose(m, origin, 0)
+    px, py, pw, ph = geometry_after(m, "password", mark)
+    m.type_text("not the password")
+    m.sendkey("ret")
+    wait_for_log(m, "[wifi] not joined: the handshake failed - the password is wrong",
+                 "a wrong password was not named as one")
+    check("[net] IP now runs over wlan0" not in m.read_log(),
+          "IP was attached to a network whose handshake failed")
+    hint = (origin[0] + px, origin[1] + py + ph + 4, pw, 24)
+    wait_for(m, lambda s: count_where(s, is_red, *hint) > 30,
+             "the password page did not come back saying the password was wrong")
+
+    m.type_text(WIFI_PASSWORD)
+    m.sendkey("ret")
+    wait_for_log(m, "[wifi] connected to Workshop", "the right password did not join Workshop")
+    check("[net] 192.168.77.23/24 via 192.168.77.1" in m.read_log(),
+          "the network's DHCP server was never heard - no address came over the radio")
+    steps = (origin[0] + 14, origin[1] + 40, 200, 80)
+    wait_for(m, lambda s: count_where(s, is_green, *steps) > 60,
+             "the progress page never showed its steps done")
+
+    bx, by, bw, bh = geometry(m, "progress_button")
+    m.click(origin[0] + bx + bw // 2, origin[1] + by + bh // 2)
+    x, y, w, h = geometry(m, "network0")
+    wait_for(m, lambda s: is_blue(s.px(origin[0] + x + w - 6, origin[1] + y + h // 2)),
+             "the list does not show the joined network as connected")
+    wait_for(m, lambda s: lit_wifi_bars(s) > 20, "the taskbar's radio bars did not light once joined")
+
+def test_wifi_remembers_a_network_across_a_reboot(m):
+    boot(m)
+    origin = open_wifi(m)
+    join_workshop(m, origin)
+    boots_before = m.read_log().count(BOOT_MARKER)
+    m.sendkey("ctrl-spc")
+    m.type_text("reboot")
+    m.sendkey("ret")
+    wait_for_log(m, BOOT_MARKER, "the machine never came back up after `reboot`", timeout=300.0,
+                 count=boots_before + 1)
+    wait_for_log(m, "[wifi] rejoining a remembered network",
+                 "after a reboot the machine did not go back to the network it remembered", timeout=90.0)
+    wait_for_log(m, "[wifi] connected to Workshop", "the remembered network was not joined again",
+                 timeout=60.0, count=2)
+    wait_for(m, lambda s: lit_wifi_bars(s) > 20, "the radio's bars stayed dark after rejoining", timeout=30.0)
+
+def test_wifi_open_network_needs_no_password_and_wpa3_is_refused(m):
+    boot(m)
+    origin = open_wifi(m)
+    geometry(m, "network2")
+    mark = choose(m, origin, 2)
+    time.sleep(2.0)
+    check(m.read_log().rfind("[geometry] password ") < mark,
+          "choosing a WPA3-only network asked for a password this machine could not use")
+    check("[wifi] joining Laboratory" not in m.read_log(),
+          "the kernel was asked to join a network whose security it cannot speak")
+    wait_for(m, lambda s: count_where(s, is_red, origin[0] + 14, origin[1] + 40, 420, 20) > 30,
+             "choosing an unsupported network did not say why nothing happened")
+    mark = choose(m, origin, 1)
+    wait_for_log(m, "[wifi] connected to Corner Cafe", "the open network was not joined")
+    check(m.read_log().rfind("[geometry] password ") < mark,
+          "an open network asked for a password")
+
+
 TESTS = [
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
@@ -2159,7 +2307,19 @@ TESTS = [
     ("popup_window_opens_captures_and_dismisses",
      test_popup_window_opens_captures_and_dismisses),
     ("window_animations_stay_smooth", test_window_animations_stay_smooth),
+    ("wifi_wizard_joins_after_a_wrong_password", test_wifi_wizard_joins_after_a_wrong_password),
+    ("wifi_remembers_a_network_across_a_reboot", test_wifi_remembers_a_network_across_a_reboot),
+    ("wifi_open_network_needs_no_password_and_wpa3_is_refused",
+     test_wifi_open_network_needs_no_password_and_wpa3_is_refused),
 ]
+
+# Tests that need a machine other than the suite's usual one - so a cold
+# boot, since the snapshot was taken of the usual one.
+MACHINE_OPTIONS = {
+    "wifi_wizard_joins_after_a_wrong_password": WIFI_MACHINE,
+    "wifi_remembers_a_network_across_a_reboot": WIFI_MACHINE,
+    "wifi_open_network_needs_no_password_and_wpa3_is_refused": WIFI_MACHINE,
+}
 
 def _die_on_signal(signum, _frame):
     raise KeyboardInterrupt("received signal %d" % signum)
@@ -2181,6 +2341,7 @@ QUICK_TESTS = [
     "browser_new_tab_button_opens_a_tab",
     "popup_window_opens_captures_and_dismisses",
     "window_animations_stay_smooth",
+    "wifi_wizard_joins_after_a_wrong_password",
 ]
 
 def default_jobs():
@@ -2252,6 +2413,9 @@ def known_flaky(names):
         return []
 
 COLD_BOOT_TESTS = {
+    "wifi_wizard_joins_after_a_wrong_password",
+    "wifi_remembers_a_network_across_a_reboot",
+    "wifi_open_network_needs_no_password_and_wpa3_is_refused",
     "shutdown_powers_off_the_machine",
     "settings_persist_across_a_reboot",
     "session_restores_windows_across_a_reboot",
@@ -2263,7 +2427,7 @@ def run_one(name, fn, boot_timeout, snapshot=None):
     started = time.time()
     try:
         use = None if name in COLD_BOOT_TESTS else snapshot
-        with Machine(boot_timeout=boot_timeout, snapshot=use) as m:
+        with Machine(boot_timeout=boot_timeout, snapshot=use, **MACHINE_OPTIONS.get(name, {})) as m:
             try:
                 fn(m)
             except Failure as exc:

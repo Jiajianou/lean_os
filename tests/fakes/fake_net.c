@@ -53,6 +53,10 @@ int rtl8139_send(const uint8_t *frame, uint16_t length) {
     return 0;
 }
 
+int net_link_send(const uint8_t *frame, uint16_t length) {
+    return rtl8139_send(frame, length);
+}
+
 int rtl8139_init(void) { return 1; }
 uint32_t rtl8139_tx_error_count(void) { return 0; }
 const uint8_t *rtl8139_mac(void) { return local_mac; }

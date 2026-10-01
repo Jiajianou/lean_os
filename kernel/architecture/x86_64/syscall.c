@@ -57,6 +57,7 @@
 #include "network/network.h"
 #include "network/socket.h"
 #include "network/tcp.h"
+#include "network/wireless_manager.h"
 #include "window_manager.h"
 
 typedef long (*syscall_function_t)(uint64_t a1, uint64_t a2, uint64_t a3,
@@ -700,6 +701,64 @@ static long sys_thread_detach(uint64_t thread_id, uint64_t a2, uint64_t a3, uint
     (void)a5;
     (void)a6;
     return scheduler_detach_thread(scheduler_current(), (int)thread_id);
+}
+
+/* M207: the wireless network. Its state is anybody's to read - a clock in
+   the taskbar may show it - but the list of networks around the machine says
+   where the machine is, and joining one decides where its traffic goes, so
+   everything else needs CAP_NETWORK. A password crosses once, into a copy
+   that is wiped when the radio's task has turned it into a key. */
+static long sys_wireless(uint64_t operation, uint64_t argument, uint64_t count, uint64_t a4,
+                         uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (operation == WIRELESS_OPERATION_STATUS) {
+        os_wireless_status_t status;
+        wireless_status(&status);
+        return copy_to_user(argument, &status, sizeof(status)) == 0 ? 0 : -14;
+    }
+    if (!has_cap(CAP_NETWORK)) {
+        return -1;
+    }
+    switch (operation) {
+        case WIRELESS_OPERATION_SCAN:
+            return wireless_request_scan();
+        case WIRELESS_OPERATION_NETWORKS: {
+            os_wireless_network_t rows[WIRELESS_NETWORKS_MAX];
+            uint32_t capacity = count > WIRELESS_NETWORKS_MAX ? WIRELESS_NETWORKS_MAX : (uint32_t)count;
+            long n = wireless_networks(rows, capacity);
+            if (n > 0 && copy_to_user(argument, rows, (uint64_t)n * sizeof(rows[0])) != 0) {
+                return -14;
+            }
+            return n;
+        }
+        case WIRELESS_OPERATION_CONNECT: {
+            os_wireless_connect_t request;
+            if (copy_from_user(&request, argument, sizeof(request)) != 0) {
+                return -14;
+            }
+            request.ssid[WIRELESS_SSID_MAX] = 0;
+            request.password[WIRELESS_PASSWORD_MAX] = 0;
+            long result = wireless_request_connect(&request);
+            volatile uint8_t *bytes = (volatile uint8_t *)&request;
+            for (uint32_t i = 0; i < sizeof(request); i++) {
+                bytes[i] = 0;
+            }
+            return result;
+        }
+        case WIRELESS_OPERATION_DISCONNECT:
+            return wireless_request_disconnect();
+        case WIRELESS_OPERATION_FORGET: {
+            os_wireless_network_t network;
+            if (copy_from_user(&network, argument, sizeof(network)) != 0) {
+                return -14;
+            }
+            return wireless_request_forget(network.ssid, network.ssid_length);
+        }
+        default:
+            return -22;
+    }
 }
 
 static long sys_thread_exit(uint64_t value, uint64_t a2, uint64_t a3, uint64_t a4,
@@ -5598,6 +5657,7 @@ static const syscall_function_t syscall_table[SYSCALL_COUNT] = {
     [SYS_peek] = sys_peek,
     [SYS_clock_ns] = sys_clock_ns,
     [SYS_thread_detach] = sys_thread_detach,
+    [SYS_wireless] = sys_wireless,
     [SYS_getrlimit] = sys_getrlimit,
     [SYS_setrlimit] = sys_setrlimit,
     [SYS_thread_setname] = sys_thread_setname,

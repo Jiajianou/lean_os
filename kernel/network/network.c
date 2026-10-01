@@ -18,6 +18,9 @@ static uint32_t gateway_ip = NET_FALLBACK_GATEWAY;
 static uint32_t dns_ip     = NET_FALLBACK_DNS;
 static int leased;
 static int have_nic;
+static int stack_started;
+static const net_link_t *active_link;
+static net_link_t wired_link = {"eth0", {0}, rtl8139_send};
 
 static spinlock_t net_lock;
 static volatile int net_lock_owner_cpu = -1;
@@ -68,11 +71,11 @@ static void tcp_timer_thread(void *arg) {
     }
 }
 
-int net_init(void) {
-    if (!rtl8139_init()) {
-        return 0;
+static void start_stack(void) {
+    if (stack_started) {
+        return;
     }
-    have_nic = 1;
+    stack_started = 1;
     arp_init();
     socket_init();
     tcp_init();
@@ -81,9 +84,9 @@ int net_init(void) {
     if (timer) {
         timer->parent_id = -1;
     }
+}
 
-    dhcp_configure();
-
+static void log_configuration(void) {
     log_ip("[net] ", local_ip);
     kernel_log_puts("/");
     int bits = 0;
@@ -94,11 +97,77 @@ int net_init(void) {
     log_ip(" via ", gateway_ip);
     log_ip(", DNS ", dns_ip);
     kernel_log_puts(leased ? " (DHCP lease)\n" : " (no DHCP answer - fallback configuration)\n");
+}
+
+/* The stack starts at boot whether or not there is a card to run it over:
+   a link that arrives later - the radio joining a network minutes in - must
+   find the socket and connection tables as the programs already using them
+   left them, loopback ones included, rather than wiped. */
+int net_init(void) {
+    start_stack();
+    if (!rtl8139_init()) {
+        return 0;
+    }
+    const uint8_t *mac = rtl8139_mac();
+    for (int i = 0; i < 6; i++) {
+        wired_link.address[i] = mac[i];
+    }
+    net_attach_link(&wired_link);
+    dhcp_configure();
+    log_configuration();
     return 1;
 }
 
+int net_attach_link(const net_link_t *link) {
+    start_stack();
+    net_lock_acquire();
+    if (active_link && active_link != link) {
+        net_lock_release();
+        return 0;
+    }
+    active_link = link;
+    have_nic = 1;
+    leased = 0;
+    arp_init();
+    net_lock_release();
+    kernel_log_puts("[net] IP now runs over ");
+    kernel_log_puts(link->name);
+    kernel_log_puts("\n");
+    return 1;
+}
+
+void net_detach_link(const net_link_t *link) {
+    net_lock_acquire();
+    if (active_link == link) {
+        active_link = 0;
+        have_nic = 0;
+        leased = 0;
+        local_ip = NET_FALLBACK_IP;
+        arp_init();
+    }
+    net_lock_release();
+}
+
+const net_link_t *net_active_link(void) {
+    return active_link;
+}
+
+int net_link_send(const uint8_t *frame, uint16_t length) {
+    const net_link_t *link = active_link;
+    if (!link) {
+        return -1;
+    }
+    return link->send(frame, length);
+}
+
+static const uint8_t no_address[6];
+
 const uint8_t *net_local_mac(void) {
-    return rtl8139_mac();
+    return active_link ? active_link->address : no_address;
+}
+
+void net_log_configuration(void) {
+    log_configuration();
 }
 
 uint32_t net_local_ip(void) { return local_ip; }

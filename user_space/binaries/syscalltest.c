@@ -3,6 +3,7 @@
 
 #include "syscall.h"
 #include "syscall_wrappers.h"
+#include "wireless.h"
 
 static int failures;
 static int checks;
@@ -122,6 +123,7 @@ static const entry_t table[] = {
     {SYS_uptime_ms,     CLASS_PLAIN, 0, NULL},
     {SYS_clock_ns,      CLASS_PLAIN, 0, NULL},
     {SYS_thread_detach, CLASS_PLAIN, 0, NULL},
+    {SYS_wireless,      CLASS_PLAIN, 0, NULL},
     {SYS_idle_ticks,    CLASS_PLAIN, 0, NULL},
     {SYS_yield,         CLASS_PLAIN, 0, NULL},
     {SYS_task_alive,    CLASS_PLAIN, 0, NULL},
@@ -285,6 +287,11 @@ int main(void) {
     for (int i = 0; i < (int)(sizeof(bogus) / sizeof(bogus[0])); i++) {
         check(sys_raw(bogus[i], 0, 0, 0) < 0,
               "a syscall number outside the table was not refused", bogus[i]);
+    }
+
+    for (int p = 0; p < N_BAD_PTRS; p++) {
+        check(sys_raw(SYS_wireless, WIRELESS_OPERATION_STATUS, (long)bad_ptrs[p], 0) < 0,
+              "the wireless status was written through an address this program does not own", SYS_wireless);
     }
 
     check(sys_raw(SYS_write, 1, (long)scratch, (long)HUGE_LENGTH) < 0,

@@ -179,7 +179,8 @@ LVGL_PORT_OBJS := $(UOBJ)/lvgl_leanos.o $(UOBJ)/lvgl_keys.o $(UOBJ)/lvgl_theme.o
 
 DESKTOP_APPLICATION_OBJS := $(UOBJ)/desktop_application_settings.o \
                             $(UOBJ)/desktop_application_task_manager.o \
-                            $(UOBJ)/desktop_application_widgets.o
+                            $(UOBJ)/desktop_application_widgets.o \
+                            $(UOBJ)/desktop_application_wireless.o
 
 # Not in USER_PROGRAMS: the reference table is 12,840 values and the kernel
 # incbins every embedded program, so this one is installed onto the image by
@@ -713,11 +714,14 @@ TEST_FAKES := tests/fakes/fake_panic.c tests/fakes/fake_klog.c \
               tests/fakes/fake_fwcfg.c tests/fakes/fake_pci.c \
               tests/fakes/fake_arch.c tests/fakes/fake_kernel_objects.c \
               tests/fakes/fake_user_syscalls.c tests/fakes/fake_user_fs.c \
-              tests/fakes/fake_user_net.c tests/fakes/fake_framebuffer.c
+              tests/fakes/fake_user_net.c tests/fakes/fake_framebuffer.c \
+              tests/fakes/fake_wireless_glue.c
 
 TEST_KERNEL_SRCS := kernel/library/kernel_library.c kernel/memory_management/heap.c kernel/file_system/leanfs.c \
                     kernel/network/arp.c kernel/network/ip.c kernel/network/icmp.c \
                     kernel/network/udp.c kernel/network/ethernet.c kernel/network/tcp.c kernel/network/ieee80211.c \
+                    kernel/network/wpa_crypto.c kernel/network/wpa_handshake.c \
+                    kernel/network/wireless_manager.c kernel/network/wireless_simulator.c \
                     kernel/device/fwcfg.c kernel/device/tty.c kernel/device/pty.c \
                     kernel/scheduler/scheduler.c kernel/file_system/flock.c kernel/device/random.c \
                     kernel/drivers/rtl8139_ring.c kernel/inter_process_communication/unix_socket.c \
