@@ -18,3 +18,7 @@ int shared_memory_count_by_owner(int owner_task_id);
 int64_t shared_memory_get_size(int id);
 
 int shared_memory_map_into(int id, uint64_t pml4_phys, uint64_t vaddr, uint64_t flags);
+
+/* Unmaps pages of a segment mapping and drops the reference each held, after
+   every core holding the address space has forgotten them. */
+uint64_t shared_memory_unmap_range(uint64_t pml4_phys, uint64_t vaddr, uint64_t pages);

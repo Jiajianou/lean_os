@@ -1698,12 +1698,7 @@ void task_exit_with_code(int code) {
            page stayed mapped into an address space nobody could release it
            from. */
         if (!others) {
-            uint64_t switch_flags = irq_save_disable();
-            t->pml4_phys = virtual_memory_kernel_pml4_phys();
-            __atomic_store_n(&loaded_pml4_phys[smp_current_cpu()], t->pml4_phys,
-                             __ATOMIC_SEQ_CST);
-            virtual_memory_switch_address_space(t->pml4_phys);
-            irq_restore(switch_flags);
+            scheduler_load_address_space(t, virtual_memory_kernel_pml4_phys());
             process_destroy_address_space(dead);
         }
     }
@@ -2079,6 +2074,26 @@ uint32_t scheduler_cpus_holding_address_space(uint64_t pml4_phys) {
         }
     }
     return mask;
+}
+
+/* M204: the one way to put a different address space on this core outside
+   schedule(). loaded_pml4_phys is what every TLB shootdown asks "who holds
+   this address space", so it is published before the load, as schedule()
+   does. execve loaded the new program's tables and published nothing: its
+   core went on recorded as holding the tables it had just destroyed, and as
+   NOT holding the new ones - so until the new program's first thread was
+   switched out, a shootdown for its address space skipped the core it ran
+   on. A renderer's allocator decommits from one thread while its main thread
+   runs, and the main thread went on writing through translations of frames
+   that had been freed and handed to somebody else: PartitionAlloc's freelist
+   in the renderer, and the browser's heap when the frame went there, both
+   found corrupt within half a second of a renderer starting. */
+void scheduler_load_address_space(task_t *t, uint64_t pml4_phys) {
+    uint64_t flags = irq_save_disable();
+    t->pml4_phys = pml4_phys;
+    __atomic_store_n(&loaded_pml4_phys[smp_current_cpu()], pml4_phys, __ATOMIC_SEQ_CST);
+    virtual_memory_switch_address_space(pml4_phys);
+    irq_restore(flags);
 }
 
 void scheduler_forget_address_space(uint64_t pml4_phys) {
@@ -2701,6 +2716,24 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
         spin_unlock_irqrestore(&forking->mmap_lock, parent_region_flags);
     }
 
+    /* M204: and the descriptors are copied here too, for the same reason.
+       Retaining a pipe end takes pipe_lock, and a write into a full pipe
+       holds pipe_lock while it wakes the reader and blocks - both of which
+       take scheduler_lock. A fork retaining under scheduler_lock while a
+       writer filled a pipe was the two locks taken in opposite orders, and
+       the machine stopped: every core that then needed either lock spun for
+       good. A browser forks while the desktop's pipes fill; it took a
+       profiler pausing the machine at awkward moments to make it happen on
+       purpose. The table is the caller's own, so it is the caller's to read. */
+    task_t *caller = scheduler_current();
+    for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
+        fresh->slots[i] = caller->descriptor_table->slots[i];
+        if (fresh->slots[i].type == FILE_DESCRIPTOR_RESERVED) {
+            fresh->slots[i].type = FILE_DESCRIPTOR_NONE;
+        }
+        file_descriptor_retain(&fresh->slots[i]);
+    }
+
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
 
@@ -2748,13 +2781,6 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->stamp_syscalls_seen = 0;
 
     t->descriptor_table = fresh;
-    for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-        t->descriptor_table->slots[i] = parent->descriptor_table->slots[i];
-        if (t->descriptor_table->slots[i].type == FILE_DESCRIPTOR_RESERVED) {
-            t->descriptor_table->slots[i].type = FILE_DESCRIPTOR_NONE;
-        }
-        file_descriptor_retain(&t->descriptor_table->slots[i]);
-    }
     t->parent_id = parent->id;
     t->pgid = parent->pgid;
     t->sid = parent->sid;

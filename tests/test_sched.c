@@ -386,6 +386,28 @@ TEST(scheduler, an_address_space_is_shared_only_while_another_live_task_is_in_it
     q13_kill(a);
 }
 
+/* M204: execve loaded a new program's tables without saying so, and every
+   TLB shootdown for that program skipped the core it was running on. The
+   record shootdowns read has to move with the load - away from the tables
+   being replaced and onto the ones replacing them. */
+TEST(scheduler, loading_an_address_space_is_what_a_shootdown_sees) {
+    q13_boot();
+    task_t *t = q13_spawn("as-exec");
+    REQUIRE(t != NULL);
+    fake_arch_set_cpu(1);
+    t->pml4_phys = 0x7D000;
+    scheduler_load_address_space(t, 0x7D000);
+    CHECK_EQ(scheduler_cpus_holding_address_space(0x7D000) & 2u, 2u);
+    scheduler_load_address_space(t, 0x7E000);
+    CHECK_EQ(t->pml4_phys, 0x7E000u);
+    CHECK_EQ(scheduler_cpus_holding_address_space(0x7E000) & 2u, 2u);
+    CHECK_EQ(scheduler_cpus_holding_address_space(0x7D000) & 2u, 0u);
+    scheduler_forget_address_space(0x7E000);
+    t->pml4_phys = 0;
+    fake_arch_set_cpu(0);
+    q13_kill(t);
+}
+
 TEST(scheduler, a_slot_comes_back_and_the_recycled_pid_is_a_different_pid) {
     q13_boot();
     task_t *first = q13_spawn("first");

@@ -37,6 +37,79 @@ static unsigned long deep(unsigned long want, unsigned long *lowest) {
     return deeper + pad[0] - 1;
 }
 
+/* M204: a memfd's frames belong to the memfd, and a mapping of it holds no
+   reference on them - so neither dropping the mapping's pages nor unmapping
+   it may free them. madvise(MADV_DONTNEED) over a shared mapping did: the
+   memfd went on naming frames the allocator had handed to somebody else.
+   Fresh anonymous memory is dirtied after each, which is what takes a
+   wrongly freed frame back out of the allocator, and the memfd has to come
+   back with what was written into it. */
+#define BORROWED_PAGES 64UL
+
+static unsigned char borrowed_mark(unsigned long page) {
+    return (unsigned char)(0xA0u + (page % 31u));
+}
+
+static void dirty_fresh_memory(void) {
+    unsigned long pages = BORROWED_PAGES * 4;
+    unsigned char *fresh = (unsigned char *)mmap(0, pages * PAGE, PROT_READ | PROT_WRITE,
+                                                 MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (fresh == (unsigned char *)MAP_FAILED) {
+        return;
+    }
+    memset(fresh, 0x5A, pages * PAGE);
+    munmap(fresh, pages * PAGE);
+}
+
+static int memfd_holds_marks(int fd) {
+    unsigned char *view = (unsigned char *)mmap(0, BORROWED_PAGES * PAGE, PROT_READ, MAP_SHARED, fd, 0);
+    if (view == (unsigned char *)MAP_FAILED) {
+        return 0;
+    }
+    int intact = 1;
+    for (unsigned long i = 0; i < BORROWED_PAGES; i++) {
+        if (view[i * PAGE] != borrowed_mark(i) || view[i * PAGE + PAGE - 1] != borrowed_mark(i)) {
+            printf("vmtest: memfd page %lu holds %02x, not %02x\n", i, view[i * PAGE], borrowed_mark(i));
+            intact = 0;
+            break;
+        }
+    }
+    munmap(view, BORROWED_PAGES * PAGE);
+    return intact;
+}
+
+static int borrowed_frames(void) {
+    int fd = memfd_create("vmtest", 0);
+    if (fd < 0 || ftruncate(fd, (off_t)(BORROWED_PAGES * PAGE)) != 0) {
+        return 26;
+    }
+    unsigned char *shared = (unsigned char *)mmap(0, BORROWED_PAGES * PAGE, PROT_READ | PROT_WRITE,
+                                                  MAP_SHARED, fd, 0);
+    if (shared == (unsigned char *)MAP_FAILED) {
+        return 26;
+    }
+    for (unsigned long i = 0; i < BORROWED_PAGES; i++) {
+        shared[i * PAGE] = borrowed_mark(i);
+        shared[i * PAGE + PAGE - 1] = borrowed_mark(i);
+    }
+    if (madvise(shared, BORROWED_PAGES * PAGE, MADV_DONTNEED) != 0) {
+        return 26;
+    }
+    dirty_fresh_memory();
+    if (!memfd_holds_marks(fd)) {
+        printf("vmtest: madvise(MADV_DONTNEED) over a shared memfd mapping freed the memfd's frames\n");
+        return 27;
+    }
+    munmap(shared, BORROWED_PAGES * PAGE);
+    dirty_fresh_memory();
+    if (!memfd_holds_marks(fd)) {
+        printf("vmtest: munmap of a shared memfd mapping freed the memfd's frames\n");
+        return 28;
+    }
+    close(fd);
+    return 0;
+}
+
 static int ordinary(void) {
     unsigned long span = 64UL * PAGE;
     void *probe = mmap(0, span, PROT_READ | PROT_WRITE,
@@ -372,9 +445,15 @@ static int ordinary(void) {
     close(fd);
     unlink(VM_FILE);
 
+    int borrowed = borrowed_frames();
+    if (borrowed != 0) {
+        return borrowed;
+    }
+
     printf("vmtest: fixed, hinted, protected, executed, dropped, reserved, "
            "grown, a file mapped both ways, a system call refusing to write "
-           "a read-only page, and a range running off the image refused - "
+           "a read-only page, a range running off the image refused, and a "
+           "memfd's frames kept through madvise and munmap - "
            "all checks passed\n");
     return 0;
 }

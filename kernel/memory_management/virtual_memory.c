@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "drivers/kernel_log.h"
+#include "library/kernel_library.h"
 #include "library/spinlock.h"
 #include "memory_management/e820.h"
 #include "memory_management/physical_memory.h"
@@ -222,7 +223,10 @@ static uint64_t *table_walk(uint64_t *table, uint64_t index, int allocate, uint6
         if (!phys) {
             return (uint64_t *)0;
         }
-        table[index] = phys | PTE_PRESENT | PTE_WRITABLE | extra_flags;
+        /* Released, because virtual_memory_user_range_ok walks without the
+           lock and must never find a linked table it can see uncleared. */
+        __atomic_store_n(&table[index], phys | PTE_PRESENT | PTE_WRITABLE | extra_flags,
+                         __ATOMIC_RELEASE);
         return phys_to_table(phys);
     }
     return phys_to_table(table[index] & PTE_ADDRESS_MASK);
@@ -488,41 +492,59 @@ uint64_t virtual_memory_protect_range_in(uint64_t pml4_phys, uint64_t start, uin
     uint64_t changed = 0;
     uint64_t irq_flags = spin_lock_irqsave(&virtual_memory_lock);
     uint64_t *pml4 = phys_to_table(pml4_phys);
-    for (uint64_t virt = start; virt < end; virt += PAGE_SIZE) {
+    /* M204: a range is walked a table at a time - a missing table skips
+       everything it would have held, and a present one is read entry by
+       entry - rather than from the top for every page. V8 and PartitionAlloc
+       change the protection of reservations far larger than what they have
+       touched, and a renderer starting up spent more kernel time here than
+       in its page faults. */
+    for (uint64_t virt = start; virt < end; ) {
         uint64_t *pdpt = table_walk(pml4, PML4_INDEX(virt), 0, 0);
-        uint64_t *pd = pdpt ? table_walk(pdpt, PDPT_INDEX(virt), 0, 0) : (uint64_t *)0;
-        if (!pd || (pd[PD_INDEX(virt)] & PTE_HUGE)) {
+        if (!pdpt) {
+            virt = (virt + (1ULL << 39)) & ~((1ULL << 39) - 1);
             continue;
         }
-        uint64_t *pt = table_walk(pd, PD_INDEX(virt), 0, 0);
+        uint64_t *pd = table_walk(pdpt, PDPT_INDEX(virt), 0, 0);
+        if (!pd) {
+            virt = (virt + (1ULL << 30)) & ~((1ULL << 30) - 1);
+            continue;
+        }
+        uint64_t *pt = (pd[PD_INDEX(virt)] & PTE_HUGE) ? (uint64_t *)0 : table_walk(pd, PD_INDEX(virt), 0, 0);
+        uint64_t table_end = (virt + (1ULL << 21)) & ~((1ULL << 21) - 1);
         if (!pt) {
+            virt = table_end;
             continue;
         }
-        uint64_t e = pt[PT_INDEX(virt)];
-        if (!(e & PTE_PRESENT)) {
-            continue;
+        if (table_end > end) {
+            table_end = end;
         }
-        uint64_t want = leaf_flags(flags);
-        if (e & PTE_COW) {
-            want = (want & ~PTE_WRITABLE) | PTE_COW;
+        for (; virt < table_end; virt += PAGE_SIZE) {
+            uint64_t e = pt[PT_INDEX(virt)];
+            if (!(e & PTE_PRESENT)) {
+                continue;
+            }
+            uint64_t want = leaf_flags(flags);
+            if (e & PTE_COW) {
+                want = (want & ~PTE_WRITABLE) | PTE_COW;
+            }
+            /* M198: a read-only page of a program's image can be a frame every
+               process running that program maps (the image cache). Made writable
+               in place, one process's store would land in all of them; it becomes
+               copy-on-write instead, and the first store takes a private copy -
+               the same path fork's pages take. Only in the image window: a shared
+               mapping in the arena is shared on purpose. */
+            if ((want & PTE_WRITABLE) && !(e & PTE_WRITABLE) && virt >= USER_IMAGE_BASE &&
+                virt < USER_IMAGE_LIMIT && physical_memory_frame_refs(e & PTE_ADDRESS_MASK) > 1) {
+                want = (want & ~PTE_WRITABLE) | PTE_COW;
+            }
+            uint64_t replacement = (e & PTE_ADDRESS_MASK) | want;
+            if (replacement == e) {
+                continue;
+            }
+            pt[PT_INDEX(virt)] = replacement;
+            __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+            changed++;
         }
-        /* M198: a read-only page of a program's image can be a frame every
-           process running that program maps (the image cache). Made writable
-           in place, one process's store would land in all of them; it becomes
-           copy-on-write instead, and the first store takes a private copy -
-           the same path fork's pages take. Only in the image window: a shared
-           mapping in the arena is shared on purpose. */
-        if ((want & PTE_WRITABLE) && !(e & PTE_WRITABLE) && virt >= USER_IMAGE_BASE &&
-            virt < USER_IMAGE_LIMIT && physical_memory_frame_refs(e & PTE_ADDRESS_MASK) > 1) {
-            want = (want & ~PTE_WRITABLE) | PTE_COW;
-        }
-        uint64_t replacement = (e & PTE_ADDRESS_MASK) | want;
-        if (replacement == e) {
-            continue;
-        }
-        pt[PT_INDEX(virt)] = replacement;
-        __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
-        changed++;
     }
     if (changed) {
         tell_other_cpus(pml4_phys);
@@ -604,6 +626,16 @@ void virtual_memory_unmap_page(uint64_t virt) {
     spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
 }
 
+/* M204: a reader, and it takes no lock. It used to take virtual_memory_lock
+   with interrupts off for every page - and it is asked on nearly every system
+   call that passes a pointer and on every page fault, from every core - so a
+   browser starting up spent more of its kernel time here than in the system
+   call entry and the page fault handler together. A page table of a live
+   address space is never freed while it is walked (only the address space's
+   destruction frees tables, and nothing of it runs then), an entry is one
+   aligned word the processor reads whole, and the answer was only ever true
+   at the instant it was given: the lock was released before the caller used
+   it. The walk is repeated only when the range crosses into another table. */
 int virtual_memory_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t length, int need_write) {
     if (length == 0) {
         return 1;
@@ -614,33 +646,30 @@ int virtual_memory_user_range_ok(uint64_t pml4_phys, uint64_t virt, uint64_t len
     }
     uint64_t need = PTE_PRESENT | PTE_USER | (need_write ? PTE_WRITABLE : 0);
 
-    uint64_t irq_flags = spin_lock_irqsave(&virtual_memory_lock);
-    uint64_t *pml4 = phys_to_table(pml4_phys);
+    const uint64_t *pml4 = phys_to_table(pml4_phys);
+    const uint64_t *pt = (const uint64_t *)0;
     for (uint64_t page = virt & ~(PAGE_SIZE - 1); page < end; page += PAGE_SIZE) {
-        uint64_t e = pml4[PML4_INDEX(page)];
-        if ((e & need) != need) {
-            spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
-            return 0;
+        if (!pt || PT_INDEX(page) == 0) {
+            uint64_t e = __atomic_load_n(&pml4[PML4_INDEX(page)], __ATOMIC_ACQUIRE);
+            if ((e & need) != need) {
+                return 0;
+            }
+            const uint64_t *pdpt = phys_to_table(e & PTE_ADDRESS_MASK);
+            e = __atomic_load_n(&pdpt[PDPT_INDEX(page)], __ATOMIC_ACQUIRE);
+            if ((e & need) != need || (e & PTE_HUGE)) {
+                return 0;
+            }
+            const uint64_t *pd = phys_to_table(e & PTE_ADDRESS_MASK);
+            e = __atomic_load_n(&pd[PD_INDEX(page)], __ATOMIC_ACQUIRE);
+            if ((e & need) != need || (e & PTE_HUGE)) {
+                return 0;
+            }
+            pt = phys_to_table(e & PTE_ADDRESS_MASK);
         }
-        uint64_t *pdpt = phys_to_table(e & PTE_ADDRESS_MASK);
-        e = pdpt[PDPT_INDEX(page)];
-        if ((e & need) != need || (e & PTE_HUGE)) {
-            spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
-            return 0;
-        }
-        uint64_t *pd = phys_to_table(e & PTE_ADDRESS_MASK);
-        e = pd[PD_INDEX(page)];
-        if ((e & need) != need || (e & PTE_HUGE)) {
-            spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
-            return 0;
-        }
-        uint64_t *pt = phys_to_table(e & PTE_ADDRESS_MASK);
-        if ((pt[PT_INDEX(page)] & need) != need) {
-            spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
+        if ((__atomic_load_n(&pt[PT_INDEX(page)], __ATOMIC_ACQUIRE) & need) != need) {
             return 0;
         }
     }
-    spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
     return 1;
 }
 
@@ -913,11 +942,11 @@ int virtual_memory_cow_break(uint64_t pml4_phys, uint64_t virt) {
         spin_unlock_irqrestore(&virtual_memory_lock, irq_flags);
         return 0;
     }
-    const uint8_t *from = (const uint8_t *)old_phys;
-    uint8_t *to = (uint8_t *)new_phys;
-    for (uint64_t i = 0; i < PAGE_SIZE; i++) {
-        to[i] = from[i];
-    }
+    /* M204: one string copy rather than four thousand byte moves. A browser
+       takes this fault on every page it writes after every fork - a tenth
+       of its processor time while it started its renderers - and all of it
+       with this lock held and interrupts off. */
+    k_memcpy((void *)new_phys, (const void *)old_phys, PAGE_SIZE);
     pt[PT_INDEX(virt)] = new_phys | (entry & (PTE_USER | PTE_PRESENT | PTE_NX)) | PTE_WRITABLE;
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
     tell_other_cpus(pml4_phys);

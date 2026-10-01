@@ -1998,11 +1998,7 @@ static long sys_shared_memory_unmap(uint64_t vaddr, uint64_t bytes, uint64_t a3,
     if (end < vaddr || vaddr < USER_SHARED_MEMORY_BASE || end > USER_FRAMEBUFFER_BASE) {
         return -1;
     }
-    uint64_t pml4 = scheduler_current()->pml4_phys;
-    for (uint64_t i = 0; i < pages; i++) {
-        (void)virtual_memory_unmap_page_in(pml4, vaddr + i * PAGE_SIZE);
-    }
-    virtual_memory_flush_other_cpus(pml4);
+    shared_memory_unmap_range(scheduler_current()->pml4_phys, vaddr, pages);
     return 0;
 }
 
@@ -2040,14 +2036,10 @@ static long sys_shared_memory_free(uint64_t id, uint64_t vaddr, uint64_t a3, uin
             return -1;
         }
         uint64_t last = vaddr + (uint64_t)pages * PAGE_SIZE;
-        if (vaddr < USER_REGION_BASE || last > USER_REGION_LIMIT || last < vaddr) {
+        if (vaddr < USER_SHARED_MEMORY_BASE || last > USER_SHARED_MEMORY_LIMIT || last < vaddr) {
             return -1;
         }
-        uint64_t pml4 = scheduler_current()->pml4_phys;
-        for (int64_t i = 0; i < pages; i++) {
-            (void)virtual_memory_unmap_page_in(pml4, vaddr + (uint64_t)i * PAGE_SIZE);
-        }
-        virtual_memory_flush_other_cpus(pml4);
+        shared_memory_unmap_range(scheduler_current()->pml4_phys, vaddr, (uint64_t)pages);
     }
     return shared_memory_free((int)id, scheduler_current()->id);
 }
@@ -2099,6 +2091,21 @@ static long sys_framebuffer_map(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t 
     return (long)USER_FRAMEBUFFER_BASE;
 }
 
+/* M204: the address space that drains the pointer. Every program holding
+   CAP_FRAMEBUFFER used to have its waitfds ended by pending movement, and
+   only the compositor ever reads it - so while the compositor spent 45 ms on
+   a frame, init and desktop_icons returned from waitfds 1.6 million times a
+   second on the laptop, on the cores the compositor needed. */
+static uint64_t pointer_reader_pml4;
+
+static int pointer_wakes(const task_t *self) {
+    if (!(self->caps & CAP_FRAMEBUFFER)) {
+        return 0;
+    }
+    uint64_t reader = __atomic_load_n(&pointer_reader_pml4, __ATOMIC_RELAXED);
+    return reader == 0 || reader == self->pml4_phys;
+}
+
 static long sys_mouse_read(uint64_t out_pointer, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
@@ -2108,6 +2115,10 @@ static long sys_mouse_read(uint64_t out_pointer, uint64_t a2, uint64_t a3, uint6
     mouse_event_t ev;
     if (!user_range_ok(out_pointer, sizeof(ev), 1)) {
         return -1;
+    }
+    task_t *self = scheduler_current();
+    if (self->caps & CAP_FRAMEBUFFER) {
+        __atomic_store_n(&pointer_reader_pml4, self->pml4_phys, __ATOMIC_RELAXED);
     }
     if (!mouse_read(&ev)) {
         return 0;
@@ -3008,6 +3019,29 @@ have_backing:
     return (long)base;
 }
 
+/* M204: the pages of a region that holds no reference on its frames - a
+   memfd's, or a shared file's page cache - leave this address space without
+   being freed; only private memory is freed. madvise(MADV_DONTNEED) asked
+   nothing and freed a shared memfd mapping's frames, and the memfd went on
+   handing them out after the allocator had given them to somebody else -
+   one process's memory written by another. munmap asked "is it shared",
+   which is the same question only while a memfd cannot be mapped privately,
+   so it asks this one too. */
+static uint32_t madvise_borrowed_reports;
+
+static int region_borrows_frames(const mmap_region_t *region) {
+    return region->memfd_id != 0 || (region->shared && region->handle >= 0);
+}
+
+static void release_region_pages(task_t *self, const mmap_region_t *region,
+                                 uint64_t start, uint64_t end) {
+    if (region_borrows_frames(region)) {
+        scheduler_release_shared_range(self, start, end);
+    } else {
+        virtual_memory_unmap_range_free(self->pml4_phys, start, end);
+    }
+}
+
 /* M181: the table work, with the region lock already held. sys_mmap needs this
    for MAP_FIXED and cannot call sys_munmap to get it - a spinlock is not
    recursive and the wrapper below would wait for the caller. */
@@ -3023,11 +3057,7 @@ static long munmap_locked(task_t *self, uint64_t address, uint64_t end) {
         if (cut_start >= cut_end) {
             continue;
         }
-        if (self->mmaps[i].shared) {
-            scheduler_release_shared_range(self, cut_start, cut_end);
-        } else {
-            virtual_memory_unmap_range_free(self->pml4_phys, cut_start, cut_end);
-        }
+        release_region_pages(self, &self->mmaps[i], cut_start, cut_end);
         if (cut_start == rstart && cut_end == rend) {
             mmap_slot_remove(self, i);
             i--;
@@ -3374,7 +3404,33 @@ static long sys_madvise(uint64_t address, uint64_t length, uint64_t advice, uint
     if (self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return -1;
     }
-    virtual_memory_unmap_range_free(self->pml4_phys, address, end);
+    /* DONTNEED drops this process's pages and nothing else: a private page
+       comes back zeroed, a shared one comes back from the object behind it
+       with what it held. Every region the range touches is asked which it
+       is - this freed whatever was mapped, and a memfd's frames are not the
+       mapping's to free. */
+    uint64_t region_flags = scheduler_regions_lock(self);
+    for (uint32_t i = 0; i < self->mmap_capacity; i++) {
+        if (self->mmaps[i].pages == 0) {
+            break;
+        }
+        uint64_t rstart = self->mmaps[i].base;
+        uint64_t rend = rstart + (uint64_t)self->mmaps[i].pages * PAGE_SIZE;
+        uint64_t cut_start = address > rstart ? address : rstart;
+        uint64_t cut_end = end < rend ? end : rend;
+        if (cut_start < cut_end) {
+            if (region_borrows_frames(&self->mmaps[i]) &&
+                __atomic_fetch_add(&madvise_borrowed_reports, 1, __ATOMIC_RELAXED) < 3) {
+                kernel_log_puts("[mm] madvise(DONTNEED) over a ");
+                kernel_log_puts(self->mmaps[i].memfd_id ? "memfd" : "shared file");
+                kernel_log_puts(" mapping in '");
+                kernel_log_puts(self->name);
+                kernel_log_puts("' - its frames stay with the object\n");
+            }
+            release_region_pages(self, &self->mmaps[i], cut_start, cut_end);
+        }
+    }
+    scheduler_regions_unlock(self, region_flags);
     return 0;
 }
 
@@ -4633,7 +4689,8 @@ static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint6
         }
         /* The pointer is not a descriptor, and its one reader ends this wait
            on movement below - so it watches input whatever it passed. */
-        if (self->caps & CAP_FRAMEBUFFER) {
+        int reads_pointer = pointer_wakes(self);
+        if (reads_pointer) {
             scheduler_watch_add(SCHEDULER_INPUT_OBJECT);
         }
         for (uint64_t i = 0; i < count; i++) {
@@ -4645,7 +4702,7 @@ static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint6
         /* M197: the pointer is not a descriptor. The one program that may
            read it used to find its movement by waking a hundred times a
            second; it waits properly now, so movement has to end the wait. */
-        if ((self->caps & CAP_FRAMEBUFFER) && mouse_pending()) {
+        if (reads_pointer && mouse_pending()) {
             scheduler_watch_end();
             WAITFDS_RETURN(WAITFDS_RETURN_POINTER, -2);
         }
@@ -5326,8 +5383,7 @@ static long sys_execve(isr_regs_t *regs) {
        memfd region references are dropped by scheduler_regions_forget_memfds
        just after, as before. */
     scheduler_release_shared_range(self, USER_MMAP_BASE, USER_MMAP_LIMIT);
-    self->pml4_phys = new_pml4;
-    virtual_memory_switch_address_space(new_pml4);
+    scheduler_load_address_space(self, new_pml4);
     process_destroy_address_space(old_pml4);
 
     /* An exec replaces the program, so it replaces the command line: a

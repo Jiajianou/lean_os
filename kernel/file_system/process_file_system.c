@@ -8,6 +8,7 @@
 #include "library/kernel_library.h"
 #include "memory_management/heap.h"
 #include "memory_management/physical_memory.h"
+#include "library/spinlock.h"
 #include "profile/sampler.h"
 #include "profile/syscall_counters.h"
 #include "scheduler/scheduler.h"
@@ -26,6 +27,15 @@ typedef struct {
 } process_file_t;
 
 static process_file_t process_files[PROCESS_MAX_OPEN];
+
+/* M204: the table is the whole machine's, and claiming a slot is a test and
+   a set. Two processes opening /proc files on two cores found the same free
+   slot, both took it, and both later closed it - the second close freed the
+   first one's buffer again and the kernel panicked. Every Chromium process
+   reads /proc/self as it starts, so a browser starting several at once was
+   the way to find it. A slot is claimed and given back under this lock; its
+   contents are generated outside it, by the one opener that owns it. */
+static spinlock_t process_files_lock;
 
 void procfs_init(void) {
     k_memset(process_files, 0, sizeof(process_files));
@@ -353,12 +363,18 @@ static int process_stat(const char *rel, leanfs_stat_t *out) {
         out->size = 0;
         return 0;
     }
-    static char probe_buffer[PROCESS_BUFFER_LARGE];
-    static process_file_t probe;
-    probe.buffer = probe_buffer;
+    /* Its own buffer: one shared by every caller was written by two stats
+       at once and could answer one file's size with another's. */
+    process_file_t probe;
+    k_memset(&probe, 0, sizeof(probe));
+    probe.buffer = (char *)kmalloc(PROCESS_BUFFER_LARGE);
+    if (!probe.buffer) {
+        return -1;
+    }
     probe.cap = PROCESS_BUFFER_LARGE;
     generate(&probe, k, pid);
     out->size = probe.length;
+    kfree(probe.buffer);
     return 0;
 }
 
@@ -369,20 +385,29 @@ static int process_open(const char *rel, int create) {
     if (k == P_NONE || k == P_ROOT || k == P_PIDDIR) {
         return -1;
     }
+    uint32_t cap = buffer_cap_for(k);
+    char *buffer = (char *)kmalloc(cap);
+    if (!buffer) {
+        return -1;
+    }
+    int claimed = -1;
+    uint64_t flags = spin_lock_irqsave(&process_files_lock);
     for (int i = 0; i < PROCESS_MAX_OPEN; i++) {
         if (!process_files[i].used) {
-            uint32_t cap = buffer_cap_for(k);
-            char *buffer = (char *)kmalloc(cap);
-            if (!buffer) {
-                return -1;
-            }
             process_files[i].used = 1;
             process_files[i].buffer = buffer;
             process_files[i].cap = cap;
-            generate(&process_files[i], k, pid);
-            return i;
+            process_files[i].length = 0;
+            claimed = i;
+            break;
         }
     }
+    spin_unlock_irqrestore(&process_files_lock, flags);
+    if (claimed >= 0) {
+        generate(&process_files[claimed], k, pid);
+        return claimed;
+    }
+    kfree(buffer);
     /* Sixteen /proc files open at once for the whole machine; reaching that
        says so, because the program only sees "open failed" (M183's rule). */
     kernel_log_puts("[procfs] all ");
@@ -394,14 +419,19 @@ static int process_open(const char *rel, int create) {
 }
 
 static void process_close(int handle) {
-    if (handle < 0 || handle >= PROCESS_MAX_OPEN || !process_files[handle].used) {
+    if (handle < 0 || handle >= PROCESS_MAX_OPEN) {
         return;
     }
-    kfree(process_files[handle].buffer);
-    process_files[handle].buffer = (char *)0;
-    process_files[handle].cap = 0;
-    process_files[handle].length = 0;
-    process_files[handle].used = 0;
+    uint64_t flags = spin_lock_irqsave(&process_files_lock);
+    char *buffer = process_files[handle].used ? process_files[handle].buffer : (char *)0;
+    if (process_files[handle].used) {
+        process_files[handle].buffer = (char *)0;
+        process_files[handle].cap = 0;
+        process_files[handle].length = 0;
+        process_files[handle].used = 0;
+    }
+    spin_unlock_irqrestore(&process_files_lock, flags);
+    kfree(buffer);
 }
 
 static int64_t process_read(int handle, void *buffer, size_t length, uint32_t off) {

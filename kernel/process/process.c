@@ -39,11 +39,23 @@ static const virtual_memory_range_t PROCESS_OWNED[] = {
 };
 #define PROCESS_OWNED_COUNT ((int)(sizeof(PROCESS_OWNED) / sizeof(PROCESS_OWNED[0])))
 
+/* What a dying address space lets go of: everything it owns, and the
+   reference each shared-memory mapping holds on its frames (M204). A fork
+   copies only the first list - a child does not inherit a window's buffer. */
+static const virtual_memory_range_t PROCESS_RELEASED[] = {
+        {USER_IMAGE_BASE, USER_IMAGE_LIMIT},
+        {USER_STACK_LIMIT, USER_ARGUMENT_ADDRESS + USER_ARGUMENT_BYTES},
+        {USER_HEAP_START, USER_HEAP_LIMIT},
+        {USER_MMAP_BASE, USER_MMAP_LIMIT},
+        {USER_SHARED_MEMORY_BASE, USER_SHARED_MEMORY_LIMIT},
+};
+#define PROCESS_RELEASED_COUNT ((int)(sizeof(PROCESS_RELEASED) / sizeof(PROCESS_RELEASED[0])))
+
 void process_destroy_address_space(uint64_t pml4_phys) {
     if (pml4_phys == 0 || pml4_phys == virtual_memory_kernel_pml4_phys()) {
         return;
     }
-    virtual_memory_destroy_address_space(pml4_phys, PROCESS_OWNED, PROCESS_OWNED_COUNT);
+    virtual_memory_destroy_address_space(pml4_phys, PROCESS_RELEASED, PROCESS_RELEASED_COUNT);
 }
 
 uint64_t process_fork_address_space(uint64_t source_pml4_phys,

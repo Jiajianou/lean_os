@@ -1,3 +1,5 @@
+#include <dirent.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +46,62 @@
 static int exists(const char *path) {
     struct stat st;
     return stat(path, &st) == 0;
+}
+
+/* M204. Chromium keeps one browser per profile with a SingletonLock - a
+   symbolic link naming the host and the process id that holds it - and a
+   browser that never exited cleanly leaves it behind: the machine switched
+   off with the window open, or a crash. Process ids here start from the same
+   place every boot, so the id in a stale lock is often a live process on the
+   next one, and Chromium then hands the launch to an "existing browser
+   session" that does not exist and exits. The Browser icon did nothing and
+   neither did the session restore. When no browser process is running the
+   lock cannot be anybody's, so it goes - and only then, because a second
+   browser on one profile is what the lock is for. */
+static int browser_is_running(void) {
+    DIR *proc = opendir("/proc");
+    if (!proc) {
+        return 1;
+    }
+    int running = 0;
+    struct dirent *entry;
+    while (!running && (entry = readdir(proc)) != 0) {
+        const char *name = entry->d_name;
+        if (name[0] < '0' || name[0] > '9') {
+            continue;
+        }
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%s/cmdline", name);
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            continue;
+        }
+        char argv0[sizeof(BROWSER_PROGRAM) + 1];
+        long n = read(fd, argv0, sizeof(argv0));
+        close(fd);
+        if (n >= (long)sizeof(BROWSER_PROGRAM) &&
+            memcmp(argv0, BROWSER_PROGRAM, sizeof(BROWSER_PROGRAM)) == 0) {
+            running = 1;
+        }
+    }
+    closedir(proc);
+    return running;
+}
+
+static void forget_stale_profile_lock(void) {
+    static const char *const singletons[] = {
+        BROWSER_PROFILE "/SingletonLock",
+        BROWSER_PROFILE "/SingletonSocket",
+        BROWSER_PROFILE "/SingletonCookie",
+    };
+    struct stat st;
+    if (lstat(singletons[0], &st) != 0 || browser_is_running()) {
+        return;
+    }
+    for (size_t i = 0; i < sizeof(singletons) / sizeof(singletons[0]); i++) {
+        unlink(singletons[i]);
+    }
+    fprintf(stderr, "browser: removed the profile lock a browser that did not exit left behind\n");
 }
 
 /* Extra switches, one per line, from /etc/chromium-flags.conf - the file
@@ -135,6 +193,7 @@ int main(int argc, char **argv) {
 
     if (exists(BROWSER_PROGRAM)) {
         setenv("HOME", PATH_HOME, 1);
+        forget_stale_profile_lock();
         const char *const fixed[] = {
             BROWSER_PROGRAM,
             "--ozone-platform=leanos",

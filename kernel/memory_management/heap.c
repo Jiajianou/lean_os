@@ -140,6 +140,13 @@ void kfree(void *ptr) {
     uint64_t irq_flags = spin_lock_irqsave(&heap_lock);
     block_header_t *b = (block_header_t *)ptr - 1;
     if (b->free) {
+        /* Which free was the second one is the whole question, and a panic
+           with no caller answers none of it. */
+        kernel_log_puts("[heap] second kfree of 0x");
+        kernel_log_put_hex64((uint64_t)(uintptr_t)ptr);
+        kernel_log_puts(" from 0x");
+        kernel_log_put_hex64((uint64_t)(uintptr_t)__builtin_return_address(0));
+        kernel_log_putc('\n');
         panic("kfree: double free");
     }
     b->free = 1;

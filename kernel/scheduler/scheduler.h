@@ -439,6 +439,10 @@ unsigned int scheduler_set_alarm(task_t *t, unsigned int seconds);
 
 int scheduler_release_shared_range(task_t *t, uint64_t start, uint64_t end);
 
+/* Makes pml4_phys this task's address space and loads it on this core,
+   recording the load where TLB shootdowns look for it. */
+void scheduler_load_address_space(task_t *t, uint64_t pml4_phys);
+
 /* The ranges of t's memfd and shared file mappings, sorted by address, in a
    kmalloc'd array the caller frees; the count, or -1 if there was no memory
    for the array. What fork leaves shared rather than copy-on-write. */

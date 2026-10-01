@@ -166,6 +166,7 @@ typedef struct {
        sees, and the log says how long it was. */
     long opened_ms;
     uint8_t presented;
+    uint8_t drawn;
 } window_t;
 
 static window_t windows[MAX_WINDOWS];
@@ -756,7 +757,67 @@ static void draw_window_shadow(const window_t *win, int focused) {
     }
 }
 
-static void blit_window(const window_t *win) {
+static void draw_text_clipped(int32_t x, int32_t y, const char *s, uint32_t color, int bold);
+static int32_t text_width(const char *s);
+
+/* M204: a window whose client has not presented holds a zeroed segment,
+   and zero is black. Chromium takes 0.8 s on the laptop and 4.7 s under
+   QEMU to draw its first frame, and a black rectangle for that long reads
+   as broken rather than as starting - so until the first present the
+   window shows a ground that continues its titlebar, and says what it is
+   waiting for. */
+#define UNPRESENTED_COLOR 0x001E2430u
+
+/* A client that draws and never presents - the self-tests' wm_demo is one -
+   has still drawn, so the placeholder stands in only for a segment nobody
+   has written: every 61st word, which walks across the columns, until the
+   first that is not zero, and never again for that window after it. */
+static int shows_placeholder(window_t *win) {
+    if (win->presented || win->drawn || win->translucent || win->is_panel || win->is_desktop || win->is_popup) {
+        return 0;
+    }
+    uint32_t words = (uint32_t)win->buffer_w * (uint32_t)win->buffer_h;
+    for (uint32_t i = 0; i < words; i += 61) {
+        if (win->pixels[i] != 0) {
+            win->drawn = 1;
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void draw_unpresented_window(const window_t *win) {
+    int32_t radius = graphics_clamp_radius(win->w, 2 * FRAME_RADIUS, FRAME_RADIUS);
+    int32_t saved_clip_y0 = clip_y0;
+    clip_y0 = max_i32(clip_y0, win->y);
+    fill_rounded(win->x, win->y - radius, win->w, win->h + radius, radius, UNPRESENTED_COLOR, 255);
+    clip_y0 = saved_clip_y0;
+    char label[WINDOW_MANAGER_TITLE_MAX + 16];
+    int n = 0;
+    static const char opening[] = "Opening ";
+    for (int i = 0; opening[i]; i++) {
+        label[n++] = opening[i];
+    }
+    for (int i = 0; win->title[i] && i < WINDOW_MANAGER_TITLE_MAX; i++) {
+        label[n++] = win->title[i];
+    }
+    if (n == (int)sizeof(opening) - 1) {
+        n--;
+    }
+    label[n++] = UI_G_ELLIPSIS;
+    label[n] = '\0';
+    int32_t label_w = text_width(label);
+    if (label_w < win->w) {
+        draw_text_clipped(win->x + (win->w - label_w) / 2, win->y + (win->h - UI_FONT_HEIGHT) / 2,
+                          label, TITLE_DIM_COLOR, 0);
+    }
+}
+
+static void blit_window(window_t *win) {
+    if (shows_placeholder(win)) {
+        draw_unpresented_window(win);
+        return;
+    }
     int32_t x0 = max_i32(win->x, clip_x0);
     int32_t y0 = max_i32(win->y - win->overhang, clip_y0);
     int32_t x1 = min_i32(win->x + win->w, clip_x1);
@@ -1337,7 +1398,7 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
     fill_rect(0, 0, (int32_t)framebuffer_info.width, (int32_t)framebuffer_info.height, bg_color);
     for (int z = 0; z < z_count; z++) {
         int i = zorder[z];
-        const window_t *win = &windows[i];
+        window_t *win = &windows[i];
         if (!win->alive || win->minimized || win->is_panel || !window_here(win)) {
             continue;
         }
@@ -1378,7 +1439,7 @@ static void redraw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
         stroke_rect(snap_preview_x, snap_preview_y, snap_preview_w, snap_preview_h, accent_color);
     }
     for (int z = 0; z < z_count; z++) {
-        const window_t *win = &windows[zorder[z]];
+        window_t *win = &windows[zorder[z]];
         if (win->alive && win->is_panel && !win->minimized) {
             blit_window(win);
         }
@@ -1899,6 +1960,7 @@ static void accept_pending_window(int request_read_file_descriptor, int response
     win->alive = 1;
     win->opened_ms = sys_uptime_ms();
     win->presented = 0;
+    win->drawn = 0;
     win->close_requested = 0;
     win->close_deadline_ms = 0;
     win->confirm_close = request.confirm_close;
@@ -2647,9 +2709,9 @@ static void present_window(int id) {
     present_window_rect(id, 0, 0, windows[id].w, windows[id].h);
 }
 
-static void note_first_frame(window_t *win) {
+static int note_first_frame(window_t *win) {
     if (win->presented) {
-        return;
+        return 0;
     }
     win->presented = 1;
     char message[WINDOW_MANAGER_TITLE_MAX + 80];
@@ -2672,6 +2734,7 @@ static void note_first_frame(window_t *win) {
         message[m++] = tail[i];
     }
     sys_write(1, message, (size_t)m);
+    return 1;
 }
 
 static void accept_one_action(int action_read_file_descriptor) {
@@ -2695,8 +2758,9 @@ static void accept_one_action(int action_read_file_descriptor) {
         if (request.action == WINDOW_MANAGER_ACTION_PRESENT_ORIGIN) {
             win->damage_x = (int32_t)window_manager_pair_first(request.value);
             win->damage_y = (int32_t)window_manager_pair_second(request.value);
+        } else if (note_first_frame(win)) {
+            present_window(request.window_id);
         } else {
-            note_first_frame(win);
             present_window_rect(request.window_id, win->damage_x, win->damage_y,
                                 (int32_t)window_manager_pair_first(request.value),
                                 (int32_t)window_manager_pair_second(request.value));

@@ -150,14 +150,59 @@ int shared_memory_map_into(int id, uint64_t pml4_phys, uint64_t vaddr, uint64_t 
         spin_unlock_irqrestore(&shared_memory_lock, irqf);
         return -1;
     }
+    /* M204: every mapping holds a reference on each frame it maps, and the
+       segment holds one more. They held none, so the owner freeing a
+       segment freed its frames while a client still had them mapped - and a
+       window that is resized is exactly that: the compositor freed the old
+       buffer at once and Chromium's raster threads went on drawing into it,
+       into frames the allocator had already handed to a renderer's heap or
+       the browser's own. A frame goes back now when the last of the owner
+       and its mappers lets go. */
     shared_memory_segment_t *seg = &segments[id];
     for (uint64_t i = 0; i < seg->page_count; i++) {
+        physical_memory_frame_reference(seg->frames[i]);
         if (virtual_memory_try_map_page_in(pml4_phys, vaddr + i * PAGE_SIZE,
                                 seg->frames[i], flags) != 0) {
+            physical_memory_free_frame(seg->frames[i]);
+            for (uint64_t j = 0; j < i; j++) {
+                uint64_t taken = virtual_memory_unmap_page_take(pml4_phys, vaddr + j * PAGE_SIZE);
+                if (taken) {
+                    physical_memory_free_frame(taken);
+                }
+            }
             spin_unlock_irqrestore(&shared_memory_lock, irqf);
             return -1;
         }
     }
     spin_unlock_irqrestore(&shared_memory_lock, irqf);
     return 0;
+}
+
+uint64_t shared_memory_unmap_range(uint64_t pml4_phys, uint64_t vaddr, uint64_t pages) {
+    uint64_t released[64];
+    uint64_t count = 0;
+    uint64_t dropped = 0;
+    for (uint64_t i = 0; i < pages; i++) {
+        uint64_t taken = virtual_memory_unmap_page_take(pml4_phys, vaddr + i * PAGE_SIZE);
+        if (!taken) {
+            continue;
+        }
+        released[count++] = taken;
+        if (count == sizeof(released) / sizeof(released[0])) {
+            virtual_memory_flush_other_cpus(pml4_phys);
+            for (uint64_t k = 0; k < count; k++) {
+                physical_memory_free_frame(released[k]);
+            }
+            dropped += count;
+            count = 0;
+        }
+    }
+    if (count) {
+        virtual_memory_flush_other_cpus(pml4_phys);
+        for (uint64_t k = 0; k < count; k++) {
+            physical_memory_free_frame(released[k]);
+        }
+        dropped += count;
+    }
+    return dropped;
 }

@@ -216,6 +216,15 @@ int epoll_scan(struct epoll *ep, epoll_mask_function mask_function, void *contex
     }
     int n = 0;
     for (int i = 0; i < EPOLL_MAX_WATCH && n < max; i++) {
+        /* M204: a set holds a handful of descriptors in 128 slots, and this
+           took the machine-wide lock with interrupts off for every slot,
+           empty or not - the hottest kernel address while a browser ran.
+           An empty slot is passed over on a plain read; the decision is
+           still made under the lock below, so a watch added in between is
+           found by the next scan, which its own wake asks for. */
+        if (!__atomic_load_n(&ep->w[i].used, __ATOMIC_RELAXED)) {
+            continue;
+        }
         uint64_t f = spin_lock_irqsave(&epoll_lock);
         if (!ep->w[i].used || ep->w[i].disarmed) {
             spin_unlock_irqrestore(&epoll_lock, f);
