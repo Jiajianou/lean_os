@@ -60,7 +60,7 @@ UEFI_BOOT_EFI := $(BUILD)/BOOTX64.EFI
 UOBJ      := $(BUILD)/user_obj
 USER_LD   := user_space/library/user.ld
 USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/string_utilities.o $(UOBJ)/malloc.o \
-                $(UOBJ)/graphics.o $(UOBJ)/font8x16.o $(UOBJ)/window_manager_client.o $(UOBJ)/wallpaper.o \
+                $(UOBJ)/graphics.o $(UOBJ)/font8x16.o $(UOBJ)/window_manager_client.o $(UOBJ)/wallpaper.o $(UOBJ)/wallpaper_picture.o $(UOBJ)/bitmap_file.o \
                 $(UOBJ)/settings_file.o $(UOBJ)/children.o $(UOBJ)/icons.o $(UOBJ)/icon_draw.o \
                 $(UOBJ)/user_interface_font.o $(UOBJ)/recent.o $(UOBJ)/sntp.o $(UOBJ)/dns.o $(UOBJ)/http.o \
                 $(UOBJ)/libc_string.o $(UOBJ)/libc_stdlib.o $(UOBJ)/libc_stdio.o \
@@ -182,7 +182,8 @@ DESKTOP_APPLICATION_OBJS := $(UOBJ)/desktop_application_settings.o \
                             $(UOBJ)/desktop_application_task_manager.o \
                             $(UOBJ)/desktop_application_widgets.o \
                             $(UOBJ)/desktop_application_wireless.o \
-                            $(UOBJ)/desktop_application_files.o
+                            $(UOBJ)/desktop_application_files.o \
+                            $(UOBJ)/desktop_application_wallpaper.o
 
 # Not in USER_PROGRAMS: the reference table is 12,840 values and the kernel
 # incbins every embedded program, so this one is installed onto the image by
@@ -732,7 +733,7 @@ TEST_KERNEL_SRCS := kernel/library/kernel_library.c kernel/memory_management/hea
                     kernel/inter_process_communication/eventfd.c kernel/inter_process_communication/timerfd.c kernel/inter_process_communication/epoll.c \
                     kernel/inter_process_communication/memfd.c \
                     kernel/process/resource_limits.c kernel/boot/boot_options.c \
-                    kernel/drivers/hid_report.c kernel/drivers/i2c_hid.c \
+                    kernel/drivers/hid_report.c kernel/drivers/i2c_hid.c kernel/drivers/touchpad_gestures.c \
                     kernel/drivers/designware_i2c_timing.c kernel/drivers/designware_i2c.c kernel/drivers/intel_wireless_firmware.c kernel/drivers/intel_wireless_transport.c kernel/drivers/intel_wireless.c \
                     kernel/drivers/usb_storage_protocol.c kernel/drivers/disk_log_area.c \
                     kernel/drivers/console.c
@@ -744,6 +745,8 @@ TEST_USER_SRCS := user_space/library/symbol_table.c \
                   user_space/library/graphics.c user_space/library/font8x16.c \
                   user_space/library/user_interface_font.c \
                   user_space/library/icons.c user_space/library/icon_draw.c \
+                  user_space/library/wallpaper.c user_space/library/wallpaper_picture.c \
+                  user_space/library/bitmap_file.c \
                   user_space/libc/src/wchar.c user_space/libc/src/errno.c \
                   user_space/libc/src/libintl.c \
                   user_space/libc/src/fnmatch.c user_space/libc/src/libgen.c \

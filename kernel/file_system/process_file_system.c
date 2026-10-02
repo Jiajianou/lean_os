@@ -5,6 +5,9 @@
 
 #include "drivers/pit.h"
 #include "drivers/hardware_inventory.h"
+#include "drivers/i2c_touchpad.h"
+#include "drivers/mouse.h"
+#include "drivers/xhci.h"
 #include "drivers/kernel_log.h"
 #include "library/kernel_library.h"
 #include "memory_management/heap.h"
@@ -81,6 +84,7 @@ enum {
     P_PROFILE,
     P_SYSCALLS,
     P_CPUINFO,
+    P_INPUT,
 };
 
 static uint32_t buffer_cap_for(int kind) {
@@ -119,6 +123,9 @@ static int classify(const char *rel, int *out_pid) {
     }
     if (k_strcmp(p, "cpuinfo") == 0) {
         return P_CPUINFO;
+    }
+    if (k_strcmp(p, "input") == 0) {
+        return P_INPUT;
     }
 
     int pid = -1;
@@ -306,6 +313,32 @@ static void generate(process_file_t *f, int kind, int pid) {
        The model name arrived with its reader: Settings' General pane says
        which processor this is (M210). A vendor_id would still be a field
        nobody here reads. */
+    case P_INPUT: {
+        static const char hex[] = "0123456789abcdef";
+        uint16_t vendor;
+        uint16_t product;
+        int precision;
+        if (i2c_touchpad_identity(&vendor, &product, &precision)) {
+            char id[10];
+            for (int k = 0; k < 4; k++) {
+                id[k] = hex[(vendor >> (12 - 4 * k)) & 0xF];
+                id[5 + k] = hex[(product >> (12 - 4 * k)) & 0xF];
+            }
+            id[4] = ':';
+            id[9] = '\0';
+            at = put_string(f->buffer, at, cap, "trackpad\ti2c-hid ");
+            at = put_string(f->buffer, at, cap, id);
+            at = put_string(f->buffer, at, cap, precision ? " multitouch\n" : " mouse-mode\n");
+        }
+        if (mouse_is_present()) {
+            at = put_string(f->buffer, at, cap, mouse_labelled_trackpad() ? "trackpad\tps2" : "mouse\tps2");
+            at = put_string(f->buffer, at, cap, mouse_wheel_present() ? " wheel\n" : "\n");
+        }
+        for (int k = xhci_mouse_count(); k > 0; k--) {
+            at = put_string(f->buffer, at, cap, mouse_labelled_trackpad() ? "trackpad\tusb\n" : "mouse\tusb wheel\n");
+        }
+        break;
+    }
     case P_CPUINFO: {
         char brand[HARDWARE_INVENTORY_BRAND_MAX];
         int named = hardware_inventory_cpu_brand(brand) > 0;
@@ -484,7 +517,7 @@ static int process_handle_stat(int handle, leanfs_stat_t *out) {
 static const char *const PID_FILES[] = {"status", "cmdline", "exe"};
 static const char *const ROOT_FILES[] = {"uptime", "meminfo", "mounts",
                                          "interrupts", "profile", "syscalls",
-                                         "cpuinfo"};
+                                         "cpuinfo", "input"};
 #define ROOT_FILE_COUNT ((uint32_t)(sizeof(ROOT_FILES) / sizeof(ROOT_FILES[0])))
 
 static int process_readdir(const char *rel, uint32_t *cookie, leanfs_directory_entry_t *out) {

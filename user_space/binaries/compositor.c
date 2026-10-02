@@ -276,14 +276,17 @@ typedef struct {
 static anim_t anims[ANIM_MAX];
 static int animations_enabled = 1;
 static uint32_t audio_volume = 70;
-static uint32_t pointer_speed = WINDOW_MANAGER_POINTER_SPEED_DEFAULT;
-static uint32_t natural_scrolling;
+static pointer_profile_t mouse_profile = {WINDOW_MANAGER_POINTER_SPEED_DEFAULT, 0, 0,
+                                          WINDOW_MANAGER_SCROLL_SPEED_DEFAULT, 1};
+static pointer_profile_t trackpad_profile = {WINDOW_MANAGER_POINTER_SPEED_DEFAULT,
+                                             WINDOW_MANAGER_TRACKPAD_ACCELERATION_DEFAULT, 1,
+                                             WINDOW_MANAGER_SCROLL_SPEED_DEFAULT, 1};
+static pointer_motion_t mouse_motion;
+static pointer_motion_t trackpad_motion;
 static uint32_t swap_buttons;
 static uint32_t clock_24_hour = 1;
 static int32_t utc_offset_minutes;
 static uint32_t restore_windows = 1;
-static int32_t pointer_remainder_x;
-static int32_t pointer_remainder_y;
 static long frame_due_ms;
 static int frame_settle_owed;
 static uint32_t frames_over_budget;
@@ -2869,6 +2872,43 @@ static int theme_is_readable(uint32_t bg, uint32_t accent) {
     return d_bg >= THEME_MIN_CONTRAST && d_ac >= THEME_MIN_CONTRAST;
 }
 
+/* M211. A request with a zero speed is one written before the field existed
+   - the boot self-tests clear the whole structure and fill in what they test -
+   and no slider can produce zero, so it means "the default" rather than the
+   slowest setting there is. */
+static uint32_t or_default(uint32_t value, uint32_t fallback) {
+    return value ? value : fallback;
+}
+
+static void adopt_pointer_settings(const window_manager_settings_request_t *request) {
+    mouse_profile.speed = pointer_settings_clamp_speed(request->pointer_speed);
+    mouse_profile.acceleration = 0;
+    mouse_profile.natural_scrolling = request->natural_scrolling != 0;
+    mouse_profile.scroll_speed = pointer_settings_clamp_scroll_speed(
+        or_default(request->scroll_speed, WINDOW_MANAGER_SCROLL_SPEED_DEFAULT));
+    mouse_profile.tap_to_click = 1;
+    trackpad_profile.speed = pointer_settings_clamp_speed(
+        or_default(request->trackpad_speed, WINDOW_MANAGER_POINTER_SPEED_DEFAULT));
+    trackpad_profile.acceleration = pointer_settings_clamp_acceleration(request->trackpad_acceleration);
+    trackpad_profile.natural_scrolling = request->trackpad_natural_scrolling != 0;
+    trackpad_profile.scroll_speed = pointer_settings_clamp_scroll_speed(
+        or_default(request->trackpad_scroll_speed, WINDOW_MANAGER_SCROLL_SPEED_DEFAULT));
+    trackpad_profile.tap_to_click = request->trackpad_tap_to_click != 0;
+    swap_buttons = request->swap_buttons != 0;
+}
+
+static void report_pointer_settings(window_manager_settings_request_t *out) {
+    out->pointer_speed = mouse_profile.speed;
+    out->natural_scrolling = mouse_profile.natural_scrolling;
+    out->scroll_speed = mouse_profile.scroll_speed;
+    out->swap_buttons = swap_buttons;
+    out->trackpad_speed = trackpad_profile.speed;
+    out->trackpad_acceleration = trackpad_profile.acceleration;
+    out->trackpad_natural_scrolling = trackpad_profile.natural_scrolling;
+    out->trackpad_scroll_speed = trackpad_profile.scroll_speed;
+    out->trackpad_tap_to_click = trackpad_profile.tap_to_click;
+}
+
 static void accept_pending_settings(int settings_read_file_descriptor) {
     if (sys_pipe_poll(settings_read_file_descriptor) < (long)sizeof(window_manager_settings_request_t)) {
         return;
@@ -2889,9 +2929,7 @@ static void accept_pending_settings(int settings_read_file_descriptor) {
     wallpaper_id = request.wallpaper;
     animations_enabled = request.animations != 0;
     audio_volume = request.volume > 100 ? 100 : request.volume;
-    pointer_speed = pointer_settings_clamp_speed(request.pointer_speed);
-    natural_scrolling = request.natural_scrolling != 0;
-    swap_buttons = request.swap_buttons != 0;
+    adopt_pointer_settings(&request);
     clock_24_hour = request.clock_24_hour != 0;
     utc_offset_minutes = request.utc_offset_minutes;
     restore_windows = request.restore_windows != 0;
@@ -2941,9 +2979,7 @@ static void accept_pending_settings_query(int query_read_file_descriptor, int qu
     response.bg_color = bg_color;
     response.accent_color = accent_color;
     response.wallpaper = wallpaper_id;
-    response.pointer_speed = pointer_speed;
-    response.natural_scrolling = natural_scrolling;
-    response.swap_buttons = swap_buttons;
+    report_pointer_settings(&response);
     response.clock_24_hour = clock_24_hour;
     response.utc_offset_minutes = utc_offset_minutes;
     response.restore_windows = restore_windows;
@@ -2964,10 +3000,23 @@ static void focus_window_under_cursor(void) {
 static void handle_mouse(void) {
     mouse_event_t mev;
     while (sys_mouse_read(&mev)) {
-        mev.buttons = pointer_settings_buttons(mev.buttons, swap_buttons);
-        mev.wheel = pointer_settings_wheel(mev.wheel, natural_scrolling);
-        cursor_x += pointer_settings_scale(mev.dx, pointer_speed, &pointer_remainder_x);
-        cursor_y += pointer_settings_scale(mev.dy, pointer_speed, &pointer_remainder_y);
+        int trackpad = mev.source == MOUSE_SOURCE_TRACKPAD;
+        pointer_motion_t *motion = trackpad ? &trackpad_motion : &mouse_motion;
+        if (!pointer_settings_apply(trackpad ? &trackpad_profile : &mouse_profile, swap_buttons, motion, &mev)) {
+            continue;
+        }
+        cursor_x += mev.dx;
+        cursor_y += mev.dy;
+        /* M211. A pointer pushed against an edge loses the fraction of a
+           pixel it was carrying, the way it loses the rest of the push: the
+           corner is then the same place however the hand got there, which is
+           what lets a person - or a test - start from it. */
+        if (cursor_x < 0 || cursor_x >= (int32_t)framebuffer_info.width) {
+            motion->remainder_x = 0;
+        }
+        if (cursor_y < 0 || cursor_y >= (int32_t)framebuffer_info.height) {
+            motion->remainder_y = 0;
+        }
         if (cursor_x < 0) {
             cursor_x = 0;
         }
@@ -3722,9 +3771,7 @@ int main(void) {
             animations_enabled = saved.animations != 0;
             audio_volume = saved.volume > 100 ? 100 : saved.volume;
         }
-        pointer_speed = pointer_settings_clamp_speed(saved.pointer_speed);
-        natural_scrolling = saved.natural_scrolling != 0;
-        swap_buttons = saved.swap_buttons != 0;
+        adopt_pointer_settings(&saved);
         clock_24_hour = saved.clock_24_hour != 0;
         utc_offset_minutes = saved.utc_offset_minutes;
         restore_windows = saved.restore_windows != 0;

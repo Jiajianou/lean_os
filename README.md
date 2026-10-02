@@ -46,7 +46,7 @@ UEFI firmware
   the icon its window title maps to.
 - **Applications.** A terminal with a real shell (arguments, quoting,
   `>`/`>>`, a pipe, tab completion, `cd`), a text editor (undo, redo,
-  find, paste), Files, a task manager, Settings, a paint toy and a
+  find, paste), Files, a task manager, Settings, Paint and a
   clock. Files, Tasks and Settings are drawn by a real toolkit; the rest
   still draw themselves.
 - **Files, shaped like a Finder.** A sidebar of places - Home, Recent,
@@ -66,10 +66,12 @@ UEFI firmware
   or copied inside itself, and that is refused twice: by Files, and by
   the filesystem itself, which until M210 would have taken the folder
   out of every path that reached it.
-- **Settings for the machine, not just the wallpaper.** Eleven panes in
-  a sidebar: what the processor, memory, disk and display are; colours,
-  wallpaper and motion; screen size; volume; pointer speed, swapped
-  buttons and natural scrolling; the shortcuts; a 12- or 24-hour clock
+- **Settings for the machine, not just the wallpaper.** Thirteen panes
+  in a sidebar: what the processor, memory, disk and display are; colours
+  and motion; the wallpaper; screen size; volume; the mouse's speed,
+  scroll speed, swapped buttons and natural scrolling; the trackpad's own
+  tracking speed, acceleration, scroll direction, scroll speed and tap to
+  click; the shortcuts; a 12- or 24-hour clock
   and a time zone, which the taskbar and Files both honour; the wired
   address, the name servers and the Wi-Fi state; what is on the disk,
   folder by folder, with the Trash's share and a button to empty it;
@@ -77,6 +79,29 @@ UEFI firmware
   when the machine starts. Every switch there changes something real -
   the compositor scales the pointer, the taskbar redraws its clock -
   because a setting nothing reads is a pretence.
+- **A trackpad that is a trackpad.** A laptop's I2C touchpad starts life
+  pretending to be a mouse - the Elan pad this was first run on reports
+  two buttons and no wheel that way, so it could not scroll at all. The
+  driver reads the pad's report descriptor, finds its Precision Touchpad
+  collection and switches it into multi-touch mode with the Input Mode
+  feature report, then reads fingers: one moves the pointer, two scroll,
+  a quick touch clicks, a two-finger tap or press is the secondary
+  button and three is the middle one. A pad it cannot switch stays a
+  mouse. The trackpad's settings are its own, apart from the mouse's,
+  because the kernel labels every pointer event with the device it came
+  from. The gestures are host-tested frame by frame; QEMU has no I2C
+  touchpad, so `opt/leanos/pointer=trackpad` labels its PS/2 pointer one
+  and the input suite grades the trackpad's speed and acceleration by
+  where the cursor lands.
+- **Wallpaper, including your own picture.** Right-click the desktop for
+  Change Wallpaper, Display and Trackpad settings, or a terminal. The
+  Wallpaper pane shows every style as a picture of itself - four that
+  take the desktop colour and three painted ones, Aurora, Dusk and Ocean
+  - and any PNG or BMP becomes the desktop from Files' right-click menu.
+  The picture is decoded once by the toolkit and kept, scaled, in
+  `/etc/wallpaper.picture`, because the desktop itself carries no image
+  decoder and the kernel has no room for one per program. Paint draws in
+  eight colours and three brushes and saves into `~/Pictures` as BMP.
 - **A system underneath.** Pre-emptive multitasking across multiple
   cores, a per-process address space, a custom filesystem with
   directories and files up to 4 GiB, pipes, shared memory, an orderly

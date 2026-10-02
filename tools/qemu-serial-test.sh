@@ -309,6 +309,7 @@ REQUIRED_MARKERS=(
   "[m127] settings rendered"
   "[m127] task_manager rendered"
   "[m210] files rendered"
+  "[m211] a BMP written on leanfs became the desktop's picture"
   "[m127] the desktop's own applications on LVGL:"
   "[m121] a second compiler that knows this OS by name:"
   "ONE PROGRAM FROM TWO COMPILERS"

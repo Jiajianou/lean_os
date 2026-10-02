@@ -81,3 +81,36 @@ uint16_t i2c_hid_input_length(const uint8_t *buffer, uint32_t length) {
 int i2c_hid_input_is_reset_acknowledgement(const uint8_t *buffer, uint32_t length) {
     return i2c_hid_input_length(buffer, length) == 0;
 }
+
+/* SET_REPORT is a command and its data in one write: the command register,
+   the opcode with the report type and id packed into one byte (an id of 15
+   or more does not fit and follows on its own), then the data register and
+   a length that counts itself. */
+uint32_t i2c_hid_build_set_feature(uint16_t command_register, uint16_t data_register, uint8_t report_id,
+                                   const uint8_t *payload, uint32_t payload_length, uint8_t *out,
+                                   uint32_t capacity) {
+    uint32_t need = 4u + (report_id >= 0x0F ? 1u : 0u) + 4u + (report_id ? 1u : 0u) + payload_length;
+    if (!out || need > capacity || payload_length > 0xFFF0u) {
+        return 0;
+    }
+    uint32_t at = 0;
+    out[at++] = (uint8_t)(command_register & 0xFFu);
+    out[at++] = (uint8_t)(command_register >> 8);
+    out[at++] = (uint8_t)((I2C_HID_REPORT_TYPE_FEATURE << 4) | (report_id >= 0x0F ? 0x0Fu : report_id));
+    out[at++] = I2C_HID_OPCODE_SET_REPORT;
+    if (report_id >= 0x0F) {
+        out[at++] = report_id;
+    }
+    out[at++] = (uint8_t)(data_register & 0xFFu);
+    out[at++] = (uint8_t)(data_register >> 8);
+    uint32_t size = 2u + (report_id ? 1u : 0u) + payload_length;
+    out[at++] = (uint8_t)(size & 0xFFu);
+    out[at++] = (uint8_t)(size >> 8);
+    if (report_id) {
+        out[at++] = report_id;
+    }
+    for (uint32_t i = 0; i < payload_length; i++) {
+        out[at++] = payload[i];
+    }
+    return at;
+}

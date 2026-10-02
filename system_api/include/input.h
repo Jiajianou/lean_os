@@ -10,9 +10,16 @@ typedef struct {
     int32_t dx;
     int32_t dy;
     uint8_t buttons;
+    uint8_t source;
+    uint8_t flags;
     uint32_t time_ms;
     int32_t wheel;
 } mouse_event_t;
+
+#define MOUSE_SOURCE_MOUSE    0
+#define MOUSE_SOURCE_TRACKPAD 1
+
+#define MOUSE_FLAG_TAP 1
 
 #define KEYBOARD_MOD_CTRL  1
 #define KEYBOARD_MOD_ALT   2

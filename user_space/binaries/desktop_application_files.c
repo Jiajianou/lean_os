@@ -14,6 +14,7 @@
 #include "spawn_error.h"
 #include "syscall_wrappers.h"
 #include "time_format.h"
+#include "wallpaper.h"
 
 #define FILES_WINDOW_WIDTH  760
 #define FILES_WINDOW_HEIGHT 480
@@ -114,6 +115,7 @@ typedef enum {
     ACTION_SELECT_ALL,
     ACTION_UNDO,
     ACTION_GO_TO,
+    ACTION_SET_DESKTOP_PICTURE,
     ACTION_SEPARATOR,
 } files_action_t;
 
@@ -122,7 +124,7 @@ static const char *const ACTION_REPORT[] = {
     "menu_rename", "menu_duplicate", "menu_copy", "menu_cut", "menu_paste", "menu_trash",
     "menu_delete", "menu_put_back", "menu_empty_trash", "menu_new_folder", "menu_new_file",
     "menu_new_window", "menu_show_enclosing", "menu_view_list", "menu_view_icons",
-    "menu_toggle_hidden", "menu_select_all", "menu_undo", "menu_go_to", "",
+    "menu_toggle_hidden", "menu_select_all", "menu_undo", "menu_go_to", "menu_set_desktop_picture", "",
 };
 
 typedef enum {
@@ -1782,6 +1784,9 @@ static void open_item_menu(int32_t x, int32_t y) {
     }
     items[n++] = (files_menu_entry_t){ACTION_QUICK_LOOK, "Quick Look", "Space", 1};
     items[n++] = (files_menu_entry_t){ACTION_INFO, "Get Info", "Ctrl+I", 1};
+    if (!folder && !in_trash && index >= 0 && entries[index].kind == FILE_BROWSER_KIND_IMAGE) {
+        items[n++] = (files_menu_entry_t){ACTION_SET_DESKTOP_PICTURE, "Set as Desktop Picture", 0, chosen == 1};
+    }
     items[n++] = (files_menu_entry_t){ACTION_SEPARATOR, 0, 0, 0};
     if (in_trash) {
         items[n++] = (files_menu_entry_t){ACTION_PUT_BACK, "Put Back", 0, 1};
@@ -2317,8 +2322,31 @@ static void select_all(void) {
     update_status();
 }
 
+static void set_desktop_picture(void) {
+    char path[FILES_LOCATION_MAX];
+    if (entry_path(first_selected(), path, sizeof(path)) != 0) {
+        return;
+    }
+    say("Making the desktop picture...", 0);
+    lv_refr_now(NULL);
+    char message[160];
+    if (desktop_application_make_desktop_picture(path, PATH_WALLPAPER_PICTURE, message, sizeof(message)) != 0) {
+        say(message, 1);
+        return;
+    }
+    if (desktop_application_use_wallpaper(WALLPAPER_PICTURE) != 0) {
+        say("The picture is ready, but the desktop could not be told.", 1);
+        return;
+    }
+    printf("[files] desktop picture %s\n", path);
+    say(message, 0);
+}
+
 static void run_action(files_action_t action) {
     switch (action) {
+    case ACTION_SET_DESKTOP_PICTURE:
+        set_desktop_picture();
+        break;
     case ACTION_OPEN:
         open_selection();
         break;

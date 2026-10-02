@@ -15,6 +15,7 @@
 #include "syscall_wrappers.h"
 #include "time_format.h"
 #include "wallpaper.h"
+#include "wallpaper_picture.h"
 #include "wireless.h"
 
 #define SETTINGS_WINDOW_WIDTH  720
@@ -24,6 +25,10 @@
 #define SETTINGS_MINIMUM_DRAWN_PIXELS 20000
 #define SETTINGS_SESSION_PATH PATH_ETC_DIRECTORY "session.conf"
 #define SETTINGS_STORAGE_FOLDERS 12
+#define SETTINGS_THUMBNAIL_WIDTH  96
+#define SETTINGS_THUMBNAIL_HEIGHT 60
+#define SETTINGS_SLIDER_LABEL_WIDTH 112
+#define SETTINGS_THUMBNAILS (WALLPAPER_COUNT + 1)
 
 static const uint32_t BACKGROUND_SWATCHES[] = {
     DESKTOP_PALETTE_DEFAULT_BACKGROUND,
@@ -55,9 +60,11 @@ static const int16_t UTC_OFFSETS[] = {
 typedef enum {
     PANE_GENERAL = 0,
     PANE_APPEARANCE,
+    PANE_WALLPAPER,
     PANE_DISPLAY,
     PANE_SOUND,
     PANE_MOUSE,
+    PANE_TRACKPAD,
     PANE_KEYBOARD,
     PANE_DATE_TIME,
     PANE_NETWORK,
@@ -77,9 +84,11 @@ typedef struct {
 static const settings_pane_info_t PANES[PANE_COUNT] = {
     {"General", LV_SYMBOL_SETTINGS, 0x007F8C8Du, "pane_general"},
     {"Appearance", LV_SYMBOL_TINT, 0x009B59B6u, "pane_appearance"},
-    {"Display", LV_SYMBOL_IMAGE, 0x003498DBu, "pane_display"},
+    {"Wallpaper", LV_SYMBOL_IMAGE, 0x0027AE9Fu, "pane_wallpaper"},
+    {"Display", LV_SYMBOL_EYE_OPEN, 0x003498DBu, "pane_display"},
     {"Sound", LV_SYMBOL_VOLUME_MAX, 0x00E74C3Cu, "pane_sound"},
     {"Mouse", LV_SYMBOL_GPS, 0x0016A085u, "pane_mouse"},
+    {"Trackpad", LV_SYMBOL_SHUFFLE, 0x00D35400u, "pane_trackpad"},
     {"Keyboard", LV_SYMBOL_KEYBOARD, 0x00607D8Bu, "pane_keyboard"},
     {"Date & Time", LV_SYMBOL_BELL, 0x00E67E22u, "pane_date_time"},
     {"Network", LV_SYMBOL_WIFI, 0x002980B9u, "pane_network"},
@@ -104,6 +113,19 @@ static lv_obj_t *page;
 static lv_obj_t *background_swatches[BACKGROUND_SWATCH_COUNT];
 static lv_obj_t *accent_swatches[ACCENT_SWATCH_COUNT];
 static lv_obj_t *wallpaper_choices[WALLPAPER_COUNT];
+static lv_obj_t *picture_choice;
+static lv_obj_t *choose_picture_button;
+static lv_draw_buf_t *thumbnails[SETTINGS_THUMBNAILS];
+static lv_obj_t *scroll_speed_slider;
+static lv_obj_t *scroll_speed_label;
+static lv_obj_t *trackpad_speed_slider;
+static lv_obj_t *trackpad_speed_label;
+static lv_obj_t *trackpad_acceleration_slider;
+static lv_obj_t *trackpad_acceleration_label;
+static lv_obj_t *trackpad_natural_switch;
+static lv_obj_t *trackpad_scroll_slider;
+static lv_obj_t *trackpad_scroll_label;
+static lv_obj_t *tap_switch;
 static lv_obj_t *mode_choices[DISPLAY_MAX_MODES];
 static lv_obj_t *confirm_row;
 static lv_obj_t *keep_button;
@@ -464,13 +486,96 @@ static void on_accent_swatch(lv_event_t *event) {
     request_rebuild();
 }
 
+static void select_tile(lv_obj_t *tile, int selected) {
+    if (!tile) {
+        return;
+    }
+    const desktop_palette_t *p = palette();
+    lv_obj_set_style_border_color(tile, color(selected ? p->accent : p->outline), LV_PART_MAIN);
+    lv_obj_set_style_border_width(tile, selected ? 3 : 1, LV_PART_MAIN);
+    lv_obj_set_style_text_color(lv_obj_get_child(tile, 1), color(selected ? p->accent : p->text_dim), LV_PART_MAIN);
+}
+
+static void select_wallpaper_tiles(void) {
+    for (int i = 0; i < WALLPAPER_COUNT; i++) {
+        select_tile(wallpaper_choices[i], (uint32_t)i == current.wallpaper);
+    }
+    select_tile(picture_choice, current.wallpaper == WALLPAPER_PICTURE);
+}
+
 static void on_wallpaper_choice(lv_event_t *event) {
     int index = (int)(intptr_t)lv_event_get_user_data(event);
     current.wallpaper = (uint32_t)index;
     apply_settings();
-    for (int i = 0; i < WALLPAPER_COUNT; i++) {
-        lvgl_theme_choice_select(wallpaper_choices[i], i == index);
+    select_wallpaper_tiles();
+    printf("[settings] wallpaper %s\n", wallpaper_name(index));
+}
+
+static void on_choose_picture(lv_event_t *event) {
+    (void)event;
+    os_stat_t status;
+    if (sys_stat(PATH_PICTURES, &status) != 0) {
+        sys_mkdir(PATH_PICTURES);
     }
+    long rc = sys_spawn(PATH_BIN_DIRECTORY "file_manager", PATH_PICTURES);
+    if (rc < 0) {
+        window_manager_notify(WINDOW_MANAGER_NOTIFY_ERROR, "Files", spawn_error_message(rc));
+    }
+}
+
+static void on_scroll_speed_changed(lv_event_t *event) {
+    current.scroll_speed = (uint32_t)lv_slider_get_value((lv_obj_t *)lv_event_get_target(event));
+    char text[16];
+    snprintf(text, sizeof(text), "%u%%", (unsigned)current.scroll_speed);
+    lv_label_set_text(scroll_speed_label, text);
+    apply_settings();
+}
+
+static void on_trackpad_speed_changed(lv_event_t *event) {
+    current.trackpad_speed = (uint32_t)lv_slider_get_value((lv_obj_t *)lv_event_get_target(event));
+    char text[16];
+    snprintf(text, sizeof(text), "%u%%", (unsigned)current.trackpad_speed);
+    lv_label_set_text(trackpad_speed_label, text);
+    apply_settings();
+    printf("[settings] trackpad speed %u\n", (unsigned)current.trackpad_speed);
+}
+
+static void acceleration_text(uint32_t value, char *out, size_t capacity) {
+    if (value == 0) {
+        snprintf(out, capacity, "Off");
+    } else {
+        snprintf(out, capacity, "%u%%", (unsigned)value);
+    }
+}
+
+static void on_trackpad_acceleration_changed(lv_event_t *event) {
+    current.trackpad_acceleration = (uint32_t)lv_slider_get_value((lv_obj_t *)lv_event_get_target(event));
+    char text[16];
+    acceleration_text(current.trackpad_acceleration, text, sizeof(text));
+    lv_label_set_text(trackpad_acceleration_label, text);
+    apply_settings();
+    printf("[settings] trackpad acceleration %u\n", (unsigned)current.trackpad_acceleration);
+}
+
+static void on_trackpad_natural_changed(lv_event_t *event) {
+    current.trackpad_natural_scrolling =
+        lv_obj_has_state((lv_obj_t *)lv_event_get_target(event), LV_STATE_CHECKED) ? 1u : 0u;
+    apply_settings();
+    printf("[settings] trackpad natural scrolling %u\n", (unsigned)current.trackpad_natural_scrolling);
+}
+
+static void on_trackpad_scroll_changed(lv_event_t *event) {
+    current.trackpad_scroll_speed = (uint32_t)lv_slider_get_value((lv_obj_t *)lv_event_get_target(event));
+    char text[16];
+    snprintf(text, sizeof(text), "%u%%", (unsigned)current.trackpad_scroll_speed);
+    lv_label_set_text(trackpad_scroll_label, text);
+    apply_settings();
+}
+
+static void on_tap_changed(lv_event_t *event) {
+    current.trackpad_tap_to_click = lv_obj_has_state((lv_obj_t *)lv_event_get_target(event), LV_STATE_CHECKED) ? 1u : 0u;
+    apply_settings();
+    printf("[settings] tap to click %u\n", (unsigned)current.trackpad_tap_to_click);
 }
 
 static void on_volume_changed(lv_event_t *event) {
@@ -661,6 +766,52 @@ static void build_general(void) {
     refresh_clock_labels();
 }
 
+/* A wallpaper is chosen by what it looks like, so each choice is a picture of
+   itself - drawn by the same code that draws the desktop, at thumbnail
+   size. */
+static lv_obj_t *wallpaper_tile(lv_obj_t *parent, int wallpaper, int slot) {
+    const desktop_palette_t *p = palette();
+    lv_obj_t *tile = plain(parent);
+    lv_obj_add_flag(tile, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(tile, SETTINGS_THUMBNAIL_WIDTH + 8, SETTINGS_THUMBNAIL_HEIGHT + 30);
+    lv_obj_set_style_radius(tile, 10, LV_PART_MAIN);
+    lv_obj_set_style_border_width(tile, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(tile, color(p->outline), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(tile, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(tile, 4, LV_PART_MAIN);
+    lv_obj_set_flex_flow(tile, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(tile, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_draw_buf_t *buffer = lv_draw_buf_create(SETTINGS_THUMBNAIL_WIDTH, SETTINGS_THUMBNAIL_HEIGHT,
+                                               LV_COLOR_FORMAT_XRGB8888, SETTINGS_THUMBNAIL_WIDTH * 4);
+    lv_obj_t *canvas = lv_canvas_create(tile);
+    if (buffer) {
+        thumbnails[slot] = buffer;
+        graphics_context_t context = {(uint32_t *)buffer->data, SETTINGS_THUMBNAIL_WIDTH, SETTINGS_THUMBNAIL_HEIGHT};
+        wallpaper_picture_t picture;
+        if (wallpaper == WALLPAPER_PICTURE && wallpaper_picture_load(PATH_WALLPAPER_PICTURE, &picture) == 0) {
+            wallpaper_picture_cover(&picture, &context, 0, 0, SETTINGS_THUMBNAIL_WIDTH, SETTINGS_THUMBNAIL_HEIGHT);
+            wallpaper_picture_free(&picture);
+        } else {
+            wallpaper_fill(&context, 0, 0, SETTINGS_THUMBNAIL_WIDTH, SETTINGS_THUMBNAIL_HEIGHT, wallpaper,
+                           current.bg_color);
+        }
+        for (uint32_t i = 0; i < SETTINGS_THUMBNAIL_WIDTH * SETTINGS_THUMBNAIL_HEIGHT; i++) {
+            context.pixels[i] |= 0xFF000000u;
+        }
+        lv_canvas_set_draw_buf(canvas, buffer);
+    }
+    lv_obj_set_style_radius(canvas, 6, LV_PART_MAIN);
+    lv_obj_set_style_clip_corner(canvas, true, LV_PART_MAIN);
+    lv_obj_remove_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(canvas, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_t *label = lv_label_create(tile);
+    lv_label_set_text(label, wallpaper_name(wallpaper));
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_add_event_cb(tile, on_wallpaper_choice, LV_EVENT_CLICKED, (void *)(intptr_t)wallpaper);
+    return tile;
+}
+
 static void build_appearance(void) {
     page_title("Appearance", "The colours every window derives its palette from.");
     lv_obj_t *card = lvgl_theme_card(page, "COLOURS");
@@ -676,19 +827,50 @@ static void build_appearance(void) {
         lvgl_theme_swatch_select(accent_swatches[i], ACCENT_SWATCHES[i] == current.accent_color);
         lv_obj_add_event_cb(accent_swatches[i], on_accent_swatch, LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }
-    wrap_caption(card, "A pair that would be hard to read is refused by the compositor and the defaults come back.");
-
-    card = lvgl_theme_card(page, "WALLPAPER");
-    strip = swatch_strip(card, "Style");
-    for (int i = 0; i < WALLPAPER_COUNT; i++) {
-        wallpaper_choices[i] = lvgl_theme_choice(strip, wallpaper_name(i));
-        lvgl_theme_choice_select(wallpaper_choices[i], (uint32_t)i == current.wallpaper);
-        lv_obj_add_event_cb(wallpaper_choices[i], on_wallpaper_choice, LV_EVENT_CLICKED, (void *)(intptr_t)i);
-    }
+    wrap_caption(card, "A pair that would be hard to read is refused by the compositor and the defaults come back. "
+                       "The desktop colour also tints the Flat, Gradient, Deep and Grid wallpapers.");
 
     card = lvgl_theme_card(page, "MOTION");
     motion_switch = toggle(card, "Animate windows and menus", current.animations != 0, on_motion_changed);
     wrap_caption(card, "Off makes windows appear, minimise and snap at once.");
+}
+
+static void build_wallpaper(void) {
+    page_title("Wallpaper", "What the desktop shows behind everything.");
+    lv_obj_t *card = lvgl_theme_card(page, "PICTURE");
+    lv_obj_t *row = lvgl_theme_row(card, 0);
+    char name[WALLPAPER_PICTURE_NAME_MAX];
+    char text[WALLPAPER_PICTURE_NAME_MAX + 32];
+    os_stat_t status;
+    int have_picture = sys_stat(PATH_WALLPAPER_PICTURE, &status) == 0 &&
+                       wallpaper_picture_read_name(PATH_WALLPAPER_PICTURE, name, sizeof(name)) == 0;
+    if (have_picture) {
+        snprintf(text, sizeof(text), "%s", name);
+    } else {
+        snprintf(text, sizeof(text), "No picture chosen yet");
+    }
+    lv_obj_t *picture_label = lvgl_theme_value(row, text);
+    lv_obj_set_flex_grow(picture_label, 1);
+    lv_label_set_long_mode(picture_label, LV_LABEL_LONG_DOT);
+    choose_picture_button = lvgl_theme_button(row, "Choose a Picture...", 1);
+    lv_obj_add_event_cb(choose_picture_button, on_choose_picture, LV_EVENT_CLICKED, 0);
+    wrap_caption(card, "Any PNG or BMP can be the desktop: right-click it in Files and choose Set as Desktop "
+                       "Picture. Paint saves what you draw into Pictures.");
+
+    card = lvgl_theme_card(page, "STYLES");
+    lv_obj_t *grid = plain(card);
+    lv_obj_set_width(grid, LV_PCT(100));
+    lv_obj_set_height(grid, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_row(grid, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(grid, 8, LV_PART_MAIN);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    if (have_picture) {
+        picture_choice = wallpaper_tile(grid, WALLPAPER_PICTURE, WALLPAPER_COUNT);
+    }
+    for (int i = 0; i < WALLPAPER_COUNT; i++) {
+        wallpaper_choices[i] = wallpaper_tile(grid, i, i);
+    }
+    select_wallpaper_tiles();
 }
 
 static void build_display(void) {
@@ -771,6 +953,100 @@ static void build_mouse(void) {
     card = lvgl_theme_card(page, "SCROLLING");
     natural_switch = toggle(card, "Natural scrolling", current.natural_scrolling != 0, on_natural_changed);
     wrap_caption(card, "Content moves the way your finger does, as on a touch screen.");
+    row = lvgl_theme_row(card, "Scroll speed");
+    lv_obj_set_width(lv_obj_get_child(row, 0), SETTINGS_SLIDER_LABEL_WIDTH);
+    scroll_speed_slider = slider(row, WINDOW_MANAGER_SCROLL_SPEED_MINIMUM, WINDOW_MANAGER_SCROLL_SPEED_MAXIMUM,
+                                 (int32_t)current.scroll_speed, on_scroll_speed_changed);
+    snprintf(text, sizeof(text), "%u%%", (unsigned)current.scroll_speed);
+    scroll_speed_label = lvgl_theme_value(row, text);
+    lv_obj_set_width(scroll_speed_label, 52);
+    lv_obj_set_style_text_align(scroll_speed_label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    wrap_caption(card, "How far one click of the wheel moves what is under the pointer. These settings are the "
+                       "mouse's; a trackpad has its own.");
+}
+
+static lv_obj_t *slider_row(lv_obj_t *card, const char *label, int32_t minimum, int32_t maximum, int32_t value,
+                            lv_event_cb_t changed, const char *shown, lv_obj_t **value_label) {
+    lv_obj_t *row = lvgl_theme_row(card, label);
+    lv_obj_set_width(lv_obj_get_child(row, 0), SETTINGS_SLIDER_LABEL_WIDTH);
+    lv_obj_t *control = slider(row, minimum, maximum, value, changed);
+    *value_label = lvgl_theme_value(row, shown);
+    lv_obj_set_width(*value_label, 52);
+    lv_obj_set_style_text_align(*value_label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    return control;
+}
+
+/* What /proc/input says the machine has, in words. */
+static void trackpad_description(char *out, size_t capacity) {
+    static char devices[512];
+    if (read_text_file(PATH_PROCESS_DIRECTORY "input", devices, sizeof(devices)) < 0) {
+        snprintf(out, capacity, "This machine did not say what it has.");
+        return;
+    }
+    for (char *line = devices; *line;) {
+        char *end = line;
+        while (*end && *end != '\n') {
+            end++;
+        }
+        char saved = *end;
+        *end = '\0';
+        if (strncmp(line, "trackpad\t", 9) == 0) {
+            const char *rest = line + 9;
+            if (strncmp(rest, "i2c-hid ", 8) == 0) {
+                int multitouch = strstr(rest, "multitouch") != 0;
+                snprintf(out, capacity, "%.9s on the I2C bus, %s.", rest + 8,
+                         multitouch ? "multi-touch: two fingers scroll and a tap clicks"
+                                    : "in its mouse mode: it moves and clicks, but cannot scroll");
+            } else {
+                snprintf(out, capacity, "The PS/2 pointer, labelled a trackpad by the machine's start-up switch.");
+            }
+            return;
+        }
+        *end = saved;
+        line = saved ? end + 1 : end;
+    }
+    snprintf(out, capacity, "No trackpad was found. These settings apply to one as soon as there is one.");
+}
+
+static void build_trackpad(void) {
+    page_title("Trackpad", "How the pointer follows your finger.");
+    lv_obj_t *card = lvgl_theme_card(page, "THIS MACHINE");
+    char text[160];
+    trackpad_description(text, sizeof(text));
+    wrap_caption(card, text);
+
+    card = lvgl_theme_card(page, "POINTER");
+    snprintf(text, sizeof(text), "%u%%", (unsigned)current.trackpad_speed);
+    trackpad_speed_slider = slider_row(card, "Tracking speed", WINDOW_MANAGER_POINTER_SPEED_MINIMUM,
+                                       WINDOW_MANAGER_POINTER_SPEED_MAXIMUM, (int32_t)current.trackpad_speed,
+                                       on_trackpad_speed_changed, text, &trackpad_speed_label);
+    acceleration_text(current.trackpad_acceleration, text, sizeof(text));
+    trackpad_acceleration_slider = slider_row(card, "Acceleration", 0, WINDOW_MANAGER_ACCELERATION_MAXIMUM,
+                                              (int32_t)current.trackpad_acceleration,
+                                              on_trackpad_acceleration_changed, text, &trackpad_acceleration_label);
+    wrap_caption(card, "Acceleration makes a quick flick go further than a slow push over the same distance, so "
+                       "the pointer can cross the screen and still land on a small button.");
+
+    card = lvgl_theme_card(page, "SCROLLING");
+    trackpad_natural_switch = toggle(card, "Natural scrolling", current.trackpad_natural_scrolling != 0,
+                                     on_trackpad_natural_changed);
+    wrap_caption(card, "On: the page moves with your fingers, like paper. Off: your fingers move the scroll "
+                       "bar, the way a mouse wheel does.");
+    snprintf(text, sizeof(text), "%u%%", (unsigned)current.trackpad_scroll_speed);
+    trackpad_scroll_slider = slider_row(card, "Scroll speed", WINDOW_MANAGER_SCROLL_SPEED_MINIMUM,
+                                        WINDOW_MANAGER_SCROLL_SPEED_MAXIMUM, (int32_t)current.trackpad_scroll_speed,
+                                        on_trackpad_scroll_changed, text, &trackpad_scroll_label);
+
+    card = lvgl_theme_card(page, "CLICKING");
+    tap_switch = toggle(card, "Tap to click", current.trackpad_tap_to_click != 0, on_tap_changed);
+    wrap_caption(card, "A light, quick touch is a click without pressing the pad down.");
+
+    card = lvgl_theme_card(page, "GESTURES");
+    lv_obj_set_style_pad_row(card, 6, LV_PART_MAIN);
+    fact(card, "Scroll", "Two fingers, up or down");
+    fact(card, "Secondary click", "Tap with two fingers, or press with two down");
+    fact(card, "Middle click", "Tap with three fingers");
+    fact(card, "Drag", "Press the pad and move");
 }
 
 static void build_keyboard(void) {
@@ -1155,11 +1431,16 @@ static void report_geometry(void) {
     for (int i = 0; i < PANE_COUNT; i++) {
         lvgl_window_report_geometry(PANES[i].report, pane_items[i]);
     }
-    if (active_pane == PANE_APPEARANCE) {
+    if (active_pane == PANE_WALLPAPER) {
         for (int i = 0; i < WALLPAPER_COUNT; i++) {
             snprintf(name, sizeof(name), "wallpaper%d", i);
             lvgl_window_report_geometry(name, wallpaper_choices[i]);
         }
+        if (picture_choice) {
+            lvgl_window_report_geometry("wallpaper_picture", picture_choice);
+        }
+        lvgl_window_report_geometry("choose_picture", choose_picture_button);
+    } else if (active_pane == PANE_APPEARANCE) {
         for (int i = 0; i < ACCENT_SWATCH_COUNT; i++) {
             snprintf(name, sizeof(name), "accent%d", i);
             lvgl_window_report_geometry(name, accent_swatches[i]);
@@ -1177,6 +1458,13 @@ static void report_geometry(void) {
         lvgl_window_report_geometry("speed", speed_slider);
         lvgl_window_report_geometry("natural", natural_switch);
         lvgl_window_report_geometry("swap", swap_switch);
+        lvgl_window_report_geometry("scroll_speed", scroll_speed_slider);
+    } else if (active_pane == PANE_TRACKPAD) {
+        lvgl_window_report_geometry("trackpad_speed", trackpad_speed_slider);
+        lvgl_window_report_geometry("trackpad_acceleration", trackpad_acceleration_slider);
+        lvgl_window_report_geometry("trackpad_natural", trackpad_natural_switch);
+        lvgl_window_report_geometry("trackpad_scroll_speed", trackpad_scroll_slider);
+        lvgl_window_report_geometry("tap_to_click", tap_switch);
     } else if (active_pane == PANE_DATE_TIME) {
         lvgl_window_report_geometry("clock24", clock_switch);
         lvgl_window_report_geometry("zone", offset_dropdown);
@@ -1190,6 +1478,16 @@ static void forget_pane_objects(void) {
     memset(background_swatches, 0, sizeof(background_swatches));
     memset(accent_swatches, 0, sizeof(accent_swatches));
     memset(wallpaper_choices, 0, sizeof(wallpaper_choices));
+    for (int i = 0; i < SETTINGS_THUMBNAILS; i++) {
+        if (thumbnails[i]) {
+            lv_draw_buf_destroy(thumbnails[i]);
+            thumbnails[i] = 0;
+        }
+    }
+    picture_choice = choose_picture_button = 0;
+    scroll_speed_slider = scroll_speed_label = 0;
+    trackpad_speed_slider = trackpad_speed_label = trackpad_acceleration_slider = trackpad_acceleration_label = 0;
+    trackpad_natural_switch = trackpad_scroll_slider = trackpad_scroll_label = tap_switch = 0;
     memset(mode_choices, 0, sizeof(mode_choices));
     confirm_row = keep_button = volume_slider = motion_switch = confirm_label = 0;
     volume_value_label = clipboard_label = clock_label = date_label = uptime_label = memory_label = 0;
@@ -1219,6 +1517,9 @@ static void build_page(void) {
     case PANE_APPEARANCE:
         build_appearance();
         break;
+    case PANE_WALLPAPER:
+        build_wallpaper();
+        break;
     case PANE_DISPLAY:
         build_display();
         break;
@@ -1227,6 +1528,9 @@ static void build_page(void) {
         break;
     case PANE_MOUSE:
         build_mouse();
+        break;
+    case PANE_TRACKPAD:
+        build_trackpad();
         break;
     case PANE_KEYBOARD:
         build_keyboard();

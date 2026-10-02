@@ -33,7 +33,9 @@ ICONS = [
     ("Browser", "browser", 146, ICON_X + 90),
 ]
 
-CTX_MENU_BG = 0x243040
+CTX_MENU_BG = 0x222A36
+CTX_MENU_PAD = 6
+CTX_MENU_ITEM_H = 28
 EMPTY_DESKTOP = (500, 500)
 
 SCREEN_H = 768
@@ -632,6 +634,9 @@ def test_alt_tab_cycles_focus(m):
                     "Alt-Tab left focus on the same app (taskbar slot %d)" % was)
     check(focused_slot(shot) >= 0, "nothing is focused after Alt-Tab")
 
+def desktop_menu_item(i, at=EMPTY_DESKTOP):
+    return (at[0] + 40, at[1] + CTX_MENU_PAD + i * CTX_MENU_ITEM_H + CTX_MENU_ITEM_H // 2)
+
 def test_desktop_context_menu(m):
     boot(m)
     m.right_click(*EMPTY_DESKTOP)
@@ -640,8 +645,20 @@ def test_desktop_context_menu(m):
                                       EMPTY_DESKTOP[1], 120, 40) > 500,
              "right-clicking the desktop did not draw the context menu")
 
-    m.click(EMPTY_DESKTOP[0] + 40, EMPTY_DESKTOP[1] + 8)
+    mark = len(m.read_log())
+    m.click(*desktop_menu_item(0))
     wait_for_windows(m, 1)
+    wait_for_log_after(m, "[settings] showing Wallpaper", mark,
+                       "Change Wallpaper... did not open Settings on its Wallpaper pane")
+
+    origin = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    mark = len(m.read_log())
+    m.click(*widget_center(m, origin, "wallpaper%d" % WALLPAPER_AURORA))
+    wait_for_log_after(m, "[desktop] wallpaper Aurora", mark,
+                       "picking Aurora did not repaint the desktop with it")
+    shot = m.screenshot()
+    check(shot.px(WALLPAPER_PROBE_X, 200) != desktop_px(200),
+          "the desktop still shows the gradient at (%d, 200) after picking Aurora" % WALLPAPER_PROBE_X)
 
 def test_launch_close_stress(m):
     boot(m)
@@ -1001,6 +1018,7 @@ def test_shutdown_confirm_can_be_cancelled(m):
           "cancelling the shutdown confirm powered the machine off anyway")
 
 WALLPAPER_PROBE_X = 960
+WALLPAPER_AURORA = 4
 
 def test_settings_persist_across_a_reboot(m):
     boot(m)
@@ -1008,7 +1026,7 @@ def test_settings_persist_across_a_reboot(m):
     wait_for_windows(m, 1)
 
     origin = app_origin(FIRST_APP_IDX, SETTINGS_H)
-    settings_pane(m, origin, "appearance")
+    settings_pane(m, origin, "wallpaper")
     m.click(*widget_center(m, origin, "wallpaper0"))
     shot = wait_for(m, lambda s: s.px(WALLPAPER_PROBE_X, 200) == s.px(WALLPAPER_PROBE_X, 600),
                     "picking the Flat wallpaper did not flatten the desktop gradient")
@@ -1047,7 +1065,9 @@ def test_session_restores_windows_across_a_reboot(m):
     wait_for_windows(m, 1)
     x, y = app_origin(FIRST_APP_IDX)
 
-    dest_x, dest_y = x + 380, y + 260
+    # M211: clear of where Paint, the second window, opens - it is 520x380
+    # now, and at the old spot it covered the Clock this test is looking for.
+    dest_x, dest_y = x + 600, y + 300
     m.drag(x + 100, y - 8, dest_x + 100, dest_y - 8)
     wait_for(m, lambda s: s.px(dest_x + 4, dest_y - 8) != desktop_px(dest_y - 8),
              "the Clock did not move to where it was dragged")
@@ -2457,6 +2477,108 @@ def test_wifi_open_network_needs_no_password_and_wpa3_is_refused(m):
           "an open network asked for a password")
 
 
+PAINT_W, PAINT_H = 520, 380
+PAINT_TOOLBAR_H = 40
+PAINT_RED = 0xE74C3C
+
+def is_whiteish(c):
+    return channel_sum(c) >= 3 * 235
+
+def test_a_painting_becomes_the_desktop_picture(m):
+    boot(m)
+    mark = len(m.read_log())
+    m.double_click(ICON_X, ICONS[5][2])
+    wait_for_windows(m, 1)
+    paint = app_origin(FIRST_APP_IDX, PAINT_H)
+    time.sleep(0.5)
+    m.click(paint[0] + 10 + 26 + 10, paint[1] + 20)
+    y = paint[1] + PAINT_TOOLBAR_H + 170
+    m.drag(paint[0] + 40, y, paint[0] + 480, y, steps=12)
+    m.click(paint[0] + PAINT_W - 10 - 29, paint[1] + 20)
+    wait_for_log_after(m, "[paint] saved /home/Pictures/Painting 1.bmp", mark,
+                       "Paint's Save button did not save the painting into Pictures")
+    m.sendkey("alt-f4")
+    wait_for(m, lambda s: count_app_windows(s) == 0, "Paint did not close")
+
+    mark = len(m.read_log())
+    m.right_click(*EMPTY_DESKTOP)
+    time.sleep(0.4)
+    m.click(*desktop_menu_item(0))
+    wait_for_log_after(m, "[settings] showing Wallpaper", mark,
+                       "the desktop's Change Wallpaper... did not open Settings on Wallpaper")
+    settings = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    mark = len(m.read_log())
+    m.click(*widget_center(m, settings, "choose_picture"))
+    fm_showing(m, "/home/Pictures", mark, "Choose a Picture... did not open Files on Pictures")
+
+    files = app_origin(FIRST_APP_IDX + 1, FM_H)
+    x, y, w, h = geometry_after(m, "item0", mark)
+    mark = len(m.read_log())
+    m.right_click(files[0] + x + 60, files[1] + y + h // 2)
+    fm_click(m, files, "menu_set_desktop_picture", mark=mark)
+    fm_wait_log(m, "[files] desktop picture /home/Pictures/Painting 1.bmp", mark,
+                "Set as Desktop Picture did not take the painting")
+    fm_wait_log(m, "[desktop] wallpaper picture Painting 1.bmp", mark,
+                "the desktop did not repaint with the painting")
+
+    m.sendkey("alt-f4")
+    time.sleep(0.6)
+    m.sendkey("alt-f4")
+    wait_for(m, lambda s: count_app_windows(s) == 0, "Files and Settings did not close")
+    shot = m.screenshot()
+    check(is_whiteish(shot.px(*EMPTY_DESKTOP)),
+          "the desktop at %r is 0x%06X, not the painting's white paper"
+          % (EMPTY_DESKTOP, shot.px(*EMPTY_DESKTOP)))
+    red = shot.count_color(PAINT_RED, 140, 360, 880, 50)
+    check(red > 5000, "the painting's red stroke is %d pixels on the desktop, not a band across it" % red)
+
+# M211: QEMU has no I2C touchpad, so this machine labels its PS/2 pointer a
+# trackpad from outside the image, and the trackpad's own settings - not the
+# mouse's - are what the pointer then answers to.
+TRACKPAD_MACHINE = dict(extra_args=["-fw_cfg", "name=opt/leanos/pointer,string=trackpad"])
+TRACKPAD_SLOW_STEP = 16
+
+def cursor_after(m, steps, near):
+    m.home()
+    for dx, dy in steps:
+        m.monitor("mouse_move %d %d" % (dx, dy), settle=0.03)
+    time.sleep(0.3)
+    m.cursor = None
+    return m.find_cursor(m.screenshot(), near, radius=200)
+
+def test_trackpad_settings_move_the_pointer(m):
+    m.step_limit = TRACKPAD_SLOW_STEP
+    boot(m)
+    check("[mouse] opt/leanos/pointer=trackpad" in m.read_log(),
+          "the harness switch did not reach the PS/2 driver")
+
+    slow = [(0, 16)] * 15
+    fast = cursor_after(m, slow + [(100, 0)], (250, 240))
+    check(fast is not None and fast[0] > 140,
+          "one fast step of 100 counts put the cursor at %r - the trackpad's default acceleration did "
+          "not take it further than 100 pixels" % (fast,))
+
+    m.double_click(ICON_X, ICONS[3][2])
+    wait_for_windows(m, 1)
+    origin = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    settings_pane(m, origin, "trackpad")
+    mark = len(m.read_log())
+    m.click(*widget_point(m, origin, "trackpad_acceleration", 0.0, 0.5))
+    wait_for_log_after(m, "[settings] trackpad acceleration 0", mark,
+                       "the Acceleration slider's left end did not turn acceleration off")
+    exact = cursor_after(m, slow + [(100, 0)], (100, 240))
+    check(exact == (100, 240),
+          "with acceleration off, 100 counts and 240 moved the cursor to %r" % (exact,))
+
+    m.cursor = None
+    mark = len(m.read_log())
+    m.click(*widget_point(m, origin, "trackpad_speed", 1.0, 0.5))
+    wait_for_log_after(m, "[settings] trackpad speed 300", mark,
+                       "the Tracking speed slider's right end did not set 300%")
+    tripled = cursor_after(m, [(0, 16)] * 5 + [(10, 0)] * 5, (150, 240))
+    check(tripled == (150, 240),
+          "at 300%%, 50 counts across and 80 down moved the cursor to %r, not (150, 240)" % (tripled,))
+
 TESTS = [
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
@@ -2464,6 +2586,8 @@ TESTS = [
     ("titlebar_drag_moves_window", test_titlebar_drag_moves_window),
     ("alt_tab_cycles_focus", test_alt_tab_cycles_focus),
     ("desktop_context_menu", test_desktop_context_menu),
+    ("a_painting_becomes_the_desktop_picture", test_a_painting_becomes_the_desktop_picture),
+    ("trackpad_settings_move_the_pointer", test_trackpad_settings_move_the_pointer),
     ("start_button_opens_launcher", test_start_button_opens_launcher),
     ("taskbar_click_keeps_app_focused", test_taskbar_click_keeps_app_focused),
     ("taskbar_button_focus_and_minimize", test_taskbar_button_focus_and_minimize),
@@ -2542,6 +2666,7 @@ TESTS = [
 # Tests that need a machine other than the suite's usual one - so a cold
 # boot, since the snapshot was taken of the usual one.
 MACHINE_OPTIONS = {
+    "trackpad_settings_move_the_pointer": TRACKPAD_MACHINE,
     "wifi_wizard_joins_after_a_wrong_password": WIFI_MACHINE,
     "wifi_remembers_a_network_across_a_reboot": WIFI_MACHINE,
     "wifi_open_network_needs_no_password_and_wpa3_is_refused": WIFI_MACHINE,
@@ -2551,6 +2676,8 @@ def _die_on_signal(signum, _frame):
     raise KeyboardInterrupt("received signal %d" % signum)
 
 QUICK_TESTS = [
+    "desktop_context_menu",
+    "a_painting_becomes_the_desktop_picture",
     "double_click_launches_every_icon",
     "titlebar_close_button",
     "closing_the_readme_raises_no_toast",
@@ -2641,6 +2768,7 @@ def known_flaky(names):
         return []
 
 COLD_BOOT_TESTS = {
+    "trackpad_settings_move_the_pointer",
     "wifi_wizard_joins_after_a_wrong_password",
     "wifi_remembers_a_network_across_a_reboot",
     "wifi_open_network_needs_no_password_and_wpa3_is_refused",

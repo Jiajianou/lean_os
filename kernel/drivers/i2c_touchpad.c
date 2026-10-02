@@ -8,6 +8,7 @@
 #include "drivers/kernel_log.h"
 #include "drivers/mouse.h"
 #include "drivers/pit.h"
+#include "drivers/touchpad_gestures.h"
 #include "scheduler/scheduler.h"
 
 #define FIRST_ADDRESS 0x08
@@ -24,10 +25,74 @@ static uint8_t found_address;
 static i2c_hid_descriptor_t descriptor;
 static hid_mouse_layout_t layout;
 static int present;
+static int have_mouse_layout;
+
+/* M211. The pad is driven in its Precision Touchpad mode when its report
+   descriptor offers one, because the mouse collection every touchpad starts
+   in is the firmware's own idea of a mouse: the laptop's Elan pad reports two
+   buttons and no wheel through it, so there was no scrolling on it at all and
+   nothing for a scroll-direction setting to change. In touchpad mode it
+   reports fingers, and two of them moving is a scroll, a quick touch is a
+   click and a press with two down is the secondary button - the gestures live
+   in touchpad_gestures.c, where the host tests can reach them. */
+static hid_touchpad_layout_t touchpad_layout;
+static int precision;
+static touchpad_gestures_t gestures;
+static uint32_t undecodable_in_a_row;
+
+#define UNDECODABLE_BEFORE_MOUSE_MODE 64
 
 static uint8_t last_buttons;
 static uint8_t input_buffer[256];
 static uint8_t report_descriptor[4096];
+
+/* The whole report descriptor goes to the log, because it is the one thing
+   about a touchpad that decides whether this driver can read it, and the
+   machines it matters on have no serial port. */
+static void log_report_descriptor(uint32_t length) {
+    static const char digits[] = "0123456789abcdef";
+    kernel_log_puts("[i2c-hid] report descriptor, ");
+    kernel_log_put_dec(length);
+    kernel_log_puts(" bytes:\n");
+    char line[3 * 32 + 16];
+    for (uint32_t at = 0; at < length; at += 32) {
+        uint32_t n = 0;
+        const char prefix[] = "[i2c-hid]  ";
+        for (uint32_t k = 0; prefix[k]; k++) {
+            line[n++] = prefix[k];
+        }
+        for (uint32_t i = at; i < length && i < at + 32; i++) {
+            line[n++] = digits[report_descriptor[i] >> 4];
+            line[n++] = digits[report_descriptor[i] & 0x0F];
+            line[n++] = ' ';
+        }
+        line[n++] = '\n';
+        line[n] = '\0';
+        kernel_log_puts(line);
+    }
+}
+
+static void log_touchpad_layout(void) {
+    kernel_log_puts("[i2c-hid] precision touchpad: report id ");
+    kernel_log_put_dec(touchpad_layout.report_id);
+    kernel_log_puts(", ");
+    kernel_log_put_dec(touchpad_layout.finger_count);
+    kernel_log_puts(" contact(s) a report, X 0..");
+    kernel_log_put_dec((uint32_t)touchpad_layout.x_maximum);
+    kernel_log_puts(" over ");
+    kernel_log_put_dec(touchpad_layout.width_tenths_mm);
+    kernel_log_puts(" tenths of a mm, Y 0..");
+    kernel_log_put_dec((uint32_t)touchpad_layout.y_maximum);
+    kernel_log_puts(" over ");
+    kernel_log_put_dec(touchpad_layout.height_tenths_mm);
+    kernel_log_puts(", contact count ");
+    kernel_log_puts(touchpad_layout.contact_count.present ? "yes" : "no");
+    kernel_log_puts(", button ");
+    kernel_log_puts(touchpad_layout.button.present ? "yes" : "no");
+    kernel_log_puts(", input mode in feature report ");
+    kernel_log_put_dec(touchpad_layout.input_mode_report_id);
+    kernel_log_puts(".\n");
+}
 
 static int read_at_register(int controller, uint8_t address, uint16_t register_address,
                             uint8_t *out, uint32_t length) {
@@ -64,7 +129,62 @@ static i2c_touchpad_statistics_t statistics;
 
 void i2c_touchpad_statistics(i2c_touchpad_statistics_t *out) {
     *out = statistics;
-    out->report_id = layout.report_id;
+    out->report_id = precision ? touchpad_layout.report_id : layout.report_id;
+    out->precision = (uint8_t)precision;
+}
+
+int i2c_touchpad_identity(uint16_t *vendor, uint16_t *product, int *is_precision) {
+    if (!present) {
+        return 0;
+    }
+    *vendor = descriptor.vendor_id;
+    *product = descriptor.product_id;
+    *is_precision = precision;
+    return 1;
+}
+
+static int set_feature(uint8_t report_id, const uint8_t *payload, uint32_t length) {
+    uint8_t command[64];
+    uint32_t command_length = i2c_hid_build_set_feature(descriptor.command_register, descriptor.data_register,
+                                                        report_id, payload, length, command, sizeof(command));
+    if (command_length == 0) {
+        return 0;
+    }
+    return designware_i2c_transfer(found_controller, found_address, command, command_length, 0, 0);
+}
+
+static int set_input_mode(uint8_t mode) {
+    uint8_t payload[32];
+    uint32_t length = hid_touchpad_build_input_mode(&touchpad_layout, mode, payload, sizeof(payload));
+    if (length == 0 || !set_feature(touchpad_layout.input_mode_report_id, payload, length)) {
+        return 0;
+    }
+    length = hid_touchpad_build_switches(&touchpad_layout, payload, sizeof(payload));
+    if (length != 0) {
+        set_feature(touchpad_layout.switches_report_id, payload, length);
+    }
+    return 1;
+}
+
+static void deliver_precision(const uint8_t *report, uint32_t length) {
+    hid_touchpad_report_t decoded;
+    if (!hid_touchpad_decode(&touchpad_layout, report, length, &decoded)) {
+        statistics.wrong_report++;
+        undecodable_in_a_row++;
+        return;
+    }
+    undecodable_in_a_row = 0;
+    statistics.reports++;
+    touchpad_event_t events[TOUCHPAD_MAX_EVENTS];
+    int count = touchpad_gestures_report(&gestures, &decoded, (uint32_t)clock_monotonic_ms(), events);
+    for (int i = 0; i < count; i++) {
+        statistics.injected++;
+        mouse_inject_from(MOUSE_SOURCE_TRACKPAD, events[i].tap ? MOUSE_FLAG_TAP : 0, events[i].dx, events[i].dy,
+                          events[i].buttons, events[i].wheel);
+    }
+    if (count > 0) {
+        last_buttons = events[count - 1].buttons;
+    }
 }
 
 /* A plain read, with no register written first. That is how HID over I2C
@@ -92,11 +212,24 @@ static int poll_once(void) {
         return 0;
     }
 
+    if (precision && input_buffer[2] == touchpad_layout.report_id) {
+        uint32_t before = statistics.injected;
+        deliver_precision(input_buffer + 2, (uint32_t)(length - 2));
+        return statistics.injected != before || gestures.touching;
+    }
+
     hid_mouse_report_t report;
-    if (!hid_mouse_decode(&layout, input_buffer + 2, (uint32_t)(length - 2), &report)) {
+    if (!have_mouse_layout || !hid_mouse_decode(&layout, input_buffer + 2, (uint32_t)(length - 2), &report)) {
         statistics.wrong_report++;
+        if (precision && ++undecodable_in_a_row >= UNDECODABLE_BEFORE_MOUSE_MODE && have_mouse_layout) {
+            precision = 0;
+            set_input_mode(HID_TOUCHPAD_INPUT_MODE_MOUSE);
+            kernel_log_puts("[i2c-hid] the pad's reports in touchpad mode could not be read - put it back "
+                            "in its mouse mode.\n");
+        }
         return 0;
     }
+    undecodable_in_a_row = 0;
     statistics.reports++;
 
     if (report.dx == 0 && report.dy == 0 && report.wheel == 0 && report.buttons == last_buttons) {
@@ -104,7 +237,7 @@ static int poll_once(void) {
     }
     last_buttons = report.buttons;
     statistics.injected++;
-    mouse_inject(report.dx, report.dy, report.buttons, report.wheel);
+    mouse_inject_from(MOUSE_SOURCE_TRACKPAD, 0, report.dx, report.dy, report.buttons, report.wheel);
     return 1;
 }
 
@@ -204,11 +337,32 @@ int i2c_touchpad_init(void) {
         return 0;
     }
 
-    if (!hid_report_find_mouse(report_descriptor, want, &layout)) {
-        kernel_log_puts("[i2c-hid] the report descriptor has no mouse collection in it - this "
-                   "device is something other than a pointing device, or it is already in "
-                   "its multitouch mode.\n");
+    log_report_descriptor(want);
+
+    have_mouse_layout = hid_report_find_mouse(report_descriptor, want, &layout);
+    precision = 0;
+    if (hid_report_find_touchpad(report_descriptor, want, &touchpad_layout)) {
+        log_touchpad_layout();
+        if (touchpad_layout.input_mode.present && set_input_mode(HID_TOUCHPAD_INPUT_MODE_TOUCHPAD)) {
+            precision = 1;
+            touchpad_gestures_init(&gestures, &touchpad_layout);
+            kernel_log_puts("[i2c-hid] switched to touchpad mode: two fingers scroll, a tap clicks.\n");
+        } else {
+            kernel_log_puts(touchpad_layout.input_mode.present
+                                ? "[i2c-hid] the pad refused the switch to touchpad mode - staying a mouse.\n"
+                                : "[i2c-hid] the touchpad collection has no input-mode feature to switch "
+                                  "with - staying a mouse.\n");
+        }
+    }
+    if (!have_mouse_layout && !precision) {
+        kernel_log_puts("[i2c-hid] the report descriptor has no mouse collection in it and no touchpad "
+                   "this driver can switch to - this device is something other than a pointing "
+                   "device.\n");
         return 0;
+    }
+    if (!have_mouse_layout) {
+        present = 1;
+        return 1;
     }
 
     kernel_log_puts("[i2c-hid] mouse collection: report id ");

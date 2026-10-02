@@ -26,6 +26,9 @@ extern "C" {
 
 #define PATH_RESOLV_CONF PATH_ETC_DIRECTORY "resolv.conf"
 
+#define PATH_WALLPAPER_PICTURE PATH_ETC_DIRECTORY "wallpaper.picture"
+#define PATH_PICTURES PATH_HOME_DIRECTORY "Pictures"
+
 #define PATH_MAX_LENGTH 4096
 
 static inline int path_join(char *out, const char *directory, const char *name) {

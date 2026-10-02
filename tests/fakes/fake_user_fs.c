@@ -331,3 +331,17 @@ int fake_user_fs_read_text(const char *guest, char *out, size_t capacity) {
 int fake_user_fs_symlink(const char *target, const char *guest) {
     return (int)sys_symlink(target, guest);
 }
+
+long sys_writefile(const char *name, const void *buffer, size_t length) {
+    char host[1024];
+    if (host_path(name, host, sizeof(host)) != 0) {
+        return -1;
+    }
+    FILE *f = fopen(host, "wb");
+    if (!f) {
+        return -1;
+    }
+    size_t wrote = length ? fwrite(buffer, 1, length, f) : 0;
+    fclose(f);
+    return wrote == length ? 0 : -1;
+}

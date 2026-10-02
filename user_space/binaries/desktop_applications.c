@@ -13,6 +13,7 @@ static const char *const DESKTOP_APPLICATION_NAMES[] = {
     "lvgl_demo",
     "wifi",
     "file_manager",
+    "wallpapertest",
 };
 
 static const desktop_application_entry_t DESKTOP_APPLICATION_ENTRIES[] = {
@@ -21,6 +22,7 @@ static const desktop_application_entry_t DESKTOP_APPLICATION_ENTRIES[] = {
     desktop_application_widgets,
     desktop_application_wireless,
     desktop_application_files,
+    desktop_application_wallpaper_selftest,
 };
 
 const char *desktop_application_argument;

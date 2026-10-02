@@ -8,6 +8,8 @@ void xhci_poll(void);
 
 int xhci_device_count(void);
 
+int xhci_mouse_count(void);
+
 int xhci_storage_present(void);
 
 int xhci_storage_superspeed(void);

@@ -1229,12 +1229,12 @@ static void boot_selftests_desktop(void) {
             {110, 115, 0x00FFFFFFu, "clock caption 'C' glyph - on pixel (left stem)"},
             {113, 115, 0x00122438u, "clock caption 'C' glyph - off pixel (bowl interior)"},
             {200, 130, 0x00222936u, "paint titlebar gradient at row 18 of 28 (focused)"},
-            {140, 190, 0x0088AA55u, "paint's own border frame color"},
-            {150, 240, 0x00202020u, "paint canvas background color"},
-            {150, 151, 0x00FFFFFFu, "paint caption 'P' glyph - on pixel (left stem)"},
-            {153, 151, 0x00202020u, "paint caption 'P' glyph - off pixel (bowl interior)"},
-            {240, 164, 0x0088AA55u, "paint separator line color"},
-            {500, 500, 0x001A1A2Eu, "desktop background color"},
+            {480, 145, 0x002A2F3Au, "paint toolbar ground"},
+            {480, 179, 0x003C4250u, "paint toolbar's bottom edge"},
+            {186, 160, 0x00E74C3Cu, "paint's red swatch, the colour it starts with"},
+            {240, 340, 0x00FFFFFFu, "paint's paper"},
+            {650, 510, 0x00FFFFFFu, "paint's paper near its far corner - the canvas fills the window"},
+            {900, 640, 0x001A1A2Eu, "desktop background color"},
         };
         uint32_t got[sizeof(checks) / sizeof(checks[0])];
         for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
@@ -9461,12 +9461,33 @@ static void boot_selftests_system(void) {
             }
         }
 
+        uint32_t picture_started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
+        size_t picture_bytes = 0;
+        uint8_t *picture_image = read_program(PATH_BIN_DIRECTORY "settings", &picture_bytes);
+        const char *picture_argv[] = {"wallpapertest", 0};
+        task_t *picture_task =
+            picture_image ? process_spawnv("wallpapertest", picture_image, picture_bytes, picture_argv) : 0;
+        long picture_rc = picture_task ? do_syscall(SYS_wait, (uint64_t)picture_task->id, 0, 0) : -1;
+        kfree(picture_image);
+
         selftest_reap(files_task);
         selftest_reap(tasks_task);
         selftest_reap(settings_task);
         selftest_reap(comp_task);
         console_init();
         kernel_log_use_console();
+
+        if (picture_rc != 0) {
+            kernel_log_puts("[m211] wallpapertest exited ");
+            kernel_log_put_dec((uint32_t)(picture_rc < 0 ? 99 : picture_rc));
+            kernel_log_puts(" - see desktop_application_wallpaper_selftest for what each code means\n");
+            panic("M211 self-test: a picture did not survive the trip to the desktop");
+        }
+        kernel_log_puts("[m211] a BMP written on leanfs became the desktop's picture through the toolkit's "
+                        "decoder and came back pixel for pixel, a file that is not a picture was refused "
+                        "and left nothing behind, and /proc/input names a pointing device - self-test passed (");
+        kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - picture_started_ms);
+        kernel_log_puts(" ms).\n");
 
         if (drawn < LVGL_MINIMUM_DRAWN_PIXELS || distinct < LVGL_MINIMUM_DISTINCT_COLORS) {
             kernel_log_puts("[m127] the two desktop applications drew ");
@@ -14167,7 +14188,7 @@ display_self_test_done:
                "up to 3s for test movement (QEMU monitor: 'mouse_move dx dy' "
                "/ 'mouse_button val')...\n");
     int got_mouse_event = 0;
-    mouse_event_t last_ev = {0, 0, 0, 0, 0};
+    mouse_event_t last_ev = {0};
     uint64_t mouse_deadline = pit_get_ticks() + input_wait_ticks;
     while (pit_get_ticks() < mouse_deadline) {
         mouse_event_t ev;

@@ -2,15 +2,21 @@
 
 #include "input.h"
 
+/* M211: usages 0x3A-0x45 are F1-F12 and 0x4F-0x52 the arrows. They were
+   zero here, so a USB keyboard could not send Alt+F4 or move a selection -
+   found by the input suite's first run with a USB keyboard over a test that
+   closes a window that way. They are the same codes the PS/2 driver sends. */
 const char usb_hid_ascii[104] = {
     0, 0, 0, 0, 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l',
     'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
     '1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
     '\n', 27, '\b', '\t', ' ', '-', '=', '[', ']', '\\', 0, ';', '\'', '`',
     ',', '.', '/', 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    KEYBOARD_KEY_FUNCTION(1), KEYBOARD_KEY_FUNCTION(2), KEYBOARD_KEY_FUNCTION(3), KEYBOARD_KEY_FUNCTION(4),
+    KEYBOARD_KEY_FUNCTION(5), KEYBOARD_KEY_FUNCTION(6), KEYBOARD_KEY_FUNCTION(7), KEYBOARD_KEY_FUNCTION(8),
+    KEYBOARD_KEY_FUNCTION(9), KEYBOARD_KEY_FUNCTION(10), KEYBOARD_KEY_FUNCTION(11), KEYBOARD_KEY_FUNCTION(12),
+    0, 0, 0, 0, 0, 0, 0, 0, 0, KEYBOARD_KEY_RIGHT, KEYBOARD_KEY_LEFT, KEYBOARD_KEY_DOWN,
+    KEYBOARD_KEY_UP, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 };
 
 const char usb_hid_ascii_shift[104] = {
@@ -19,9 +25,11 @@ const char usb_hid_ascii_shift[104] = {
     '!', '@', '#', '$', '%', '^', '&', '*', '(', ')',
     '\n', 27, '\b', '\t', ' ', '_', '+', '{', '}', '|', 0, ':', '"', '~',
     '<', '>', '?', 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    KEYBOARD_KEY_FUNCTION(1), KEYBOARD_KEY_FUNCTION(2), KEYBOARD_KEY_FUNCTION(3), KEYBOARD_KEY_FUNCTION(4),
+    KEYBOARD_KEY_FUNCTION(5), KEYBOARD_KEY_FUNCTION(6), KEYBOARD_KEY_FUNCTION(7), KEYBOARD_KEY_FUNCTION(8),
+    KEYBOARD_KEY_FUNCTION(9), KEYBOARD_KEY_FUNCTION(10), KEYBOARD_KEY_FUNCTION(11), KEYBOARD_KEY_FUNCTION(12),
+    0, 0, 0, 0, 0, 0, 0, 0, 0, KEYBOARD_KEY_RIGHT, KEYBOARD_KEY_LEFT, KEYBOARD_KEY_DOWN,
+    KEYBOARD_KEY_UP, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 };
 
 static int mods_from_report(uint8_t raw) {

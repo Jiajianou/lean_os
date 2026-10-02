@@ -424,3 +424,25 @@ TEST(usb_hid, the_mouse_remembers_that_it_has_seen_a_report) {
     usb_hid_decode_mouse(&st, r, 4, &m);
     CHECK_EQ(m.deliver, 0);
 }
+
+TEST(usb_hid, function_keys_and_arrows_are_the_codes_the_ps2_driver_sends) {
+    usb_hid_state_t state = {0};
+    usb_hid_keys_t keys;
+    const uint8_t alt_f4[8] = {0x04, 0, 0x3D, 0, 0, 0, 0, 0};
+    usb_hid_decode_keyboard(&state, alt_f4, &keys);
+    CHECK_EQ(keys.count, 1);
+    CHECK_EQ(keys.ch[0], (char)KEYBOARD_KEY_FUNCTION(4));
+    CHECK_EQ(keys.mods[0], KEYBOARD_MOD_ALT);
+    const uint8_t f1_f12[8] = {0, 0, 0x3A, 0x45, 0, 0, 0, 0};
+    usb_hid_decode_keyboard(&state, f1_f12, &keys);
+    CHECK_EQ(keys.count, 2);
+    CHECK_EQ(keys.ch[0], (char)KEYBOARD_KEY_F1);
+    CHECK_EQ(keys.ch[1], (char)KEYBOARD_KEY_F12);
+    const uint8_t arrows[8] = {0x02, 0, 0x4F, 0x50, 0x51, 0x52, 0, 0};
+    usb_hid_decode_keyboard(&state, arrows, &keys);
+    CHECK_EQ(keys.count, 4);
+    CHECK_EQ(keys.ch[0], KEYBOARD_KEY_RIGHT);
+    CHECK_EQ(keys.ch[1], KEYBOARD_KEY_LEFT);
+    CHECK_EQ(keys.ch[2], KEYBOARD_KEY_DOWN);
+    CHECK_EQ(keys.ch[3], KEYBOARD_KEY_UP);
+}

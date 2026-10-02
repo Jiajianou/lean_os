@@ -7,7 +7,7 @@
 #include "syscall_wrappers.h"
 #include "wallpaper.h"
 
-#define SETTINGS_BUFFER 768
+#define SETTINGS_BUFFER 1280
 
 typedef enum {
     KEY_BACKGROUND = 0,
@@ -23,13 +23,20 @@ typedef enum {
     KEY_CLOCK_24_HOUR,
     KEY_UTC_OFFSET,
     KEY_RESTORE_WINDOWS,
+    KEY_SCROLL_SPEED,
+    KEY_TRACKPAD_SPEED,
+    KEY_TRACKPAD_ACCELERATION,
+    KEY_TRACKPAD_NATURAL_SCROLLING,
+    KEY_TRACKPAD_SCROLL_SPEED,
+    KEY_TRACKPAD_TAP_TO_CLICK,
     KEY_COUNT,
 } settings_key_t;
 
 static const char *const KEY_NAMES[KEY_COUNT] = {
     "bg", "accent", "wallpaper", "animations", "volume", "display_w", "display_h",
     "pointer_speed", "natural_scrolling", "swap_buttons", "clock_24_hour", "utc_offset",
-    "restore_windows",
+    "restore_windows", "scroll_speed", "trackpad_speed", "trackpad_acceleration",
+    "trackpad_natural_scrolling", "trackpad_scroll_speed", "trackpad_tap_to_click",
 };
 
 typedef struct {
@@ -152,6 +159,12 @@ void settings_file_defaults(window_manager_settings_request_t *out) {
     out->clock_24_hour = 1;
     out->utc_offset_minutes = 0;
     out->restore_windows = 1;
+    out->scroll_speed = WINDOW_MANAGER_SCROLL_SPEED_DEFAULT;
+    out->trackpad_speed = WINDOW_MANAGER_POINTER_SPEED_DEFAULT;
+    out->trackpad_acceleration = WINDOW_MANAGER_TRACKPAD_ACCELERATION_DEFAULT;
+    out->trackpad_natural_scrolling = 1;
+    out->trackpad_scroll_speed = WINDOW_MANAGER_SCROLL_SPEED_DEFAULT;
+    out->trackpad_tap_to_click = 1;
 }
 
 int settings_file_load(window_manager_settings_request_t *out) {
@@ -174,6 +187,24 @@ int settings_file_load(window_manager_settings_request_t *out) {
     }
     if (all.have[KEY_RESTORE_WINDOWS]) {
         out->restore_windows = all.value[KEY_RESTORE_WINDOWS] != 0;
+    }
+    if (all.have[KEY_SCROLL_SPEED]) {
+        out->scroll_speed = all.value[KEY_SCROLL_SPEED];
+    }
+    if (all.have[KEY_TRACKPAD_SPEED]) {
+        out->trackpad_speed = all.value[KEY_TRACKPAD_SPEED];
+    }
+    if (all.have[KEY_TRACKPAD_ACCELERATION]) {
+        out->trackpad_acceleration = all.value[KEY_TRACKPAD_ACCELERATION];
+    }
+    if (all.have[KEY_TRACKPAD_NATURAL_SCROLLING]) {
+        out->trackpad_natural_scrolling = all.value[KEY_TRACKPAD_NATURAL_SCROLLING] != 0;
+    }
+    if (all.have[KEY_TRACKPAD_SCROLL_SPEED]) {
+        out->trackpad_scroll_speed = all.value[KEY_TRACKPAD_SCROLL_SPEED];
+    }
+    if (all.have[KEY_TRACKPAD_TAP_TO_CLICK]) {
+        out->trackpad_tap_to_click = all.value[KEY_TRACKPAD_TAP_TO_CLICK] != 0;
     }
     if (all.have[KEY_ANIMATIONS]) {
         out->animations = all.value[KEY_ANIMATIONS];
@@ -216,6 +247,12 @@ int settings_file_save(const window_manager_settings_request_t *in) {
         [KEY_CLOCK_24_HOUR] = in->clock_24_hour,
         [KEY_UTC_OFFSET] = (uint32_t)in->utc_offset_minutes,
         [KEY_RESTORE_WINDOWS] = in->restore_windows,
+        [KEY_SCROLL_SPEED] = in->scroll_speed,
+        [KEY_TRACKPAD_SPEED] = in->trackpad_speed,
+        [KEY_TRACKPAD_ACCELERATION] = in->trackpad_acceleration,
+        [KEY_TRACKPAD_NATURAL_SCROLLING] = in->trackpad_natural_scrolling,
+        [KEY_TRACKPAD_SCROLL_SPEED] = in->trackpad_scroll_speed,
+        [KEY_TRACKPAD_TAP_TO_CLICK] = in->trackpad_tap_to_click,
     };
     for (int key = 0; key < (int)(sizeof(values) / sizeof(values[0])); key++) {
         if (key == KEY_DISPLAY_WIDTH || key == KEY_DISPLAY_HEIGHT) {

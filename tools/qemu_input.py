@@ -366,6 +366,10 @@ class Machine:
 
         self._shot_seq = 0
         self.cursor = None
+        # M211: an accelerated pointer moves further on a big step than on
+        # the same distance in small ones, so a test driving one places the
+        # pointer in steps too small to be accelerated.
+        self.step_limit = MAX_STEP
 
     def _drain(self):
         self._sock.setblocking(False)
@@ -451,8 +455,8 @@ class Machine:
 
     def _step_by(self, dx, dy):
         while dx or dy:
-            sx = max(-MAX_STEP, min(MAX_STEP, dx))
-            sy = max(-MAX_STEP, min(MAX_STEP, dy))
+            sx = max(-self.step_limit, min(self.step_limit, dx))
+            sy = max(-self.step_limit, min(self.step_limit, dy))
             self.monitor("mouse_move %d %d" % (sx, sy), settle=0.02)
             dx -= sx
             dy -= sy

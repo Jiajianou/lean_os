@@ -203,6 +203,13 @@ typedef struct {
 #define WINDOW_MANAGER_POINTER_SPEED_DEFAULT 100
 #define WINDOW_MANAGER_POINTER_SPEED_MAXIMUM 300
 
+#define WINDOW_MANAGER_SCROLL_SPEED_MINIMUM  25
+#define WINDOW_MANAGER_SCROLL_SPEED_DEFAULT 100
+#define WINDOW_MANAGER_SCROLL_SPEED_MAXIMUM 400
+
+#define WINDOW_MANAGER_ACCELERATION_MAXIMUM          100
+#define WINDOW_MANAGER_TRACKPAD_ACCELERATION_DEFAULT  50
+
 typedef struct {
     uint32_t volume;
     uint32_t animations;
@@ -215,6 +222,12 @@ typedef struct {
     uint32_t clock_24_hour;
     int32_t utc_offset_minutes;
     uint32_t restore_windows;
+    uint32_t scroll_speed;
+    uint32_t trackpad_speed;
+    uint32_t trackpad_acceleration;
+    uint32_t trackpad_natural_scrolling;
+    uint32_t trackpad_scroll_speed;
+    uint32_t trackpad_tap_to_click;
 } window_manager_settings_request_t;
 
 #ifdef __cplusplus

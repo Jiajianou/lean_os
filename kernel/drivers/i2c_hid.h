@@ -5,7 +5,10 @@
 #define I2C_HID_DESCRIPTOR_LENGTH 30
 
 #define I2C_HID_OPCODE_RESET      0x01
+#define I2C_HID_OPCODE_SET_REPORT 0x03
 #define I2C_HID_OPCODE_SET_POWER  0x08
+
+#define I2C_HID_REPORT_TYPE_FEATURE 0x03
 
 #define I2C_HID_POWER_ON    0x00
 #define I2C_HID_POWER_SLEEP 0x01
@@ -36,3 +39,7 @@ uint32_t i2c_hid_build_command(uint16_t command_register, uint8_t opcode, uint8_
 uint16_t i2c_hid_input_length(const uint8_t *buffer, uint32_t length);
 
 int i2c_hid_input_is_reset_acknowledgement(const uint8_t *buffer, uint32_t length);
+
+uint32_t i2c_hid_build_set_feature(uint16_t command_register, uint16_t data_register, uint8_t report_id,
+                                   const uint8_t *payload, uint32_t payload_length, uint8_t *out,
+                                   uint32_t capacity);

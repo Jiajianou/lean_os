@@ -5,6 +5,7 @@
 #include "architecture/x86_64/io.h"
 #include "architecture/x86_64/interrupt_service_routines.h"
 #include "architecture/x86_64/pic.h"
+#include "device/fwcfg.h"
 #include "drivers/kernel_log.h"
 #include "drivers/pit.h"
 #include "drivers/ps2_controller.h"
@@ -26,6 +27,15 @@ static volatile uint32_t buffer_head;
 static volatile uint32_t buffer_tail;
 
 static int packet_bytes = 3;
+
+/* M211. QEMU has no I2C touchpad, so the trackpad's half of the pointer
+   settings could never be graded by the input suite - every event it can
+   make is a PS/2 mouse's. opt/leanos/pointer=trackpad, from outside the
+   image like every other harness switch, makes the machine's mouse - this
+   port's, or a USB one on a machine with no PS/2 controller - arrive
+   labelled as a trackpad, which is the only thing the compositor looks at
+   to choose between the two sets of settings. */
+static uint8_t ps2_source = MOUSE_SOURCE_MOUSE;
 
 static uint8_t packet[4];
 static int packet_index;
@@ -72,6 +82,8 @@ static void mouse_irq(isr_regs_t *regs) {
     ev.dx = dx;
     ev.dy = -dy;
     ev.buttons = status & 0x07;
+    ev.source = ps2_source;
+    ev.flags = 0;
     ev.time_ms = (uint32_t)(clock_monotonic_ms());
     ev.wheel = 0;
     if (packet_bytes == 4) {
@@ -90,6 +102,23 @@ void mouse_init(void) {
     packet_index = 0;
     packet_bytes = 3;
     mouse_present = 0;
+
+    char pointer_switch[16];
+    int switch_length = fwcfg_read_file("opt/leanos/pointer", pointer_switch, sizeof(pointer_switch) - 1);
+    ps2_source = MOUSE_SOURCE_MOUSE;
+    if (switch_length == 8) {
+        pointer_switch[switch_length] = '\0';
+        static const char trackpad[] = "trackpad";
+        int same = 1;
+        for (int i = 0; i < 8; i++) {
+            same &= pointer_switch[i] == trackpad[i];
+        }
+        if (same) {
+            ps2_source = MOUSE_SOURCE_TRACKPAD;
+            kernel_log_puts("[mouse] opt/leanos/pointer=trackpad - the mouse's events are labelled as a "
+                            "trackpad's.\n");
+        }
+    }
 
     if (!(ps2_controller_ports() & PS2_AUX_PORT_PRESENT)) {
         kernel_log_puts("[mouse] no PS/2 auxiliary port - nothing to negotiate with. A USB "
@@ -130,11 +159,25 @@ int mouse_is_present(void) {
     return mouse_present;
 }
 
+int mouse_labelled_trackpad(void) {
+    return ps2_source == MOUSE_SOURCE_TRACKPAD;
+}
+
+int mouse_wheel_present(void) {
+    return packet_bytes == 4;
+}
+
 void mouse_inject(int32_t dx, int32_t dy, uint8_t buttons, int32_t wheel) {
+    mouse_inject_from(ps2_source, 0, dx, dy, buttons, wheel);
+}
+
+void mouse_inject_from(uint8_t source, uint8_t flags, int32_t dx, int32_t dy, uint8_t buttons, int32_t wheel) {
     mouse_event_t ev;
     ev.dx = dx;
     ev.dy = dy;
     ev.buttons = buttons & 0x07u;
+    ev.source = source;
+    ev.flags = flags;
     ev.time_ms = (uint32_t)(clock_monotonic_ms());
     ev.wheel = wheel;
     push_event(ev);

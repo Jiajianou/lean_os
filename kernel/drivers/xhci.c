@@ -914,6 +914,14 @@ int xhci_init(void) {
     return hid_count;
 }
 
+int xhci_mouse_count(void) {
+    int mice = 0;
+    for (int i = 0; i < hid_count; i++) {
+        mice += hid_devices[i].proto != HID_PROTO_KEYBOARD;
+    }
+    return mice;
+}
+
 int xhci_device_count(void) {
     return hid_count;
 }
