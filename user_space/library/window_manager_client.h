@@ -58,6 +58,10 @@ int window_manager_veto_shutdown(int32_t window_id);
 void window_manager_quit(window_manager_window_t *win, int status) __attribute__((noreturn));
 
 int window_manager_set_display_mode(uint32_t width, uint32_t height);
+int window_manager_set_display_scale(uint32_t percent);
+
+int window_manager_ask_power(int mode);
+
 int window_manager_confirm_display_mode(void);
 
 int window_manager_set_theme(uint32_t bg_color, uint32_t accent_color, uint32_t wallpaper);

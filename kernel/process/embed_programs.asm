@@ -186,12 +186,6 @@ text_editor_elf_start:
     incbin "build/text_editor.elf"
 text_editor_elf_end:
 
-global file_manager_elf_start
-global file_manager_elf_end
-file_manager_elf_start:
-    incbin "build/file_manager.elf"
-file_manager_elf_end:
-
 global wm_stubborn_elf_start
 global wm_stubborn_elf_end
 wm_stubborn_elf_start:

@@ -385,6 +385,14 @@ int window_manager_set_display_mode(uint32_t width, uint32_t height) {
     return window_manager_send_action_value(-1, WINDOW_MANAGER_ACTION_SET_MODE, window_manager_pack_mode(width, height));
 }
 
+int window_manager_set_display_scale(uint32_t percent) {
+    return window_manager_send_action_value(-1, WINDOW_MANAGER_ACTION_SET_SCALE, (int32_t)percent);
+}
+
+int window_manager_ask_power(int mode) {
+    return window_manager_send_action_value(-1, WINDOW_MANAGER_ACTION_ASK_POWER, (int32_t)mode);
+}
+
 int window_manager_confirm_display_mode(void) {
     return window_manager_send_action_value(-1, WINDOW_MANAGER_ACTION_CONFIRM_MODE, 0);
 }

@@ -232,3 +232,25 @@ TEST(boot_options, the_scale_crosses_the_handoff_and_a_forged_one_does_not) {
     boot_options_set_active(&handoff);
     CHECK_EQ(boot_options_active()->display_scale, 0u);
 }
+
+TEST(boot_options, config_names_the_file_s_own_sectors_and_crosses_the_handoff) {
+    boot_options_t options;
+    parse("video=native\nconfig=4309700+4\n", &options);
+    CHECK_EQ(options.config_lba, 4309700u);
+    CHECK_EQ(options.config_sectors, 4u);
+    CHECK_EQ(options.unknown_keys, 0u);
+    boot_options_set_active(&options);
+    CHECK_EQ(boot_options_active()->config_lba, 4309700u);
+    CHECK_EQ(boot_options_active()->config_sectors, 4u);
+    options.config_sectors = 40;
+    boot_options_set_active(&options);
+    CHECK_EQ(boot_options_active()->config_sectors, 0u);
+}
+
+TEST(boot_options, a_config_extent_that_is_not_one_is_refused_and_counted) {
+    boot_options_t options;
+    parse("config=0+4\nconfig=12\nconfig=12+0\nconfig=12+9\nconfig=12+4x\n", &options);
+    CHECK_EQ(options.config_lba, 0u);
+    CHECK_EQ(options.config_sectors, 0u);
+    CHECK_EQ(options.unknown_keys, 5u);
+}

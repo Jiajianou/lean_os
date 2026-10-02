@@ -338,6 +338,18 @@ long sys_display_set_mode(uint32_t width, uint32_t height) {
     return do_syscall(SYS_display_set_mode, (long)width, (long)height, 0);
 }
 
+long sys_display_status(display_status_t *out) {
+    return do_syscall(SYS_display, DISPLAY_OPERATION_STATUS, (long)out, (long)sizeof(*out));
+}
+
+long sys_display_set_scale(uint32_t percent) {
+    return do_syscall(SYS_display, DISPLAY_OPERATION_SET_SCALE, (long)percent, 0);
+}
+
+long sys_display_set_startup_mode(uint32_t width, uint32_t height) {
+    return do_syscall(SYS_display, DISPLAY_OPERATION_SET_STARTUP_MODE, (long)width, (long)height);
+}
+
 long sys_open(const char *path, uint32_t flags) {
     return do_syscall(SYS_open, (long)path, (long)flags, 0);
 }

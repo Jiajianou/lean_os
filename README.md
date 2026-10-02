@@ -68,7 +68,7 @@ UEFI firmware
   out of every path that reached it.
 - **Settings for the machine, not just the wallpaper.** Thirteen panes
   in a sidebar: what the processor, memory, disk and display are; colours
-  and motion; the wallpaper; screen size; volume; the mouse's speed,
+  and motion; the wallpaper; the screen's scale and resolution; volume; the mouse's speed,
   scroll speed, swapped buttons and natural scrolling; the trackpad's own
   tracking speed, acceleration, scroll direction, scroll speed and tap to
   click; the shortcuts; a 12- or 24-hour clock
@@ -197,8 +197,17 @@ UEFI firmware
   suite grades it unchanged, on a machine booted with **no PS/2
   controller at all**.
 - **Settings that stick.** Wallpaper, colours, **screen resolution**
-  (changed live, with a countdown that puts it back if you do not
-  confirm), motion, and volume.
+  and **scale** (changed live, with a countdown that puts it back if you
+  do not confirm), motion, and volume.
+- **A display that scales the way a laptop needs.** A 3840x2400 panel
+  is about 320 pixels to the inch, so Settings offers every scale that
+  divides it exactly - 100, 125, 150, 200, 250 and 300% - each shown as
+  the desktop it gives ("150%, 2560 x 1600"), applied while the machine
+  runs and drawn by the compositor, which builds each scaled row once
+  and copies it to every panel row it covers. A panel whose mode only
+  the firmware can set is offered the firmware's own list too: the
+  choice is written into `\EFI\BOOT\lean_os.cfg` and used from the
+  next restart, which Settings offers to do.
 - **A toolkit under the applications.** LVGL 9.2.2, nobody here's and
   unedited, rasterising straight into each window's own shared memory -
   anti-aliased Montserrat, a flex layout that places things rather than
@@ -453,7 +462,12 @@ cpus=4              # fewer processors than the MADT lists
 scale=2             # desktop pixels are 2x2 panel pixels; scale=1 turns
                     #   it off. The default doubles on any panel of
                     #   2560x1440 or more, so a 3840x2400 laptop screen
-                    #   is a 1920x1200 desktop you can read
+                    #   is a 1920x1200 desktop you can read. Settings can
+                    #   choose any other scale while the machine runs.
+config=4309696+4    # this file's own sectors, written by the image tool,
+                    #   so Settings can rewrite video= without a FAT
+                    #   driver; nothing is written there unless the
+                    #   sectors still start with this file's first line
 ```
 
 `tools/make-hardware-image.sh` writes a copy of the image with that file

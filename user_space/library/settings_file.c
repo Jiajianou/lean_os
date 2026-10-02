@@ -29,6 +29,7 @@ typedef enum {
     KEY_TRACKPAD_NATURAL_SCROLLING,
     KEY_TRACKPAD_SCROLL_SPEED,
     KEY_TRACKPAD_TAP_TO_CLICK,
+    KEY_DISPLAY_SCALE,
     KEY_COUNT,
 } settings_key_t;
 
@@ -36,7 +37,7 @@ static const char *const KEY_NAMES[KEY_COUNT] = {
     "bg", "accent", "wallpaper", "animations", "volume", "display_w", "display_h",
     "pointer_speed", "natural_scrolling", "swap_buttons", "clock_24_hour", "utc_offset",
     "restore_windows", "scroll_speed", "trackpad_speed", "trackpad_acceleration",
-    "trackpad_natural_scrolling", "trackpad_scroll_speed", "trackpad_tap_to_click",
+    "trackpad_natural_scrolling", "trackpad_scroll_speed", "trackpad_tap_to_click", "display_scale",
 };
 
 typedef struct {
@@ -255,12 +256,32 @@ int settings_file_save(const window_manager_settings_request_t *in) {
         [KEY_TRACKPAD_TAP_TO_CLICK] = in->trackpad_tap_to_click,
     };
     for (int key = 0; key < (int)(sizeof(values) / sizeof(values[0])); key++) {
-        if (key == KEY_DISPLAY_WIDTH || key == KEY_DISPLAY_HEIGHT) {
+        if (key == KEY_DISPLAY_WIDTH || key == KEY_DISPLAY_HEIGHT || key == KEY_DISPLAY_SCALE) {
             continue;
         }
         all.value[key] = values[key];
         all.have[key] = 1;
     }
+    return write_all(&all);
+}
+
+/* M213: the desktop's scale in percent of the panel, 0 for automatic. Kept
+   apart from the mode because a laptop's panel has one mode and many scales. */
+int settings_file_load_display_scale(uint32_t *percent) {
+    settings_all_t all;
+    parse_all(&all);
+    if (!all.have[KEY_DISPLAY_SCALE]) {
+        return 0;
+    }
+    *percent = all.value[KEY_DISPLAY_SCALE];
+    return 1;
+}
+
+int settings_file_save_display_scale(uint32_t percent) {
+    settings_all_t all;
+    parse_all(&all);
+    all.value[KEY_DISPLAY_SCALE] = percent;
+    all.have[KEY_DISPLAY_SCALE] = 1;
     return write_all(&all);
 }
 

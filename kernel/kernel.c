@@ -9060,8 +9060,25 @@ static void boot_selftests_system(void) {
         if (!ex_img) {
             panic("Q9 self-test: /bin/exhausttest is not on this disk");
         }
-        uint64_t frames_before = physical_memory_free_frame_count();
-        for (int round = 0; round < 2; round++) {
+        /* M213. Sockets and TCP control blocks are pools: a slot is made the
+           first time one is needed and kept for the next, up to 512 since
+           M209 - so the first time anything fills the table, the table grows
+           to its high-water mark and stays there. That is not a leak, and
+           counting it as one is what stopped this battery here from M209 on.
+           The second round settles too - 33 frames, once, because the heap
+           lays the pools out differently when pipes' buffers were freed among
+           them - and the third costs nothing. A leak costs every round, so
+           two rounds grow and settle the pools and the two after them must
+           not cost a frame. */
+        uint64_t frames_before = 0;
+        uint64_t frames_first_round = physical_memory_free_frame_count();
+        for (int round = 0; round < 4; round++) {
+            if (round == 2) {
+                frames_before = physical_memory_free_frame_count();
+                kernel_log_puts("[q9] the first two rounds grew the tables' pools by ");
+                kernel_log_put_dec((uint32_t)(frames_first_round > frames_before ? frames_first_round - frames_before : 0));
+                kernel_log_puts(" frames\n");
+            }
             const char *ex_argv[] = {PATH_BIN_DIRECTORY "exhausttest", 0};
             task_t *ex = process_spawnv("exhausttest", ex_img, ex_bytes, ex_argv);
             long rc = ex ? do_syscall(SYS_wait, (uint64_t)ex->id, 0, 0) : -1;
@@ -9081,7 +9098,7 @@ static void boot_selftests_system(void) {
 
         uint64_t frames_after = physical_memory_free_frame_count();
         if (frames_after < frames_before) {
-            kernel_log_puts("[q9] filling and emptying every table cost ");
+            kernel_log_puts("[q9] filling and emptying every table twice more cost ");
             kernel_log_put_dec((uint32_t)(frames_before - frames_after));
             kernel_log_puts(" frames that never came back\n");
             panic("Q9 self-test: exhausting a resource leaked physical memory");

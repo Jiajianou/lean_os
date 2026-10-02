@@ -2,6 +2,7 @@
 
 #include "boot/boot_options.h"
 #include "console.h"
+#include "display_scale.h"
 #include "kernel_log.h"
 #include "library/kernel_library.h"
 #include "memory_management/virtual_memory.h"
@@ -94,17 +95,36 @@ uint64_t framebuffer_mapped_bytes(void) {
     return framebuffer_mapped;
 }
 
-/* How many physical pixels, along each axis, one pixel of the desktop is.
-   A 14-inch panel at 3840x2400 is about 320 pixels to the inch, and at one
-   to one every glyph and icon drawn for a 96-dpi screen came out a third of
-   the size a person could read (M196). Two is what that panel wants; a boot
-   option pins it either way. */
-uint32_t framebuffer_desktop_scale(void) {
-    uint32_t asked = boot_options_active()->display_scale;
-    if (asked == 1 || asked == 2) {
-        return asked;
+/* How many physical pixels, along each axis, one pixel of the desktop is,
+   in percent. A 14-inch panel at 3840x2400 is about 320 pixels to the inch,
+   and at one to one every glyph and icon drawn for a 96-dpi screen came out a
+   third of the size a person could read (M196). Two is what that panel gets
+   unless somebody chooses otherwise; M213 lets Settings choose, while the
+   machine runs, any scale that divides the panel exactly. A choice that no
+   longer fits - the mode changed under it - gives way to the automatic one. */
+static uint32_t requested_scale_percent;
+
+uint32_t framebuffer_scale_percent(void) {
+    return display_scale_effective(framebuffer_w, framebuffer_h, requested_scale_percent,
+                                   boot_options_active()->display_scale);
+}
+
+uint32_t framebuffer_scale_requested(void) {
+    return requested_scale_percent;
+}
+
+int framebuffer_set_scale_percent(uint32_t percent) {
+    if (percent != 0 && !display_scale_fits(framebuffer_w, framebuffer_h, percent)) {
+        return -1;
     }
-    return (framebuffer_w >= 2560 && framebuffer_h >= 1440) ? 2u : 1u;
+    requested_scale_percent = percent;
+    return 0;
+}
+
+void framebuffer_desktop_size(uint32_t *width, uint32_t *height) {
+    uint32_t percent = framebuffer_scale_percent();
+    *width = (uint32_t)((uint64_t)framebuffer_w * 100u / percent);
+    *height = (uint32_t)((uint64_t)framebuffer_h * 100u / percent);
 }
 
 uint32_t framebuffer_width(void) {

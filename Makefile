@@ -221,6 +221,12 @@ check-embedded-programs:
 	    echo "          Add one (see that file's header comment on why it is written out longhand)." >&2; \
 	    exit 1; }; \
 	done
+	@for p in $$(sed -n 's/^\([A-Za-z0-9_]*\)_elf_start:$$/\1/p' kernel/process/embed_programs.asm); do \
+	  case " $(USER_PROGRAMS) " in *" $$p "*) ;; *) \
+	    echo "Makefile: kernel/process/embed_programs.asm embeds '$$p', which is not in USER_PROGRAMS -" >&2; \
+	    echo "          nothing builds build/$$p.elf, so the kernel would carry whatever stale copy is lying there." >&2; \
+	    exit 1;; esac; \
+	done
 
 $(KERNEL_ELF): $(KERNEL_OBJS) kernel/linker.ld
 	$(if $(V),,@echo "  LD      $@")

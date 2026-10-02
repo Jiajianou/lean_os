@@ -11,7 +11,7 @@
 #define BOOT_INTERRUPTS_PIC    1
 #define BOOT_INTERRUPTS_IOAPIC 2
 
-#define BOOT_OFFERED_MODES_MAX 16
+#define BOOT_OFFERED_MODES_MAX 32
 
 #define BOOT_OPTIONS_MAGIC 0x4C4E4F5054424FULL
 
@@ -30,6 +30,8 @@ typedef struct __attribute__((packed)) {
     uint32_t log_lba;
     uint32_t log_sectors;
     uint32_t display_scale;
+    uint32_t config_lba;
+    uint32_t config_sectors;
 } boot_options_t;
 
 void boot_options_defaults(boot_options_t *options);

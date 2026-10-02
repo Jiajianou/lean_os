@@ -1799,8 +1799,11 @@ def clock_ink_span(shot):
             left = i
             gap = 0
         elif right is not None:
+            # A word space after a narrow "1" is nine columns of nothing, so
+            # "7:41 PM" read as "PM" alone at 8. The workspace dots to the
+            # left are never this bright, so the clock is still all it finds.
             gap += 1
-            if gap > 8:
+            if gap > 12:
                 break
     if right is None:
         return 0
@@ -2604,8 +2607,113 @@ def test_a_tap_reaches_every_toolkit_control(m):
     wait_for_log_after(m, "[settings] trackpad natural scrolling 1", mark,
                        "a second tap on the switch did not turn it back on")
 
+GOP_IMAGE = os.path.join(qemu_input.REPO_ROOT, "build", "os-image-gop.bin")
+GOP_PANEL = (2560, 1600)
+
+def build_gop_image():
+    # M213: the laptop's case - a mode the boot loader chose from the
+    # firmware's list, nothing to change it with afterwards, and a
+    # lean_os.cfg that names its own sectors - made from the image under test.
+    base = qemu_input.IMAGE
+    if os.path.exists(GOP_IMAGE) and os.path.getmtime(GOP_IMAGE) >= os.path.getmtime(base):
+        return
+    subprocess.check_call(["tools/make-hardware-image.sh", "--no-wireless-firmware", "--log-mib", "0",
+                           "--video", "%dx%d" % GOP_PANEL, "--output", GOP_IMAGE],
+                          cwd=qemu_input.REPO_ROOT, stdout=subprocess.DEVNULL)
+
+GOP_MACHINE = dict(extra_args=["-fw_cfg", "name=opt/leanos/display,string=firmware"], image=GOP_IMAGE)
+
+def desktop_line(width, height, percent, panel=GOP_PANEL):
+    return "[compositor] the desktop is %dx%d on a %dx%d panel, at %d%%" % (width, height, panel[0], panel[1],
+                                                                            percent)
+
+def gop_click(m, x, y):
+    # A cursor drawn at twice its size is not the shape the harness looks
+    # for, so the pointer is placed by counting rather than by looking.
+    m.home()
+    m._step_by(x, y)
+    time.sleep(0.2)
+    m.cursor = (x, y)
+    m.click()
+
+def gop_widget(m, origin, name, mark):
+    deadline = time.time() + 25
+    needle = "[geometry] %s " % name
+    while time.time() < deadline:
+        log = m.read_log()[mark:]
+        at = log.rfind(needle)
+        if at >= 0:
+            x, y, w, h = (int(v) for v in log[at + len(needle):].split("\n", 1)[0].split()[:4])
+            return (origin[0] + x + w // 2, origin[1] + y + h // 2)
+        time.sleep(0.3)
+    raise Failure("Settings never reported where it put %r (log: %s)" % (name, m.save_log("no-geometry")))
+
+def start_glyph_is_at(shot, x, y):
+    r, g, b = (shot.px(x, y) >> 16) & 0xFF, (shot.px(x, y) >> 8) & 0xFF, shot.px(x, y) & 0xFF
+    return b > r + 60 and b > 0x80
+
+def test_display_scale_and_startup_mode_on_a_fixed_mode_screen(m):
+    m.wait_for_marker(desktop_line(1280, 800, 200), timeout=300)
+    time.sleep(4)
+    # The Start button's ring, in desktop pixels: on a doubled desktop it is
+    # drawn twice the size at twice the distance from the corner.
+    glyph = (START_PROBE[0], 800 - (SCREEN_H - START_PROBE[1]))
+    wait_for(m, lambda s: start_glyph_is_at(s, 2 * glyph[0] + 1, 2 * glyph[1] + 1),
+             "the taskbar's Start button is not where a 200% desktop puts it")
+
+    mark = len(m.read_log())
+    m.sendkey("ctrl-spc")
+    time.sleep(0.5)
+    m.type_text("settings")
+    m.sendkey("ret")
+    origin = app_origin(FIRST_APP_IDX)
+    gop_click(m, *gop_widget(m, origin, "pane_display", mark))
+    wait_for_log_after(m, "[settings] showing Display", mark, "Settings did not open its Display pane")
+    shown = mark
+
+    mark = len(m.read_log())
+    gop_click(m, *gop_widget(m, origin, "scale125", shown))
+    wait_for_log_after(m, desktop_line(2048, 1280, 125), mark, "choosing 125% did not rescale the desktop")
+    wait_for_log_after(m, desktop_line(1280, 800, 200), mark, "a scale nobody kept did not go back by itself",
+                       timeout=30.0)
+
+    mark = len(m.read_log())
+    gop_click(m, *gop_widget(m, origin, "scale100", shown))
+    wait_for_log_after(m, desktop_line(2560, 1600, 100), mark, "choosing 100% did not rescale the desktop")
+    wait_for(m, lambda s: start_glyph_is_at(s, glyph[0], 1600 - (800 - glyph[1])),
+             "at 100% the taskbar was not laid out again along the bottom of the full panel")
+    keep = gop_widget(m, origin, "keep", mark)
+    gop_click(m, *keep)
+    wait_for_log_after(m, "[settings] kept scale 100", mark, "Keep did not keep the scale")
+    time.sleep(12)
+    check(desktop_line(1280, 800, 200) not in m.read_log()[mark:],
+          "a scale that was kept went back anyway")
+
+    mark = len(m.read_log())
+    gop_click(m, *gop_widget(m, origin, "startup1920x1200", shown))
+    wait_for_log_after(m, "[display] the next boot starts in video=1920x1200", mark,
+                       "choosing 1920x1200 did not rewrite lean_os.cfg")
+    gop_click(m, *gop_widget(m, origin, "restart", mark))
+    time.sleep(1.0)
+    boots = m.read_log().count(BOOT_MARKER)
+    m.sendkey("y")
+    deadline = time.time() + 300
+    while time.time() < deadline and m.read_log().count(BOOT_MARKER) <= boots:
+        time.sleep(1.0)
+    check(m.read_log().count(BOOT_MARKER) > boots, "Restart Now and a yes did not restart the machine")
+    after = m.read_log().rfind(BOOT_MARKER)
+    wait_for_log_after(m, "[inventory] screen: 1920x1200", m.read_log().rfind("[fwcfg]"),
+                       "the boot after the restart did not start in the mode Settings chose")
+    wait_for_log_after(m, desktop_line(1920, 1200, 100, panel=(1920, 1200)), after,
+                       "the kept scale did not survive the restart", timeout=120.0)
+    shot = m.screenshot()
+    check((shot.width, shot.height) == (1920, 1200),
+          "the screen after the restart is %dx%d, not 1920x1200" % (shot.width, shot.height))
+
 TESTS = [
     ("a_tap_reaches_every_toolkit_control", test_a_tap_reaches_every_toolkit_control),
+    ("display_scale_and_startup_mode_on_a_fixed_mode_screen",
+     test_display_scale_and_startup_mode_on_a_fixed_mode_screen),
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
     ("titlebar_close_button", test_titlebar_close_button),
@@ -2692,6 +2800,7 @@ TESTS = [
 # Tests that need a machine other than the suite's usual one - so a cold
 # boot, since the snapshot was taken of the usual one.
 MACHINE_OPTIONS = {
+    "display_scale_and_startup_mode_on_a_fixed_mode_screen": GOP_MACHINE,
     "trackpad_settings_move_the_pointer": TRACKPAD_MACHINE,
     "wifi_wizard_joins_after_a_wrong_password": WIFI_MACHINE,
     "wifi_remembers_a_network_across_a_reboot": WIFI_MACHINE,
@@ -2795,6 +2904,7 @@ def known_flaky(names):
         return []
 
 COLD_BOOT_TESTS = {
+    "display_scale_and_startup_mode_on_a_fixed_mode_screen",
     "trackpad_settings_move_the_pointer",
     "wifi_wizard_joins_after_a_wrong_password",
     "wifi_remembers_a_network_across_a_reboot",
@@ -2810,6 +2920,8 @@ def run_one(name, fn, boot_timeout, snapshot=None):
     started = time.time()
     try:
         use = None if name in COLD_BOOT_TESTS else snapshot
+        if MACHINE_OPTIONS.get(name, {}).get("image") == GOP_IMAGE:
+            build_gop_image()
         with Machine(boot_timeout=boot_timeout, snapshot=use, **MACHINE_OPTIONS.get(name, {})) as m:
             try:
                 fn(m)

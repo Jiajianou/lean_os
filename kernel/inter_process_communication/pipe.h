@@ -14,6 +14,7 @@ typedef struct pipe {
     int write_closed;
     int readers, writers;
     int persistent;
+    struct pipe *next_free;
 } pipe_t;
 
 pipe_t *pipe_create(void);

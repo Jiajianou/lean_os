@@ -12,8 +12,12 @@
 
 #define AT_LEAST_ONE(n) do { if ((n) == 0) { return 11; } } while (0)
 
-int main(void) {
-    {
+static int wanted(int argc, char **argv, const char *section) {
+    return argc < 2 || strcmp(argv[1], section) == 0;
+}
+
+int main(int argc, char **argv) {
+    if (wanted(argc, argv, "descriptors")) {
         int fd = open("/tmp/exhaust.probe", O_RDWR | O_CREAT | O_TRUNC);
         if (fd < 0) {
             return 10;
@@ -47,7 +51,7 @@ int main(void) {
         unlink("/tmp/exhaust.probe");
     }
 
-    {
+    if (wanted(argc, argv, "pipes")) {
         static int rd[TRY_HARD], wr[TRY_HARD];
         int n = 0;
         for (; n < TRY_HARD; n++) {
@@ -79,7 +83,7 @@ int main(void) {
         close(p[1]);
     }
 
-    {
+    if (wanted(argc, argv, "shm")) {
         static long ids[TRY_HARD];
         static void *addrs[TRY_HARD];
         int n = 0;
@@ -115,7 +119,7 @@ int main(void) {
         }
     }
 
-    {
+    if (wanted(argc, argv, "sockets")) {
         static int socks[TRY_HARD];
         int n = 0;
         for (; n < TRY_HARD; n++) {

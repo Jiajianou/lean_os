@@ -149,6 +149,14 @@ typedef enum {
        menu's Quit, or its answer to a close it was asked to confirm. The
        window goes when the program does, and nobody is told it stopped. */
     WINDOW_MANAGER_ACTION_QUITTING = 20,
+    /* M213: the desktop's scale, in percent of the panel (0 is automatic).
+       It goes back by itself after WINDOW_MANAGER_MODE_REVERT_MS unless
+       CONFIRM_MODE keeps it, exactly as a new resolution does. */
+    WINDOW_MANAGER_ACTION_SET_SCALE = 21,
+    /* M213: open the desktop's own Restart or Shut Down confirmation (value
+       is a POWER_ mode). It asks the person, so a program needs no power
+       capability to send it: nothing happens until somebody says yes. */
+    WINDOW_MANAGER_ACTION_ASK_POWER = 22,
 } window_manager_action_type_t;
 
 static inline int32_t window_manager_pack_pair(uint32_t first, uint32_t second) {

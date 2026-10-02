@@ -284,9 +284,10 @@ def build_snapshot(painted, boot_timeout=300, quiet=False):
 class Machine:
 
     def __init__(self, extra_args=(), quiet=False, boot_timeout=None,
-                 snapshot=None, snapshot_build=None, wired_network=True):
-        if not os.path.exists(IMAGE):
-            raise RuntimeError("no image at %s - run 'make' first" % IMAGE)
+                 snapshot=None, snapshot_build=None, wired_network=True, image=None):
+        image = image or IMAGE
+        if not os.path.exists(image):
+            raise RuntimeError("no image at %s - run 'make' first" % image)
         if not os.path.exists(OVMF_CODE):
             raise RuntimeError("no OVMF at build/ovmf - run tools/build-ovmf.sh")
 
@@ -313,9 +314,9 @@ class Machine:
                            "if=pflash,format=raw,readonly=on,file=" + vars_rt]
             restore_args = [] if snapshot_build else ["-loadvm", SNAPSHOT_TAG]
         else:
-            disk_args = (["-drive", "format=raw,snapshot=on,file=" + IMAGE]
+            disk_args = (["-drive", "format=raw,snapshot=on,file=" + image]
                          if _qemu_disk_kind() == "ide" else
-                         ["-drive", "if=none,id=disk0,format=raw,snapshot=on,file=" + IMAGE,
+                         ["-drive", "if=none,id=disk0,format=raw,snapshot=on,file=" + image,
                           "-device", "virtio-blk-pci,drive=disk0"])
             pflash_vars = ["-drive", "if=pflash,format=raw,file=" + vars_rt]
             restore_args = []

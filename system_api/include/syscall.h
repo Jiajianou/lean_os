@@ -292,7 +292,11 @@ typedef struct {
 /* M209: how a process that is not your child ended, as a wait(2) status -
    which the compositor needs to tell a crash from a program that quit. */
 #define SYS_task_end_status       140
-#define SYSCALL_COUNT 141
+
+/* M213: the display's scale and the mode the next boot starts in - see
+   system_api/include/display.h. */
+#define SYS_display               141
+#define SYSCALL_COUNT 142
 
 #ifdef __cplusplus
 }

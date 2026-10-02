@@ -6,7 +6,9 @@
 #include "architecture/x86_64/symmetric_multiprocessing.h"
 #include "architecture/x86_64/timestamp_counter.h"
 #include "drivers/ac97.h"
+#include "drivers/boot_config.h"
 #include "drivers/dispi.h"
+#include "drivers/display_scale.h"
 #include "drivers/pc_speaker.h"
 #include "drivers/framebuffer.h"
 #include "drivers/keyboard.h"
@@ -2132,9 +2134,12 @@ static long sys_framebuffer_info(uint64_t out_pointer, uint64_t a2, uint64_t a3,
     (void)a5;
     (void)a6;
     window_manager_framebuffer_info_t out;
-    uint32_t scale = a2 == WINDOW_MANAGER_FRAMEBUFFER_PHYSICAL ? 1u : framebuffer_desktop_scale();
-    out.width = framebuffer_width() / scale;
-    out.height = framebuffer_height() / scale;
+    if (a2 == WINDOW_MANAGER_FRAMEBUFFER_PHYSICAL) {
+        out.width = framebuffer_width();
+        out.height = framebuffer_height();
+    } else {
+        framebuffer_desktop_size(&out.width, &out.height);
+    }
     out.pitch = framebuffer_pitch_bytes();
     out.bpp = 32;
     return copy_to_user(out_pointer, &out, sizeof(out));
@@ -4433,6 +4438,75 @@ static long sys_display_set_mode(uint64_t width, uint64_t height, uint64_t a3, u
     return 0;
 }
 
+/* M213: what the screen is, what it could be, and the two choices a person
+   makes about it - see system_api/include/display.h. */
+static long sys_display(uint64_t operation, uint64_t a, uint64_t b, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (operation == DISPLAY_OPERATION_SET_SCALE) {
+        if (!has_cap(CAP_DISPLAY_MODE)) {
+            return -1;
+        }
+        return framebuffer_set_scale_percent((uint32_t)a);
+    }
+    if (operation == DISPLAY_OPERATION_SET_STARTUP_MODE) {
+        if (!has_cap(CAP_DISPLAY_MODE)) {
+            return -1;
+        }
+        return boot_config_set_startup_mode((uint32_t)a, (uint32_t)b);
+    }
+    if (operation != DISPLAY_OPERATION_STATUS || b != sizeof(display_status_t)) {
+        return -1;
+    }
+    display_status_t *status = (display_status_t *)kmalloc(sizeof(display_status_t));
+    if (!status) {
+        return -1;
+    }
+    k_memset(status, 0, sizeof(*status));
+    status->physical_width = framebuffer_width();
+    status->physical_height = framebuffer_height();
+    framebuffer_desktop_size(&status->desktop_width, &status->desktop_height);
+    status->scale_percent = framebuffer_scale_percent();
+    status->scale_requested = framebuffer_scale_requested();
+    status->scale_automatic = display_scale_automatic(status->physical_width, status->physical_height,
+                                                      boot_options_active()->display_scale);
+    status->scale_count = (uint32_t)display_scale_choices(status->physical_width, status->physical_height,
+                                                          status->scales, DISPLAY_SCALES_MAX);
+    status->live_modes = dispi_available() ? 1u : 0u;
+    boot_options_t startup;
+    if (boot_config_startup(&startup) == 0) {
+        status->startup_writable = 1;
+        switch (startup.video_selection) {
+        case BOOT_VIDEO_LARGEST:
+            status->startup_selection = DISPLAY_STARTUP_LARGEST;
+            break;
+        case BOOT_VIDEO_EXACT:
+            status->startup_selection = DISPLAY_STARTUP_EXACT;
+            status->startup_width = startup.video_width;
+            status->startup_height = startup.video_height;
+            break;
+        case BOOT_VIDEO_FIRMWARE:
+            status->startup_selection = DISPLAY_STARTUP_FIRMWARE;
+            break;
+        default:
+            status->startup_selection = DISPLAY_STARTUP_BUILT_IN;
+            break;
+        }
+    }
+    const boot_options_t *options = boot_options_active();
+    uint32_t offered = options->offered_count < DISPLAY_FIRMWARE_MODES_MAX ? options->offered_count
+                                                                          : DISPLAY_FIRMWARE_MODES_MAX;
+    for (uint32_t i = 0; i < offered; i++) {
+        status->firmware_modes[i].width = options->offered[i][0];
+        status->firmware_modes[i].height = options->offered[i][1];
+    }
+    status->firmware_mode_count = offered;
+    long result = copy_to_user(a, status, sizeof(*status));
+    kfree(status);
+    return result;
+}
+
 static int file_descriptor_is_ready(task_t *self, int fd) {
     if (fd < 0 || fd >= MAX_FILE_DESCRIPTORS) {
         return 0;
@@ -5642,6 +5716,7 @@ static const syscall_function_t syscall_table[SYSCALL_COUNT] = {
     [SYS_audio_play] = sys_audio_play,
     [SYS_display_modes] = sys_display_modes,
     [SYS_display_set_mode] = sys_display_set_mode,
+    [SYS_display] = sys_display,
     [SYS_socket] = sys_socket,
     [SYS_bind] = sys_bind,
     [SYS_sendto] = sys_sendto,

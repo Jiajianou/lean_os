@@ -1,6 +1,7 @@
 #include "dispi.h"
 
 #include "architecture/x86_64/io.h"
+#include "device/fwcfg.h"
 #include "kernel_log.h"
 
 #define DISPI_IOPORT_INDEX 0x01CE
@@ -61,6 +62,25 @@ void dispi_init(void) {
     available = 0;
     mode_count = 0;
     vram_bytes = 0;
+
+    /* M213. A laptop's panel has no mode-setting interface after the boot
+       loader leaves, and the paths that serve it - scaling and a mode chosen
+       for the next boot - are graded under QEMU by hiding this one from
+       outside the image. */
+    char display_switch[16];
+    int switch_length = fwcfg_read_file("opt/leanos/display", display_switch, sizeof(display_switch) - 1);
+    if (switch_length == 8) {
+        static const char firmware[] = "firmware";
+        int same = 1;
+        for (int i = 0; i < 8; i++) {
+            same &= display_switch[i] == firmware[i];
+        }
+        if (same) {
+            kernel_log_puts("[dispi] opt/leanos/display=firmware - the adapter is left as the firmware set it, "
+                            "as on a machine with no mode-setting interface.\n");
+            return;
+        }
+    }
 
     uint16_t id = dispi_read(DISPI_INDEX_ID);
     if (id < DISPI_ID0 || id > DISPI_ID5) {

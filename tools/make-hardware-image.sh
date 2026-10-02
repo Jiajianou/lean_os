@@ -9,6 +9,9 @@ VIDEO="native"
 INTERRUPTS=""
 CPUS=""
 LOG_SECTORS=49152
+SCALE=""
+WIRELESS_FIRMWARE=1
+CONFIG_BYTES=2048
 
 usage() {
   cat >&2 <<'USAGE'
@@ -23,10 +26,15 @@ suite is measured against its 1024x768 framebuffer.
   --interrupts pic|ioapic           default: unset, which means the I/O APIC
                                     on a machine with no QEMU fw_cfg device
   --cpus <n>                        default: unset, which means every one
+  --scale 1|2|auto                  default: unset, which is auto - a panel
+                                    of 2560x1440 or more is doubled. Settings
+                                    can choose any scale while it runs.
   --log-mib <n>                     size of \LOGS\LEANOS.LOG, the file the
                                     kernel writes its log into; default 24,
                                     0 for none. tools/read-usb-log.sh reads it.
   --output <path>                   default: build/os-image-hardware.bin
+  --no-wireless-firmware            leave Intel's firmware out (the QEMU
+                                    harnesses, which have no such card)
 USAGE
   exit 1
 }
@@ -36,6 +44,8 @@ while [ $# -gt 0 ]; do
     --video) VIDEO="$2"; shift 2 ;;
     --interrupts) INTERRUPTS="$2"; shift 2 ;;
     --cpus) CPUS="$2"; shift 2 ;;
+    --scale) SCALE="$2"; shift 2 ;;
+    --no-wireless-firmware) WIRELESS_FIRMWARE=0; shift ;;
     --log-mib) LOG_SECTORS=$(( $2 * 2048 )); shift 2 ;;
     --output) OUTPUT="$2"; shift 2 ;;
     *) usage ;;
@@ -79,6 +89,7 @@ fi
   echo "video=$VIDEO"
   [ -n "$INTERRUPTS" ] && echo "interrupts=$INTERRUPTS"
   [ -n "$CPUS" ] && echo "cpus=$CPUS"
+  [ -n "$SCALE" ] && echo "scale=$SCALE"
   if [ -n "$LOG_OPTION" ]; then
     echo "# \\LOGS\\LEANOS.LOG, as sectors of this disk. Found by the image tool;"
     echo "# the kernel refuses to write there unless the file's header is there."
@@ -87,23 +98,30 @@ fi
   true
 } > "$CONFIG"
 
+# M213: the file is a fixed run of sectors that names itself with config=,
+# so Settings can change the mode the next boot starts in without a FAT driver.
+python3 tools/boot-config.py --pad "$CONFIG" "$CONFIG_BYTES"
 mcopy -i "$ESP" -o "$CONFIG" ::EFI/BOOT/lean_os.cfg
+CONFIG_LBA=$(python3 tools/boot-config.py --place "$OUTPUT" "$ESP_START_LBA" "$ESP_SECTORS" "$CONFIG")
+mcopy -i "$ESP" -o ::EFI/BOOT/lean_os.cfg "$CONFIG"
 
 # M206: Intel's firmware for the laptop's wireless card, which cannot run
 # without it. Only the hardware image carries it - QEMU has no such device -
 # and it goes in /lib/firmware, where kernel/drivers/intel_wireless.c looks,
 # beside the licence it is redistributed under.
-tools/fetch-wifi-firmware.sh >/dev/null || { echo "make-hardware-image: could not fetch the wireless firmware" >&2; exit 1; }
-FIRMWARE_STAGE=build/firmware-stage
-rm -rf "$FIRMWARE_STAGE"
-mkdir -p "$FIRMWARE_STAGE"
-cp build/firmware/iwlwifi-*.ucode build/firmware/LICENCE.iwlwifi_firmware "$FIRMWARE_STAGE/"
-[ -x build/leanfs-put ] || make -s leanfs-put || exit 1
-build/leanfs-put -r "$OUTPUT" "$FIRMWARE_STAGE" /lib/firmware >/dev/null || { echo "make-hardware-image: could not write /lib/firmware" >&2; exit 1; }
-echo "Wrote /lib/firmware: $(ls "$FIRMWARE_STAGE" | tr '\n' ' ')"
+if [ "$WIRELESS_FIRMWARE" = 1 ]; then
+  tools/fetch-wifi-firmware.sh >/dev/null || { echo "make-hardware-image: could not fetch the wireless firmware" >&2; exit 1; }
+  FIRMWARE_STAGE=build/firmware-stage
+  rm -rf "$FIRMWARE_STAGE"
+  mkdir -p "$FIRMWARE_STAGE"
+  cp build/firmware/iwlwifi-*.ucode build/firmware/LICENCE.iwlwifi_firmware "$FIRMWARE_STAGE/"
+  [ -x build/leanfs-put ] || make -s leanfs-put || exit 1
+  build/leanfs-put -r "$OUTPUT" "$FIRMWARE_STAGE" /lib/firmware >/dev/null || { echo "make-hardware-image: could not write /lib/firmware" >&2; exit 1; }
+  echo "Wrote /lib/firmware: $(ls "$FIRMWARE_STAGE" | tr '\n' ' ')"
+fi
 
-echo "Wrote \\EFI\\BOOT\\lean_os.cfg:"
-sed 's/^/    /' "$CONFIG"
+echo "Wrote \\EFI\\BOOT\\lean_os.cfg (sectors $CONFIG_LBA+$(( CONFIG_BYTES / 512 ))):"
+sed -e '/^$/d' -e 's/^/    /' "$CONFIG"
 echo
 echo "$OUTPUT is $(wc -c < "$OUTPUT") bytes."
 echo "Write it to the whole disk of the machine it is for - not to a partition."

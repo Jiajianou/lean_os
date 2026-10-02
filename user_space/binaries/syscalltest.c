@@ -125,6 +125,7 @@ static const entry_t table[] = {
     {SYS_thread_detach, CLASS_PLAIN, 0, NULL},
     {SYS_task_end_status, CLASS_PLAIN, 0, NULL},
     {SYS_wireless,      CLASS_PLAIN, 0, NULL},
+    {SYS_display,       CLASS_PLAIN, 0, NULL},
     {SYS_idle_ticks,    CLASS_PLAIN, 0, NULL},
     {SYS_yield,         CLASS_PLAIN, 0, NULL},
     {SYS_task_alive,    CLASS_PLAIN, 0, NULL},
@@ -294,6 +295,15 @@ int main(void) {
         check(sys_raw(SYS_wireless, WIRELESS_OPERATION_STATUS, (long)bad_ptrs[p], 0) < 0,
               "the wireless status was written through an address this program does not own", SYS_wireless);
     }
+
+    for (int p = 0; p < N_BAD_PTRS; p++) {
+        check(sys_raw(SYS_display, DISPLAY_OPERATION_STATUS, (long)bad_ptrs[p], (long)sizeof(display_status_t)) < 0,
+              "the display status was written through an address this program does not own", SYS_display);
+    }
+    check(sys_raw(SYS_display, DISPLAY_OPERATION_SET_SCALE, 150, 0) < 0,
+          "a program without display-mode changed the desktop's scale", SYS_display);
+    check(sys_raw(SYS_display, DISPLAY_OPERATION_SET_STARTUP_MODE, 800, 600) < 0,
+          "a program without display-mode rewrote the boot configuration", SYS_display);
 
     check(sys_raw(SYS_write, 1, (long)scratch, (long)HUGE_LENGTH) < 0,
           "a length that overflows its base was accepted", SYS_write);

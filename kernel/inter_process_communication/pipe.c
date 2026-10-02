@@ -12,11 +12,41 @@ static spinlock_t pipe_lock;
 #define PIPE_DATA_CHAN(p)  ((const void *)(p))
 #define PIPE_SPACE_CHAN(p) ((const void *)&(p)->count)
 
-pipe_t *pipe_create(void) {
-    pipe_t *p = (pipe_t *)kmalloc(sizeof(pipe_t));
-    if (!p) {
-        return (pipe_t *)0;
+/* M213. A pipe whose last reader and last writer have both gone was never
+   given back: every pipe(2) since the first one kept its buffer for good,
+   about three kilobytes a pair, which [q9] measured as 403 frames each time
+   491 pairs were made and closed. They are kept on this list and handed out
+   again rather than returned to the heap, so the memory stays a pipe - a
+   thread still asleep on one whose descriptor another thread closed wakes to
+   a pipe, never to whatever the heap gave the space to next. */
+static pipe_t *free_pipes;
+
+static void pipe_initialise(pipe_t *p);
+
+/* With pipe_lock held - pipe_named calls this under it. The heap has its
+   own lock and never takes this one, so allocating here cannot deadlock. */
+static pipe_t *pipe_create_locked(void) {
+    pipe_t *p = free_pipes;
+    if (p) {
+        free_pipes = p->next_free;
+    } else {
+        p = (pipe_t *)kmalloc(sizeof(pipe_t));
     }
+    if (p) {
+        pipe_initialise(p);
+    }
+    return p;
+}
+
+pipe_t *pipe_create(void) {
+    uint64_t f = spin_lock_irqsave(&pipe_lock);
+    pipe_t *p = pipe_create_locked();
+    spin_unlock_irqrestore(&pipe_lock, f);
+    return p;
+}
+
+static void pipe_initialise(pipe_t *p) {
+    p->next_free = (pipe_t *)0;
     p->head = 0;
     p->tail = 0;
     p->count = 0;
@@ -25,7 +55,15 @@ pipe_t *pipe_create(void) {
     p->readers = 1;
     p->writers = 1;
     p->persistent = 0;
-    return p;
+}
+
+static void pipe_recycle(pipe_t *p) {
+    uint64_t f = spin_lock_irqsave(&pipe_lock);
+    if (p->readers == 0 && p->writers == 0 && !p->persistent) {
+        p->next_free = free_pipes;
+        free_pipes = p;
+    }
+    spin_unlock_irqrestore(&pipe_lock, f);
 }
 
 void pipe_reference_read(pipe_t *p) {
@@ -61,10 +99,14 @@ void pipe_unref_read(pipe_t *p) {
         p->read_closed = 1;
         closed = 1;
     }
+    int unused = p->readers == 0 && p->writers == 0;
     spin_unlock_irqrestore(&pipe_lock, f);
     if (closed) {
         scheduler_wake_all(PIPE_SPACE_CHAN(p));
         scheduler_wake_object(p);
+    }
+    if (closed && unused) {
+        pipe_recycle(p);
     }
 }
 
@@ -83,10 +125,14 @@ void pipe_unref_write(pipe_t *p) {
         p->write_closed = 1;
         closed = 1;
     }
+    int unused = p->readers == 0 && p->writers == 0;
     spin_unlock_irqrestore(&pipe_lock, f);
     if (closed) {
         scheduler_wake_all(PIPE_DATA_CHAN(p));
         scheduler_wake_object(p);
+    }
+    if (closed && unused) {
+        pipe_recycle(p);
     }
 }
 
@@ -171,7 +217,7 @@ pipe_t *pipe_named(const char *name) {
         spin_unlock_irqrestore(&pipe_lock, f);
         return (pipe_t *)0;
     }
-    pipe_t *p = pipe_create();
+    pipe_t *p = pipe_create_locked();
     if (!p) {
         spin_unlock_irqrestore(&pipe_lock, f);
         return (pipe_t *)0;

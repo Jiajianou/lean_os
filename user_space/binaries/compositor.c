@@ -218,27 +218,69 @@ static int resize_hit_mask(const window_t *win, int32_t px, int32_t py) {
 
 static window_manager_framebuffer_info_t framebuffer_info;
 static window_manager_framebuffer_info_t physical_info;
-static uint32_t display_scale = 1;
+static uint32_t display_scale_percent = 100;
 static uint32_t *real_framebuffer;
 static uint32_t framebuffer_pitch_pixels;
 
+/* M213: where each desktop column and row starts on the panel, for a scale
+   that is not a whole number - at 150% a desktop pixel is alternately one
+   and two panel pixels wide. */
+#define SCALED_MAXIMUM 8192
+static uint32_t scaled_column_start[SCALED_MAXIMUM + 1];
+static uint32_t scaled_row_start[SCALED_MAXIMUM + 1];
+static uint32_t scaled_row[SCALED_MAXIMUM];
+
+static int format_uint(uint32_t value, char *out);
+
+static void append_text(char *message, int *m, const char *text) {
+    for (int i = 0; text[i]; i++) {
+        message[(*m)++] = text[i];
+    }
+}
+
+static void report_display(void) {
+    char message[96];
+    int m = 0;
+    append_text(message, &m, "[compositor] the desktop is ");
+    m += format_uint(framebuffer_info.width, message + m);
+    append_text(message, &m, "x");
+    m += format_uint(framebuffer_info.height, message + m);
+    append_text(message, &m, " on a ");
+    m += format_uint(physical_info.width, message + m);
+    append_text(message, &m, "x");
+    m += format_uint(physical_info.height, message + m);
+    append_text(message, &m, " panel, at ");
+    m += format_uint(display_scale_percent, message + m);
+    append_text(message, &m, "%\n");
+    sys_write(1, message, (size_t)m);
+}
+
 /* Everything here - windows, the cursor, the back buffer - is in DESKTOP
    pixels, the size the kernel tells every program the screen is. The real
-   framebuffer is display_scale times that along each axis, and present() is
-   the one place the two meet. */
+   framebuffer is display_scale_percent of that along each axis, and
+   present() is the one place the two meet. */
 static int read_display_modes(void) {
     if (sys_framebuffer_info(&framebuffer_info) != 0 ||
         sys_framebuffer_info_physical(&physical_info) != 0 ||
         framebuffer_info.width == 0 || framebuffer_info.height == 0) {
         return -1;
     }
-    display_scale = physical_info.width / framebuffer_info.width;
-    if (display_scale < 1 || display_scale > 2 ||
-        framebuffer_info.height * display_scale > physical_info.height) {
-        display_scale = 1;
+    display_scale_percent = physical_info.width * 100u / framebuffer_info.width;
+    if (display_scale_percent < 100 || physical_info.width > SCALED_MAXIMUM ||
+        physical_info.height > SCALED_MAXIMUM ||
+        framebuffer_info.width * display_scale_percent / 100u != physical_info.width ||
+        framebuffer_info.height * display_scale_percent / 100u != physical_info.height) {
+        display_scale_percent = 100;
         framebuffer_info = physical_info;
     }
+    for (uint32_t x = 0; x <= framebuffer_info.width; x++) {
+        scaled_column_start[x] = x * display_scale_percent / 100u;
+    }
+    for (uint32_t y = 0; y <= framebuffer_info.height; y++) {
+        scaled_row_start[y] = y * display_scale_percent / 100u;
+    }
     framebuffer_pitch_pixels = physical_info.pitch / (uint32_t)sizeof(uint32_t);
+    report_display();
     return 0;
 }
 
@@ -247,6 +289,8 @@ static uint32_t back_pitch_pixels;
 static long back_shared_memory_id = -1;
 
 static uint32_t mode_previous_w, mode_previous_h;
+static uint32_t mode_previous_scale;
+static uint32_t scale_requested;
 static long mode_revert_at_ms;
 
 #define ANIM_MS         140
@@ -586,7 +630,7 @@ static inline void put_pixel_clipped(int32_t x, int32_t y, uint32_t color) {
 }
 
 static void present(void) {
-    if (display_scale == 1) {
+    if (display_scale_percent == 100) {
         for (int32_t y = clip_y0; y < clip_y1; y++) {
             memcpy(&real_framebuffer[(uint32_t)y * framebuffer_pitch_pixels + (uint32_t)clip_x0],
                    &back_buffer[(uint32_t)y * back_pitch_pixels + (uint32_t)clip_x0],
@@ -594,18 +638,39 @@ static void present(void) {
         }
         return;
     }
-    /* Each desktop pixel becomes a 2x2 block, written as one 64-bit store to
-       each of the two rows it covers. The framebuffer is write-combining
-       memory and is only ever written: reading a row back to copy it would
-       cost more than building it twice. */
+    if (display_scale_percent == 200) {
+        /* Each desktop pixel becomes a 2x2 block, written as one 64-bit store
+           to each of the two rows it covers. The framebuffer is
+           write-combining memory and is only ever written: reading a row back
+           to copy it would cost more than building it twice. */
+        for (int32_t y = clip_y0; y < clip_y1; y++) {
+            const uint32_t *source = &back_buffer[(uint32_t)y * back_pitch_pixels];
+            uint64_t *top = (uint64_t *)&real_framebuffer[(uint32_t)(2 * y) * framebuffer_pitch_pixels];
+            uint64_t *bottom = (uint64_t *)&real_framebuffer[(uint32_t)(2 * y + 1) * framebuffer_pitch_pixels];
+            for (int32_t x = clip_x0; x < clip_x1; x++) {
+                uint64_t pair = (uint64_t)source[x] | ((uint64_t)source[x] << 32);
+                top[x] = pair;
+                bottom[x] = pair;
+            }
+        }
+        return;
+    }
+    /* Any other scale: the row is built once in ordinary memory, each desktop
+       pixel repeated across the panel columns it covers, then copied to each
+       panel row it covers - for the same reason as above. */
+    uint32_t left = scaled_column_start[clip_x0];
+    uint32_t right = scaled_column_start[clip_x1];
     for (int32_t y = clip_y0; y < clip_y1; y++) {
         const uint32_t *source = &back_buffer[(uint32_t)y * back_pitch_pixels];
-        uint64_t *top = (uint64_t *)&real_framebuffer[(uint32_t)(2 * y) * framebuffer_pitch_pixels];
-        uint64_t *bottom = (uint64_t *)&real_framebuffer[(uint32_t)(2 * y + 1) * framebuffer_pitch_pixels];
         for (int32_t x = clip_x0; x < clip_x1; x++) {
-            uint64_t pair = (uint64_t)source[x] | ((uint64_t)source[x] << 32);
-            top[x] = pair;
-            bottom[x] = pair;
+            uint32_t pixel = source[x];
+            for (uint32_t column = scaled_column_start[x]; column < scaled_column_start[x + 1]; column++) {
+                scaled_row[column - left] = pixel;
+            }
+        }
+        for (uint32_t row = scaled_row_start[y]; row < scaled_row_start[y + 1]; row++) {
+            memcpy(&real_framebuffer[row * framebuffer_pitch_pixels + left], scaled_row,
+                   (size_t)(right - left) * sizeof(uint32_t));
         }
     }
 }
@@ -2644,14 +2709,10 @@ static void anim_window_close(int idx) {
     anim_start(ANIM_CLOSE, x, y, w, h, x + w / 4, y + h / 4, w / 2, h / 2);
 }
 
-static int apply_display_mode(uint32_t w, uint32_t h) {
-    if ((w == framebuffer_info.width && h == framebuffer_info.height) ||
-        (w == physical_info.width && h == physical_info.height)) {
-        return 0;
-    }
-    if (sys_display_set_mode(w, h) != 0) {
-        return -1;
-    }
+/* Whatever the kernel now says the screen is - a new mode, a new scale, or
+   both - becomes the back buffer, the cursor's bounds and every window's
+   news. */
+static int adopt_display(void) {
     if (read_display_modes() != 0) {
         return -1;
     }
@@ -2667,8 +2728,6 @@ static int apply_display_mode(uint32_t w, uint32_t h) {
         if (new_id >= 0) {
             sys_shared_memory_free(new_id, (void *)0);
         }
-        sys_display_set_mode(mode_previous_w ? mode_previous_w : (uint32_t)back_pitch_pixels, h);
-        read_display_modes();
         return -1;
     }
     if (back_shared_memory_id >= 0) {
@@ -2695,6 +2754,33 @@ static int apply_display_mode(uint32_t w, uint32_t h) {
     }
     dirty = 1;
     return 0;
+}
+
+static int apply_display_mode(uint32_t w, uint32_t h) {
+    if (w == physical_info.width && h == physical_info.height) {
+        return 0;
+    }
+    if (sys_display_set_mode(w, h) != 0) {
+        return -1;
+    }
+    return adopt_display();
+}
+
+static int apply_display_scale(uint32_t percent) {
+    if (sys_display_set_scale(percent) != 0) {
+        return -1;
+    }
+    scale_requested = percent;
+    return adopt_display();
+}
+
+static void remember_display_for_revert(void) {
+    if (mode_revert_at_ms == 0) {
+        mode_previous_w = physical_info.width;
+        mode_previous_h = physical_info.height;
+        mode_previous_scale = scale_requested;
+    }
+    mode_revert_at_ms = sys_uptime_ms() + WINDOW_MANAGER_MODE_REVERT_MS;
 }
 
 static void clamp_window_on_screen(int idx) {
@@ -2816,7 +2902,8 @@ static void accept_one_action(int action_read_file_descriptor) {
         return;
     }
     if (request.action == WINDOW_MANAGER_ACTION_SET_MODE) {
-        uint32_t previous_w = framebuffer_info.width, previous_h = framebuffer_info.height;
+        uint32_t previous_w = physical_info.width, previous_h = physical_info.height;
+        uint32_t previous_scale = scale_requested;
         if (apply_display_mode(window_manager_mode_width(request.value), window_manager_mode_height(request.value)) != 0) {
             toast_post(WINDOW_MANAGER_NOTIFY_ERROR, "Display unchanged",
                         "The adapter refused that resolution");
@@ -2825,8 +2912,27 @@ static void accept_one_action(int action_read_file_descriptor) {
         if (mode_revert_at_ms == 0) {
             mode_previous_w = previous_w;
             mode_previous_h = previous_h;
+            mode_previous_scale = previous_scale;
         }
         mode_revert_at_ms = sys_uptime_ms() + WINDOW_MANAGER_MODE_REVERT_MS;
+        return;
+    }
+    if (request.action == WINDOW_MANAGER_ACTION_ASK_POWER) {
+        if (request.value == POWER_REBOOT || request.value == POWER_OFF) {
+            launcher_set_open(1);
+            power_confirm = request.value;
+            dirty = 1;
+        }
+        return;
+    }
+    if (request.action == WINDOW_MANAGER_ACTION_SET_SCALE) {
+        uint32_t percent = (uint32_t)request.value;
+        remember_display_for_revert();
+        if (apply_display_scale(percent) != 0) {
+            toast_post(WINDOW_MANAGER_NOTIFY_ERROR, "Display unchanged",
+                        "That scale does not divide this screen");
+            return;
+        }
         return;
     }
     if (request.action == WINDOW_MANAGER_ACTION_CONFIRM_MODE) {
@@ -3729,14 +3835,22 @@ int main(void) {
 
     {
         uint32_t saved_w = 0, saved_h = 0;
+        int changed = 0;
         if (settings_file_load_display(&saved_w, &saved_h) &&
-            (saved_w != framebuffer_info.width || saved_h != framebuffer_info.height)) {
-            if (sys_display_set_mode(saved_w, saved_h) == 0) {
-                read_display_modes();
-                long remapped = sys_framebuffer_map();
-                if (remapped >= 0) {
-                    real_framebuffer = (uint32_t *)remapped;
-                }
+            (saved_w != physical_info.width || saved_h != physical_info.height)) {
+            changed |= sys_display_set_mode(saved_w, saved_h) == 0;
+        }
+        uint32_t saved_scale = 0;
+        if (settings_file_load_display_scale(&saved_scale) && saved_scale != 0 &&
+            sys_display_set_scale(saved_scale) == 0) {
+            scale_requested = saved_scale;
+            changed = 1;
+        }
+        if (changed) {
+            read_display_modes();
+            long remapped = sys_framebuffer_map();
+            if (remapped >= 0) {
+                real_framebuffer = (uint32_t *)remapped;
             }
         }
     }
@@ -3858,7 +3972,11 @@ int main(void) {
         if (mode_revert_at_ms != 0 && now >= mode_revert_at_ms) {
             uint32_t w = mode_previous_w, h = mode_previous_h;
             mode_revert_at_ms = 0;
-            if (apply_display_mode(w, h) == 0) {
+            int restored = apply_display_mode(w, h) == 0;
+            if (scale_requested != mode_previous_scale) {
+                restored = apply_display_scale(mode_previous_scale) == 0 && restored;
+            }
+            if (restored) {
                 toast_post(WINDOW_MANAGER_NOTIFY_WARN, "Display reverted",
                             "Nobody confirmed the new resolution");
             }

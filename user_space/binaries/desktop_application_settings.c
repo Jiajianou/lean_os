@@ -9,6 +9,7 @@
 #include "os_file_system.h"
 #include "os_network.h"
 #include "paths.h"
+#include "power_mode.h"
 #include "settings_file.h"
 #include "shortcuts.h"
 #include "spawn_error.h"
@@ -105,6 +106,23 @@ static display_mode_t modes[DISPLAY_MAX_MODES];
 static int mode_count;
 static long confirm_until_ms;
 
+/* M213: the screen as the kernel describes it, and what is waiting to be kept
+   or put back. A scale and a live mode both go back by themselves after ten
+   seconds; a mode for the next boot waits for a restart instead. */
+typedef enum {
+    PENDING_NONE = 0,
+    PENDING_MODE,
+    PENDING_SCALE,
+} pending_display_t;
+
+static display_status_t display_status;
+static int display_status_known;
+static pending_display_t pending_display;
+static uint32_t pending_previous_width, pending_previous_height, pending_previous_scale;
+static uint32_t pending_scale;
+static display_mode_t startup_modes[DISPLAY_FIRMWARE_MODES_MAX];
+static int startup_mode_count;
+
 static int rebuild_pending;
 static settings_pane_t active_pane = PANE_GENERAL;
 
@@ -127,6 +145,12 @@ static lv_obj_t *trackpad_scroll_slider;
 static lv_obj_t *trackpad_scroll_label;
 static lv_obj_t *tap_switch;
 static lv_obj_t *mode_choices[DISPLAY_MAX_MODES];
+static lv_obj_t *scale_choices[DISPLAY_SCALES_MAX];
+static lv_obj_t *startup_choices[DISPLAY_FIRMWARE_MODES_MAX];
+static lv_obj_t *restart_row;
+static lv_obj_t *restart_label;
+static lv_obj_t *restart_button;
+static lv_obj_t *revert_button;
 static lv_obj_t *confirm_row;
 static lv_obj_t *keep_button;
 static lv_obj_t *volume_slider;
@@ -396,13 +420,42 @@ static void refresh_clipboard_label(void) {
     lv_label_set_text(clipboard_label, buffer);
 }
 
+static void refresh_display_status(void) {
+    display_status_known = sys_display_status(&display_status) == 0;
+}
+
+static void describe_display(char *out, size_t capacity) {
+    if (!display_status_known) {
+        window_manager_framebuffer_info_t framebuffer_info;
+        if (sys_framebuffer_info(&framebuffer_info) == 0) {
+            snprintf(out, capacity, "%u x %u", (unsigned)framebuffer_info.width, (unsigned)framebuffer_info.height);
+        } else {
+            snprintf(out, capacity, "unknown");
+        }
+        return;
+    }
+    if (display_status.scale_percent == 100) {
+        snprintf(out, capacity, "%u x %u", (unsigned)display_status.physical_width,
+                 (unsigned)display_status.physical_height);
+    } else {
+        snprintf(out, capacity, "%u x %u at %u%%, looks like %u x %u", (unsigned)display_status.physical_width,
+                 (unsigned)display_status.physical_height, (unsigned)display_status.scale_percent,
+                 (unsigned)display_status.desktop_width, (unsigned)display_status.desktop_height);
+    }
+}
+
 static void refresh_display_size_label(void) {
     window_manager_framebuffer_info_t framebuffer_info;
-    char text[32];
     if (!display_size_label || sys_framebuffer_info(&framebuffer_info) != 0) {
         return;
     }
-    snprintf(text, sizeof(text), "%u x %u", (unsigned)framebuffer_info.width, (unsigned)framebuffer_info.height);
+    if (display_status_known && framebuffer_info.width == display_status.desktop_width &&
+        framebuffer_info.height == display_status.desktop_height) {
+        return;
+    }
+    refresh_display_status();
+    char text[80];
+    describe_display(text, sizeof(text));
     lv_label_set_text(display_size_label, text);
 }
 
@@ -465,10 +518,13 @@ static void on_tick(lv_timer_t *timer) {
         long left_ms = confirm_until_ms - sys_uptime_ms();
         if (left_ms <= 0) {
             confirm_until_ms = 0;
+            pending_display = PENDING_NONE;
             lv_obj_add_flag(confirm_row, LV_OBJ_FLAG_HIDDEN);
+            request_rebuild();
         } else {
-            char text[40];
-            snprintf(text, sizeof(text), "Keep this size? %ds", (int)(left_ms / 1000) + 1);
+            char text[48];
+            snprintf(text, sizeof(text), "Keep this %s? Going back in %ds",
+                     pending_display == PENDING_SCALE ? "scale" : "size", (int)(left_ms / 1000) + 1);
             lv_label_set_text(confirm_label, text);
         }
     }
@@ -637,22 +693,149 @@ static void on_clipboard_clear(lv_event_t *event) {
     refresh_clipboard_label();
 }
 
+static void begin_confirmation(pending_display_t kind) {
+    if (pending_display == PENDING_NONE) {
+        pending_previous_width = display_status.physical_width;
+        pending_previous_height = display_status.physical_height;
+        pending_previous_scale = display_status.scale_requested;
+    }
+    pending_display = kind;
+    confirm_until_ms = sys_uptime_ms() + WINDOW_MANAGER_MODE_REVERT_MS;
+    if (confirm_row) {
+        lv_obj_remove_flag(confirm_row, LV_OBJ_FLAG_HIDDEN);
+        lvgl_window_report_geometry("keep", keep_button);
+        lvgl_window_report_geometry("revert", revert_button);
+    }
+}
+
 static void on_mode_choice(lv_event_t *event) {
     int index = (int)(intptr_t)lv_event_get_user_data(event);
+    begin_confirmation(PENDING_MODE);
     window_manager_set_display_mode(modes[index].width, modes[index].height);
-    confirm_until_ms = sys_uptime_ms() + WINDOW_MANAGER_MODE_REVERT_MS;
-    lv_obj_remove_flag(confirm_row, LV_OBJ_FLAG_HIDDEN);
-    lvgl_window_report_geometry("keep", keep_button);
+    for (int i = 0; i < mode_count; i++) {
+        lvgl_theme_choice_select(mode_choices[i], i == index);
+    }
+    printf("[settings] resolution %ux%u\n", (unsigned)modes[index].width, (unsigned)modes[index].height);
+}
+
+static void on_scale_choice(lv_event_t *event) {
+    int index = (int)(intptr_t)lv_event_get_user_data(event);
+    uint32_t percent = display_status.scales[index];
+    begin_confirmation(PENDING_SCALE);
+    pending_scale = percent;
+    window_manager_set_display_scale(percent);
+    for (int i = 0; i < (int)display_status.scale_count; i++) {
+        lvgl_theme_choice_select(scale_choices[i], i == index);
+    }
+    printf("[settings] scale %u\n", (unsigned)percent);
+}
+
+static void finish_confirmation(void) {
+    confirm_until_ms = 0;
+    pending_display = PENDING_NONE;
+    if (confirm_row) {
+        lv_obj_add_flag(confirm_row, LV_OBJ_FLAG_HIDDEN);
+    }
+    request_rebuild();
 }
 
 static void on_mode_keep(lv_event_t *event) {
     (void)event;
     window_manager_confirm_display_mode();
-    confirm_until_ms = 0;
-    lv_obj_add_flag(confirm_row, LV_OBJ_FLAG_HIDDEN);
-    window_manager_framebuffer_info_t framebuffer_info;
-    if (sys_framebuffer_info(&framebuffer_info) == 0) {
-        settings_file_save_display(framebuffer_info.width, framebuffer_info.height);
+    if (pending_display == PENDING_SCALE) {
+        settings_file_save_display_scale(pending_scale);
+        printf("[settings] kept scale %u\n", (unsigned)pending_scale);
+    } else {
+        refresh_display_status();
+        if (display_status_known) {
+            settings_file_save_display(display_status.physical_width, display_status.physical_height);
+        }
+        printf("[settings] kept resolution\n");
+    }
+    finish_confirmation();
+}
+
+static void on_mode_revert(lv_event_t *event) {
+    (void)event;
+    if (pending_display == PENDING_SCALE) {
+        window_manager_set_display_scale(pending_previous_scale);
+    } else if (pending_display == PENDING_MODE) {
+        window_manager_set_display_mode(pending_previous_width, pending_previous_height);
+    }
+    window_manager_confirm_display_mode();
+    printf("[settings] put the display back\n");
+    finish_confirmation();
+}
+
+static void startup_description(char *out, size_t capacity, int *differs);
+
+static int startup_mode_is_chosen(int index) {
+    const display_mode_t *mode = &startup_modes[index];
+    switch (display_status.startup_selection) {
+    case DISPLAY_STARTUP_LARGEST:
+        return index == 0;
+    case DISPLAY_STARTUP_EXACT:
+        return mode->width == display_status.startup_width && mode->height == display_status.startup_height;
+    case DISPLAY_STARTUP_BUILT_IN:
+        return mode->width == 1024 && mode->height == 768;
+    default:
+        return 0;
+    }
+}
+
+static void on_startup_choice(lv_event_t *event) {
+    int index = (int)(intptr_t)lv_event_get_user_data(event);
+    uint32_t width = index == 0 ? 0 : startup_modes[index].width;
+    uint32_t height = index == 0 ? 0 : startup_modes[index].height;
+    if (sys_display_set_startup_mode(width, height) != 0) {
+        window_manager_notify(WINDOW_MANAGER_NOTIFY_ERROR, "Display",
+                              "The boot disk's lean_os.cfg could not be changed.");
+        return;
+    }
+    refresh_display_status();
+    for (int i = 0; i < startup_mode_count; i++) {
+        lvgl_theme_choice_select(startup_choices[i], i == index);
+    }
+    char text[96];
+    int differs = 0;
+    startup_description(text, sizeof(text), &differs);
+    lv_label_set_text(restart_label, text);
+    if (differs) {
+        lv_obj_remove_flag(restart_button, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(restart_button, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_remove_flag(restart_row, LV_OBJ_FLAG_HIDDEN);
+    lvgl_window_report_geometry("restart", restart_button);
+    printf("[settings] startup mode %ux%u\n", (unsigned)startup_modes[index].width,
+           (unsigned)startup_modes[index].height);
+}
+
+static void on_restart(lv_event_t *event) {
+    (void)event;
+    window_manager_ask_power(POWER_REBOOT);
+}
+
+/* The modes the firmware offered, biggest first and each once - the first
+   is what video=native picks, so it is the one called the panel's own. */
+static void collect_startup_modes(void) {
+    startup_mode_count = 0;
+    for (uint32_t i = 0; i < display_status.firmware_mode_count; i++) {
+        display_mode_t mode = display_status.firmware_modes[i];
+        int seen = 0;
+        for (int j = 0; j < startup_mode_count; j++) {
+            seen |= startup_modes[j].width == mode.width && startup_modes[j].height == mode.height;
+        }
+        if (seen || mode.width == 0 || mode.height == 0) {
+            continue;
+        }
+        int at = startup_mode_count++;
+        while (at > 0 && (uint64_t)startup_modes[at - 1].width * startup_modes[at - 1].height <
+                             (uint64_t)mode.width * mode.height) {
+            startup_modes[at] = startup_modes[at - 1];
+            at--;
+        }
+        startup_modes[at] = mode;
     }
 }
 
@@ -732,12 +915,8 @@ static void build_general(void) {
     fact(card, "Processor", text);
     format_memory(text, sizeof(text));
     memory_label = fact(card, "Memory", text);
-    window_manager_framebuffer_info_t framebuffer_info;
-    if (sys_framebuffer_info(&framebuffer_info) == 0) {
-        snprintf(text, sizeof(text), "%u x %u", (unsigned)framebuffer_info.width, (unsigned)framebuffer_info.height);
-    } else {
-        snprintf(text, sizeof(text), "unknown");
-    }
+    refresh_display_status();
+    describe_display(text, sizeof(text));
     display_size_label = fact(card, "Display", text);
     os_statvfs_t disk;
     if (sys_statvfs("/", &disk) == 0) {
@@ -873,54 +1052,137 @@ static void build_wallpaper(void) {
     select_wallpaper_tiles();
 }
 
-static void build_display(void) {
-    page_title("Display", "The size of the screen the desktop draws on.");
-    lv_obj_t *card = lvgl_theme_card(page, "RESOLUTION");
-    window_manager_framebuffer_info_t framebuffer_info;
-    char text[32];
-    if (sys_framebuffer_info(&framebuffer_info) == 0) {
-        snprintf(text, sizeof(text), "%u x %u", (unsigned)framebuffer_info.width, (unsigned)framebuffer_info.height);
-    } else {
-        snprintf(text, sizeof(text), "unknown");
-    }
-    display_size_label = fact(card, "Now", text);
-
-    if (mode_count == 0) {
-        wrap_caption(card, "This display cannot be resized after boot.");
-        confirm_row = plain(card);
-        lv_obj_add_flag(confirm_row, LV_OBJ_FLAG_HIDDEN);
-        confirm_label = lvgl_theme_caption(confirm_row, "");
-        keep_button = 0;
-        return;
-    }
+static lv_obj_t *choice_grid(lv_obj_t *card) {
     lv_obj_t *grid = plain(card);
     lv_obj_set_width(grid, LV_PCT(100));
     lv_obj_set_height(grid, LV_SIZE_CONTENT);
     lv_obj_set_style_pad_row(grid, 8, LV_PART_MAIN);
     lv_obj_set_style_pad_column(grid, 8, LV_PART_MAIN);
     lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
-    window_manager_framebuffer_info_t now;
-    int have_now = sys_framebuffer_info(&now) == 0;
-    for (int i = 0; i < mode_count; i++) {
-        snprintf(text, sizeof(text), "%ux%u", (unsigned)modes[i].width, (unsigned)modes[i].height);
-        mode_choices[i] = lvgl_theme_choice(grid, text);
-        lvgl_theme_choice_select(mode_choices[i],
-                                 have_now && now.width == modes[i].width && now.height == modes[i].height);
-        lv_obj_add_event_cb(mode_choices[i], on_mode_choice, LV_EVENT_CLICKED, (void *)(intptr_t)i);
-    }
+    return grid;
+}
+
+/* Under the screen's size, at the top of the pane, because the choice it
+   asks about may be a long way down a list of thirty modes. */
+static void build_confirm_row(lv_obj_t *card) {
     confirm_row = lvgl_theme_row(card, 0);
-    keep_button = lvgl_theme_button(confirm_row, "Keep", 1);
-    lv_obj_add_event_cb(keep_button, on_mode_keep, LV_EVENT_CLICKED, 0);
     confirm_label = lvgl_theme_value(confirm_row, "Keep this size?");
     lv_obj_set_flex_grow(confirm_label, 1);
+    revert_button = lvgl_theme_button(confirm_row, "Revert", 0);
+    lv_obj_add_event_cb(revert_button, on_mode_revert, LV_EVENT_CLICKED, 0);
+    keep_button = lvgl_theme_button(confirm_row, "Keep", 1);
+    lv_obj_add_event_cb(keep_button, on_mode_keep, LV_EVENT_CLICKED, 0);
     if (confirm_until_ms == 0) {
         lv_obj_add_flag(confirm_row, LV_OBJ_FLAG_HIDDEN);
     }
-    wrap_caption(card, "A new size goes back by itself after ten seconds unless you keep it, so a size the "
-                       "screen cannot show is never stuck.");
-    card = lvgl_theme_card(page, "SCALING");
-    wrap_caption(card, "Scaling is chosen as the machine starts, by scale= in \\EFI\\BOOT\\lean_os.cfg on the boot "
-                       "disk: a panel of 2560x1440 or more is doubled unless that line says otherwise.");
+}
+
+static void startup_description(char *out, size_t capacity, int *differs) {
+    uint32_t width = display_status.startup_width;
+    uint32_t height = display_status.startup_height;
+    if (display_status.startup_selection == DISPLAY_STARTUP_LARGEST && startup_mode_count > 0) {
+        width = startup_modes[0].width;
+        height = startup_modes[0].height;
+    } else if (display_status.startup_selection != DISPLAY_STARTUP_EXACT) {
+        *differs = 0;
+        out[0] = '\0';
+        return;
+    }
+    *differs = width != display_status.physical_width || height != display_status.physical_height;
+    if (*differs) {
+        snprintf(out, capacity, "The screen will be %u x %u after a restart.", (unsigned)width, (unsigned)height);
+    } else {
+        snprintf(out, capacity, "The screen stays %u x %u.", (unsigned)width, (unsigned)height);
+    }
+}
+
+/* Beside the confirmation and for the same reason: a mode for the next boot
+   is chosen far down the list, and the restart it needs belongs where the
+   screen's size is. */
+static void build_restart_row(lv_obj_t *card) {
+    restart_row = lvgl_theme_row(card, 0);
+    restart_label = lvgl_theme_value(restart_row, "");
+    lv_obj_set_flex_grow(restart_label, 1);
+    lv_label_set_long_mode(restart_label, LV_LABEL_LONG_WRAP);
+    restart_button = lvgl_theme_button(restart_row, "Restart Now", 1);
+    lv_obj_add_event_cb(restart_button, on_restart, LV_EVENT_CLICKED, 0);
+    char text[96];
+    int differs = 0;
+    if (mode_count == 0 && display_status_known && display_status.startup_writable) {
+        collect_startup_modes();
+        startup_description(text, sizeof(text), &differs);
+    }
+    if (differs) {
+        lv_label_set_text(restart_label, text);
+    } else {
+        lv_obj_add_flag(restart_row, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void build_display(void) {
+    refresh_display_status();
+    page_title("Display", "How big everything looks, and the mode the screen runs in.");
+    lv_obj_t *card = lvgl_theme_card(page, "THIS SCREEN");
+    char text[96];
+    describe_display(text, sizeof(text));
+    display_size_label = fact(card, "Now", text);
+    build_confirm_row(card);
+    build_restart_row(card);
+
+    card = lvgl_theme_card(page, "SCALE");
+    if (display_status_known && display_status.scale_count > 1) {
+        lv_obj_t *grid = choice_grid(card);
+        for (int i = 0; i < (int)display_status.scale_count; i++) {
+            uint32_t percent = display_status.scales[i];
+            snprintf(text, sizeof(text), "%u%%%s\n%u x %u", (unsigned)percent,
+                     percent == display_status.scale_automatic ? " (default)" : "",
+                     (unsigned)(display_status.physical_width * 100u / percent),
+                     (unsigned)(display_status.physical_height * 100u / percent));
+            scale_choices[i] = lvgl_theme_choice(grid, text);
+            lv_obj_set_height(scale_choices[i], LV_SIZE_CONTENT);
+            lv_obj_set_style_pad_ver(scale_choices[i], 6, LV_PART_MAIN);
+            lv_obj_set_style_text_align(scale_choices[i], LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+            lvgl_theme_choice_select(scale_choices[i], percent == display_status.scale_percent);
+            lv_obj_add_event_cb(scale_choices[i], on_scale_choice, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        }
+        wrap_caption(card, "A bigger scale makes text, icons and windows larger; a smaller one fits more on the "
+                           "screen. The number under each is the size of the desktop it gives.");
+    } else {
+        wrap_caption(card, "This screen is shown one to one. A screen with more pixels can be scaled up here, "
+                           "so text stays a readable size.");
+    }
+
+    card = lvgl_theme_card(page, "RESOLUTION");
+    if (mode_count > 0) {
+        lv_obj_t *grid = choice_grid(card);
+        for (int i = 0; i < mode_count; i++) {
+            snprintf(text, sizeof(text), "%ux%u", (unsigned)modes[i].width, (unsigned)modes[i].height);
+            mode_choices[i] = lvgl_theme_choice(grid, text);
+            lvgl_theme_choice_select(mode_choices[i], display_status_known &&
+                                                          display_status.physical_width == modes[i].width &&
+                                                          display_status.physical_height == modes[i].height);
+            lv_obj_add_event_cb(mode_choices[i], on_mode_choice, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        }
+        wrap_caption(card, "A new size or scale goes back by itself after ten seconds unless you keep it, so one "
+                           "the screen cannot show is never stuck.");
+    } else if (display_status_known && display_status.startup_writable) {
+        collect_startup_modes();
+        lv_obj_t *grid = choice_grid(card);
+        for (int i = 0; i < startup_mode_count; i++) {
+            snprintf(text, sizeof(text), i == 0 ? "%ux%u (native)" : "%ux%u", (unsigned)startup_modes[i].width,
+                     (unsigned)startup_modes[i].height);
+            startup_choices[i] = lvgl_theme_choice(grid, text);
+            lvgl_theme_choice_select(startup_choices[i], startup_mode_is_chosen(i));
+            lv_obj_add_event_cb(startup_choices[i], on_startup_choice, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        }
+        wrap_caption(card, "This screen's mode is set by the firmware as the machine starts, so a new one is "
+                           "written to the boot disk and used from the next restart. The native mode is the "
+                           "sharpest; scale it up above rather than choosing a smaller one.");
+    } else {
+        wrap_caption(card, "This screen's mode is set by the firmware as the machine starts, by video= in "
+                           "\\EFI\\BOOT\\lean_os.cfg on the boot disk - and this boot disk's copy cannot be "
+                           "changed from here.");
+    }
 }
 
 static void build_sound(void) {
@@ -1451,6 +1713,15 @@ static void report_geometry(void) {
             snprintf(name, sizeof(name), "mode%d", i);
             lvgl_window_report_geometry(name, mode_choices[i]);
         }
+        for (int i = 0; i < DISPLAY_SCALES_MAX && scale_choices[i]; i++) {
+            snprintf(name, sizeof(name), "scale%u", (unsigned)display_status.scales[i]);
+            lvgl_window_report_geometry(name, scale_choices[i]);
+        }
+        for (int i = 0; i < startup_mode_count && startup_choices[i]; i++) {
+            snprintf(name, sizeof(name), "startup%ux%u", (unsigned)startup_modes[i].width,
+                     (unsigned)startup_modes[i].height);
+            lvgl_window_report_geometry(name, startup_choices[i]);
+        }
         lvgl_window_report_geometry("keep", keep_button);
     } else if (active_pane == PANE_SOUND) {
         lvgl_window_report_geometry("volume", volume_slider);
@@ -1489,6 +1760,9 @@ static void forget_pane_objects(void) {
     trackpad_speed_slider = trackpad_speed_label = trackpad_acceleration_slider = trackpad_acceleration_label = 0;
     trackpad_natural_switch = trackpad_scroll_slider = trackpad_scroll_label = tap_switch = 0;
     memset(mode_choices, 0, sizeof(mode_choices));
+    memset(scale_choices, 0, sizeof(scale_choices));
+    memset(startup_choices, 0, sizeof(startup_choices));
+    restart_row = restart_label = restart_button = revert_button = 0;
     confirm_row = keep_button = volume_slider = motion_switch = confirm_label = 0;
     volume_value_label = clipboard_label = clock_label = date_label = uptime_label = memory_label = 0;
     display_size_label = speed_slider = speed_value_label = natural_switch = swap_switch = 0;

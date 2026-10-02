@@ -126,6 +126,12 @@ long sys_display_modes(display_mode_t *out, long max);
 
 long sys_display_set_mode(uint32_t width, uint32_t height);
 
+long sys_display_status(display_status_t *out);
+
+long sys_display_set_scale(uint32_t percent);
+
+long sys_display_set_startup_mode(uint32_t width, uint32_t height);
+
 long sys_open(const char *path, uint32_t flags);
 long sys_lseek(int fd, long offset, int whence);
 long sys_stat(const char *path, os_stat_t *out);

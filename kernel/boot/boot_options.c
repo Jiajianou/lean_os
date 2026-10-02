@@ -52,6 +52,8 @@ void boot_options_defaults(boot_options_t *options) {
     options->log_lba = 0;
     options->log_sectors = 0;
     options->display_scale = 0;
+    options->config_lba = 0;
+    options->config_sectors = 0;
 }
 
 static void apply_video(const char *text, uint32_t start, uint32_t end, boot_options_t *options) {
@@ -123,6 +125,31 @@ static void apply_scale(const char *text, uint32_t start, uint32_t end, boot_opt
     options->display_scale = value;
 }
 
+static int parse_extent(const char *text, uint32_t start, uint32_t end, uint32_t *lba, uint32_t *sectors) {
+    uint32_t cursor = start;
+    *lba = parse_number(text, &cursor, end);
+    if (cursor == start || cursor >= end || text[cursor] != '+') {
+        return 0;
+    }
+    cursor++;
+    uint32_t sectors_start = cursor;
+    *sectors = parse_number(text, &cursor, end);
+    return cursor != sectors_start && cursor == end && *lba != 0;
+}
+
+/* M213: config=<lba>+<sectors> names this file's own sectors, so the kernel -
+   which has no FAT driver - can rewrite a line of it in place. */
+static void apply_config(const char *text, uint32_t start, uint32_t end, boot_options_t *options) {
+    uint32_t lba = 0;
+    uint32_t sectors = 0;
+    if (!parse_extent(text, start, end, &lba, &sectors) || sectors == 0 || sectors > 8) {
+        options->unknown_keys++;
+        return;
+    }
+    options->config_lba = lba;
+    options->config_sectors = sectors;
+}
+
 static void apply_log(const char *text, uint32_t start, uint32_t end, boot_options_t *options) {
     uint32_t cursor = start;
     uint32_t lba = parse_number(text, &cursor, end);
@@ -161,6 +188,10 @@ static void apply_pair(const char *text, uint32_t key_start, uint32_t key_end,
     }
     if (token_equals(text, key_start, key_end, "log")) {
         apply_log(text, value_start, value_end, options);
+        return;
+    }
+    if (token_equals(text, key_start, key_end, "config")) {
+        apply_config(text, value_start, value_end, options);
         return;
     }
     options->unknown_keys++;
@@ -275,6 +306,8 @@ void boot_options_set_active(const boot_options_t *handoff) {
     active_options.log_lba = handoff->log_lba;
     active_options.log_sectors = handoff->log_sectors;
     active_options.display_scale = handoff->display_scale <= 2 ? handoff->display_scale : 0;
+    active_options.config_lba = handoff->config_lba;
+    active_options.config_sectors = handoff->config_sectors <= 8 ? handoff->config_sectors : 0;
     if (active_options.offered_count > BOOT_OFFERED_MODES_MAX) {
         active_options.offered_count = BOOT_OFFERED_MODES_MAX;
     }
