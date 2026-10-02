@@ -815,3 +815,39 @@ TEST(leanfs, a_file_changed_in_any_way_reports_a_generation_it_never_had) {
     }
     fake_block_device_free();
 }
+
+TEST(leanfs, a_folder_cannot_be_moved_inside_itself) {
+    fs_fixture();
+    CHECK_EQ(leanfs_mkdir("/outer"), 0);
+    CHECK_EQ(leanfs_mkdir("/outer/middle"), 0);
+    CHECK_EQ(leanfs_mkdir("/outer/middle/inner"), 0);
+    CHECK_EQ(leanfs_write("/outer/middle/inner/keep", "kept", 4), 0);
+    CHECK_EQ(leanfs_rename("/outer", "/outer/moved"), -1);
+    CHECK_EQ(leanfs_rename("/outer", "/outer/middle/inner/moved"), -1);
+    CHECK_EQ(leanfs_rename_replace("/outer", "/outer/middle/moved"), -1);
+    CHECK(leanfs_exists("/outer/middle/inner/keep"));
+    char back[8] = {0};
+    CHECK_EQ(leanfs_read("/outer/middle/inner/keep", back, 4), 4);
+    CHECK_MEMEQ(back, "kept", 4);
+}
+
+TEST(leanfs, a_folder_still_moves_beside_and_below_its_siblings) {
+    fs_fixture();
+    CHECK_EQ(leanfs_mkdir("/outer"), 0);
+    CHECK_EQ(leanfs_mkdir("/outer/inner"), 0);
+    CHECK_EQ(leanfs_mkdir("/sibling"), 0);
+    CHECK_EQ(leanfs_rename("/outer", "/sibling/outer"), 0);
+    CHECK(leanfs_exists("/sibling/outer/inner"));
+    CHECK_EQ(leanfs_rename("/sibling/outer/inner", "/inner"), 0);
+    CHECK(leanfs_exists("/inner"));
+    CHECK(!leanfs_exists("/sibling/outer/inner"));
+}
+
+TEST(leanfs, a_folder_can_take_the_name_of_its_own_child_somewhere_else) {
+    fs_fixture();
+    CHECK_EQ(leanfs_mkdir("/a"), 0);
+    CHECK_EQ(leanfs_mkdir("/a/a"), 0);
+    CHECK_EQ(leanfs_rename("/a/a", "/b"), 0);
+    CHECK_EQ(leanfs_rename("/a", "/b/a"), 0);
+    CHECK(leanfs_exists("/b/a"));
+}

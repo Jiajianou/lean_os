@@ -100,6 +100,17 @@ void fake_user_fs_reset(void);
 int fake_user_fs_mkdir(const char *guest);
 int fake_user_fs_write(const char *guest, size_t bytes);
 int fake_user_fs_exists(const char *guest);
+int fake_user_fs_write_text(const char *guest, const char *text);
+int fake_user_fs_read_text(const char *guest, char *out, size_t capacity);
+int fake_user_fs_symlink(const char *target, const char *guest);
+int fake_user_fs_open_count(void);
+
+#define FAKE_USER_FS_FIRST_DESCRIPTOR 1000
+int fake_user_fs_owns(int fd);
+long fake_user_fs_read(int fd, void *buffer, size_t length);
+long fake_user_fs_write_descriptor(int fd, const void *buffer, size_t length);
+long fake_user_fs_close(int fd);
+extern long fake_user_fs_write_limit;
 
 #define FAKE_DNS_SILENT   0
 #define FAKE_DNS_ANSWER   1

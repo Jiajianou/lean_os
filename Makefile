@@ -84,11 +84,12 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
                 $(UOBJ)/libc_iconv.o $(UOBJ)/libc_iconv_tables.o $(UOBJ)/libc_wallclock.o \
                 $(UOBJ)/libc_readyfds.o \
                 $(UOBJ)/sha256.o $(UOBJ)/os_package.o $(UOBJ)/file_system_utilities.o \
+                $(UOBJ)/file_browser.o $(UOBJ)/time_format.o \
                 $(UOBJ)/setjmp.o $(UOBJ)/symbol_table.o $(UOBJ)/crtn.o
 
 THIRD_PARTY_PROGRAMS := whetstone
 
-USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor file_manager wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest os pkgtest dirtest browsertest netrecv unixtest epolltest memfdtest posixtest basetest browser popuptest
+USER_PROGRAMS := hello echo cat cp ls audiograb libctest netconf nettime nettest tcptest racetest console nslookup fetch httpd caps captest init sh memtest fonttest compositor wm_demo gui_clock gui_paint desktop_shell desktop_icons gui_terminal text_editor wm_stubborn wm_zorder wm_faulter wm_crash badptr shutdown reboot env envtest sigtest treewalk mmaptest threadtest lazytest vmtest forktest exectest jobtest syscalltest profile proftest oomtest futextest fswriter ptytest exhausttest measure faulttest os pkgtest dirtest browsertest netrecv unixtest epolltest memfdtest posixtest basetest browser popuptest
 USER_PROGRAMS += $(THIRD_PARTY_PROGRAMS)
 
 LVGL_PROGRAMS := desktop_applications
@@ -180,7 +181,8 @@ LVGL_PORT_OBJS := $(UOBJ)/lvgl_leanos.o $(UOBJ)/lvgl_keys.o $(UOBJ)/lvgl_theme.o
 DESKTOP_APPLICATION_OBJS := $(UOBJ)/desktop_application_settings.o \
                             $(UOBJ)/desktop_application_task_manager.o \
                             $(UOBJ)/desktop_application_widgets.o \
-                            $(UOBJ)/desktop_application_wireless.o
+                            $(UOBJ)/desktop_application_wireless.o \
+                            $(UOBJ)/desktop_application_files.o
 
 # Not in USER_PROGRAMS: the reference table is 12,840 values and the kernel
 # incbins every embedded program, so this one is installed onto the image by
@@ -737,7 +739,8 @@ TEST_KERNEL_SRCS := kernel/library/kernel_library.c kernel/memory_management/hea
 
 TEST_USER_SRCS := user_space/library/symbol_table.c \
                   user_space/library/sha256.c user_space/library/os_package.c \
-                  user_space/library/file_system_utilities.c user_space/library/dns.c \
+                  user_space/library/file_system_utilities.c user_space/library/file_browser.c user_space/library/time_format.c \
+                  user_space/library/dns.c \
                   user_space/library/graphics.c user_space/library/font8x16.c \
                   user_space/library/user_interface_font.c \
                   user_space/library/icons.c user_space/library/icon_draw.c \
@@ -840,7 +843,7 @@ mutate:
 
 FUZZ_BUILD  := $(BUILD)/fuzz
 FUZZ_CC     := $(LLVM_CC)
-FUZZ_CFLAGS := -std=c11 -g -O1 -Wall -Wextra \
+FUZZ_CFLAGS := -std=c11 -g -O1 -Wall -Wextra -DLEANOS_HOST_TEST \
                -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
                -Itests -Itests/fakes -Ikernel -Isystem_api/include
 FUZZ_FAKES  := tests/fakes/fake_panic_abort.c tests/fakes/fake_klog.c \
@@ -849,17 +852,24 @@ FUZZ_FAKES  := tests/fakes/fake_panic_abort.c tests/fakes/fake_klog.c \
                tests/fakes/fake_rtc.c tests/fakes/fake_net.c \
                tests/fakes/fake_pit.c tests/fakes/fake_socket.c \
               tests/fakes/fake_fwcfg.c tests/fakes/fake_pci.c \
-              tests/fakes/fake_arch.c tests/fakes/fake_kernel_objects.c
+              tests/fakes/fake_arch.c tests/fakes/fake_kernel_objects.c \
+              tests/fakes/fake_wireless_glue.c tests/fakes/fake_framebuffer.c
+# The fuzzers drive the network parsers and leanfs. The drivers below reach
+# hardware through shims that only their own unit tests define, and the
+# console draws with a font the fuzzers never link; none of them is a parser.
+FUZZ_KERNEL_SRCS := $(filter-out kernel/drivers/designware_i2c.c kernel/drivers/intel_wireless.c \
+                                 kernel/drivers/intel_wireless_transport.c kernel/drivers/console.c, \
+                                 $(TEST_KERNEL_SRCS))
 FUZZ_TARGETS := $(FUZZ_BUILD)/fuzz_net $(FUZZ_BUILD)/fuzz_leanfs
 
 $(FUZZ_BUILD):
 	mkdir -p $@
 
-$(FUZZ_BUILD)/fuzz_net: tests/fuzz/fuzz_net.c $(FUZZ_FAKES) $(TEST_KERNEL_SRCS) | $(FUZZ_BUILD)
-	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_FAKES) $(TEST_KERNEL_SRCS)
+$(FUZZ_BUILD)/fuzz_net: tests/fuzz/fuzz_net.c $(FUZZ_FAKES) $(FUZZ_KERNEL_SRCS) | $(FUZZ_BUILD)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_FAKES) $(FUZZ_KERNEL_SRCS)
 
-$(FUZZ_BUILD)/fuzz_leanfs: tests/fuzz/fuzz_leanfs.c $(FUZZ_FAKES) $(TEST_KERNEL_SRCS) | $(FUZZ_BUILD)
-	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_FAKES) $(TEST_KERNEL_SRCS)
+$(FUZZ_BUILD)/fuzz_leanfs: tests/fuzz/fuzz_leanfs.c $(FUZZ_FAKES) $(FUZZ_KERNEL_SRCS) | $(FUZZ_BUILD)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_FAKES) $(FUZZ_KERNEL_SRCS)
 
 fuzz: $(FUZZ_TARGETS)
 	@echo "fuzz targets built with $(FUZZ_CC)"

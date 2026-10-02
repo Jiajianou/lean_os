@@ -74,7 +74,17 @@ static void report_pci_device(const pci_device_t *device, void *context) {
     kernel_log_putc('\n');
 }
 
-static void put_cpu_brand(void) {
+static int cpu_supports_brand_string(void) {
+    uint32_t a = 0x80000000u, b = 0, c = 0, d = 0;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+    return a >= 0x80000004u;
+}
+
+int hardware_inventory_cpu_brand(char out[HARDWARE_INVENTORY_BRAND_MAX]) {
+    out[0] = '\0';
+    if (!cpu_supports_brand_string()) {
+        return 0;
+    }
     uint32_t brand[13];
     for (uint32_t leaf = 0; leaf < 3; leaf++) {
         uint32_t a = 0x80000002u + leaf, b = 0, c = 0, d = 0;
@@ -90,13 +100,22 @@ static void put_cpu_brand(void) {
     while (*text == ' ') {
         text++;
     }
-    kernel_log_puts(text);
+    int n = 0;
+    while (text[n] && n < HARDWARE_INVENTORY_BRAND_MAX - 1) {
+        out[n] = text[n];
+        n++;
+    }
+    while (n > 0 && out[n - 1] == ' ') {
+        n--;
+    }
+    out[n] = '\0';
+    return n;
 }
 
-static int cpu_supports_brand_string(void) {
-    uint32_t a = 0x80000000u, b = 0, c = 0, d = 0;
-    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
-    return a >= 0x80000004u;
+static void put_cpu_brand(void) {
+    char brand[HARDWARE_INVENTORY_BRAND_MAX];
+    hardware_inventory_cpu_brand(brand);
+    kernel_log_puts(brand);
 }
 
 void hardware_inventory_report(void) {

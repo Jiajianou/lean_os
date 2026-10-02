@@ -6,6 +6,7 @@
 #define UI_FONT        ui_font_ui
 #define UI_FONT_HEIGHT UI_FONT_UI_HEIGHT
 #include "graphics.h"
+#include "pointer_settings.h"
 #include "power_mode.h"
 #include "spawn_error.h"
 #include "settings_file.h"
@@ -275,6 +276,14 @@ typedef struct {
 static anim_t anims[ANIM_MAX];
 static int animations_enabled = 1;
 static uint32_t audio_volume = 70;
+static uint32_t pointer_speed = WINDOW_MANAGER_POINTER_SPEED_DEFAULT;
+static uint32_t natural_scrolling;
+static uint32_t swap_buttons;
+static uint32_t clock_24_hour = 1;
+static int32_t utc_offset_minutes;
+static uint32_t restore_windows = 1;
+static int32_t pointer_remainder_x;
+static int32_t pointer_remainder_y;
 static long frame_due_ms;
 static int frame_settle_owed;
 static uint32_t frames_over_budget;
@@ -2880,6 +2889,12 @@ static void accept_pending_settings(int settings_read_file_descriptor) {
     wallpaper_id = request.wallpaper;
     animations_enabled = request.animations != 0;
     audio_volume = request.volume > 100 ? 100 : request.volume;
+    pointer_speed = pointer_settings_clamp_speed(request.pointer_speed);
+    natural_scrolling = request.natural_scrolling != 0;
+    swap_buttons = request.swap_buttons != 0;
+    clock_24_hour = request.clock_24_hour != 0;
+    utc_offset_minutes = request.utc_offset_minutes;
+    restore_windows = request.restore_windows != 0;
     sys_audio_volume(audio_volume);
     dirty = 1;
 }
@@ -2926,6 +2941,12 @@ static void accept_pending_settings_query(int query_read_file_descriptor, int qu
     response.bg_color = bg_color;
     response.accent_color = accent_color;
     response.wallpaper = wallpaper_id;
+    response.pointer_speed = pointer_speed;
+    response.natural_scrolling = natural_scrolling;
+    response.swap_buttons = swap_buttons;
+    response.clock_24_hour = clock_24_hour;
+    response.utc_offset_minutes = utc_offset_minutes;
+    response.restore_windows = restore_windows;
     sys_write(query_response_write_file_descriptor, &response, sizeof(response));
 }
 
@@ -2943,8 +2964,10 @@ static void focus_window_under_cursor(void) {
 static void handle_mouse(void) {
     mouse_event_t mev;
     while (sys_mouse_read(&mev)) {
-        cursor_x += mev.dx;
-        cursor_y += mev.dy;
+        mev.buttons = pointer_settings_buttons(mev.buttons, swap_buttons);
+        mev.wheel = pointer_settings_wheel(mev.wheel, natural_scrolling);
+        cursor_x += pointer_settings_scale(mev.dx, pointer_speed, &pointer_remainder_x);
+        cursor_y += pointer_settings_scale(mev.dy, pointer_speed, &pointer_remainder_y);
         if (cursor_x < 0) {
             cursor_x = 0;
         }
@@ -3684,6 +3707,7 @@ int main(void) {
 
     {
         window_manager_settings_request_t saved;
+        settings_file_defaults(&saved);
         saved.volume = audio_volume;
         saved.animations = (uint32_t)animations_enabled;
         saved.bg_color = bg_color;
@@ -3697,6 +3721,17 @@ int main(void) {
             wallpaper_id = saved.wallpaper;
             animations_enabled = saved.animations != 0;
             audio_volume = saved.volume > 100 ? 100 : saved.volume;
+        }
+        pointer_speed = pointer_settings_clamp_speed(saved.pointer_speed);
+        natural_scrolling = saved.natural_scrolling != 0;
+        swap_buttons = saved.swap_buttons != 0;
+        clock_24_hour = saved.clock_24_hour != 0;
+        utc_offset_minutes = saved.utc_offset_minutes;
+        restore_windows = saved.restore_windows != 0;
+        if (!restore_windows && session_relaunch) {
+            session_relaunch = 0;
+            static const char message[] = "[wm] session: reopening windows is turned off in Settings\n";
+            sys_write(1, message, sizeof(message) - 1);
         }
         sys_audio_claim();
         sys_audio_volume(audio_volume);

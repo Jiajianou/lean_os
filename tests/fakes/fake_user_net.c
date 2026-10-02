@@ -133,7 +133,9 @@ long sys_bind(int fd, uint16_t port) {
 }
 
 long sys_close(int fd) {
-    (void)fd;
+    if (fake_user_fs_owns(fd)) {
+        return fake_user_fs_close(fd);
+    }
     socket_open = 0;
     return 0;
 }

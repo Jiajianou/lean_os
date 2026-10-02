@@ -4,6 +4,7 @@
 #include "architecture/x86_64/symmetric_multiprocessing.h"
 
 #include "drivers/pit.h"
+#include "drivers/hardware_inventory.h"
 #include "drivers/kernel_log.h"
 #include "library/kernel_library.h"
 #include "memory_management/heap.h"
@@ -302,14 +303,19 @@ static void generate(process_file_t *f, int kind, int pid) {
        a program that wants to know how many processors there are counts
        the lines beginning "processor", and sysconf(_SC_NPROCESSORS_ONLN)
        in this libc is one of them.
-       There is one field because there is one question. A vendor_id or a
-       model name here would be a field nobody on this machine reads, and
-       the moment something does read one it can be added along with the
-       reader. */
+       The model name arrived with its reader: Settings' General pane says
+       which processor this is (M210). A vendor_id would still be a field
+       nobody here reads. */
     case P_CPUINFO: {
+        char brand[HARDWARE_INVENTORY_BRAND_MAX];
+        int named = hardware_inventory_cpu_brand(brand) > 0;
         for (int c = 0; c < smp_cpu_count && c < MAX_CPUS; c++) {
             at = put_string(f->buffer, at, cap, "processor\t: ");
             at = put_dec(f->buffer, at, cap, (uint64_t)c);
+            if (named) {
+                at = put_string(f->buffer, at, cap, "\nmodel name\t: ");
+                at = put_string(f->buffer, at, cap, brand);
+            }
             at = put_string(f->buffer, at, cap, "\n\n");
         }
         break;

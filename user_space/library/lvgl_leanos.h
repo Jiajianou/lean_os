@@ -12,6 +12,10 @@ struct lvgl_window;
 
 typedef int (*lvgl_key_handler_t)(struct lvgl_window *window, uint32_t ch, uint32_t mods);
 
+typedef int (*lvgl_event_handler_t)(struct lvgl_window *window, const window_manager_event_t *event);
+
+#define LVGL_WHEEL_STEP 48
+
 typedef struct lvgl_window {
     window_manager_window_t window;
     lv_display_t *display;
@@ -34,6 +38,7 @@ typedef struct lvgl_window {
     int should_close;
     int confirm_close;
     lvgl_key_handler_t key_handler;
+    lvgl_event_handler_t event_handler;
     void *user_data;
 } lvgl_window_t;
 
@@ -42,6 +47,12 @@ int lvgl_window_open(uint32_t width, uint32_t height, const char *title, lvgl_wi
 int lvgl_window_open_confirm_close(uint32_t width, uint32_t height, const char *title, lvgl_window_t *out);
 
 void lvgl_window_set_key_handler(lvgl_window_t *window, lvgl_key_handler_t handler);
+
+void lvgl_window_set_event_handler(lvgl_window_t *window, lvgl_event_handler_t handler);
+
+lv_obj_t *lvgl_window_object_at(int32_t x, int32_t y);
+
+int lvgl_window_scroll_at(int32_t x, int32_t y, int32_t wheel);
 
 void lvgl_window_report_geometry(const char *name, lv_obj_t *object);
 

@@ -1529,6 +1529,50 @@ uint32_t leanfs_nlink(const char *path) {
     return inodes[idx].nlink;
 }
 
+static int directory_next(int idx, uint32_t *cookie, leanfs_directory_entry_t *out);
+
+#define LEANFS_RENAME_DEPTH 64
+
+/* M210: a directory moved under itself leaves the old parent and becomes a
+   child of its own descendant - a loop no path reaches, and every byte in it
+   lost while it still counts against the disk. leanfs keeps no parent
+   pointers, so the only way to ask "is this inside that" is to walk the
+   subtree being moved; a tree deeper than the walk is refused rather than
+   guessed about. */
+static int directory_within(int candidate, int ancestor) {
+    if (candidate == ancestor) {
+        return 1;
+    }
+    int stack[LEANFS_RENAME_DEPTH];
+    uint32_t cookies[LEANFS_RENAME_DEPTH];
+    int depth = 1;
+    stack[0] = ancestor;
+    cookies[0] = 0;
+    while (depth > 0) {
+        leanfs_directory_entry_t entry;
+        int top = depth - 1;
+        int got = directory_next(stack[top], &cookies[top], &entry);
+        if (got < 0) {
+            return 1;
+        }
+        if (got == 0) {
+            depth--;
+            continue;
+        }
+        int child = (int)entry.inode;
+        if (!directory_ok(child)) {
+            continue;
+        }
+        if (child == candidate || depth == LEANFS_RENAME_DEPTH) {
+            return 1;
+        }
+        stack[depth] = child;
+        cookies[depth] = 0;
+        depth++;
+    }
+    return 0;
+}
+
 int leanfs_rename(const char *old_path, const char *new_path) {
     int old_parent, new_parent;
     char old_leaf[LEANFS_MAX_NAME + 1];
@@ -1539,6 +1583,9 @@ int leanfs_rename(const char *old_path, const char *new_path) {
     }
     int idx = directory_lookup(old_parent, old_leaf);
     if (!inode_valid(idx)) {
+        return -1;
+    }
+    if (directory_ok(idx) && directory_within(new_parent, idx)) {
         return -1;
     }
     if (inode_valid(directory_lookup(new_parent, new_leaf))) {
@@ -1625,6 +1672,9 @@ int leanfs_rename_replace(const char *old_path, const char *new_path) {
     }
     int idx = directory_lookup(old_parent, old_leaf);
     if (!inode_valid(idx)) {
+        return -1;
+    }
+    if (directory_ok(idx) && directory_within(new_parent, idx)) {
         return -1;
     }
     int victim = directory_lookup(new_parent, new_leaf);

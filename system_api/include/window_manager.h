@@ -199,12 +199,22 @@ typedef struct {
 #define WINDOW_MANAGER_SETTINGS_QUERY_PIPE      "wm_set_query"
 #define WINDOW_MANAGER_SETTINGS_QUERY_RESPONSE_PIPE "wm_set_qresp"
 
+#define WINDOW_MANAGER_POINTER_SPEED_MINIMUM  25
+#define WINDOW_MANAGER_POINTER_SPEED_DEFAULT 100
+#define WINDOW_MANAGER_POINTER_SPEED_MAXIMUM 300
+
 typedef struct {
     uint32_t volume;
     uint32_t animations;
     uint32_t bg_color;
     uint32_t accent_color;
     uint32_t wallpaper;
+    uint32_t pointer_speed;
+    uint32_t natural_scrolling;
+    uint32_t swap_buttons;
+    uint32_t clock_24_hour;
+    int32_t utc_offset_minutes;
+    uint32_t restore_windows;
 } window_manager_settings_request_t;
 
 #ifdef __cplusplus

@@ -46,12 +46,37 @@ UEFI firmware
   the icon its window title maps to.
 - **Applications.** A terminal with a real shell (arguments, quoting,
   `>`/`>>`, a pipe, tab completion, `cd`), a text editor (undo, redo,
-  find, paste), a file manager (columns, sorting, exact sizes, free
-  space, new file, new folder, rename, copy, and a delete that takes a
-  folder with things in it - behind a confirm that counted them), a
-  task manager, a settings panel, a paint toy and a clock. The task
-  manager and the settings panel are drawn by a real toolkit now; the
-  rest still draw themselves.
+  find, paste), Files, a task manager, Settings, a paint toy and a
+  clock. Files, Tasks and Settings are drawn by a real toolkit; the rest
+  still draw themselves.
+- **Files, shaped like a Finder.** A sidebar of places - Home, Recent,
+  Applications, Temporary, Computer, Packages and the Trash - with Back
+  and Forward, a path bar whose every folder is a click, and a list view
+  with sortable Name, Date Modified, Size and Kind columns or an icon
+  view. **Search** looks through the folder you are in or the whole
+  machine as you type. **Quick Look** (Space) shows a text file's words,
+  a PNG or BMP picture decoded on the machine, or a program's first
+  bytes; **Get Info** gives exact sizes, a folder's whole contents
+  counted, where a link points, where something in the Trash came from,
+  and what a program would be allowed to do. New File and New Folder,
+  rename, Duplicate, Copy, Cut and Paste - folders copied whole -
+  drag-and-drop onto folders, the sidebar or the desktop, and a **Trash**
+  that remembers where everything came from, so Put Back works and
+  Ctrl+Z undoes the last move, rename or trash. A folder cannot be moved
+  or copied inside itself, and that is refused twice: by Files, and by
+  the filesystem itself, which until M210 would have taken the folder
+  out of every path that reached it.
+- **Settings for the machine, not just the wallpaper.** Eleven panes in
+  a sidebar: what the processor, memory, disk and display are; colours,
+  wallpaper and motion; screen size; volume; pointer speed, swapped
+  buttons and natural scrolling; the shortcuts; a 12- or 24-hour clock
+  and a time zone, which the taskbar and Files both honour; the wired
+  address, the name servers and the Wi-Fi state; what is on the disk,
+  folder by folder, with the Trash's share and a button to empty it;
+  which capabilities every program holds; and whether windows reopen
+  when the machine starts. Every switch there changes something real -
+  the compositor scales the pointer, the taskbar redraws its clock -
+  because a setting nothing reads is a pretence.
 - **A system underneath.** Pre-emptive multitasking across multiple
   cores, a per-process address space, a custom filesystem with
   directories and files up to 4 GiB, pipes, shared memory, an orderly
@@ -153,14 +178,15 @@ UEFI firmware
   unedited, rasterising straight into each window's own shared memory -
   anti-aliased Montserrat, a flex layout that places things rather than
   a list of hardcoded pixel coordinates, rounded cards, a volume slider
-  you drag and a switch that slides. **Settings** and **Tasks** are
-  built on it, and they are the *same binary*: one multicall program
-  that `/bin/settings` and `/bin/task_manager` are symbolic links to,
+  you drag and a switch that slides. **Settings**, **Tasks** and
+  **Files** are built on it, and they are the *same binary*: one
+  multicall program that `/bin/settings`, `/bin/task_manager` and
+  `/bin/file_manager` are symbolic links to,
   the way `/bin/ls` is a link to toybox - because a converted desktop
   cannot afford a 600 KB copy of the toolkit per application. **The
   capability model survives that**, and not by accident: the kernel
   assigns capabilities from the name a program was *spawned by*, so one
-  binary reached through two links still gets two different sets.
+  binary reached through three links still gets three different sets.
 
   Their colours are not `#define`s any more. The desktop colour and
   accent picked in Settings derive the whole palette - window ground,

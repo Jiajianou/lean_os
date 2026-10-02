@@ -72,7 +72,12 @@ static const cap_grant_t CAP_GRANTS[] = {
     {"task_manager",  CAP_APP_DEFAULT | CAP_PROCESS_LIST | CAP_KILL_ANY},
     {"profile",       CAP_APP_DEFAULT | CAP_PROCESS_LIST},
     {"proftest",      CAP_APP_DEFAULT | CAP_PROCESS_LIST},
-    {"settings",      CAP_APP_DEFAULT | CAP_DISPLAY_MODE | CAP_CLIPBOARD},
+    /* M210: Settings shows the machine's address, which only SYS_netconf
+       knows, and opens the Wi-Fi wizard - which holds no more than its parent. */
+    {"settings",      CAP_APP_DEFAULT | CAP_DISPLAY_MODE | CAP_CLIPBOARD | CAP_NETWORK},
+    /* M210: Copy and Paste in Files put paths on the clipboard, the way a
+       Finder copy pastes as names into a text editor. */
+    {"file_manager",  CAP_APP_DEFAULT | CAP_CLIPBOARD},
     {"wifi",          CAP_APP_DEFAULT | CAP_NETWORK},
     /* M207: the taskbar opens the Wi-Fi wizard, and a child holds only what
        its parent holds - so the taskbar holds network, and nothing else

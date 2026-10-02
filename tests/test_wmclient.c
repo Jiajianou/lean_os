@@ -1,4 +1,5 @@
 #include "check.h"
+#include "fakes.h"
 
 #include <setjmp.h>
 #include <string.h>
@@ -83,6 +84,9 @@ static window_manager_action_request_t actions[8];
 static int action_count;
 
 long sys_write(int fd, const void *buffer, size_t length) {
+    if (fake_user_fs_owns(fd)) {
+        return fake_user_fs_write_descriptor(fd, buffer, length);
+    }
     if (fd == REQUEST_WRITE_END) {
         requests_sent++;
         if (requests_sent == answer_request_number) {
@@ -125,6 +129,9 @@ long sys_pipe_open(const char *name, int file_descriptors_out[2]) {
 }
 
 long sys_read(int fd, void *buffer, size_t length) {
+    if (fake_user_fs_owns(fd)) {
+        return fake_user_fs_read(fd, buffer, length);
+    }
     if (fd != RESPONSE_READ_END) {
         return -1;
     }

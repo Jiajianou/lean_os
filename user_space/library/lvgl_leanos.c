@@ -199,6 +199,43 @@ void lvgl_window_set_key_handler(lvgl_window_t *window, lvgl_key_handler_t handl
     }
 }
 
+void lvgl_window_set_event_handler(lvgl_window_t *window, lvgl_event_handler_t handler) {
+    if (window) {
+        window->event_handler = handler;
+    }
+}
+
+lv_obj_t *lvgl_window_object_at(int32_t x, int32_t y) {
+    lv_point_t point = {x, y};
+    lv_obj_t *found = lv_indev_search_obj(lv_layer_top(), &point);
+    if (!found) {
+        found = lv_indev_search_obj(lv_screen_active(), &point);
+    }
+    return found;
+}
+
+int lvgl_window_scroll_at(int32_t x, int32_t y, int32_t wheel) {
+    for (lv_obj_t *object = lvgl_window_object_at(x, y); object; object = lv_obj_get_parent(object)) {
+        if (!lv_obj_has_flag(object, LV_OBJ_FLAG_SCROLLABLE)) {
+            continue;
+        }
+        int32_t room = wheel > 0 ? lv_obj_get_scroll_bottom(object) : lv_obj_get_scroll_top(object);
+        if (room <= 0) {
+            continue;
+        }
+        int32_t distance = wheel * LVGL_WHEEL_STEP;
+        if (distance > room) {
+            distance = room;
+        }
+        if (-distance > room) {
+            distance = -room;
+        }
+        lv_obj_scroll_by(object, 0, -distance, LV_ANIM_OFF);
+        return 1;
+    }
+    return 0;
+}
+
 void lvgl_window_report_geometry(const char *name, lv_obj_t *object) {
     if (!name || !object) {
         return;
@@ -218,6 +255,9 @@ int lvgl_window_pump(lvgl_window_t *window, int timeout_ms) {
 
     window_manager_event_t event;
     while (window_manager_poll_event(&window->window, &event) > 0) {
+        if (window->event_handler && window->event_handler(window, &event)) {
+            continue;
+        }
         switch (event.type) {
         case WINDOW_MANAGER_EVENT_MOUSE_MOVE:
             window->pointer_x = event.x;
@@ -234,6 +274,9 @@ int lvgl_window_pump(lvgl_window_t *window, int timeout_ms) {
                 break;
             }
             lvgl_push_key(window, lvgl_translate_key(event.ch, event.mods));
+            break;
+        case WINDOW_MANAGER_EVENT_MOUSE_WHEEL:
+            lvgl_window_scroll_at(event.x, event.y, event.wheel);
             break;
         case WINDOW_MANAGER_EVENT_EXPOSE:
             lv_obj_invalidate(lv_screen_active());

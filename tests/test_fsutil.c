@@ -256,3 +256,14 @@ TEST(file_system_utilities, counting_past_the_depth_limit_says_so_rather_than_ly
     CHECK_EQ(file_system_utilities_count_tree("/d0", &t), 0);
     CHECK_EQ(t.deep, 1);
 }
+
+TEST(file_system_utilities, a_link_counts_as_itself_not_as_what_it_points_at) {
+    fake_user_fs_reset();
+    REQUIRE(fake_user_fs_mkdir("/tree") == 0);
+    REQUIRE(fake_user_fs_write("/tree/big", 5000) == 0);
+    REQUIRE(fake_user_fs_symlink("big", "/tree/alias") == 0);
+    file_system_utilities_tree_t t;
+    REQUIRE(file_system_utilities_count_tree("/tree", &t) == 0);
+    CHECK_EQ(t.entries, 2);
+    CHECK_EQ(t.bytes, 5000 + 3);
+}

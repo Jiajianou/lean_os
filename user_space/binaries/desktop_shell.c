@@ -1,6 +1,8 @@
 #include "icons.h"
+#include "settings_file.h"
 #include "string_utilities.h"
 #include "syscall_wrappers.h"
+#include "time_format.h"
 #include "window_manager_client.h"
 #include "wireless.h"
 
@@ -44,15 +46,34 @@
 #define FOCUS_BAR_H      3
 #define RUNNING_DOT      4
 
-#define CLOCK_CHARS   5
+#define CLOCK_CHARS   (TIME_FORMAT_CLOCK_MAX - 1)
+#define CLOCK_SETTINGS_MS 2000
 #define TRAY_PAD      12
 #define WS_DOT_W    14
 #define WS_DOT_H    5
 #define WS_DOT_GAP  5
 #define TRAY_ICONS_W  (TRAY_PAD + WINDOW_MANAGER_WORKSPACE_COUNT * WS_DOT_W + (WINDOW_MANAGER_WORKSPACE_COUNT - 1) * WS_DOT_GAP + TRAY_PAD)
 
+static int clock_24_hour = 1;
+static int32_t clock_offset_minutes;
+static long clock_settings_next_ms;
+
+static void refresh_clock_settings(void) {
+    long now = sys_uptime_ms();
+    if (clock_settings_next_ms != 0 && now < clock_settings_next_ms) {
+        return;
+    }
+    clock_settings_next_ms = now + CLOCK_SETTINGS_MS;
+    window_manager_settings_request_t settings;
+    settings_file_defaults(&settings);
+    settings_file_load(&settings);
+    clock_24_hour = settings.clock_24_hour != 0;
+    clock_offset_minutes = settings.utc_offset_minutes;
+}
+
 static int32_t clock_text_w(void) {
-    return graphics_text_width(graphics_ui_font(), "00:00");
+    refresh_clock_settings();
+    return graphics_text_width(graphics_ui_font(), clock_24_hour ? "00:00" : "12:00 PM");
 }
 
 /* M207: the radio, as four bars beside the workspaces - lit by the signal
@@ -142,12 +163,8 @@ static int shown_workspace;
 static void format_clock(long now_ms, char *out) {
     os_datetime_t t;
     if (sys_time(&t) > 0 && t.valid) {
-        out[0] = (char)('0' + t.hour / 10);
-        out[1] = (char)('0' + t.hour % 10);
-        out[2] = ':';
-        out[3] = (char)('0' + t.minute / 10);
-        out[4] = (char)('0' + t.minute % 10);
-        out[5] = '\0';
+        refresh_clock_settings();
+        time_format_clock(os_unix_time(&t), clock_offset_minutes, clock_24_hour, out);
         return;
     }
     long total_s = now_ms / 1000;

@@ -12,6 +12,7 @@ static const char *const DESKTOP_APPLICATION_NAMES[] = {
     "task_manager",
     "lvgl_demo",
     "wifi",
+    "file_manager",
 };
 
 static const desktop_application_entry_t DESKTOP_APPLICATION_ENTRIES[] = {
@@ -19,7 +20,10 @@ static const desktop_application_entry_t DESKTOP_APPLICATION_ENTRIES[] = {
     desktop_application_task_manager,
     desktop_application_widgets,
     desktop_application_wireless,
+    desktop_application_files,
 };
+
+const char *desktop_application_argument;
 
 #define DESKTOP_APPLICATION_COUNT \
     ((int)(sizeof(DESKTOP_APPLICATION_NAMES) / sizeof(DESKTOP_APPLICATION_NAMES[0])))
@@ -36,6 +40,8 @@ int main(int argc, char **argv) {
         } else if (index < 0) {
             index = application_dispatch_index(argv[i], DESKTOP_APPLICATION_NAMES,
                                                DESKTOP_APPLICATION_COUNT);
+        } else if (!desktop_application_argument) {
+            desktop_application_argument = argv[i];
         }
     }
 

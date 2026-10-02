@@ -47,6 +47,7 @@
 #define LV_FONT_MONTSERRAT_20 1
 #define LV_FONT_MONTSERRAT_24 1
 #define LV_FONT_MONTSERRAT_28 1
+#define LV_FONT_UNSCII_16 1
 #define LV_FONT_DEFAULT &lv_font_montserrat_14
 
 #define LV_FONT_FMT_TXT_LARGE 0
@@ -66,7 +67,7 @@
 #define LV_USE_FREETYPE 0
 #define LV_USE_LIBPNG 0
 #define LV_USE_LIBJPEG_TURBO 0
-#define LV_USE_LODEPNG 0
+#define LV_USE_LODEPNG 1
 #define LV_USE_TJPGD 0
 #define LV_USE_GIF 0
 #define LV_USE_RLOTTIE 0
@@ -74,12 +75,15 @@
 #define LV_USE_TINY_TTF 0
 #define LV_USE_BARCODE 0
 #define LV_USE_QRCODE 0
-#define LV_USE_BMP 0
+#define LV_USE_BMP 1
 
 #define LV_USE_FS_STDIO 1
 #define LV_FS_STDIO_LETTER 'A'
 #define LV_FS_STDIO_PATH ""
 #define LV_FS_STDIO_CACHE_SIZE 0
+
+#define LV_CACHE_DEF_SIZE (4 * 1024 * 1024)
+#define LV_IMAGE_HEADER_CACHE_DEF_CNT 8
 
 #define LV_USE_SYSMON 0
 #define LV_USE_PERF_MONITOR 0

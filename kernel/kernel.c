@@ -79,6 +79,7 @@
 #define BROWSER_SHOT_DIRECTORY PATH_TEMPORARY_DIRECTORY "shot"
 #define BROWSER_SHOT_FILE BROWSER_SHOT_DIRECTORY "/1.png"
 #define BROWSER_SECONDS 420
+#define BROWSER_OUTPUT_BYTES 262144u
 /* Half-second polls, so this is fifteen seconds of nothing changing. */
 #define BROWSER_SETTLE_POLLS 30
 /* M175: and ninety of them - forty-five seconds - when only ONE present was
@@ -136,7 +137,6 @@
     X(desktop_icons)                 \
     X(gui_terminal)                  \
     X(text_editor)                   \
-    X(file_manager)                  \
     X(wm_stubborn)                 \
     X(wm_zorder)                   \
     X(wm_faulter)                  \
@@ -4630,7 +4630,14 @@ static void boot_selftests_system(void) {
                                      br_argv);
         kfree(br_image);
 
-        static char br_out[262144];
+        /* M210: from the heap rather than .bss. The kernel image has to end
+           below the 8 MiB OVMF keeps for itself, and a quarter of a megabyte
+           that is only ever used by this one self-test is the easiest room
+           to give back. */
+        char *br_out = (char *)kmalloc(BROWSER_OUTPUT_BYTES);
+        if (!br_out) {
+            panic("M169 self-test: no memory for the browser's output");
+        }
         size_t br_got = 0;
         long br_deadline = (long)pit_get_ticks() + BROWSER_SECONDS * PIT_HZ;
         uint32_t br_settled_size = 0;
@@ -4640,8 +4647,8 @@ static void boot_selftests_system(void) {
         int br_presents = 0;
         for (;;) {
             long avail = do_syscall(SYS_pipe_poll, (uint64_t)br_pipe[0], 0, 0);
-            if (avail > 0 && br_got < sizeof(br_out) - 1) {
-                size_t room = sizeof(br_out) - 1 - br_got;
+            if (avail > 0 && br_got < BROWSER_OUTPUT_BYTES - 1) {
+                size_t room = BROWSER_OUTPUT_BYTES - 1 - br_got;
                 long n = do_syscall(SYS_read, (uint64_t)br_pipe[0],
                                     (uint64_t)(br_out + br_got),
                                     (uint64_t)((size_t)avail < room
@@ -4771,6 +4778,7 @@ static void boot_selftests_system(void) {
             *end = saved;
             line = saved ? end + 1 : end;
         }
+        kfree(br_out);
 
         uint32_t shot_width = 0;
         uint32_t shot_height = 0;
@@ -9244,7 +9252,11 @@ static void boot_selftests_system(void) {
                   "tree counted to the byte, SYS_rmdir refusing the full "
                   "directory it is supposed to refuse, the whole tree removed "
                   "by the user-space walk, and the directory beside it "
-                  "untouched - self-test passed (");
+                  "untouched - self-test passed.\n");
+        kernel_log_puts("[m210] Files on leanfs: a folder copied byte for byte, "
+                  "refused inside itself by the library and by SYS_rename, "
+                  "moved whole, a file trashed and put back where it was, and "
+                  "a search that found all four needles - self-test passed (");
         kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
         kernel_log_puts(" ms).\n\n");
     }
@@ -9368,20 +9380,25 @@ static void boot_selftests_system(void) {
         leanfs_stat_t settings_target;
         leanfs_stat_t tasks_link;
         leanfs_stat_t tasks_target;
+        leanfs_stat_t files_link;
+        leanfs_stat_t files_target;
         if (virtual_file_system_stat(PATH_BIN_DIRECTORY "desktop_applications", &binary_stat) != 0 ||
+            virtual_file_system_lstat(PATH_BIN_DIRECTORY "file_manager", &files_link) != 0 ||
+            virtual_file_system_stat(PATH_BIN_DIRECTORY "file_manager", &files_target) != 0 ||
             virtual_file_system_lstat(PATH_BIN_DIRECTORY "settings", &settings_link) != 0 ||
             virtual_file_system_stat(PATH_BIN_DIRECTORY "settings", &settings_target) != 0 ||
             virtual_file_system_lstat(PATH_BIN_DIRECTORY "task_manager", &tasks_link) != 0 ||
             virtual_file_system_stat(PATH_BIN_DIRECTORY "task_manager", &tasks_target) != 0) {
             panic("M127 self-test: the desktop applications are not on this disk");
         }
-        if (!settings_link.is_link || !tasks_link.is_link) {
+        if (!settings_link.is_link || !tasks_link.is_link || !files_link.is_link) {
             kernel_log_puts("[m127] /bin/settings and /bin/task_manager are not links - "
                       "every application is paying for its own copy of the toolkit\n");
             panic("M127 self-test: the desktop applications were seeded as copies");
         }
         if (settings_target.inode != binary_stat.inode ||
-            tasks_target.inode != binary_stat.inode) {
+            tasks_target.inode != binary_stat.inode ||
+            files_target.inode != binary_stat.inode) {
             kernel_log_puts("[m127] the application links do not resolve to "
                       PATH_BIN_DIRECTORY "desktop_applications\n");
             panic("M127 self-test: an application link points somewhere else");
@@ -9393,7 +9410,9 @@ static void boot_selftests_system(void) {
         uint8_t *settings_image = read_program(PATH_BIN_DIRECTORY "settings", &settings_bytes);
         size_t tasks_bytes = 0;
         uint8_t *tasks_image = read_program(PATH_BIN_DIRECTORY "task_manager", &tasks_bytes);
-        if (!comp_image || !settings_image || !tasks_image) {
+        size_t files_bytes = 0;
+        uint8_t *files_image = read_program(PATH_BIN_DIRECTORY "file_manager", &files_bytes);
+        if (!comp_image || !settings_image || !tasks_image || !files_image) {
             panic("M127 self-test: a desktop application could not be read through its link");
         }
 
@@ -9405,8 +9424,11 @@ static void boot_selftests_system(void) {
         kfree(settings_image);
         task_t *tasks_task = process_spawn("task_manager", tasks_image, tasks_bytes, "");
         kfree(tasks_image);
+        task_t *files_task = process_spawn("file_manager", files_image, files_bytes, "");
+        kfree(files_image);
         uint32_t settings_caps = settings_task ? settings_task->caps : 0;
         uint32_t tasks_caps = tasks_task ? tasks_task->caps : 0;
+        uint32_t files_caps = files_task ? files_task->caps : 0;
         pit_sleep_ms(4000);
 
         uint32_t width = framebuffer_width();
@@ -9439,6 +9461,7 @@ static void boot_selftests_system(void) {
             }
         }
 
+        selftest_reap(files_task);
         selftest_reap(tasks_task);
         selftest_reap(settings_task);
         selftest_reap(comp_task);
@@ -9457,19 +9480,23 @@ static void boot_selftests_system(void) {
         if ((settings_caps & CAP_DISPLAY_MODE) == 0 ||
             (tasks_caps & CAP_PROCESS_LIST) == 0 ||
             (settings_caps & CAP_PROCESS_LIST) != 0 ||
-            (tasks_caps & CAP_DISPLAY_MODE) != 0) {
+            (tasks_caps & CAP_DISPLAY_MODE) != 0 ||
+            (files_caps & CAP_CLIPBOARD) == 0 ||
+            (files_caps & (CAP_DISPLAY_MODE | CAP_PROCESS_LIST | CAP_NETWORK)) != 0) {
             kernel_log_puts("[m127] settings holds 0x");
             kernel_log_put_hex64(settings_caps);
             kernel_log_puts(" and task_manager holds 0x");
             kernel_log_put_hex64(tasks_caps);
-            kernel_log_puts(" - one binary under two names got one capability set\n");
+            kernel_log_puts(" and file_manager holds 0x");
+            kernel_log_put_hex64(files_caps);
+            kernel_log_puts(" - one binary under three names got one capability set\n");
             panic("M127 self-test: a multicall binary defeated the capability model");
         }
 
-        kernel_log_puts("[m127] the desktop's own applications on LVGL: Settings and "
-                  "Tasks are ");
+        kernel_log_puts("[m127] the desktop's own applications on LVGL: Settings, "
+                  "Tasks and Files are ");
         kernel_log_put_dec((uint32_t)binary_stat.size);
-        kernel_log_puts(" bytes of ONE binary reached through two links, "
+        kernel_log_puts(" bytes of ONE binary reached through three links, "
                   "drawing ");
         kernel_log_put_dec(drawn);
         kernel_log_puts(" pixels in ");
@@ -9479,6 +9506,8 @@ static void boot_selftests_system(void) {
         kernel_log_put_hex64(settings_caps);
         kernel_log_puts(", task_manager 0x");
         kernel_log_put_hex64(tasks_caps);
+        kernel_log_puts(", file_manager 0x");
+        kernel_log_put_hex64(files_caps);
         kernel_log_puts(") - self-test passed (");
         kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
         kernel_log_puts(" ms).\n\n");
@@ -14605,6 +14634,7 @@ display_self_test_done:
             {"task_manager", PATH_BIN_DIRECTORY "desktop_applications"},
             {"lvgl_demo", PATH_BIN_DIRECTORY "desktop_applications"},
             {"wifi", PATH_BIN_DIRECTORY "desktop_applications"},
+            {"file_manager", PATH_BIN_DIRECTORY "desktop_applications"},
         };
         for (size_t i = 0; i < sizeof(PROGRAM_ALIASES) / sizeof(PROGRAM_ALIASES[0]); i++) {
             char path[PATH_MAX_LENGTH];

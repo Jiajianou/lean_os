@@ -149,7 +149,7 @@ static int count_at(int length, int depth, file_system_utilities_tree_t *out) {
                 count_at(pushed, depth + 1, out);
             } else {
                 os_stat_t st;
-                if (sys_stat(walk_path, &st) == 0) {
+                if (sys_lstat(walk_path, &st) == 0) {
                     out->bytes += st.size;
                 }
             }

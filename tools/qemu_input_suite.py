@@ -257,7 +257,20 @@ def window_edge_at(shot, x, y):
     inside = channel_sum(shot.px(x + 3, y))
     return here + WINDOW_EDGE_MARGIN < inside
 
-SETTINGS_W, SETTINGS_H = 440, 620
+SETTINGS_W, SETTINGS_H = 720, 540
+
+def settings_pane(m, origin, pane):
+    mark = len(m.read_log())
+    m.click(*widget_center(m, origin, "pane_" + pane))
+    wait_for_log_after(m, "[settings] showing ", mark, "Settings did not switch pane")
+
+def wait_for_log_after(m, needle, mark, what, timeout=20.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if needle in m.read_log()[mark:]:
+            return
+        time.sleep(0.3)
+    raise Failure("%s: %s (log: %s)" % (current_test(), what, m.save_log("settings")))
 
 SMALL_MODE = (800, 600)
 SMALL_MODE_INDEX = 0
@@ -310,35 +323,64 @@ def volume_is_audible(m, shot, origin):
 def mode_btn_center(m, origin, i):
     return widget_center(m, origin, "mode%d" % i)
 
-FM_W, FM_H = 340, 360
-FM_HEADER_H = 24
-FM_COLS_H = 16
-FM_LIST_Y = FM_HEADER_H + FM_COLS_H
-FM_ROW_H = 16
-FM_LIST_W = FM_W - 8
+FM_W, FM_H = 760, 480
+FM_ROW_H = 26
+FM_CONTENT_PAD = 6
+FM_INK_SUM = 600
 
-FM_LABEL_COLOR = 0x90A0C0
-FM_TEXT_COLOR = 0xD8D8D8
-FM_STATUS_H = 20
-FM_ROWS_VISIBLE = (FM_H - FM_LIST_Y - FM_STATUS_H) // FM_ROW_H
+def fm_origin():
+    return app_origin(FIRST_APP_IDX, FM_H)
 
-FM_UP_ROW = 0
-FM_FIRST_FILE_ROW = 1
-FM_ROOT_FIRST_ROW = 0
+def fm_mark(m):
+    return len(m.read_log())
 
-def fm_row_point(x, y, row):
-    return (x + 60, y + FM_LIST_Y + row * FM_ROW_H + FM_ROW_H // 2)
+def fm_wait_log(m, needle, mark, what, timeout=20.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if needle in m.read_log()[mark:]:
+            return
+        time.sleep(0.3)
+    raise Failure("%s: %s (log: %s)" % (current_test(), what, m.save_log("files")))
 
-FM_INK_SUM = 0x90 * 3
+def fm_showing(m, path, mark, what, timeout=20.0):
+    fm_wait_log(m, "[files] showing %s " % path, mark, what, timeout)
 
-def fm_rows_with_text(shot, x, y):
+def fm_click(m, origin, name, double=False, mark=None):
+    if mark is None:
+        x, y, w, h = geometry(m, name)
+    else:
+        x, y, w, h = geometry_after(m, name, mark)
+    point = (origin[0] + x + w // 2, origin[1] + y + h // 2)
+    if double:
+        m.double_click(*point)
+    else:
+        m.click(*point)
+
+def fm_rows_with_text(m, shot, origin):
+    x, y, w, h = geometry(m, "content")
+    top = origin[1] + y + FM_CONTENT_PAD
     n = 0
-    for row in range(FM_ROWS_VISIBLE):
-        top = y + FM_LIST_Y + row * FM_ROW_H
-        if shot.count_brighter(FM_INK_SUM, x + 6, top, FM_LIST_W - 12, FM_ROW_H,
+    for row in range((h - FM_CONTENT_PAD) // FM_ROW_H):
+        band = top + row * FM_ROW_H
+        if shot.count_brighter(FM_INK_SUM, origin[0] + x + 40, band + 4, w - 60, FM_ROW_H - 8,
                                ignore=qemu_input.CURSOR_COLOR) > 0:
             n += 1
+        elif shot.count_color(DESKTOP_ACCENT, origin[0] + x + 40, band + 4, w - 60, FM_ROW_H - 8) > (w - 60) * 4:
+            n += 1
     return n
+
+def fm_rows_visible(m):
+    x, y, w, h = geometry(m, "content")
+    return (h - FM_CONTENT_PAD) // FM_ROW_H
+
+def fm_open(m):
+    mark = fm_mark(m)
+    m.double_click(ICON_X, ICONS[2][2])
+    wait_for_windows(m, 1)
+    fm_showing(m, "/home", mark, "Files never said it was showing /home")
+    origin = fm_origin()
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) > 0, "the Files window listed nothing")
+    return origin
 
 DRAG_LABEL_BG = 0x335577
 
@@ -958,16 +1000,19 @@ def test_shutdown_confirm_can_be_cancelled(m):
     check(m.exit_status is None,
           "cancelling the shutdown confirm powered the machine off anyway")
 
+WALLPAPER_PROBE_X = 960
+
 def test_settings_persist_across_a_reboot(m):
     boot(m)
     m.double_click(ICON_X, ICONS[3][2])
     wait_for_windows(m, 1)
 
     origin = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    settings_pane(m, origin, "appearance")
     m.click(*widget_center(m, origin, "wallpaper0"))
-    shot = wait_for(m, lambda s: s.px(700, 200) == s.px(700, 600),
+    shot = wait_for(m, lambda s: s.px(WALLPAPER_PROBE_X, 200) == s.px(WALLPAPER_PROBE_X, 600),
                     "picking the Flat wallpaper did not flatten the desktop gradient")
-    flat = shot.px(700, 200)
+    flat = shot.px(WALLPAPER_PROBE_X, 200)
     check(flat != desktop_px(200),
           "the 'flat' desktop is the same color the gradient already was at that row")
 
@@ -990,7 +1035,7 @@ def test_settings_persist_across_a_reboot(m):
     deadline = time.time() + 60
     while time.time() < deadline:
         shot = m.screenshot()
-        if shot.px(700, 200) == flat and shot.px(700, 600) == flat:
+        if shot.px(WALLPAPER_PROBE_X, 200) == flat and shot.px(WALLPAPER_PROBE_X, 600) == flat:
             return
         time.sleep(1.0)
     raise Failure("after restarting, the desktop came back with the default gradient "
@@ -1074,42 +1119,39 @@ def test_clicking_a_toast_dismisses_it(m):
     check(shot.px(*probe) == desktop_px(probe[1]),
           "the toast went away but left something behind at 0x%06X" % shot.px(*probe))
 
-def test_wheel_scrolls_the_file_list_one_row_per_detent(m):
+def test_wheel_scrolls_the_file_list(m):
     boot(m)
-    m.double_click(ICON_X, ICONS[2][2])
-    wait_for_windows(m, 1)
+    origin = fm_open(m)
+    mark = fm_mark(m)
+    fm_click(m, origin, "place_applications")
+    fm_showing(m, "/bin", mark, "Applications did not show /bin")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) >= fm_rows_visible(m) - 1,
+             "/bin did not fill the list - there is nothing here long enough to scroll")
 
-    x, y = app_origin(FIRST_APP_IDX)
-    list_x = x + 6
-    row0_y = y + FM_LIST_Y
+    x, y, w, h = geometry(m, "content")
+    left = origin[0] + x + 40
+    right = origin[0] + x + w - 20
+    top = origin[1] + y + FM_CONTENT_PAD
+    step = 48
 
-    m.double_click(*fm_row_point(x, y, FM_UP_ROW))
-    wait_for(m, lambda s: fm_rows_with_text(s, x, y) > 0, "the file manager showed nothing after going up")
-    m.double_click(*fm_row_point(x, y, FM_ROOT_FIRST_ROW))
-    wait_for(m, lambda s: fm_rows_with_text(s, x, y) >= FM_ROWS_VISIBLE,
-             "entering /bin did not fill the list - there is nothing here long enough to scroll")
+    def band(shot, at):
+        return [shot.px(px, py) for py in range(at, at + 20) for px in range(left, right, 2)]
 
-    def row_pixels(shot, row):
-        top = row0_y + row * FM_ROW_H
-        return [shot.px(px, py)
-                for py in range(top, top + FM_ROW_H)
-                for px in range(list_x, x + FM_LIST_W - 4)]
-
-    m.move_to(x + FM_W // 2, y + FM_H // 2)
+    m.move_to(origin[0] + x + w // 2, origin[1] + y + h // 2)
     before = m.screenshot()
-    want = row_pixels(before, 3)
+    want = band(before, top + 3 * step)
     check(any(p != want[0] for p in want),
-          "the row this test scrolls to is blank - the file list is too short to scroll")
+          "the band this test scrolls to is blank - the file list is too short to scroll")
 
     m.wheel(3)
-    after = m.screenshot()
-    got = row_pixels(after, 0)
+    time.sleep(1.0)
+    got = band(m.screenshot(), top)
     if got != want:
         m.wheel(-6)
-        after = m.screenshot()
-        got = row_pixels(after, 0)
+        time.sleep(1.0)
+        got = band(m.screenshot(), top)
     check(got == want,
-          "three wheel detents did not move the file list by exactly three rows")
+          "three wheel detents did not move the file list by exactly three steps of %d pixels" % step)
 
 def test_alt_f4_closes_the_focused_window(m):
     boot(m)
@@ -1139,39 +1181,39 @@ def test_ctrl_alt_arrows_snap_and_maximize(m):
 
 def test_drag_a_file_onto_the_desktop_opens_it(m):
     boot(m)
-    m.double_click(ICON_X, ICONS[2][2])
-    wait_for_windows(m, 1)
-
-    x, y = app_origin(FIRST_APP_IDX)
-    m.press(*fm_row_point(x, y, FM_FIRST_FILE_ROW))
-    m.move_held(700, 500)
+    origin = fm_open(m)
+    x, y, w, h = geometry(m, "item0")
+    m.press(origin[0] + x + 60, origin[1] + y + h // 2)
+    m.move_held(600, 690)
 
     shot = m.screenshot()
-    check(shot.count_color(DRAG_LABEL_BG, 700, 500, 200, 32) > 0,
+    check(shot.count_color(DRAG_LABEL_BG, 600, 690, 200, 32) > 0,
           "no drag label followed the cursor - the drag never started")
 
     m.release()
     wait_for(m, lambda s: count_app_windows(s) == 2,
              "dropping a file on the desktop did not open it in the editor")
 
+CLOCK_W, CLOCK_H = 200, 90
 FILES_ORIGIN = app_origin(FIRST_APP_IDX)
 TASKS_ORIGIN = app_origin(FIRST_APP_IDX + 1)
 FILES_SLOT = 0
 TASKS_SLOT = 1
-FILES_IN_FRONT_PROBE = (FILES_ORIGIN[0] + FM_W, 400)
-TASKS_IN_FRONT_PROBE = (TASKS_ORIGIN[0] - BORDER, 400)
+_PAIR_PROBE_Y = TASKS_ORIGIN[1] + (FILES_ORIGIN[1] + CLOCK_H - TASKS_ORIGIN[1]) // 2
+FILES_IN_FRONT_PROBE = (FILES_ORIGIN[0] + CLOCK_W, _PAIR_PROBE_Y)
+TASKS_IN_FRONT_PROBE = (TASKS_ORIGIN[0] - BORDER, _PAIR_PROBE_Y)
 FILES_TITLEBAR_CLICK = (FILES_ORIGIN[0] + 20, FILES_ORIGIN[1] - TITLEBAR_H // 2)
 _TASKS_BTN_BAND = TASKS_ORIGIN[0] + TASKS_W - 74
-_TASKS_FREE_LO = FILES_ORIGIN[0] + FM_W + 4
+_TASKS_FREE_LO = FILES_ORIGIN[0] + CLOCK_W + 4
 if _TASKS_FREE_LO >= _TASKS_BTN_BAND:
-    raise SystemExit("qemu_input_suite: Files is now wide enough to cover every clickable "
+    raise SystemExit("qemu_input_suite: the Clock is now wide enough to cover every clickable "
                      "part of Tasks' titlebar - the overlap tests need a different pair")
 TASKS_TITLEBAR_CLICK = ((_TASKS_FREE_LO + _TASKS_BTN_BAND) // 2, TASKS_ORIGIN[1] - TITLEBAR_H // 2)
-OVERLAP_CLICK = (400, 480)
+OVERLAP_CLICK = ((TASKS_ORIGIN[0] + FILES_ORIGIN[0] + CLOCK_W) // 2, _PAIR_PROBE_Y)
 
 def open_overlapping_pair(m):
     boot(m)
-    m.double_click(ICON_X, ICONS[2][2])
+    m.double_click(ICON_X, ICONS[4][2])
     wait_for_windows(m, 1)
     m.double_click(ICON_X, ICONS[6][2])
     wait_for_windows(m, 2)
@@ -1254,136 +1296,230 @@ def test_a_crashing_program_only_takes_itself_down(m):
 
 def test_file_manager_navigates_directories(m):
     boot(m)
-    m.double_click(ICON_X, ICONS[2][2])
-    wait_for_windows(m, 1)
-    x, y = app_origin(FIRST_APP_IDX)
-
-    home_rows = fm_rows_with_text(m.screenshot(), x, y)
-    check(0 < home_rows < FM_ROWS_VISIBLE,
+    origin = fm_open(m)
+    home_rows = fm_rows_with_text(m, m.screenshot(), origin)
+    check(0 < home_rows < fm_rows_visible(m),
           "/home did not open as a short list (%d rows)" % home_rows)
 
-    m.double_click(*fm_row_point(x, y, FM_UP_ROW))
-    wait_for(m, lambda s: fm_rows_with_text(s, x, y) > 0,
-             "double-clicking .. left the file manager showing nothing")
-    m.double_click(*fm_row_point(x, y, FM_ROOT_FIRST_ROW))
-    wait_for(m, lambda s: fm_rows_with_text(s, x, y) >= FM_ROWS_VISIBLE,
-             "double-clicking /bin did not enter a directory full of programs")
+    mark = fm_mark(m)
+    fm_click(m, origin, "place_computer")
+    fm_showing(m, "/", mark, "the Computer place did not show /")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) > 0, "/ was listed as nothing")
 
-    m.double_click(*fm_row_point(x, y, FM_UP_ROW))
-    wait_for(m, lambda s: 0 < fm_rows_with_text(s, x, y) < FM_ROWS_VISIBLE,
-             "double-clicking .. did not leave /bin")
+    mark = fm_mark(m)
+    fm_click(m, origin, "item0", double=True)
+    fm_showing(m, "/bin", mark, "double-clicking the first folder of / did not enter /bin")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) >= fm_rows_visible(m) - 1,
+             "/bin did not fill the list with programs")
 
-FM_CTX_ITEM_W = 124
-FM_CTX_ITEM_H = 20
-FM_CTX_COUNT = 6
-FM_PROMPT_W, FM_PROMPT_H = 260, 72
-FM_PROMPT_BG = 0x243040
+    mark = fm_mark(m)
+    fm_click(m, origin, "back")
+    fm_showing(m, "/", mark, "the Back button did not return to /")
 
-def fm_prompt_is_open(shot, x, y):
-    px = x + (FM_W - FM_PROMPT_W) // 2
-    py = y + (FM_H - FM_PROMPT_H) // 2
-    return shot.count_color(FM_PROMPT_BG, px, py, FM_PROMPT_W, FM_PROMPT_H) > 3000
+    mark = fm_mark(m)
+    fm_click(m, origin, "forward")
+    fm_showing(m, "/bin", mark, "the Forward button did not go to /bin again")
+
+    mark = fm_mark(m)
+    m.sendkey("left")
+    fm_showing(m, "/", mark, "the Left arrow did not go to the enclosing folder")
+
+    mark = fm_mark(m)
+    fm_click(m, origin, "place_home")
+    fm_showing(m, "/home", mark, "the Home place did not show /home")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == home_rows,
+             "/home came back with a different number of rows")
+
+def fm_name_dialog(m, keys, typed, mark_before):
+    m.sendkey(keys)
+    geometry_after(m, "dialog_field", mark_before)
+    m.type_text(typed)
+    m.sendkey("ret")
 
 def test_file_manager_creates_a_folder_and_deletes_it_full(m):
     boot(m)
-    m.double_click(ICON_X, ICONS[2][2])
-    wait_for_windows(m, 1)
-    x, y = app_origin(FIRST_APP_IDX)
+    origin = fm_open(m)
+    before = fm_rows_with_text(m, m.screenshot(), origin)
 
-    before = fm_rows_with_text(m.screenshot(), x, y)
-    check(before > 0, "the Files window listed nothing")
-
-    press_x = x + 60
-    press_y = y + FM_LIST_Y + (FM_ROWS_VISIBLE - 1) * FM_ROW_H
-    mx = min(press_x, x + FM_LIST_W - FM_CTX_ITEM_W)
-    my = min(press_y, y + (FM_H - FM_STATUS_H) - FM_CTX_ITEM_H * FM_CTX_COUNT)
-
-    m.right_click(press_x, press_y)
-    wait_for(m, lambda s: s.count_color(CTX_MENU_BG, mx, my, FM_CTX_ITEM_W,
-                                        FM_CTX_ITEM_H * FM_CTX_COUNT) > 500,
-             "right-clicking the file list did not open a context menu")
-
-    m.click(mx + FM_CTX_ITEM_W // 2, my + FM_CTX_ITEM_H + FM_CTX_ITEM_H // 2)
-    wait_for(m, lambda s: fm_prompt_is_open(s, x, y),
-             "the New Folder menu item did not open a prompt")
-
+    x, y, w, h = geometry(m, "content")
+    mark = fm_mark(m)
+    m.right_click(origin[0] + x + w // 2, origin[1] + y + h - 20)
+    fm_click(m, origin, "menu_new_folder", mark=mark)
+    geometry_after(m, "dialog_field", mark)
     m.type_text("m112dir")
     m.sendkey("ret")
-    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == before + 1,
+    fm_wait_log(m, "[files] created /home/m112dir", mark, "New Folder did not make /home/m112dir")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == before + 1,
              "the new folder did not appear in the list", timeout=15.0)
 
-    m.double_click(*fm_row_point(x, y, FM_FIRST_FILE_ROW))
-    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == 1,
-             "row 1 was not the empty folder that was just created")
+    mark = fm_mark(m)
+    fm_click(m, origin, "item0", double=True)
+    fm_showing(m, "/home/m112dir", mark, "item 0 was not the folder that was just made")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == 0, "the new folder was not empty")
 
-    m.sendkey("n")
-    wait_for(m, lambda s: fm_prompt_is_open(s, x, y),
-             "N did not open the New File prompt")
-    m.type_text("inside")
-    m.sendkey("ret")
-    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == 2,
+    mark = fm_mark(m)
+    fm_name_dialog(m, "ctrl-n", "inside", mark)
+    fm_wait_log(m, "[files] created /home/m112dir/inside", mark, "Ctrl+N did not make a file")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == 1,
              "the new file did not appear inside the new folder", timeout=15.0)
 
+    mark = fm_mark(m)
     m.sendkey("left")
-    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == before + 1,
-             "the Left arrow did not leave the folder")
+    fm_showing(m, "/home", mark, "the Left arrow did not leave the folder")
 
-    m.click(*fm_row_point(x, y, FM_FIRST_FILE_ROW))
+    fm_click(m, origin, "item0")
     time.sleep(0.4)
+    mark = fm_mark(m)
     m.sendkey("backspace")
-    wait_for(m, lambda s: fm_prompt_is_open(s, x, y),
-             "Backspace did not open a delete confirm")
-    m.sendkey("y")
-    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == before,
-             "the folder and the file inside it were not deleted", timeout=15.0)
+    fm_wait_log(m, "[files] trashed /home/m112dir", mark, "Backspace did not move the folder to the Trash")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == before,
+             "the folder was still listed after it went to the Trash", timeout=15.0)
+
+    mark = fm_mark(m)
+    fm_click(m, origin, "place_trash")
+    fm_showing(m, FILES_TRASH, mark, "the Trash place did not show the Trash")
+    fm_click(m, origin, "item0")
+    time.sleep(0.4)
+    mark = fm_mark(m)
+    m.sendkey("backspace")
+    geometry_after(m, "dialog_ok", mark)
+    m.sendkey("ret")
+    fm_wait_log(m, "[files] deleted %s/m112dir" % FILES_TRASH, mark,
+                "deleting from the Trash did not remove the folder and the file inside it")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == 0, "the Trash is not empty afterwards")
+
+FILES_TRASH = "/home/.Trash"
 
 def test_file_manager_refuses_a_new_name_that_escapes_the_folder(m):
     boot(m)
-    m.double_click(ICON_X, ICONS[2][2])
-    wait_for_windows(m, 1)
-    x, y = app_origin(FIRST_APP_IDX)
+    origin = fm_open(m)
+    before = fm_rows_with_text(m, m.screenshot(), origin)
 
-    before = fm_rows_with_text(m.screenshot(), x, y)
-    check(before > 0, "the Files window listed nothing")
+    mark = fm_mark(m)
+    fm_name_dialog(m, "ctrl-shift-n", "m112esc", mark)
+    fm_wait_log(m, "[files] created /home/m112esc", mark, "the folder to escape into was not created")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == before + 1,
+             "the folder to escape into was not listed", timeout=15.0)
 
-    m.sendkey("f")
-    wait_for(m, lambda s: fm_prompt_is_open(s, x, y),
-             "F did not open the New Folder prompt")
-    m.type_text("m112esc")
-    m.sendkey("ret")
-    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == before + 1,
-             "the folder to escape into was not created", timeout=15.0)
-
-    m.sendkey("n")
-    wait_for(m, lambda s: fm_prompt_is_open(s, x, y),
-             "N did not open the New File prompt")
-    m.type_text("m112esc/inside")
-    m.sendkey("ret")
-
+    mark = fm_mark(m)
+    fm_name_dialog(m, "ctrl-n", "m112esc/inside", mark)
     time.sleep(3.0)
-    check(fm_rows_with_text(m.screenshot(), x, y) == before + 1,
-          "a name with a path separator in it created something here")
+    check("[files] created" not in m.read_log()[mark:],
+          "a name with a path separator in it created something")
+    check(fm_rows_with_text(m, m.screenshot(), origin) == before + 1,
+          "a name with a path separator in it changed this folder")
 
-    m.double_click(*fm_row_point(x, y, FM_FIRST_FILE_ROW))
-    wait_for(m, lambda s: fm_rows_with_text(s, x, y) >= 1,
-             "double-clicking the new folder did not enter it")
-    time.sleep(1.5)
-    rows = fm_rows_with_text(m.screenshot(), x, y)
-    check(rows == 1,
-          "a name with a path separator in it escaped into the subfolder "
-          "(%d rows inside it, expected just \"..\")" % rows)
+    mark = fm_mark(m)
+    fm_click(m, origin, "item0", double=True)
+    fm_wait_log(m, "[files] showing /home/m112esc 0 items\n", mark,
+                "a name with a path separator in it escaped into the subfolder")
 
+    mark = fm_mark(m)
     m.sendkey("left")
-    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == before + 1,
-             "the Left arrow did not leave the folder")
-    m.click(*fm_row_point(x, y, FM_FIRST_FILE_ROW))
+    fm_showing(m, "/home", mark, "the Left arrow did not leave the folder")
+    fm_click(m, origin, "item0")
     time.sleep(0.4)
+    mark = fm_mark(m)
     m.sendkey("backspace")
-    wait_for(m, lambda s: fm_prompt_is_open(s, x, y),
-             "Backspace did not open a delete confirm")
-    m.sendkey("y")
-    wait_for(m, lambda s: fm_rows_with_text(s, x, y) == before,
-             "the folder this test made was not cleaned up", timeout=15.0)
+    fm_wait_log(m, "[files] trashed /home/m112esc", mark, "the folder this test made was not cleaned up")
+
+def test_file_manager_puts_back_and_undoes(m):
+    boot(m)
+    origin = fm_open(m)
+    before = fm_rows_with_text(m, m.screenshot(), origin)
+
+    fm_click(m, origin, "item0")
+    time.sleep(0.4)
+    mark = fm_mark(m)
+    m.sendkey("ctrl-d")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == before + 1,
+             "Ctrl+D did not duplicate the selected file", timeout=15.0)
+
+    mark = fm_mark(m)
+    m.sendkey("backspace")
+    fm_wait_log(m, "[files] trashed /home/", mark, "Backspace did not trash the duplicate")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == before,
+             "the duplicate was still listed after it went to the Trash", timeout=15.0)
+
+    mark = fm_mark(m)
+    m.sendkey("ctrl-z")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == before + 1,
+             "Ctrl+Z did not bring the trashed file back", timeout=15.0)
+
+    fm_click(m, origin, "item0")
+    time.sleep(0.4)
+    m.sendkey("ctrl-a")
+    time.sleep(0.4)
+    mark = fm_mark(m)
+    fm_click(m, origin, "place_trash")
+    fm_showing(m, FILES_TRASH, mark, "the Trash did not open")
+    check(fm_rows_with_text(m, m.screenshot(), origin) == 0,
+          "undo left something behind in the Trash")
+
+    mark = fm_mark(m)
+    fm_click(m, origin, "back")
+    fm_showing(m, "/home", mark, "Back did not return home")
+    m.sendkey("ctrl-a")
+    time.sleep(0.4)
+    mark = fm_mark(m)
+    m.sendkey("backspace")
+    fm_wait_log(m, "[files] trashed /home/", mark, "Backspace did not trash everything selected")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == 0,
+             "trashing everything left rows behind", timeout=15.0)
+
+    mark = fm_mark(m)
+    fm_click(m, origin, "place_trash")
+    fm_showing(m, FILES_TRASH, mark, "the Trash did not open")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == before + 1,
+             "the Trash does not hold what was put in it")
+    m.sendkey("ctrl-a")
+    time.sleep(0.4)
+    x, y, w, h = geometry(m, "item0")
+    mark = fm_mark(m)
+    m.right_click(origin[0] + x + 60, origin[1] + y + h // 2)
+    fm_click(m, origin, "menu_put_back", mark=mark)
+    fm_wait_log(m, "[files] put back /home/", mark, "Put Back did not restore anything")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == 0, "Put Back left things in the Trash")
+
+    mark = fm_mark(m)
+    fm_click(m, origin, "place_home")
+    fm_wait_log(m, "[files] showing /home %d items\n" % (before + 1), mark,
+                "Put Back did not return every file to /home")
+
+def test_file_manager_searches_and_quick_looks(m):
+    boot(m)
+    origin = fm_open(m)
+    mark = fm_mark(m)
+    fm_click(m, origin, "search")
+    time.sleep(0.4)
+    m.type_text("notes")
+    fm_wait_log(m, '[files] search "notes" in /home: 1 results', mark,
+                "searching home for notes did not find the one file")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == 1, "the search result was not listed")
+
+    fm_click(m, origin, "item0")
+    time.sleep(0.4)
+    mark = fm_mark(m)
+    m.sendkey("spc")
+    fm_wait_log(m, "[files] quick look notes", mark, "Space did not open Quick Look")
+    px, py, pw, ph = geometry_after(m, "preview", mark)
+    shot = m.screenshot()
+    check(shot.count_brighter(FM_INK_SUM, origin[0] + px + 20, origin[1] + py + 60, pw - 40, ph - 80,
+                              ignore=qemu_input.CURSOR_COLOR) > 200,
+          "Quick Look opened but shows no text from the file")
+
+    m.sendkey("esc")
+    time.sleep(0.6)
+    mark = fm_mark(m)
+    m.sendkey("ctrl-i")
+    geometry_after(m, "info", mark)
+
+    m.sendkey("esc")
+    time.sleep(0.4)
+    mark = fm_mark(m)
+    fm_click(m, origin, "search")
+    m.sendkey("esc")
+    fm_showing(m, "/home", mark, "Escape in the search field did not go back to the folder")
 
 def test_desktop_survives_losing_the_compositor(m):
     boot(m)
@@ -1485,28 +1621,23 @@ def test_terminal_scrollback_scrolls_with_the_wheel(m):
 
 def test_copying_a_file_shows_up_in_another_window(m):
     boot(m)
-    m.double_click(ICON_X, ICONS[2][2])
-    wait_for_windows(m, 1)
+    first = fm_open(m)
+    mark = fm_mark(m)
     m.double_click(ICON_X, ICONS[2][2])
     wait_for_windows(m, 2)
+    fm_showing(m, "/home", mark, "the second Files window never listed /home")
+    second = app_origin(FIRST_APP_IDX + 1, FM_H)
 
-    ax, ay = app_origin(FIRST_APP_IDX)
-    bx, by = app_origin(FIRST_APP_IDX + 1)
-
-    before = fm_rows_with_text(m.screenshot(), bx, by)
+    before = fm_rows_with_text(m, m.screenshot(), second)
     check(before > 0, "the second Files window listed nothing")
 
-    m.click(*fm_row_point(bx, by, FM_FIRST_FILE_ROW))
+    fm_click(m, second, "item0")
     time.sleep(0.4)
-    m.sendkey("c")
-    time.sleep(0.6)
-    m.type_text("m56copy")
-    m.sendkey("ret")
-
-    wait_for(m, lambda s: fm_rows_with_text(s, bx, by) == before + 1,
+    m.sendkey("ctrl-d")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, second) == before + 1,
              "the copy did not appear in the window that made it", timeout=15.0)
-    m.click(ax + 20, ay - TITLEBAR_H // 2)
-    wait_for(m, lambda s: fm_rows_with_text(s, ax, ay) == before + 1,
+    m.click(first[0] + 20, first[1] - TITLEBAR_H // 2)
+    wait_for(m, lambda s: fm_rows_with_text(m, s, first) == before + 1,
              "the other window's listing never caught up with the new file", timeout=15.0)
 
 def test_soak_desktop_stays_usable(m):
@@ -1546,6 +1677,7 @@ def test_display_resolution_changes_and_persists(m):
     wait_for_windows(m, 1)
 
     origin = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    settings_pane(m, origin, "display")
     m.click(*mode_btn_center(m, origin, SMALL_MODE_INDEX))
     wait_for(m, lambda s: (s.width, s.height) == SMALL_MODE,
              "clicking a resolution did not change the display size")
@@ -1553,8 +1685,12 @@ def test_display_resolution_changes_and_persists(m):
              "the taskbar does not span the new %dx%d display - its buffer was not reallocated"
              % SMALL_MODE, timeout=20.0)
 
+    moved = (min(origin[0], SMALL_MODE[0] - SETTINGS_W),
+             max(min(origin[1], SMALL_MODE[1] - PANEL_H - SETTINGS_H), CONTENT_TOP))
     keep_x, keep_y, keep_w, keep_h = geometry(m, "keep")
-    m.click(origin[0] + keep_x + keep_w // 2, CONTENT_TOP + keep_y + keep_h // 2)
+    check(moved[0] + keep_x + keep_w < SMALL_MODE[0] and moved[1] + keep_y + keep_h < SMALL_MODE[1],
+          "the Keep button is off the edge of the smaller screen it is asking about")
+    m.click(moved[0] + keep_x + keep_w // 2, moved[1] + keep_y + keep_h // 2)
 
     time.sleep(MODE_REVERT_S)
     shot = m.screenshot()
@@ -1572,6 +1708,7 @@ def test_display_resolution_reverts_when_not_confirmed(m):
     m.double_click(ICON_X, ICONS[3][2])
     wait_for_windows(m, 1)
     origin = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    settings_pane(m, origin, "display")
     m.click(*mode_btn_center(m, origin, SMALL_MODE_INDEX))
     wait_for(m, lambda s: (s.width, s.height) == SMALL_MODE,
              "clicking a resolution did not change the display size")
@@ -1593,15 +1730,16 @@ def test_behaviour_settings_persist(m):
     wait_for_windows(m, 1)
 
     origin = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    settings_pane(m, origin, "appearance")
     wait_for(m, lambda s: motion_is_on(m, s, origin),
              "Settings did not open with animations on, which is the default")
-    check(volume_is_audible(m, m.screenshot(), origin),
-          "the volume did not start un-muted, which is the default")
-
     m.click(*widget_center(m, origin, "motion"))
     wait_for(m, lambda s: not motion_is_on(m, s, origin),
              "clicking the Motion switch did not turn animations off")
 
+    settings_pane(m, origin, "sound")
+    check(volume_is_audible(m, m.screenshot(), origin),
+          "the volume did not start un-muted, which is the default")
     m.click(*widget_point(m, origin, "volume", 0.0, 0.5))
     wait_for(m, lambda s: not volume_is_audible(m, s, origin),
              "dragging the volume slider to its left end did not mute it")
@@ -1617,11 +1755,56 @@ def test_behaviour_settings_persist(m):
 
     wait_for(m, lambda s: count_app_windows(s) >= 1,
              "Settings did not come back after the restart", timeout=120.0)
-    shot = m.screenshot()
-    check(not motion_is_on(m, shot, origin),
+    geometry_after(m, "pane_appearance", m.read_log().rfind(BOOT_MARKER))
+    settings_pane(m, origin, "appearance")
+    check(not motion_is_on(m, m.screenshot(), origin),
           "the Motion switch forgot it had been turned off across a restart")
-    check(not volume_is_audible(m, shot, origin),
+    settings_pane(m, origin, "sound")
+    check(not volume_is_audible(m, m.screenshot(), origin),
           "the volume forgot it had been muted across a restart")
+
+def clock_ink_span(shot):
+    y0 = PANEL_TOP + PANEL_H // 2 - 7
+    columns = []
+    for x in range(shot.width - 1, shot.width - 160, -1):
+        bright = any(channel_sum(shot.px(x, y)) > 0x200 for y in range(y0, y0 + 14))
+        columns.append(bright)
+    right = None
+    left = None
+    gap = 0
+    for i, bright in enumerate(columns):
+        if bright:
+            if right is None:
+                right = i
+            left = i
+            gap = 0
+        elif right is not None:
+            gap += 1
+            if gap > 8:
+                break
+    if right is None:
+        return 0
+    return left - right + 1
+
+def test_twelve_hour_clock_reaches_the_taskbar(m):
+    boot(m)
+    m.double_click(ICON_X, ICONS[3][2])
+    wait_for_windows(m, 1)
+    origin = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    settings_pane(m, origin, "date_time")
+
+    before = clock_ink_span(m.screenshot())
+    check(before > 20, "the taskbar clock could not be found (%d columns)" % before)
+
+    m.click(*widget_center(m, origin, "clock24"))
+    wait_for(m, lambda s: clock_ink_span(s) > before + 12,
+             "turning the 24-hour clock off did not widen the taskbar clock to say AM or PM",
+             timeout=15.0)
+
+    m.click(*widget_center(m, origin, "clock24"))
+    wait_for(m, lambda s: abs(clock_ink_span(s) - before) <= 3,
+             "turning the 24-hour clock back on did not put the taskbar clock back",
+             timeout=15.0)
 
 class Region:
 
@@ -1757,7 +1940,7 @@ def test_typing_into_a_window_changes_only_that_window(m):
         shots.append(m.screenshot())
 
     allowed = [
-        Region(x - 40, y - 60, 700, 520, "the editor window, its chrome and its shadow"),
+        Region(x - 40, y - 60, FM_W + 80, FM_H + 100, "the Files window, its chrome and its shadow"),
         Region(0, PANEL_TOP, 400, PANEL_H, "the taskbar"),
         CLOCK_REGION,
     ]
@@ -2306,7 +2489,7 @@ TESTS = [
     ("session_restores_windows_across_a_reboot", test_session_restores_windows_across_a_reboot),
     ("launcher_does_not_offer_data_files", test_launcher_does_not_offer_data_files),
     ("clicking_a_toast_dismisses_it", test_clicking_a_toast_dismisses_it),
-    ("wheel_scrolls_the_file_list_one_row_per_detent", test_wheel_scrolls_the_file_list_one_row_per_detent),
+    ("wheel_scrolls_the_file_list", test_wheel_scrolls_the_file_list),
     ("alt_f4_closes_the_focused_window", test_alt_f4_closes_the_focused_window),
     ("ctrl_alt_arrows_snap_and_maximize", test_ctrl_alt_arrows_snap_and_maximize),
     ("drag_a_file_onto_the_desktop_opens_it", test_drag_a_file_onto_the_desktop_opens_it),
@@ -2319,6 +2502,9 @@ TESTS = [
      test_file_manager_creates_a_folder_and_deletes_it_full),
     ("file_manager_refuses_a_new_name_that_escapes_the_folder",
      test_file_manager_refuses_a_new_name_that_escapes_the_folder),
+    ("file_manager_puts_back_and_undoes", test_file_manager_puts_back_and_undoes),
+    ("file_manager_searches_and_quick_looks", test_file_manager_searches_and_quick_looks),
+    ("twelve_hour_clock_reaches_the_taskbar", test_twelve_hour_clock_reaches_the_taskbar),
     ("desktop_survives_losing_the_compositor", test_desktop_survives_losing_the_compositor),
     ("editor_undo_restores_the_buffer", test_editor_undo_restores_the_buffer),
     ("terminal_scrollback_scrolls_with_the_wheel", test_terminal_scrollback_scrolls_with_the_wheel),
@@ -2373,6 +2559,7 @@ QUICK_TESTS = [
     "terminal_scrollback_scrolls_with_the_wheel",
     "file_manager_navigates_directories",
     "file_manager_creates_a_folder_and_deletes_it_full",
+    "file_manager_puts_back_and_undoes",
     "settings_persist_across_a_reboot",
     "a_crashing_program_only_takes_itself_down",
     "launching_an_app_does_not_disturb_the_rest_of_the_screen",
