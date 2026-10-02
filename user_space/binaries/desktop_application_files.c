@@ -2483,8 +2483,10 @@ static void on_item_pressed(lv_event_t *event) {
         anchor = position;
     }
     press_position = position;
-    press_x = files_window.pointer_x;
-    press_y = files_window.pointer_y;
+    lv_point_t point;
+    lv_indev_get_point(lv_indev_active(), &point);
+    press_x = point.x;
+    press_y = point.y;
     dragging = 0;
     if (last_press_position == position && last_press_ms >= 0 && now - last_press_ms <= FILES_DOUBLE_CLICK_MS &&
         !(mods & (KEYBOARD_MOD_SHIFT | KEYBOARD_MOD_CTRL))) {
@@ -3110,7 +3112,7 @@ static void start_drag(void) {
         return;
     }
     dragging = 1;
-    files_window.pointer_pressed = 0;
+    lvgl_window_release_pointer(&files_window);
     window_manager_drag_begin(path);
     printf("[files] dragging %s\n", path);
 }

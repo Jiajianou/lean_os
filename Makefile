@@ -175,7 +175,7 @@ $(BUILD)/%.elf: $(UOBJ)/%.o $(USER_LIBOBJS) $(USER_LD)
 	$(if $(V),,@echo "  LD      $@")
 	$(if $(V),,@)$(LD) --gc-sections -T $(USER_LD) -o $@ $(USER_LIBOBJS) $(UOBJ)/$*.o
 
-LVGL_PORT_OBJS := $(UOBJ)/lvgl_leanos.o $(UOBJ)/lvgl_keys.o $(UOBJ)/lvgl_theme.o \
+LVGL_PORT_OBJS := $(UOBJ)/lvgl_leanos.o $(UOBJ)/lvgl_keys.o $(UOBJ)/lvgl_pointer_queue.o $(UOBJ)/lvgl_theme.o \
                   $(UOBJ)/desktop_palette.o $(UOBJ)/application_dispatch.o
 
 DESKTOP_APPLICATION_OBJS := $(UOBJ)/desktop_application_settings.o \

@@ -53,14 +53,16 @@ static void lvgl_read_pointer(lv_indev_t *indev, lv_indev_data_t *data) {
     if (!window) {
         return;
     }
-    int32_t x = window->pointer_x;
-    int32_t y = window->pointer_y;
+    lvgl_pointer_sample_t sample;
+    data->continue_reading = lvgl_pointer_queue_read(&window->pointer_queue, &sample) != 0;
+    int32_t x = sample.x;
+    int32_t y = sample.y;
     int32_t width = (int32_t)window->window.width;
     int32_t height = (int32_t)window->window.height;
     int outside = (x < 0 || y < 0 || x >= width || y >= height);
     data->point.x = x < 0 ? 0 : (x >= width ? width - 1 : x);
     data->point.y = y < 0 ? 0 : (y >= height ? height - 1 : y);
-    data->state = (window->pointer_pressed && !outside) ? LV_INDEV_STATE_PRESSED
+    data->state = (sample.pressed && !outside) ? LV_INDEV_STATE_PRESSED
                                                         : LV_INDEV_STATE_RELEASED;
 }
 
@@ -262,11 +264,12 @@ int lvgl_window_pump(lvgl_window_t *window, int timeout_ms) {
         case WINDOW_MANAGER_EVENT_MOUSE_MOVE:
             window->pointer_x = event.x;
             window->pointer_y = event.y;
+            lvgl_pointer_queue_move(&window->pointer_queue, event.x, event.y);
             break;
         case WINDOW_MANAGER_EVENT_MOUSE_BUTTON:
             window->pointer_x = event.x;
             window->pointer_y = event.y;
-            window->pointer_pressed = (uint8_t)(event.buttons & 1u);
+            lvgl_pointer_queue_button(&window->pointer_queue, event.x, event.y, (uint8_t)(event.buttons & 1u));
             break;
         case WINDOW_MANAGER_EVENT_KEY:
             if (window->key_handler &&
@@ -302,6 +305,12 @@ void lvgl_window_run(lvgl_window_t *window) {
             sleep_ms = LVGL_MAX_SLEEP_MS;
         }
         lvgl_window_pump(window, (int)sleep_ms);
+    }
+}
+
+void lvgl_window_release_pointer(lvgl_window_t *window) {
+    if (window) {
+        lvgl_pointer_queue_release(&window->pointer_queue);
     }
 }
 

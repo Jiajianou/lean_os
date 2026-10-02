@@ -2579,7 +2579,33 @@ def test_trackpad_settings_move_the_pointer(m):
     check(tripled == (150, 240),
           "at 300%%, 50 counts across and 80 down moved the cursor to %r, not (150, 240)" % (tripled,))
 
+def test_a_tap_reaches_every_toolkit_control(m):
+    # M212: a tap's press and release arrive together, and a toolkit that
+    # samples the pointer once a frame saw neither. A pane row and a switch
+    # are different LVGL widgets, so both are tapped.
+    boot(m)
+    m.double_click(ICON_X, ICONS[3][2])
+    wait_for_windows(m, 1)
+    origin = app_origin(FIRST_APP_IDX, SETTINGS_H)
+    geometry(m, "pane_trackpad")
+    for pane, name in (("trackpad", "Trackpad"), ("display", "Display"), ("date_time", "Date & Time")):
+        mark = len(m.read_log())
+        m.tap(*widget_center(m, origin, "pane_" + pane))
+        wait_for_log_after(m, "[settings] showing %s" % name, mark,
+                           "a tap on the %s pane's row did not open it" % name)
+
+    settings_pane(m, origin, "trackpad")
+    mark = len(m.read_log())
+    m.tap(*widget_center(m, origin, "trackpad_natural"))
+    wait_for_log_after(m, "[settings] trackpad natural scrolling 0", mark,
+                       "a tap on the Natural scrolling switch did not turn it off")
+    mark = len(m.read_log())
+    m.tap(*widget_center(m, origin, "trackpad_natural"))
+    wait_for_log_after(m, "[settings] trackpad natural scrolling 1", mark,
+                       "a second tap on the switch did not turn it back on")
+
 TESTS = [
+    ("a_tap_reaches_every_toolkit_control", test_a_tap_reaches_every_toolkit_control),
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
     ("single_click_does_not_launch", test_single_click_does_not_launch),
     ("titlebar_close_button", test_titlebar_close_button),
@@ -2676,6 +2702,7 @@ def _die_on_signal(signum, _frame):
     raise KeyboardInterrupt("received signal %d" % signum)
 
 QUICK_TESTS = [
+    "a_tap_reaches_every_toolkit_control",
     "desktop_context_menu",
     "a_painting_becomes_the_desktop_picture",
     "double_click_launches_every_icon",

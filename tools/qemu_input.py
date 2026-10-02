@@ -518,6 +518,16 @@ class Machine:
         self.button(0)
         time.sleep(0.04)
 
+    def tap(self, x=None, y=None):
+        # M212. A touchpad tap is a press and a release in the same instant;
+        # one write to the monitor puts both in the guest's queue together,
+        # which is the case a person's finger makes and a click cannot.
+        if x is not None:
+            self.move_to(x, y)
+        self._sock.sendall(b"mouse_button 1\nmouse_button 0\n")
+        self._drain()
+        time.sleep(0.08)
+
     def right_click(self, x=None, y=None):
         self.click(x, y, mask=self.BTN_RIGHT)
 
