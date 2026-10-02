@@ -1173,7 +1173,7 @@ def test_wheel_scrolls_the_file_list(m):
     time.sleep(1.0)
     got = band(m.screenshot(), top)
     if got != want:
-        m.wheel(-6)
+        m.wheel(-3)
         time.sleep(1.0)
         got = band(m.screenshot(), top)
     check(got == want,
@@ -2848,10 +2848,57 @@ def test_windows_key_chords_snap_and_open(m):
     wait_for_log_after(m, "[settings] showing General", mark, "Windows+I did not open Settings")
     wait_for_windows(m, 2)
 
+NO_WHEEL_MACHINE = dict(extra_args=["-fw_cfg", "name=opt/leanos/mouse,string=no-wheel"])
+
+def test_the_middle_button_held_scrolls_a_mouse_with_no_wheel(m):
+    # M219: a TrackPoint is three buttons and no wheel; holding the middle
+    # one and pushing is how it scrolls.
+    boot(m)
+    check("[mouse] opt/leanos/mouse=no-wheel" in m.read_log(), "the harness switch did not reach the PS/2 driver")
+    origin = fm_open(m)
+    mark = fm_mark(m)
+    fm_click(m, origin, "place_applications")
+    fm_showing(m, "/bin", mark, "Applications did not show /bin")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) >= fm_rows_visible(m) - 1,
+             "/bin did not fill the list - there is nothing here long enough to scroll")
+    x, y, w, h = geometry(m, "content")
+    left = origin[0] + x + 40
+    right = origin[0] + x + w - 20
+    top = origin[1] + y + FM_CONTENT_PAD
+    step = 48
+
+    def band(shot, at):
+        return [shot.px(px, py) for py in range(at, at + 20) for px in range(left, right, 2)]
+
+    here = (origin[0] + x + w // 2, origin[1] + y + h // 2)
+    m.move_to(*here)
+    want = band(m.screenshot(), top + 3 * step)
+
+    def push(dy, times):
+        m.monitor("mouse_button 4", settle=0.05)
+        for _ in range(times):
+            m.monitor("mouse_move 0 %d" % dy, settle=0.06)
+        m.monitor("mouse_button 0", settle=0.05)
+        time.sleep(1.0)
+
+    # Which way is "down the list" depends on the natural-scrolling setting;
+    # at the top of the list the other way moves nothing, so the second try
+    # starts from where the first did.
+    push(10, 3)
+    got = band(m.screenshot(), top)
+    if got != want:
+        push(-10, 3)
+        got = band(m.screenshot(), top)
+    check(got == want, "the middle button held and pushed three detents' worth did not scroll the list three steps")
+    found = m.find_cursor(m.screenshot(), here)
+    check(found == here, "the pointer moved while the middle button was scrolling: %r, not %r" % (found, here))
+
 TESTS = [
     ("a_tap_reaches_every_toolkit_control", test_a_tap_reaches_every_toolkit_control),
     ("the_keys_a_laptop_keyboard_adds", test_the_keys_a_laptop_keyboard_adds),
     ("windows_key_chords_snap_and_open", test_windows_key_chords_snap_and_open),
+    ("the_middle_button_held_scrolls_a_mouse_with_no_wheel",
+     test_the_middle_button_held_scrolls_a_mouse_with_no_wheel),
     ("settings_opens_once_and_takes_the_pane_it_is_asked_for",
      test_settings_opens_once_and_takes_the_pane_it_is_asked_for),
     ("the_taskbar_clock_opens_date_and_time", test_the_taskbar_clock_opens_date_and_time),
@@ -2945,6 +2992,7 @@ TESTS = [
 # Tests that need a machine other than the suite's usual one - so a cold
 # boot, since the snapshot was taken of the usual one.
 MACHINE_OPTIONS = {
+    "the_middle_button_held_scrolls_a_mouse_with_no_wheel": NO_WHEEL_MACHINE,
     "display_scale_and_startup_mode_on_a_fixed_mode_screen": GOP_MACHINE,
     "trackpad_settings_move_the_pointer": TRACKPAD_MACHINE,
     "wifi_wizard_joins_after_a_wrong_password": WIFI_MACHINE,
@@ -3052,6 +3100,7 @@ def known_flaky(names):
         return []
 
 COLD_BOOT_TESTS = {
+    "the_middle_button_held_scrolls_a_mouse_with_no_wheel",
     "start_menu_confirmation_answers_a_click",
     "display_scale_and_startup_mode_on_a_fixed_mode_screen",
     "trackpad_settings_move_the_pointer",

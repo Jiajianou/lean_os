@@ -108,7 +108,10 @@ UEFI firmware
   feature report, then reads fingers: one moves the pointer, two scroll,
   a quick touch clicks, a two-finger tap or press is the secondary
   button and three is the middle one. Tap and touch again at once to
-  hold the button down: sliding drags, lifting lets go. A pad it cannot switch stays a
+  hold the button down: sliding drags, lifting lets go. And the
+  TrackPoint scrolls the ThinkPad way: on a pointer with no wheel,
+  holding the middle button and pushing is the wheel, and a middle press
+  that never moved is still a middle click. A pad it cannot switch stays a
   mouse. The trackpad's settings are its own, apart from the mouse's,
   because the kernel labels every pointer event with the device it came
   from. The gestures are host-tested frame by frame; QEMU has no I2C

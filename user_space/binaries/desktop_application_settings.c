@@ -1258,6 +1258,12 @@ static void build_mouse(void) {
     lv_obj_set_style_text_align(scroll_speed_label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
     wrap_caption(card, "How far one click of the wheel moves what is under the pointer. These settings are the "
                        "mouse's; a trackpad has its own.");
+    static char devices[256];
+    if (read_text_file(PATH_PROCESS_DIRECTORY "input", devices, sizeof(devices)) >= 0 &&
+        strstr(devices, "mouse\tps2\n") != 0) {
+        wrap_caption(card, "This machine's pointer has no wheel - a TrackPoint's kind - so holding its middle "
+                           "button and pushing it scrolls, and a middle click is a press with no push.");
+    }
 }
 
 static lv_obj_t *slider_row(lv_obj_t *card, const char *label, int32_t minimum, int32_t maximum, int32_t value,

@@ -6,6 +6,7 @@
 #include "architecture/x86_64/interrupt_service_routines.h"
 #include "architecture/x86_64/pic.h"
 #include "device/fwcfg.h"
+#include "drivers/middle_button_scroll.h"
 #include "drivers/kernel_log.h"
 #include "drivers/pit.h"
 #include "drivers/ps2_controller.h"
@@ -39,6 +40,7 @@ static uint8_t ps2_source = MOUSE_SOURCE_MOUSE;
 
 static uint8_t packet[4];
 static int packet_index;
+static middle_button_scroll_t middle_scroll;
 
 int mouse_pending(void) {
     return buffer_head != buffer_tail;
@@ -54,11 +56,28 @@ static void push_event(mouse_event_t ev) {
     scheduler_wake_object(SCHEDULER_INPUT_OBJECT);
 }
 
+/* M219. A packet's bytes arrive back to back, and the only mark a header
+   carries is bit 3 - which half of all movement bytes have too. A stream
+   picked up mid-packet (an acknowledgement left over from setting the device
+   up, or bytes lost to a busy machine) took a movement byte for a header and
+   stayed out of step: the first thing the wheel-less harness machine ever
+   saw was a right-button press nobody made, which opened the desktop's menu
+   and ate the next click. A gap longer than any packet's starts a new one,
+   and a header claiming an overflow is not believed. */
+#define MOUSE_PACKET_GAP_MS 30
+
+static uint64_t last_byte_ms;
+
 static void mouse_irq(isr_regs_t *regs) {
     (void)regs;
     uint8_t data = inb(PS2_DATA_PORT);
+    uint64_t now_ms = clock_monotonic_ms();
+    if (packet_index != 0 && now_ms - last_byte_ms > MOUSE_PACKET_GAP_MS) {
+        packet_index = 0;
+    }
+    last_byte_ms = now_ms;
 
-    if (packet_index == 0 && !(data & 0x08)) {
+    if (packet_index == 0 && (!(data & 0x08) || (data & 0xC0))) {
         return;
     }
 
@@ -92,8 +111,18 @@ static void mouse_irq(isr_regs_t *regs) {
             z -= 16;
         }
         ev.wheel = -z;
+        push_event(ev);
+        return;
     }
-    push_event(ev);
+    middle_button_scroll_event_t scrolled[2];
+    int count = middle_button_scroll_filter(&middle_scroll, ev.dx, ev.dy, ev.buttons, scrolled);
+    for (int i = 0; i < count; i++) {
+        ev.dx = scrolled[i].dx;
+        ev.dy = scrolled[i].dy;
+        ev.wheel = scrolled[i].wheel;
+        ev.buttons = scrolled[i].buttons;
+        push_event(ev);
+    }
 }
 
 void mouse_init(void) {
@@ -133,9 +162,19 @@ void mouse_init(void) {
     }
     mouse_present = 1;
 
-    mouse_write(0xF3); mouse_write(200);
-    mouse_write(0xF3); mouse_write(100);
-    mouse_write(0xF3); mouse_write(80);
+    /* M219: opt/leanos/mouse=no-wheel leaves out the knock that turns on
+       the wheel, so QEMU's mouse is the TrackPoint's kind - three buttons and
+       no wheel - and middle-button scrolling can be graded. */
+    char wheel_switch[16];
+    int wheel_length = fwcfg_read_file("opt/leanos/mouse", wheel_switch, sizeof(wheel_switch) - 1);
+    int leave_wheel_off = wheel_length == 8 && wheel_switch[0] == 'n' && wheel_switch[3] == 'w';
+    if (leave_wheel_off) {
+        kernel_log_puts("[mouse] opt/leanos/mouse=no-wheel - the wheel is not turned on.\n");
+    } else {
+        mouse_write(0xF3); mouse_write(200);
+        mouse_write(0xF3); mouse_write(100);
+        mouse_write(0xF3); mouse_write(80);
+    }
 
     uint8_t device_id = 0;
     packet_bytes = 3;
@@ -148,7 +187,8 @@ void mouse_init(void) {
 
     kernel_log_puts(packet_bytes == 4
                   ? "[mouse] IntelliMouse 4-byte protocol negotiated - wheel events enabled.\n"
-                  : "[mouse] standard 3-byte protocol - no wheel on this device.\n");
+                  : "[mouse] standard 3-byte protocol - no wheel on this device, so the middle button "
+                    "held scrolls (the TrackPoint's way).\n");
 
     irq_register_handler(MOUSE_IRQ, mouse_irq);
     irq_enable_line(CASCADE_IRQ);
