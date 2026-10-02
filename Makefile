@@ -61,7 +61,7 @@ UOBJ      := $(BUILD)/user_obj
 USER_LD   := user_space/library/user.ld
 USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)/string_utilities.o $(UOBJ)/malloc.o \
                 $(UOBJ)/graphics.o $(UOBJ)/font8x16.o $(UOBJ)/window_manager_client.o $(UOBJ)/wallpaper.o $(UOBJ)/wallpaper_picture.o $(UOBJ)/bitmap_file.o \
-                $(UOBJ)/settings_file.o $(UOBJ)/children.o $(UOBJ)/icons.o $(UOBJ)/icon_draw.o \
+                $(UOBJ)/settings_file.o $(UOBJ)/children.o $(UOBJ)/start_menu.o $(UOBJ)/icons.o $(UOBJ)/icon_draw.o \
                 $(UOBJ)/user_interface_font.o $(UOBJ)/recent.o $(UOBJ)/sntp.o $(UOBJ)/dns.o $(UOBJ)/http.o \
                 $(UOBJ)/libc_string.o $(UOBJ)/libc_stdlib.o $(UOBJ)/libc_stdio.o \
                 $(UOBJ)/libc_math.o $(UOBJ)/libc_math_long_double.o $(UOBJ)/libc_time.o \

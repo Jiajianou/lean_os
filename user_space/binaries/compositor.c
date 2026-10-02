@@ -15,6 +15,9 @@
 #include <stdlib.h>
 
 #include "recent.h"
+#include "start_menu.h"
+#include "icon.h"
+#include "icons.h"
 #include "string_utilities.h"
 #include "syscall_wrappers.h"
 #include "window_manager.h"
@@ -64,22 +67,28 @@
 
 #define TRANSLUCENT_NUMBER 3
 #define TRANSLUCENT_DEN 4
-#define LAUNCHER_OPACITY_NUMBER 4
-#define LAUNCHER_OPACITY_DEN 5
+#define LAUNCHER_OPACITY_NUMBER 15
+#define LAUNCHER_OPACITY_DEN 16
 
-#define LAUNCHER_W 480
-#define LAUNCHER_H 320
-#define LAUNCHER_PAD      GRAPHICS_PAD
-#define LAUNCHER_INPUT_H  (UI_FONT_HEIGHT + 8)
-#define LAUNCHER_ROW_H    20
-#define LAUNCHER_LIST_Y   (LAUNCHER_PAD + LAUNCHER_INPUT_H + 10)
-#define LAUNCHER_ROWS     10
-#define LAUNCHER_MAX_ENTRIES 512
-#define LAUNCHER_NAME_MAX 32
+#define START_MENU_W        420
+#define START_MENU_MAX_H    470
+#define START_MENU_MARGIN   8
+#define START_MENU_PAD      14
+#define START_MENU_SEARCH_H 34
+#define START_MENU_HEADING_H 22
+#define START_MENU_TILE_W   ((START_MENU_W - 2 * START_MENU_PAD - START_MENU_TILE_GAP) / START_MENU_COLUMNS)
+#define START_MENU_TILE_H   40
+#define START_MENU_TILE_GAP 6
+#define START_MENU_ROW_H    32
+#define START_MENU_FOOTER_H 52
+#define START_MENU_BUTTON_W 100
+#define START_MENU_BUTTON_H 30
+#define START_MENU_BUTTON_GAP 8
+#define START_MENU_HOVER_YES 10
+#define START_MENU_HOVER_NO  11
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x) STRINGIFY_(x)
-#define LAUNCHER_QUERY_MAX 24
-#define LAUNCHER_LIST_BUFFER 2048
+#define LAUNCHER_LIST_BUFFER 8192
 
 #define LAUNCHER_BG      0x001C2233u
 #define LAUNCHER_BORDER  0x005B6B85u
@@ -89,18 +98,8 @@
 #define LAUNCHER_SEL_BG  0x00335577u
 #define LAUNCHER_ROW_FG  0x00C8D4E4u
 
-#define POWER_BTN_W   96
-#define POWER_BTN_H   22
-#define POWER_BTN_GAP 8
-#define POWER_BTN_Y   (LAUNCHER_H - LAUNCHER_PAD - POWER_BTN_H)
-#define POWER_OFF_X   (LAUNCHER_W - LAUNCHER_PAD - 2 * POWER_BTN_W - POWER_BTN_GAP)
-#define POWER_REBOOT_X (LAUNCHER_W - LAUNCHER_PAD - POWER_BTN_W)
 #define POWER_BTN_BG      0x002B3548u
 #define POWER_BTN_HOVER   0x004C6699u
-#define POWER_CONFIRM_W   300
-#define POWER_CONFIRM_H   96
-#define POWER_CONFIRM_BG  0x00202838u
-
 #define POWER_CONFIRM_NONE (-1)
 
 #define WMENU_W        124
@@ -236,6 +235,20 @@ static void append_text(char *message, int *m, const char *text) {
     for (int i = 0; text[i]; i++) {
         message[(*m)++] = text[i];
     }
+}
+
+static void report_geometry(const char *name, int32_t x, int32_t y, int32_t w, int32_t h) {
+    char message[96];
+    int m = 0;
+    append_text(message, &m, "[geometry] ");
+    append_text(message, &m, name);
+    const int32_t values[4] = {x, y, w, h};
+    for (int i = 0; i < 4; i++) {
+        append_text(message, &m, " ");
+        m += format_uint((uint32_t)(values[i] < 0 ? 0 : values[i]), message + m);
+    }
+    append_text(message, &m, "\n");
+    sys_write(1, message, (size_t)m);
 }
 
 static void report_display(void) {
@@ -476,16 +489,11 @@ static void z_raise(int idx) {
     }
 }
 static int launcher_open;
-static char launcher_entries[LAUNCHER_MAX_ENTRIES][LAUNCHER_NAME_MAX];
-static int launcher_entry_count;
-static char launcher_recent_path[RECENT_MAX][PATH_MAX_LENGTH];
-static int launcher_recent_count;
-static int launcher_matches[LAUNCHER_MAX_ENTRIES];
-static int launcher_match_count;
-static int launcher_selected;
-static int launcher_scroll;
-static char launcher_query[LAUNCHER_QUERY_MAX];
-static int launcher_query_length;
+static start_menu_t start_menu;
+static int start_menu_scroll;
+static void launcher_set_open(int open);
+static void report_geometry(const char *name, int32_t x, int32_t y, int32_t w, int32_t h);
+static int32_t content_top_limit(void);
 static int power_confirm = POWER_CONFIRM_NONE;
 static int shutdown_pending_mode = POWER_CONFIRM_NONE;
 static long shutdown_deadline_ms;
@@ -1265,92 +1273,268 @@ static void stroke_rect_rounded(int32_t x, int32_t y, int32_t w, int32_t h, uint
     stroke_rounded(x, y, w, h, OVERLAY_RADIUS, color, 255);
 }
 
+/* M214. The Start menu opens where the Start button is - above it, from the
+   bottom-left corner - because a menu that appears in the middle of the
+   screen, away from the button that opened it, reads as a different thing.
+   The keyboard chord opens the same menu in the same place. */
+static void launcher_size(int32_t *out_w, int32_t *out_h) {
+    int32_t room = content_bottom_limit() - START_MENU_MARGIN - content_top_limit();
+    *out_w = START_MENU_W;
+    *out_h = room < START_MENU_MAX_H ? room : START_MENU_MAX_H;
+}
+
 static void launcher_rect(int32_t *out_x, int32_t *out_y) {
-    *out_x = ((int32_t)framebuffer_info.width - LAUNCHER_W) / 2;
-    *out_y = ((int32_t)framebuffer_info.height - LAUNCHER_H) / 3;
+    int32_t w, h;
+    launcher_size(&w, &h);
+    *out_x = START_MENU_MARGIN;
+    *out_y = content_bottom_limit() - START_MENU_MARGIN - h;
 }
 
-static int32_t launcher_row_y(int32_t launcher_y, int i) {
-    return launcher_y + LAUNCHER_LIST_Y + i * LAUNCHER_ROW_H;
+static int32_t start_menu_footer_top(void) {
+    int32_t w, h;
+    launcher_size(&w, &h);
+    return h - START_MENU_FOOTER_H;
 }
 
-static void draw_power_button(int32_t x, int32_t y, int32_t bx, const char *label, int mode) {
-    int32_t px = x + bx;
-    int32_t py = y + POWER_BTN_Y;
-    fill_rect_rounded(px, py, POWER_BTN_W, POWER_BTN_H,
-                       power_hover == mode ? POWER_BTN_HOVER : POWER_BTN_BG);
-    stroke_rect_rounded(px, py, POWER_BTN_W, POWER_BTN_H, LAUNCHER_BORDER);
+static int32_t start_menu_content_top(void) {
+    return START_MENU_PAD + START_MENU_SEARCH_H + 12;
+}
+
+static int start_menu_app_count(void) {
+    int apps = 0;
+    while (apps < start_menu.result_count && start_menu.results[apps].kind == START_MENU_APP) {
+        apps++;
+    }
+    return apps;
+}
+
+static int32_t start_menu_tiles_top(void) {
+    return start_menu_content_top() + START_MENU_HEADING_H;
+}
+
+static int32_t start_menu_recent_top(void) {
+    int rows = (start_menu_app_count() + START_MENU_COLUMNS - 1) / START_MENU_COLUMNS;
+    return start_menu_tiles_top() + rows * (START_MENU_TILE_H + START_MENU_TILE_GAP) + 8 + START_MENU_HEADING_H;
+}
+
+static int start_menu_visible_rows(void) {
+    int rows = (start_menu_footer_top() - 6 - start_menu_content_top()) / START_MENU_ROW_H;
+    return rows < 1 ? 1 : rows;
+}
+
+/* Where result i is drawn, relative to the menu; 0 when it is scrolled out
+   of view or falls below the footer. */
+static int start_menu_item_rect(int i, int32_t *x, int32_t *y, int32_t *w, int32_t *h) {
+    if (i < 0 || i >= start_menu.result_count) {
+        return 0;
+    }
+    if (start_menu_searching(&start_menu)) {
+        int row = i - start_menu_scroll;
+        if (row < 0 || row >= start_menu_visible_rows()) {
+            return 0;
+        }
+        *x = START_MENU_PAD / 2;
+        *y = start_menu_content_top() + row * START_MENU_ROW_H;
+        *w = START_MENU_W - START_MENU_PAD;
+        *h = START_MENU_ROW_H;
+        return 1;
+    }
+    int apps = start_menu_app_count();
+    if (i < apps) {
+        *x = START_MENU_PAD + (i % START_MENU_COLUMNS) * (START_MENU_TILE_W + START_MENU_TILE_GAP);
+        *y = start_menu_tiles_top() + (i / START_MENU_COLUMNS) * (START_MENU_TILE_H + START_MENU_TILE_GAP);
+        *w = START_MENU_TILE_W;
+        *h = START_MENU_TILE_H;
+        return 1;
+    }
+    *x = START_MENU_PAD / 2;
+    *y = start_menu_recent_top() + (i - apps) * START_MENU_ROW_H;
+    *w = START_MENU_W - START_MENU_PAD;
+    *h = START_MENU_ROW_H;
+    return *y + *h <= start_menu_footer_top() - 4;
+}
+
+static void start_menu_keep_selection_visible(void) {
+    if (!start_menu_searching(&start_menu)) {
+        start_menu_scroll = 0;
+        return;
+    }
+    int rows = start_menu_visible_rows();
+    if (start_menu.selected < start_menu_scroll) {
+        start_menu_scroll = start_menu.selected;
+    }
+    if (start_menu.selected >= start_menu_scroll + rows) {
+        start_menu_scroll = start_menu.selected - rows + 1;
+    }
+    if (start_menu_scroll < 0) {
+        start_menu_scroll = 0;
+    }
+}
+
+static const uint8_t *start_menu_icon(start_menu_icon_t icon) {
+    switch (icon) {
+    case START_MENU_ICON_FILES:
+        return ICON_FILES_SMALL;
+    case START_MENU_ICON_BROWSER:
+        return ICON_BROWSER_SMALL;
+    case START_MENU_ICON_TERMINAL:
+        return ICON_TERMINAL_SMALL;
+    case START_MENU_ICON_EDITOR:
+        return ICON_EDITOR_SMALL;
+    case START_MENU_ICON_SETTINGS:
+        return ICON_SETTINGS_SMALL;
+    case START_MENU_ICON_TASKS:
+        return ICON_TASKS_SMALL;
+    case START_MENU_ICON_PAINT:
+        return ICON_PAINT_SMALL;
+    case START_MENU_ICON_CLOCK:
+        return ICON_CLOCK_SMALL;
+    default:
+        return ICON_APPLICATION_SMALL;
+    }
+}
+
+/* The taskbar's own 24-pixel icons, blended through the clip like every
+   other thing drawn here. */
+static void draw_icon_clipped(int32_t x, int32_t y, const uint8_t *blob) {
+    if (!icon_valid(blob) || !icon_is_truecolor(blob)) {
+        return;
+    }
+    int width = icon_width(blob);
+    int height = icon_height(blob);
+    const uint8_t *pixels = blob + ICON_HEADER_BYTES;
+    for (int row = 0; row < height; row++) {
+        for (int column = 0; column < width; column++) {
+            const uint8_t *pixel = pixels + ((size_t)row * (size_t)width + (size_t)column) * 4u;
+            if (pixel[3] == 0) {
+                continue;
+            }
+            uint32_t color = ((uint32_t)pixel[0] << 16) | ((uint32_t)pixel[1] << 8) | (uint32_t)pixel[2];
+            blend_pixel_clipped(x + column, y + row, color, pixel[3]);
+        }
+    }
+}
+
+static void draw_text_fitted(int32_t x, int32_t y, const char *text, int32_t width, uint32_t color, int bold) {
+    char fitted[64];
+    int32_t fit = graphics_text_fit(&UI_FONT, text, width);
+    int i = 0;
+    for (; text[i] && i < fit && i < (int)sizeof(fitted) - 2; i++) {
+        fitted[i] = text[i];
+    }
+    if (text[i]) {
+        int32_t ellipsis = graphics_char_advance(&UI_FONT, UI_G_ELLIPSIS);
+        while (i > 0 && graphics_text_width_n(&UI_FONT, fitted, i) + ellipsis > width) {
+            i--;
+        }
+        fitted[i++] = UI_G_ELLIPSIS;
+    }
+    fitted[i] = '\0';
+    draw_text_clipped(x, y, fitted, color, bold);
+}
+
+static void start_menu_button_rect(int which, int32_t *x, int32_t *y) {
+    *y = start_menu_footer_top() + (START_MENU_FOOTER_H - START_MENU_BUTTON_H) / 2;
+    *x = START_MENU_W - START_MENU_PAD - (which + 1) * START_MENU_BUTTON_W - which * START_MENU_BUTTON_GAP;
+}
+
+/* Dark ink on a light accent and light ink on a dark one, by the accent's
+   own brightness - the rule the toolkit's palette uses, cut down. */
+static uint32_t ink_on(uint32_t ground) {
+    uint32_t brightness = ((ground >> 16) & 0xFFu) * 299u + ((ground >> 8) & 0xFFu) * 587u + (ground & 0xFFu) * 114u;
+    return brightness > 160000u ? 0x00101418u : LAUNCHER_TEXT;
+}
+
+static void draw_menu_button(int32_t x, int32_t y, const char *label, int hovered, int prominent) {
+    uint32_t ground = prominent ? accent_color : (hovered ? POWER_BTN_HOVER : POWER_BTN_BG);
+    fill_rounded(x, y, START_MENU_BUTTON_W, START_MENU_BUTTON_H, 7, ground, 255);
+    stroke_rounded(x, y, START_MENU_BUTTON_W, START_MENU_BUTTON_H, 7, LAUNCHER_BORDER, 255);
     int32_t label_w = text_width(label);
-    draw_text_clipped(px + (POWER_BTN_W - label_w) / 2, py + (POWER_BTN_H - UI_FONT_HEIGHT) / 2,
-                       label, LAUNCHER_TEXT, 0);
-}
-
-static void draw_power_row(int32_t x, int32_t y) {
-    draw_power_button(x, y, POWER_OFF_X, "Shut Down", POWER_OFF);
-    draw_power_button(x, y, POWER_REBOOT_X, "Restart", POWER_REBOOT);
-}
-
-static void draw_power_confirm(int32_t x, int32_t y) {
-    int32_t cx = x + (LAUNCHER_W - POWER_CONFIRM_W) / 2;
-    int32_t cy = y + (LAUNCHER_H - POWER_CONFIRM_H) / 2;
-    fill_rect_rounded(cx, cy, POWER_CONFIRM_W, POWER_CONFIRM_H, POWER_CONFIRM_BG);
-    stroke_rect_rounded(cx, cy, POWER_CONFIRM_W, POWER_CONFIRM_H, LAUNCHER_BORDER);
-    draw_text_clipped(cx + GRAPHICS_PAD, cy + GRAPHICS_PAD,
-                       power_confirm == POWER_REBOOT ? "Restart this machine?" : "Shut down this machine?",
-                       LAUNCHER_TEXT, 1);
-    draw_text_clipped(cx + GRAPHICS_PAD, cy + GRAPHICS_PAD + 2 * UI_FONT_HEIGHT,
-                       "Y / Enter = yes", LAUNCHER_ROW_FG, 0);
-    draw_text_clipped(cx + GRAPHICS_PAD, cy + GRAPHICS_PAD + 3 * UI_FONT_HEIGHT,
-                       "N / Esc / click = cancel", LAUNCHER_ROW_FG, 0);
+    draw_text_clipped(x + (START_MENU_BUTTON_W - label_w) / 2, y + (START_MENU_BUTTON_H - UI_FONT_HEIGHT) / 2,
+                      label, prominent ? ink_on(accent_color) : LAUNCHER_TEXT, prominent);
 }
 
 static void draw_launcher(void) {
-    int32_t x, y;
+    int32_t x, y, w, h;
     launcher_rect(&x, &y);
-    fill_rect_rounded_blend(x, y, LAUNCHER_W, LAUNCHER_H, LAUNCHER_BG,
-                             launcher_opacity_number(), LAUNCHER_OPACITY_DEN);
-    stroke_rect_rounded(x, y, LAUNCHER_W, LAUNCHER_H, LAUNCHER_BORDER);
+    launcher_size(&w, &h);
+    fill_rect_rounded_blend(x, y, w, h, LAUNCHER_BG, launcher_opacity_number(), LAUNCHER_OPACITY_DEN);
+    stroke_rect_rounded(x, y, w, h, LAUNCHER_BORDER);
 
-    int32_t input_x = x + LAUNCHER_PAD;
-    int32_t input_y = y + LAUNCHER_PAD;
-    int32_t input_w = LAUNCHER_W - 2 * LAUNCHER_PAD;
-    fill_rect_rounded(input_x, input_y, input_w, LAUNCHER_INPUT_H, LAUNCHER_INPUT_BG);
-    stroke_rect_rounded(input_x, input_y, input_w, LAUNCHER_INPUT_H, LAUNCHER_BORDER);
-    int32_t text_y = input_y + (LAUNCHER_INPUT_H - UI_FONT_HEIGHT) / 2;
-    if (launcher_query_length > 0) {
-        draw_text_clipped(input_x + 6, text_y, launcher_query, LAUNCHER_TEXT, 0);
+    int32_t input_x = x + START_MENU_PAD;
+    int32_t input_y = y + START_MENU_PAD;
+    int32_t input_w = w - 2 * START_MENU_PAD;
+    fill_rounded(input_x, input_y, input_w, START_MENU_SEARCH_H, START_MENU_SEARCH_H / 2, LAUNCHER_INPUT_BG, 255);
+    stroke_rounded(input_x, input_y, input_w, START_MENU_SEARCH_H, START_MENU_SEARCH_H / 2, LAUNCHER_BORDER, 255);
+    int32_t text_y = input_y + (START_MENU_SEARCH_H - UI_FONT_HEIGHT) / 2;
+    int32_t text_x = input_x + 14;
+    if (start_menu.query_length > 0) {
+        draw_text_clipped(text_x, text_y, start_menu.query, LAUNCHER_TEXT, 0);
     } else {
-        draw_text_clipped(input_x + 6, text_y, "Type to search", LAUNCHER_HINT, 0);
+        draw_text_clipped(text_x, text_y, "Search apps, settings and files", LAUNCHER_HINT, 0);
     }
-    fill_rect(input_x + 6 + (launcher_query_length > 0 ? text_width(launcher_query) : 0),
-               text_y, 2, UI_FONT_HEIGHT, LAUNCHER_TEXT);
+    fill_rect(text_x + (start_menu.query_length > 0 ? text_width(start_menu.query) : 0), text_y, 2,
+              UI_FONT_HEIGHT, LAUNCHER_TEXT);
 
-    if (launcher_match_count == 0) {
-        draw_text_clipped(x + LAUNCHER_PAD, launcher_row_y(y, 0) + 2, "No matches", LAUNCHER_HINT, 0);
+    int32_t content_top = y + start_menu_content_top();
+    if (start_menu_searching(&start_menu)) {
+        if (start_menu.result_count == 0) {
+            draw_text_clipped(x + START_MENU_PAD, content_top + 6, "Nothing matches that", LAUNCHER_HINT, 0);
+        }
     } else {
-        for (int i = 0; i < LAUNCHER_ROWS; i++) {
-            int m = launcher_scroll + i;
-            if (m >= launcher_match_count) {
-                break;
-            }
-            int32_t ry = launcher_row_y(y, i);
-            if (m == launcher_selected) {
-                fill_rect_rounded(x + LAUNCHER_PAD / 2, ry, LAUNCHER_W - LAUNCHER_PAD, LAUNCHER_ROW_H, LAUNCHER_SEL_BG);
-            }
-            int32_t mark_w = graphics_char_advance(&UI_FONT, UI_G_ARROW_RIGHT);
-            if (m == launcher_selected) {
-                draw_text_clipped(x + LAUNCHER_PAD, ry + 2, UI_S_ARROW_RIGHT, LAUNCHER_TEXT, 0);
-            }
-            draw_text_clipped(x + LAUNCHER_PAD + mark_w + 2, ry + 2, launcher_entries[launcher_matches[m]],
-                               m == launcher_selected ? LAUNCHER_TEXT : LAUNCHER_ROW_FG,
-                               m == launcher_selected);
+        draw_text_clipped(x + START_MENU_PAD, content_top + 2, "Applications", LAUNCHER_HINT, 1);
+        int32_t recent_heading = y + start_menu_recent_top() - START_MENU_HEADING_H + 2;
+        draw_text_clipped(x + START_MENU_PAD, recent_heading, "Recent", LAUNCHER_HINT, 1);
+        if (start_menu.result_count == start_menu_app_count()) {
+            draw_text_clipped(x + START_MENU_PAD, recent_heading + START_MENU_HEADING_H + 4,
+                              "Files you open in the Editor will be here.", LAUNCHER_HINT, 0);
         }
     }
-
-    draw_power_row(x, y);
-    if (power_confirm != POWER_CONFIRM_NONE) {
-        draw_power_confirm(x, y);
+    int apps = start_menu_app_count();
+    for (int i = 0; i < start_menu.result_count; i++) {
+        int32_t ix, iy, iw, ih;
+        if (!start_menu_item_rect(i, &ix, &iy, &iw, &ih)) {
+            continue;
+        }
+        ix += x;
+        iy += y;
+        int selected = i == start_menu.selected;
+        if (selected) {
+            fill_rounded(ix, iy, iw, ih, 8, LAUNCHER_SEL_BG, 255);
+        } else if (!start_menu_searching(&start_menu) && i < apps) {
+            fill_rounded(ix, iy, iw, ih, 8, 0x00FFFFFFu, 10);
+        }
+        draw_icon_clipped(ix + 8, iy + (ih - ICON_SMALL_SIZE) / 2,
+                          start_menu_icon(start_menu_result_icon(&start_menu, i)));
+        int32_t label_x = ix + 8 + ICON_SMALL_SIZE + 10;
+        int32_t label_y = iy + (ih - UI_FONT_HEIGHT) / 2;
+        int32_t kind_w = 0;
+        if (start_menu_searching(&start_menu)) {
+            const char *kind = start_menu_result_kind(&start_menu, i);
+            kind_w = text_width(kind) + 12;
+            draw_text_clipped(ix + iw - kind_w, label_y, kind, LAUNCHER_HINT, 0);
+        }
+        draw_text_fitted(label_x, label_y, start_menu_result_name(&start_menu, i), ix + iw - kind_w - label_x - 8,
+                         selected ? LAUNCHER_TEXT : LAUNCHER_ROW_FG, selected);
     }
+
+    int32_t footer = y + start_menu_footer_top();
+    fill_rect_blend(x + 1, footer, w - 2, 1, 0x00FFFFFFu, 1, 8);
+    int32_t bx, by;
+    if (power_confirm != POWER_CONFIRM_NONE) {
+        draw_text_clipped(x + START_MENU_PAD, footer + (START_MENU_FOOTER_H - UI_FONT_HEIGHT) / 2,
+                          power_confirm == POWER_REBOOT ? "Restart now?" : "Shut down now?", LAUNCHER_TEXT, 1);
+        start_menu_button_rect(0, &bx, &by);
+        draw_menu_button(x + bx, y + by, power_confirm == POWER_REBOOT ? "Restart" : "Shut Down",
+                         power_hover == START_MENU_HOVER_YES, 1);
+        start_menu_button_rect(1, &bx, &by);
+        draw_menu_button(x + bx, y + by, "Cancel", power_hover == START_MENU_HOVER_NO, 0);
+        return;
+    }
+    start_menu_button_rect(0, &bx, &by);
+    draw_menu_button(x + bx, y + by, "Shut Down", power_hover == POWER_OFF, 0);
+    start_menu_button_rect(1, &bx, &by);
+    draw_menu_button(x + bx, y + by, "Restart", power_hover == POWER_REBOOT, 0);
 }
 
 static void toast_rect(int i, int32_t *out_x, int32_t *out_y) {
@@ -2262,153 +2446,6 @@ static void wmenu_click(int32_t px, int32_t py) {
     }
 }
 
-static char lower_char(char c) {
-    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
-}
-
-static int launcher_name_matches(const char *name, const char *query) {
-    if (!query[0]) {
-        return 1;
-    }
-    for (int i = 0; name[i]; i++) {
-        int j = 0;
-        while (query[j] && lower_char(name[i + j]) == lower_char(query[j])) {
-            j++;
-        }
-        if (!query[j]) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static void launcher_clamp_scroll(void) {
-    if (launcher_selected < 0) {
-        launcher_selected = 0;
-    }
-    if (launcher_selected >= launcher_match_count) {
-        launcher_selected = launcher_match_count - 1;
-    }
-    if (launcher_selected < launcher_scroll) {
-        launcher_scroll = launcher_selected;
-    }
-    if (launcher_selected >= launcher_scroll + LAUNCHER_ROWS) {
-        launcher_scroll = launcher_selected - LAUNCHER_ROWS + 1;
-    }
-    if (launcher_scroll < 0) {
-        launcher_scroll = 0;
-    }
-}
-
-static void launcher_apply_filter(void) {
-    launcher_match_count = 0;
-    for (int i = 0; i < launcher_entry_count; i++) {
-        if (launcher_name_matches(launcher_entries[i], launcher_query)) {
-            launcher_matches[launcher_match_count++] = i;
-        }
-    }
-    launcher_selected = 0;
-    launcher_scroll = 0;
-}
-
-static void launcher_reload(void) {
-    static char buffer[LAUNCHER_LIST_BUFFER];
-    launcher_entry_count = 0;
-    launcher_recent_count = recent_load(launcher_recent_path, RECENT_MAX);
-    for (int i = 0; i < launcher_recent_count; i++) {
-        const char *base = launcher_recent_path[i];
-        for (const char *c = launcher_recent_path[i]; *c; c++) {
-            if (*c == '/') {
-                base = c + 1;
-            }
-        }
-        int col = 0;
-        for (; base[col] && col < LAUNCHER_NAME_MAX - 1; col++) {
-            launcher_entries[launcher_entry_count][col] = base[col];
-        }
-        launcher_entries[launcher_entry_count][col] = '\0';
-        launcher_entry_count++;
-    }
-    long n = sys_listdir(PATH_BIN, buffer, sizeof(buffer));
-    if (n <= 0) {
-        return;
-    }
-    if (n > (long)sizeof(buffer)) {
-        n = (long)sizeof(buffer);
-    }
-    int col = 0;
-    int truncated = 0;
-    for (long i = 0; i < n; i++) {
-        if (launcher_entry_count >= LAUNCHER_MAX_ENTRIES) {
-            truncated = 1;
-            break;
-        }
-        if (buffer[i] == '\n') {
-            if (col > 0 && launcher_entries[launcher_entry_count][col - 1] == '/') {
-                col = 0;
-                continue;
-            }
-            launcher_entries[launcher_entry_count][col] = '\0';
-            launcher_entry_count++;
-            col = 0;
-        } else if (col < LAUNCHER_NAME_MAX - 1) {
-            launcher_entries[launcher_entry_count][col++] = buffer[i];
-        }
-    }
-    if (truncated) {
-        static const char message[] =
-            "[launcher] more than " STRINGIFY(LAUNCHER_MAX_ENTRIES)
-            " programs in /bin - the rest are not listed. Raise "
-            "LAUNCHER_MAX_ENTRIES in compositor.c.\n";
-        sys_write(1, message, sizeof(message) - 1);
-    }
-}
-
-static void launcher_set_open(int open) {
-    if (open && !launcher_open && animations_enabled) {
-        launcher_fade_start_ms = sys_uptime_ms();
-    } else {
-        launcher_fade_start_ms = 0;
-    }
-    launcher_open = open;
-    power_confirm = POWER_CONFIRM_NONE;
-    power_hover = POWER_CONFIRM_NONE;
-    if (open) {
-        launcher_query[0] = '\0';
-        launcher_query_length = 0;
-        launcher_reload();
-        launcher_apply_filter();
-    }
-    dirty = 1;
-}
-
-static void launcher_launch_selected(void) {
-    if (launcher_selected >= 0 && launcher_selected < launcher_match_count) {
-        int entry = launcher_matches[launcher_selected];
-        const char *name = launcher_entries[entry];
-        if (entry < launcher_recent_count) {
-            long rc = sys_spawn(PATH_BIN_DIRECTORY "text_editor", launcher_recent_path[entry]);
-            if (rc < 0) {
-                toast_post(WINDOW_MANAGER_NOTIFY_ERROR, name, spawn_error_message(rc));
-            }
-            child_track(rc);
-            launcher_set_open(0);
-            return;
-        }
-        char path[PATH_MAX_LENGTH];
-        if (path_join(path, PATH_BIN_DIRECTORY, name) != 0) {
-            toast_post(WINDOW_MANAGER_NOTIFY_ERROR, name, "Name too long to launch.");
-        } else {
-            long rc = sys_spawn(path, "");
-            if (rc < 0) {
-                toast_post(WINDOW_MANAGER_NOTIFY_ERROR, name, spawn_error_message(rc));
-            }
-            child_track(rc);
-        }
-    }
-    launcher_set_open(0);
-}
-
 static void shutdown_begin(int mode) {
     int asked = 0;
     window_manager_event_t ev;
@@ -2461,6 +2498,88 @@ static void shutdown_tick(long now) {
     }
 }
 
+static void start_menu_report_geometry(void) {
+    int32_t x, y, w, h;
+    launcher_rect(&x, &y);
+    launcher_size(&w, &h);
+    report_geometry("start_menu", x, y, w, h);
+    int32_t bx, by;
+    start_menu_button_rect(0, &bx, &by);
+    report_geometry(power_confirm != POWER_CONFIRM_NONE ? "start_confirm" : "start_shut_down", x + bx, y + by,
+                    START_MENU_BUTTON_W, START_MENU_BUTTON_H);
+    start_menu_button_rect(1, &bx, &by);
+    report_geometry(power_confirm != POWER_CONFIRM_NONE ? "start_cancel" : "start_restart", x + bx, y + by,
+                    START_MENU_BUTTON_W, START_MENU_BUTTON_H);
+}
+
+static void launcher_reload(void) {
+    static char buffer[LAUNCHER_LIST_BUFFER];
+    start_menu.recent_count = recent_load(start_menu.recent, RECENT_MAX);
+    long n = sys_listdir(PATH_BIN, buffer, sizeof(buffer));
+    if (n < 0) {
+        n = 0;
+    }
+    if (n > (long)sizeof(buffer)) {
+        n = (long)sizeof(buffer);
+    }
+    start_menu_set_commands(&start_menu, buffer, n);
+    if (start_menu.commands_truncated) {
+        static const char message[] =
+            "[launcher] more than " STRINGIFY(START_MENU_MAX_COMMANDS)
+            " programs in /bin - the rest are not listed. Raise "
+            "START_MENU_MAX_COMMANDS in start_menu.h.\n";
+        sys_write(1, message, sizeof(message) - 1);
+    }
+}
+
+static void launcher_set_open(int open) {
+    if (open && !launcher_open && animations_enabled) {
+        launcher_fade_start_ms = sys_uptime_ms();
+    } else {
+        launcher_fade_start_ms = 0;
+    }
+    launcher_open = open;
+    power_confirm = POWER_CONFIRM_NONE;
+    power_hover = POWER_CONFIRM_NONE;
+    if (open) {
+        start_menu.query[0] = '\0';
+        start_menu.query_length = 0;
+        launcher_reload();
+        start_menu_search(&start_menu);
+        start_menu_scroll = 0;
+        start_menu_report_geometry();
+    }
+    dirty = 1;
+}
+
+static void launcher_launch_selected(void) {
+    int chosen = start_menu.selected;
+    if (chosen < 0 || chosen >= start_menu.result_count) {
+        launcher_set_open(0);
+        return;
+    }
+    char path[PATH_MAX_LENGTH];
+    const char *argument = "";
+    const char *name = start_menu_result_name(&start_menu, chosen);
+    if (start_menu_result_command(&start_menu, chosen, path, sizeof(path), &argument) != 0) {
+        toast_post(WINDOW_MANAGER_NOTIFY_ERROR, name, "Name too long to launch.");
+    } else {
+        long rc = sys_spawn(path, argument);
+        if (rc < 0) {
+            toast_post(WINDOW_MANAGER_NOTIFY_ERROR, name, spawn_error_message(rc));
+        }
+        child_track(rc);
+    }
+    launcher_set_open(0);
+}
+
+static void start_menu_ask(int mode) {
+    power_confirm = mode;
+    power_hover = POWER_CONFIRM_NONE;
+    start_menu_report_geometry();
+    dirty = 1;
+}
+
 static void launcher_key(char ch) {
     if (power_confirm != POWER_CONFIRM_NONE) {
         if (ch == 'y' || ch == 'Y' || ch == '\n' || ch == '\r') {
@@ -2471,6 +2590,16 @@ static void launcher_key(char ch) {
         return;
     }
     if (ch == 27) {
+        /* Escape clears a search first, the way a search field does, and
+           closes the menu when there is nothing left to clear. */
+        if (start_menu.query_length > 0) {
+            start_menu.query[0] = '\0';
+            start_menu.query_length = 0;
+            start_menu_search(&start_menu);
+            start_menu_scroll = 0;
+            dirty = 1;
+            return;
+        }
         launcher_set_open(0);
         return;
     }
@@ -2479,96 +2608,107 @@ static void launcher_key(char ch) {
         return;
     }
     if (ch == (char)KEYBOARD_KEY_UP) {
-        launcher_selected--;
+        start_menu_move(&start_menu, 0, -1);
     } else if (ch == (char)KEYBOARD_KEY_DOWN) {
-        launcher_selected++;
-    } else if (ch == '\b' || ch == 0x7F) {
-        if (launcher_query_length > 0) {
-            launcher_query[--launcher_query_length] = '\0';
-            launcher_apply_filter();
-        }
-    } else if (ch >= 0x20 && ch < 0x7F && launcher_query_length < LAUNCHER_QUERY_MAX - 1) {
-        launcher_query[launcher_query_length++] = ch;
-        launcher_query[launcher_query_length] = '\0';
-        launcher_apply_filter();
+        start_menu_move(&start_menu, 0, 1);
+    } else if (ch == (char)KEYBOARD_KEY_LEFT) {
+        start_menu_move(&start_menu, -1, 0);
+    } else if (ch == (char)KEYBOARD_KEY_RIGHT) {
+        start_menu_move(&start_menu, 1, 0);
+    } else if (!start_menu_type(&start_menu, ch)) {
+        return;
     }
-    launcher_clamp_scroll();
+    start_menu_keep_selection_visible();
     dirty = 1;
 }
 
+static int start_menu_button_at(int32_t px, int32_t py, int which) {
+    int32_t x, y, bx, by;
+    launcher_rect(&x, &y);
+    start_menu_button_rect(which, &bx, &by);
+    return graphics_point_in_rect(px, py, x + bx, y + by, START_MENU_BUTTON_W, START_MENU_BUTTON_H);
+}
+
 static int power_button_at(int32_t px, int32_t py) {
-    int32_t lx, ly;
-    launcher_rect(&lx, &ly);
-    if (graphics_point_in_rect(px, py, lx + POWER_OFF_X, ly + POWER_BTN_Y, POWER_BTN_W, POWER_BTN_H)) {
+    if (power_confirm != POWER_CONFIRM_NONE) {
+        if (start_menu_button_at(px, py, 0)) {
+            return START_MENU_HOVER_YES;
+        }
+        return start_menu_button_at(px, py, 1) ? START_MENU_HOVER_NO : POWER_CONFIRM_NONE;
+    }
+    if (start_menu_button_at(px, py, 0)) {
         return POWER_OFF;
     }
-    if (graphics_point_in_rect(px, py, lx + POWER_REBOOT_X, ly + POWER_BTN_Y, POWER_BTN_W, POWER_BTN_H)) {
-        return POWER_REBOOT;
+    return start_menu_button_at(px, py, 1) ? POWER_REBOOT : POWER_CONFIRM_NONE;
+}
+
+static int start_menu_item_at(int32_t px, int32_t py) {
+    int32_t x, y;
+    launcher_rect(&x, &y);
+    for (int i = 0; i < start_menu.result_count; i++) {
+        int32_t ix, iy, iw, ih;
+        if (start_menu_item_rect(i, &ix, &iy, &iw, &ih) && graphics_point_in_rect(px, py, x + ix, y + iy, iw, ih)) {
+            return i;
+        }
     }
-    return POWER_CONFIRM_NONE;
+    return -1;
 }
 
 static int launcher_click(int32_t px, int32_t py) {
-    int32_t lx, ly;
-    launcher_rect(&lx, &ly);
-    if (power_confirm != POWER_CONFIRM_NONE) {
-        power_confirm = POWER_CONFIRM_NONE;
-        dirty = 1;
-        return 1;
-    }
-    if (!graphics_point_in_rect(px, py, lx, ly, LAUNCHER_W, LAUNCHER_H)) {
+    int32_t x, y, w, h;
+    launcher_rect(&x, &y);
+    launcher_size(&w, &h);
+    if (!graphics_point_in_rect(px, py, x, y, w, h)) {
         launcher_set_open(0);
         return 1;
     }
-    int power = power_button_at(px, py);
-    if (power != POWER_CONFIRM_NONE) {
-        power_confirm = power;
+    int button = power_button_at(px, py);
+    if (power_confirm != POWER_CONFIRM_NONE) {
+        if (button == START_MENU_HOVER_YES) {
+            int mode = power_confirm;
+            power_confirm = POWER_CONFIRM_NONE;
+            shutdown_begin(mode);
+        } else if (button == START_MENU_HOVER_NO) {
+            power_confirm = POWER_CONFIRM_NONE;
+            start_menu_report_geometry();
+        }
         dirty = 1;
         return 1;
     }
-    for (int i = 0; i < LAUNCHER_ROWS; i++) {
-        if (launcher_scroll + i >= launcher_match_count) {
-            break;
-        }
-        if (graphics_point_in_rect(px, py, lx + LAUNCHER_PAD / 2, launcher_row_y(ly, i),
-                               LAUNCHER_W - LAUNCHER_PAD, LAUNCHER_ROW_H)) {
-            launcher_selected = launcher_scroll + i;
-            launcher_launch_selected();
-            return 1;
-        }
+    if (button == POWER_OFF || button == POWER_REBOOT) {
+        start_menu_ask(button);
+        return 1;
+    }
+    int item = start_menu_item_at(px, py);
+    if (item >= 0) {
+        start_menu.selected = item;
+        launcher_launch_selected();
     }
     return 1;
 }
 
 static void launcher_wheel(int32_t detents) {
-    if (launcher_match_count == 0) {
+    if (!start_menu_searching(&start_menu) || start_menu.result_count == 0) {
         return;
     }
-    launcher_selected += detents;
-    launcher_clamp_scroll();
+    start_menu_move(&start_menu, 0, detents);
+    start_menu_keep_selection_visible();
     dirty = 1;
 }
 
 static void launcher_hover(int32_t px, int32_t py) {
-    int32_t lx, ly;
-    launcher_rect(&lx, &ly);
-    int power = power_button_at(px, py);
-    if (power != power_hover) {
-        power_hover = power;
+    int button = power_button_at(px, py);
+    if (button != power_hover) {
+        power_hover = button;
         dirty = 1;
     }
-    for (int i = 0; i < LAUNCHER_ROWS; i++) {
-        if (launcher_scroll + i >= launcher_match_count) {
-            break;
-        }
-        if (graphics_point_in_rect(px, py, lx + LAUNCHER_PAD / 2, launcher_row_y(ly, i),
-                               LAUNCHER_W - LAUNCHER_PAD, LAUNCHER_ROW_H)) {
-            if (launcher_selected != launcher_scroll + i) {
-                launcher_selected = launcher_scroll + i;
-                dirty = 1;
-            }
-            return;
-        }
+    if (power_confirm != POWER_CONFIRM_NONE) {
+        return;
+    }
+    int item = start_menu_item_at(px, py);
+    if (item >= 0 && item != start_menu.selected) {
+        start_menu.selected = item;
+        dirty = 1;
     }
 }
 
@@ -4017,9 +4157,10 @@ int main(void) {
                 painted = 1;
             }
             if (launcher_fading()) {
-                int32_t lx, ly;
+                int32_t lx, ly, lw, lh;
                 launcher_rect(&lx, &ly);
-                redraw_rect(lx, ly, lx + LAUNCHER_W, ly + LAUNCHER_H);
+                launcher_size(&lw, &lh);
+                redraw_rect(lx, ly, lx + lw, ly + lh);
                 painted = 1;
             } else {
                 launcher_fade_start_ms = 0;

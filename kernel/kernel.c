@@ -642,6 +642,30 @@ static uint32_t selftest_pixel_settled(uint32_t x, uint32_t y, uint32_t expected
     }
 }
 
+/* M214: the Start menu is drawn at fifteen sixteenths over whatever is
+   behind it, so what a probe should find is worked out from what was there
+   before - compositor.c's blend_pixel, alpha 239. */
+#define SELFTEST_MENU_X 30
+#define SELFTEST_MENU_Y 705
+#define SELFTEST_MENU_TILE_X 25
+#define SELFTEST_MENU_TILE_Y 348
+
+static uint32_t selftest_over_255(uint32_t v) {
+    return (v + 128u + ((v + 128u) >> 8)) >> 8;
+}
+
+static uint32_t selftest_menu_blend(uint32_t behind) {
+    const uint32_t color = 0x001C2233u;
+    const uint32_t alpha = 239u;
+    uint32_t out = 0;
+    for (int shift = 16; shift >= 0; shift -= 8) {
+        uint32_t c = (color >> shift) & 0xFFu;
+        uint32_t b = (behind >> shift) & 0xFFu;
+        out |= selftest_over_255(c * alpha + b * (255u - alpha)) << shift;
+    }
+    return out;
+}
+
 /* M200: [m55]'s two clients are spawned together and whichever reaches the
    compositor first gets the first cascade slot. The test assumed the one
    spawned first always won; with wake-ups that no longer wait for a tick the
@@ -3001,15 +3025,17 @@ static void boot_selftests_system(void) {
         uint32_t panel_over_maximized = selftest_pixel_settled(512, 726, 0x00202634u,
                                                                 "the taskbar to stay on top of the maximized window");
 
+        uint32_t launcher_under = framebuffer_get_pixel(SELFTEST_MENU_X, SELFTEST_MENU_Y);
         k_memset(&request, 0, sizeof(request));
         request.window_id = -1;
         request.action = WINDOW_MANAGER_ACTION_TOGGLE_LAUNCHER;
         do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
-        uint32_t launcher_open_px = selftest_pixel_settled(512, 309, 0x001C2032u,
-                                                            "the launcher overlay to finish fading in");
+        uint32_t launcher_open_px = selftest_pixel_settled(SELFTEST_MENU_X, SELFTEST_MENU_Y,
+                                                            selftest_menu_blend(launcher_under),
+                                                            "the Start menu to finish fading in");
         do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
-        uint32_t launcher_closed_px = selftest_pixel_settled(512, 309, 0x001A1A2Eu,
-                                                              "the launcher overlay to go away again");
+        uint32_t launcher_closed_px = selftest_pixel_settled(SELFTEST_MENU_X, SELFTEST_MENU_Y, launcher_under,
+                                                              "the Start menu to go away again");
 
         selftest_reap(clock_task);
         selftest_reap(shell_task);
@@ -3017,7 +3043,7 @@ static void boot_selftests_system(void) {
         console_init();
         kernel_log_use_console();
 
-        static const struct { const char *what; uint32_t expected; } names[] = {
+        const struct { const char *what; uint32_t expected; } names[] = {
             {"taskbar gradient at row 2, docked at the screen's bottom edge (desktop_shell.c PANEL_TOP_COLOR, translucent)", 0x00202634u},
             {"desktop background above the taskbar (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
             {"the launcher button's accent glyph at the taskbar's left edge (desktop_shell.c ACCENT_COLOR, translucent)", 0x003F79B8u},
@@ -3025,8 +3051,8 @@ static void boot_selftests_system(void) {
             {"the current workspace's pill in the tray, right-aligned (desktop_shell.c ACCENT_COLOR, translucent)", 0x003F79B8u},
             {"a maximized window's accent hairline at y=1, directly under the one-pixel frame border (compositor.c accent_color)", 0x004C99E6u},
             {"the taskbar staying on top of a maximized window (desktop_shell.c PANEL_TOP_COLOR, translucent)", 0x00202634u},
-            {"the launcher overlay, opened by WM_ACTION_TOGGLE_LAUNCHER (compositor.c LAUNCHER_BG, translucent)", 0x001C2032u},
-            {"the launcher overlay gone again after a second toggle (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
+            {"the Start menu, opened by WM_ACTION_TOGGLE_LAUNCHER above the Start button (compositor.c LAUNCHER_BG, fifteen sixteenths over what was there)", selftest_menu_blend(launcher_under)},
+            {"the Start menu gone again after a second toggle (what was there before)", launcher_under},
         };
         const uint32_t got[] = {
             panel_bg_px, above_panel_px, start_btn_px, running_slot_px, workspace_px,
@@ -3095,17 +3121,18 @@ static void boot_selftests_system(void) {
         uint32_t left_right_half = selftest_pixel_settled(700, 12, 0x001A1A2Eu,
                                                            "the right half to be empty");
 
+        uint32_t menu_under = framebuffer_get_pixel(SELFTEST_MENU_X, SELFTEST_MENU_Y);
         k_memset(&request, 0, sizeof(request));
         request.window_id = -1;
         request.action = WINDOW_MANAGER_ACTION_TOGGLE_LAUNCHER;
         do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
-        uint32_t launcher_bg = selftest_pixel_settled(700, 309, 0x001B2032u,
-                                                       "the launcher overlay to finish fading in");
-        uint32_t launcher_selected_row = selftest_pixel_settled(700, 205, 0x00335577u,
-                                                                 "the launcher's first result to be drawn selected");
+        uint32_t launcher_bg = selftest_pixel_settled(SELFTEST_MENU_X, SELFTEST_MENU_Y, selftest_menu_blend(menu_under),
+                                                       "the Start menu to finish fading in");
+        uint32_t launcher_selected_row = selftest_pixel_settled(SELFTEST_MENU_TILE_X, SELFTEST_MENU_TILE_Y, 0x00335577u,
+                                                                 "the Start menu's first application to be drawn selected");
         do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
-        uint32_t launcher_closed = selftest_pixel_settled(700, 309, 0x001A1A2Eu,
-                                                           "the launcher overlay to go away again");
+        uint32_t launcher_closed = selftest_pixel_settled(SELFTEST_MENU_X, SELFTEST_MENU_Y, menu_under,
+                                                           "the Start menu to go away again");
 
         selftest_reap(editor_task);
         selftest_reap(shell_task);
@@ -3113,14 +3140,14 @@ static void boot_selftests_system(void) {
         console_init();
         kernel_log_use_console();
 
-        static const struct { const char *what; uint32_t expected; } names[] = {
+        const struct { const char *what; uint32_t expected; } names[] = {
             {"a right-snapped window's titlebar filling the screen's right half (compositor.c titlebar gradient at row 11 of 28, focused)", 0x00262C3Au},
             {"the left half staying empty while a window is snapped right (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
             {"a left-snapped window's titlebar filling the screen's left half (compositor.c titlebar gradient at row 11 of 28, focused)", 0x00262C3Au},
             {"the right half staying empty while a window is snapped left (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
-            {"the launcher overlay, opened by WM_ACTION_TOGGLE_LAUNCHER (compositor.c LAUNCHER_BG, translucent)", 0x001C2032u},
-            {"the launcher's first result drawn selected (compositor.c LAUNCHER_SEL_BG, drawn opaquely over the blended overlay)", 0x00335577u},
-            {"the launcher overlay gone again after a second toggle (compositor.c DEFAULT_BG_COLOR)", 0x001A1A2Eu},
+            {"the Start menu, opened by WM_ACTION_TOGGLE_LAUNCHER (compositor.c LAUNCHER_BG, fifteen sixteenths over what was there)", selftest_menu_blend(menu_under)},
+            {"the Start menu's first application drawn selected (compositor.c LAUNCHER_SEL_BG, drawn opaquely over the blended menu)", 0x00335577u},
+            {"the Start menu gone again after a second toggle (what was there before)", menu_under},
         };
         const uint32_t got[] = {
             right_titlebar, right_left_half, left_titlebar, left_right_half,

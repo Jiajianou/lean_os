@@ -17,8 +17,16 @@ UEFI firmware
 
 - **A desktop.** Overlapping windows with a real z-order, titlebars with
   traffic-light buttons, drag and resize, snapping, minimize/restore with
-  motion, a taskbar, a Spotlight-style launcher, context menus, toasts,
+  motion, a taskbar, a Start menu, context menus, toasts,
   drag and drop, four virtual desktops, and keyboard chords.
+- **A Start menu that opens where its button is.** Above the Start
+  button, from the bottom-left corner, with the applications as a grid
+  of their own icons and the files opened recently under them. Typing
+  searches applications, then Settings by the words people use for
+  them ("resolution", "touchpad", "wallpaper"), then recent files, then
+  every command in `/bin` - so a setting is two keystrokes and Enter
+  away and opens at its own pane. Restart and Shut Down ask first, with
+  buttons as well as Y and N, so a trackpad alone can answer.
 - **Window chrome that is not from 2005.** A 28px titlebar with its own
   vertical gradient rather than a flat fill, the title centred and bold,
   and an accent hairline along the top of the focused window - so focus
@@ -30,7 +38,7 @@ UEFI firmware
   which the compositor can do because it already has what is behind the
   window in its back buffer - and they sit on a real drop shadow: eight
   concentric rounded strokes whose alpha falls off with distance, rather
-  than one offset rectangle at a flat ratio. The launcher, the toasts
+  than one offset rectangle at a flat ratio. The Start menu, the toasts
   and the window menu are on the same rounded primitives.
 - **Artwork with an alpha channel.** The desktop icons are RGBA, drawn by
   a first-party vector rasteriser in `tools/gen-icons.c` rather than typed

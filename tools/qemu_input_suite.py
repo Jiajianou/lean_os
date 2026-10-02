@@ -66,7 +66,7 @@ def desktop_px(y, base=WALLPAPER_BASE):
 DESKTOP_BG = desktop_px(EMPTY_DESKTOP[1])
 
 TRANSLUCENT_NUM, TRANSLUCENT_DEN = 3, 4
-LAUNCHER_OPACITY_NUM, LAUNCHER_OPACITY_DEN = 4, 5
+LAUNCHER_OPACITY_NUM, LAUNCHER_OPACITY_DEN = 15, 16
 
 def blend(under, over, num, den):
     out = 0
@@ -147,39 +147,45 @@ PANEL_GROUND_X = 3
 
 LAUNCHER_BG_RAW = 0x1C2233
 LAUNCHER_SEL_BG = 0x335577
-LAUNCHER_W, LAUNCHER_H = 480, 320
-LAUNCHER_X = (1024 - LAUNCHER_W) // 2
-LAUNCHER_Y = (768 - LAUNCHER_H) // 3
-LAUNCHER_LIST_Y = 46
-LAUNCHER_ROW_H = 20
-LAUNCHER_PAD = 12
-
-POWER_BTN_W, POWER_BTN_H, POWER_BTN_GAP = 96, 22, 8
-POWER_BTN_Y = LAUNCHER_H - LAUNCHER_PAD - POWER_BTN_H
-POWER_OFF_X = LAUNCHER_W - LAUNCHER_PAD - 2 * POWER_BTN_W - POWER_BTN_GAP
-POWER_REBOOT_X = LAUNCHER_W - LAUNCHER_PAD - POWER_BTN_W
-POWER_CONFIRM_W, POWER_CONFIRM_H = 300, 96
-POWER_CONFIRM_BG = 0x202838
+# M214: the Start menu opens above the Start button, from the screen's
+# bottom-left corner, rather than in the middle of the screen.
+LAUNCHER_X, LAUNCHER_Y = 8, 246
+LAUNCHER_W, LAUNCHER_H = 420, 470
+LAUNCHER_CONTENT_Y = 60
+LAUNCHER_ROW_H = 32
+START_MENU_FOOTER_Y = LAUNCHER_H - 52
+START_MENU_BUTTON_W, START_MENU_BUTTON_H = 100, 30
 
 def power_button_center(which):
-    bx = POWER_OFF_X if which == 0 else POWER_REBOOT_X
-    return (LAUNCHER_X + bx + POWER_BTN_W // 2, LAUNCHER_Y + POWER_BTN_Y + POWER_BTN_H // 2)
+    # 0 is Shut Down, rightmost; 1 is Restart, beside it.
+    bx = LAUNCHER_W - 14 - (which + 1) * START_MENU_BUTTON_W - which * 8
+    by = START_MENU_FOOTER_Y + (52 - START_MENU_BUTTON_H) // 2
+    return (LAUNCHER_X + bx + START_MENU_BUTTON_W // 2, LAUNCHER_Y + by + START_MENU_BUTTON_H // 2)
 
-LAUNCHER_LOWER_PROBE = (LAUNCHER_X + 20, LAUNCHER_Y + POWER_BTN_Y + POWER_BTN_H // 2)
+LAUNCHER_LOWER_PROBE = (LAUNCHER_X + 150, LAUNCHER_Y + START_MENU_FOOTER_Y + 8)
 LAUNCHER_LOWER_BG = blend_alpha(desktop_px(LAUNCHER_LOWER_PROBE[1]), LAUNCHER_BG_RAW,
                                 LAUNCHER_ALPHA)
 
+# Asked to confirm, the Shut Down button becomes the accent-coloured one
+# that says yes; its left edge is the probe.
+POWER_CONFIRM_BG = 0x4C99E6
+
 def power_confirm_probe():
-    return (LAUNCHER_X + (LAUNCHER_W - POWER_CONFIRM_W) // 2 + POWER_CONFIRM_W - 12,
-            LAUNCHER_Y + (LAUNCHER_H - POWER_CONFIRM_H) // 2 + POWER_CONFIRM_H - 8)
-LAUNCHER_PROBE = (LAUNCHER_X + 428, LAUNCHER_Y + LAUNCHER_LIST_Y + 5 * LAUNCHER_ROW_H + 10)
+    x, y = power_button_center(0)
+    return (x - START_MENU_BUTTON_W // 2 + 5, y)
+
+LAUNCHER_PROBE = (LAUNCHER_X + LAUNCHER_W - 4, LAUNCHER_Y + 200)
 LAUNCHER_BG = blend_alpha(desktop_px(LAUNCHER_PROBE[1]), LAUNCHER_BG_RAW, LAUNCHER_ALPHA)
+
+def launcher_row_probe(i):
+    return (LAUNCHER_X + 10, LAUNCHER_Y + LAUNCHER_CONTENT_Y + i * LAUNCHER_ROW_H + LAUNCHER_ROW_H // 2)
+
+# The first application's tile, selected when the menu opens.
+LAUNCHER_TILE_PROBE = (LAUNCHER_X + 17, LAUNCHER_Y + 82 + 20)
 
 ACCENT = 0x4C99E6
 SNAP_PREVIEW_NUM, SNAP_PREVIEW_DEN = 1, 4
 
-def launcher_row_probe(i):
-    return (LAUNCHER_X + 428, LAUNCHER_Y + LAUNCHER_LIST_Y + i * LAUNCHER_ROW_H + 10)
 
 def slot_center_x(i):
     return SLOTS_X + i * (SLOT_W + SLOT_GAP) + SLOT_W // 2
@@ -800,8 +806,8 @@ def test_launcher_keychord_types_and_launches(m):
     m.sendkey("ctrl-spc")
     wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == LAUNCHER_BG,
              "Ctrl+Space did not open the launcher")
-    check(m.screenshot().px(*launcher_row_probe(0)) == LAUNCHER_SEL_BG,
-          "the launcher's first result is not drawn selected")
+    check(m.screenshot().px(*LAUNCHER_TILE_PROBE) == LAUNCHER_SEL_BG,
+          "the Start menu's first application is not drawn selected")
 
     m.type_text("gui_pai")
     m.sendkey("ret")
@@ -1105,8 +1111,8 @@ def test_launcher_does_not_offer_data_files(m):
     m.sendkey("ctrl-spc")
     wait_for(m, lambda s: s.px(*LAUNCHER_LOWER_PROBE) == LAUNCHER_LOWER_BG,
              "Ctrl+Space did not open the launcher")
-    check(m.screenshot().px(*launcher_row_probe(0)) == LAUNCHER_SEL_BG,
-          "the launcher's first result is not drawn selected before typing")
+    check(m.screenshot().px(*LAUNCHER_TILE_PROBE) == LAUNCHER_SEL_BG,
+          "the Start menu's first application is not drawn selected before typing")
 
     m.type_text("readme")
     wait_for(m, lambda s: s.px(*launcher_row_probe(0)) != LAUNCHER_SEL_BG,
@@ -2710,8 +2716,51 @@ def test_display_scale_and_startup_mode_on_a_fixed_mode_screen(m):
     check((shot.width, shot.height) == (1920, 1200),
           "the screen after the restart is %dx%d, not 1920x1200" % (shot.width, shot.height))
 
+def test_start_menu_confirmation_answers_a_click(m):
+    # M214: the confirmation used to say "Y / Enter = yes, click = cancel" -
+    # a person with only a trackpad could not say yes. It is two buttons.
+    boot(m)
+    m.click(*START_CLICK)
+    wait_for(m, lambda s: s.px(*LAUNCHER_LOWER_PROBE) == LAUNCHER_LOWER_BG,
+             "the Start button did not open the Start menu")
+    m.click(*power_button_center(0))
+    wait_for(m, lambda s: s.px(*power_confirm_probe()) == POWER_CONFIRM_BG,
+             "clicking Shut Down did not ask to confirm")
+    m.click(*power_button_center(1))
+    wait_for(m, lambda s: s.px(*power_confirm_probe()) != POWER_CONFIRM_BG and
+                          s.px(*LAUNCHER_LOWER_PROBE) == LAUNCHER_LOWER_BG,
+             "clicking Cancel did not put the menu back")
+    time.sleep(3.0)
+    check(m.exit_status is None, "clicking Cancel powered the machine off")
+
+    m.click(*power_button_center(0))
+    wait_for(m, lambda s: s.px(*power_confirm_probe()) == POWER_CONFIRM_BG,
+             "clicking Shut Down a second time did not ask to confirm")
+    # The machine can be gone before a release would be sent, so this one
+    # is a press: the menu acts on it.
+    m.move_to(*power_button_center(0))
+    m.monitor("mouse_button 1")
+    took = m.wait_for_exit(timeout=40.0)
+    check(took is not None, "clicking the confirming Shut Down button did not power the machine off")
+    check(m.exit_status == 0, "the guest exited with status %d rather than 0" % (m.exit_status or -1))
+
+def test_start_menu_search_opens_a_setting_at_its_pane(m):
+    boot(m)
+    check(m.screenshot().px(512, 309) == desktop_px(309), "something is drawn in the middle of the desktop already")
+    m.click(*START_CLICK)
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == LAUNCHER_BG, "the Start button did not open the Start menu")
+    check(m.screenshot().px(512, 309) == desktop_px(309),
+          "the Start menu covered the middle of the screen rather than opening above its button")
+    mark = len(m.read_log())
+    m.type_text("touchpad")
+    m.sendkey("ret")
+    wait_for_log_after(m, "[settings] showing Trackpad", mark,
+                       "searching the Start menu for touchpad and pressing Enter did not open Trackpad settings")
+
 TESTS = [
     ("a_tap_reaches_every_toolkit_control", test_a_tap_reaches_every_toolkit_control),
+    ("start_menu_confirmation_answers_a_click", test_start_menu_confirmation_answers_a_click),
+    ("start_menu_search_opens_a_setting_at_its_pane", test_start_menu_search_opens_a_setting_at_its_pane),
     ("display_scale_and_startup_mode_on_a_fixed_mode_screen",
      test_display_scale_and_startup_mode_on_a_fixed_mode_screen),
     ("double_click_launches_every_icon", test_double_click_launches_every_icon),
@@ -2811,6 +2860,7 @@ def _die_on_signal(signum, _frame):
     raise KeyboardInterrupt("received signal %d" % signum)
 
 QUICK_TESTS = [
+    "start_menu_search_opens_a_setting_at_its_pane",
     "a_tap_reaches_every_toolkit_control",
     "desktop_context_menu",
     "a_painting_becomes_the_desktop_picture",
@@ -2904,6 +2954,7 @@ def known_flaky(names):
         return []
 
 COLD_BOOT_TESTS = {
+    "start_menu_confirmation_answers_a_click",
     "display_scale_and_startup_mode_on_a_fixed_mode_screen",
     "trackpad_settings_move_the_pointer",
     "wifi_wizard_joins_after_a_wrong_password",
