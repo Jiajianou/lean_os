@@ -651,3 +651,87 @@ TEST(touchpad, a_second_touch_with_two_fingers_after_a_tap_scrolls_rather_than_d
     REQUIRE(tap_at(&state, 0, events) == 2);
     CHECK_EQ(two(&state, 1000, 3000, 1500, 3000, 0, 100, events), 0);
 }
+
+TEST(touchpad, a_touch_exactly_as_long_and_as_far_as_a_tap_may_be_is_still_a_tap) {
+    touchpad_gestures_t state = gestures_for_hybrid();
+    touchpad_event_t events[TOUCHPAD_MAX_EVENTS];
+    one(&state, 2000, 2000, 0, 0, events);
+    CHECK_EQ(lift(&state, TOUCHPAD_TAP_MAXIMUM_MS, events), 2);
+
+    state = gestures_for_hybrid();
+    int32_t span = (int32_t)(state.x_range * TOUCHPAD_TAP_MAXIMUM_TRAVEL_TENTHS_MM / state.width_tenths_mm);
+    while ((int64_t)span * state.width_tenths_mm / state.x_range < TOUCHPAD_TAP_MAXIMUM_TRAVEL_TENTHS_MM) {
+        span++;
+    }
+    while ((int64_t)span * state.width_tenths_mm / state.x_range > TOUCHPAD_TAP_MAXIMUM_TRAVEL_TENTHS_MM) {
+        span--;
+    }
+    one(&state, 2000, 2000, 0, 1000, events);
+    one(&state, 2000 + span, 2000, 0, 1020, events);
+    CHECK_EQ(lift(&state, 1040, events), 2);
+
+    state = gestures_for_hybrid();
+    one(&state, 2000, 2000, 0, 2000, events);
+    one(&state, 2000 + span + 40, 2000, 0, 2020, events);
+    int n = lift(&state, 2040, events);
+    for (int i = 0; i < n; i++) {
+        CHECK_EQ(events[i].tap, 0);
+    }
+}
+
+TEST(touchpad, each_touch_starts_counting_its_fingers_again) {
+    touchpad_gestures_t state = gestures_for_hybrid();
+    touchpad_event_t events[TOUCHPAD_MAX_EVENTS];
+    two(&state, 2000, 2000, 2400, 2000, 0, 0, events);
+    REQUIRE(lift(&state, 60, events) == 2);
+    CHECK_EQ(events[0].buttons, 2);
+    one(&state, 2000, 2000, 0, 1000, events);
+    REQUIRE(lift(&state, 1060, events) == 2);
+    CHECK_EQ(events[0].buttons, 1);
+}
+
+TEST(touchpad, a_fraction_of_a_count_left_over_does_not_carry_into_the_next_touch) {
+    touchpad_gestures_t state = gestures_for_hybrid();
+    touchpad_event_t events[TOUCHPAD_MAX_EVENTS];
+    one(&state, 2000, 2000, 0, 0, events);
+    one(&state, 2001, 2001, 0, 300, events);
+    lift(&state, 400, events);
+    CHECK(state.remainder_x != 0 || state.remainder_y != 0);
+    one(&state, 3000, 3000, 0, 1000, events);
+    CHECK_EQ(state.remainder_x, 0);
+    CHECK_EQ(state.remainder_y, 0);
+    CHECK_EQ(state.touch_travel_tenths_mm, 0u);
+}
+
+TEST(touchpad, more_contacts_than_a_frame_holds_are_cut_to_the_frame) {
+    touchpad_gestures_t state = gestures_for_hybrid();
+    touchpad_event_t events[TOUCHPAD_MAX_EVENTS];
+    touchpad_point_t points[HID_TOUCHPAD_MAX_CONTACTS + 2];
+    for (int i = 0; i < HID_TOUCHPAD_MAX_CONTACTS + 2; i++) {
+        points[i] = (touchpad_point_t){(uint8_t)i, 1000 + 100 * i, 1000};
+    }
+    touchpad_gestures_frame(&state, points, HID_TOUCHPAD_MAX_CONTACTS + 2, 0, 0, events);
+    CHECK_EQ(state.previous_count, HID_TOUCHPAD_MAX_CONTACTS);
+    CHECK_EQ(state.touch_most_fingers, HID_TOUCHPAD_MAX_CONTACTS);
+}
+
+TEST(touchpad, a_two_finger_drag_follows_the_finger_that_moved_most) {
+    touchpad_gestures_t state = gestures_for_hybrid();
+    touchpad_event_t events[TOUCHPAD_MAX_EVENTS];
+    two(&state, 2000, 2000, 1000, 1000, 1, 0, events);
+    int n = two(&state, 2010, 2000, 1340, 1000, 1, 20, events);
+    REQUIRE(n == 1);
+    CHECK(events[0].dx >= 118 && events[0].dx <= 120);
+    n = two(&state, 2010, 2340, 1345, 1000, 1, 40, events);
+    REQUIRE(n == 1);
+    CHECK(events[0].dy >= 78 && events[0].dy <= 80);
+    CHECK(events[0].dx < 5);
+}
+
+TEST(touchpad, one_finger_matched_of_two_neither_moves_nor_scrolls) {
+    touchpad_gestures_t state = gestures_for_hybrid();
+    touchpad_event_t events[TOUCHPAD_MAX_EVENTS];
+    one(&state, 2000, 2000, 0, 0, events);
+    touchpad_point_t points[2] = {{0, 2000, 2200}, {5, 3000, 3000}};
+    CHECK_EQ(touchpad_gestures_frame(&state, points, 2, 0, 20, events), 0);
+}
