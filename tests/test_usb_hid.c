@@ -25,7 +25,7 @@ static void report(uint8_t out[8], uint8_t mods, uint8_t k0, uint8_t k1, uint8_t
 #define MOD_LALT   0x04
 
 TEST(usb_hid, a_single_press_is_one_character) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t r[8];
 
@@ -37,7 +37,7 @@ TEST(usb_hid, a_single_press_is_one_character) {
 }
 
 TEST(usb_hid, a_held_key_does_not_repeat) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t r[8];
 
@@ -52,7 +52,7 @@ TEST(usb_hid, a_held_key_does_not_repeat) {
 }
 
 TEST(usb_hid, a_key_released_and_pressed_again_is_two_characters) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t down[8], up[8];
     report(down, 0, K_A, 0, 0);
@@ -68,7 +68,7 @@ TEST(usb_hid, a_key_released_and_pressed_again_is_two_characters) {
 }
 
 TEST(usb_hid, one_of_two_held_keys_released) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t both[8], just_b[8];
     report(both, 0, K_A, K_B, 0);
@@ -84,7 +84,7 @@ TEST(usb_hid, one_of_two_held_keys_released) {
 }
 
 TEST(usb_hid, a_key_that_changes_slot_is_not_a_new_press) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t r[8];
 
@@ -98,7 +98,7 @@ TEST(usb_hid, a_key_that_changes_slot_is_not_a_new_press) {
 }
 
 TEST(usb_hid, shift_selects_the_shifted_table) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t r[8];
 
@@ -110,7 +110,7 @@ TEST(usb_hid, shift_selects_the_shifted_table) {
 }
 
 TEST(usb_hid, right_hand_modifiers_count) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t r[8];
 
@@ -122,7 +122,7 @@ TEST(usb_hid, right_hand_modifiers_count) {
 }
 
 TEST(usb_hid, ctrl_and_alt_travel_with_the_character) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t r[8];
 
@@ -133,7 +133,7 @@ TEST(usb_hid, ctrl_and_alt_travel_with_the_character) {
     CHECK_EQ(keys.mods[0] & KEYBOARD_MOD_CTRL, KEYBOARD_MOD_CTRL);
     CHECK_EQ(keys.mods[0] & KEYBOARD_MOD_SHIFT, 0);
 
-    usb_hid_state_t st2 = {{0}, 0, 0};
+    usb_hid_state_t st2 = {{0}, 0, 0, {0, 0}};
     report(r, MOD_LALT, K_A, 0, 0);
     usb_hid_decode_keyboard(&st2, r, &keys);
     CHECK_EQ(keys.count, 1);
@@ -141,7 +141,7 @@ TEST(usb_hid, ctrl_and_alt_travel_with_the_character) {
 }
 
 TEST(usb_hid, error_rollover_is_not_a_key) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t r[8];
 
@@ -151,7 +151,7 @@ TEST(usb_hid, error_rollover_is_not_a_key) {
 }
 
 TEST(usb_hid, an_out_of_range_usage_reads_nothing) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t r[8];
 
@@ -161,7 +161,7 @@ TEST(usb_hid, an_out_of_range_usage_reads_nothing) {
 }
 
 TEST(usb_hid, return_space_and_backspace_are_the_control_characters) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t r[8];
 
@@ -196,7 +196,7 @@ TEST(usb_hid, the_digit_row_is_in_keyboard_order) {
 }
 
 TEST(usb_hid, a_mouse_report_with_nothing_in_it_is_not_delivered) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_mouse_t m;
     uint8_t r[4] = {0, 0, 0, 0};
 
@@ -210,7 +210,7 @@ TEST(usb_hid, a_mouse_report_with_nothing_in_it_is_not_delivered) {
 }
 
 TEST(usb_hid, movement_is_signed) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_mouse_t m;
     uint8_t r[4] = {0, 0xFF, 0xFE, 0};
 
@@ -221,7 +221,7 @@ TEST(usb_hid, movement_is_signed) {
 }
 
 TEST(usb_hid, a_button_change_is_delivered_without_movement) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_mouse_t m;
     uint8_t idle[4] = {0, 0, 0, 0};
     uint8_t click[4] = {1, 0, 0, 0};
@@ -244,7 +244,7 @@ TEST(usb_hid, a_button_change_is_delivered_without_movement) {
 }
 
 TEST(usb_hid, a_three_byte_report_has_no_wheel) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_mouse_t m;
     uint8_t r[3] = {0, 5, 5};
 
@@ -255,7 +255,7 @@ TEST(usb_hid, a_three_byte_report_has_no_wheel) {
 }
 
 TEST(usb_hid, the_wheel_is_signed_on_a_four_byte_report) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_mouse_t m;
     uint8_t r[4] = {0, 0, 0, 0xFF};
 
@@ -265,7 +265,7 @@ TEST(usb_hid, the_wheel_is_signed_on_a_four_byte_report) {
 }
 
 TEST(usb_hid, the_decoder_reads_exactly_eight_bytes) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t *r = malloc(8);
     REQUIRE(r != NULL);
@@ -276,14 +276,14 @@ TEST(usb_hid, the_decoder_reads_exactly_eight_bytes) {
     for (int i = 2; i < 8; i++) {
         r[i] = (uint8_t)(K_A + i - 2);
     }
-    usb_hid_state_t st2 = {{0}, 0, 0};
+    usb_hid_state_t st2 = {{0}, 0, 0, {0, 0}};
     usb_hid_decode_keyboard(&st2, r, &keys);
     CHECK_EQ(keys.count, 6);
     free(r);
 }
 
 TEST(usb_hid, the_table_bound_is_exactly_one_past_the_last_entry) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t r[8];
 
@@ -291,12 +291,12 @@ TEST(usb_hid, the_table_bound_is_exactly_one_past_the_last_entry) {
     usb_hid_decode_keyboard(&st, r, &keys);
     CHECK_EQ(keys.count, 0);
 
-    usb_hid_state_t st2 = {{0}, 0, 0};
+    usb_hid_state_t st2 = {{0}, 0, 0, {0, 0}};
     report(r, 0, 104, 0, 0);
     usb_hid_decode_keyboard(&st2, r, &keys);
     CHECK_EQ(keys.count, 0);
 
-    usb_hid_state_t st3 = {{0}, 0, 0};
+    usb_hid_state_t st3 = {{0}, 0, 0, {0, 0}};
     report(r, 0, 0x38, 0, 0);
     usb_hid_decode_keyboard(&st3, r, &keys);
     CHECK_EQ(keys.count, 1);
@@ -307,12 +307,12 @@ TEST(usb_hid, the_status_codes_below_four_are_not_keys_and_four_is) {
     usb_hid_keys_t keys;
     uint8_t r[8];
     for (uint8_t usage = 0; usage <= 3; usage++) {
-        usb_hid_state_t st = {{0}, 0, 0};
+        usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
         report(r, 0, usage, 0, 0);
         usb_hid_decode_keyboard(&st, r, &keys);
         CHECK_EQ(keys.count, 0);
     }
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     report(r, 0, 4, 0, 0);
     usb_hid_decode_keyboard(&st, r, &keys);
     CHECK_EQ(keys.count, 1);
@@ -320,7 +320,7 @@ TEST(usb_hid, the_status_codes_below_four_are_not_keys_and_four_is) {
 }
 
 TEST(usb_hid, six_simultaneous_presses_are_all_reported) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t r[8];
     memset(r, 0, 8);
@@ -335,7 +335,7 @@ TEST(usb_hid, six_simultaneous_presses_are_all_reported) {
 }
 
 TEST(usb_hid, the_first_report_is_not_diffed_against_nothing) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t r[8];
 
@@ -347,7 +347,7 @@ TEST(usb_hid, the_first_report_is_not_diffed_against_nothing) {
 }
 
 TEST(usb_hid, the_whole_report_is_remembered_including_the_last_slot) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t r[8];
     memset(r, 0, 8);
@@ -366,7 +366,7 @@ TEST(usb_hid, the_whole_report_is_remembered_including_the_last_slot) {
 
 TEST(usb_hid, a_key_held_in_any_slot_is_found_by_the_held_search) {
     for (int slot = 2; slot < 8; slot++) {
-        usb_hid_state_t st = {{0}, 0, 0};
+        usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
         usb_hid_keys_t keys;
         uint8_t r[8];
         memset(r, 0, 8);
@@ -380,14 +380,14 @@ TEST(usb_hid, a_key_held_in_any_slot_is_found_by_the_held_search) {
 }
 
 TEST(usb_hid, a_key_with_no_character_injects_nothing) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_keys_t keys;
     uint8_t r[8];
     report(r, 0, 0x65, 0, 0);
     usb_hid_decode_keyboard(&st, r, &keys);
     CHECK_EQ(keys.count, 0);
 
-    usb_hid_state_t st2 = {{0}, 0, 0};
+    usb_hid_state_t st2 = {{0}, 0, 0, {0, 0}};
     report(r, MOD_LSHIFT, 0x32, 0, 0);
     usb_hid_decode_keyboard(&st2, r, &keys);
     CHECK_EQ(keys.count, 0);
@@ -415,7 +415,7 @@ TEST(usb_hid, the_punctuation_block_is_the_us_layout) {
 }
 
 TEST(usb_hid, the_mouse_remembers_that_it_has_seen_a_report) {
-    usb_hid_state_t st = {{0}, 0, 0};
+    usb_hid_state_t st = {{0}, 0, 0, {0, 0}};
     usb_hid_mouse_t m;
     uint8_t r[4] = {0, 0, 0, 0};
     usb_hid_decode_mouse(&st, r, 4, &m);
@@ -445,4 +445,88 @@ TEST(usb_hid, function_keys_and_arrows_are_the_codes_the_ps2_driver_sends) {
     CHECK_EQ(keys.ch[1], KEYBOARD_KEY_LEFT);
     CHECK_EQ(keys.ch[2], KEYBOARD_KEY_DOWN);
     CHECK_EQ(keys.ch[3], KEYBOARD_KEY_UP);
+}
+
+TEST(usb_hid, the_editing_keys_and_keypad_are_the_codes_the_ps2_driver_sends) {
+    usb_hid_state_t state = {0};
+    usb_hid_keys_t keys;
+    const uint8_t block[8] = {0, 0, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0};
+    usb_hid_decode_keyboard(&state, block, &keys);
+    CHECK_EQ(keys.count, 5);
+    CHECK_EQ(keys.ch[0], (char)KEYBOARD_KEY_HOME);
+    CHECK_EQ(keys.ch[1], (char)KEYBOARD_KEY_PAGE_UP);
+    CHECK_EQ(keys.ch[2], (char)KEYBOARD_KEY_DELETE);
+    CHECK_EQ(keys.ch[3], (char)KEYBOARD_KEY_END);
+    CHECK_EQ(keys.ch[4], (char)KEYBOARD_KEY_PAGE_DOWN);
+    CHECK_EQ(keyboard_extended_key(0x47), (char)KEYBOARD_KEY_HOME);
+    CHECK_EQ(keyboard_extended_key(0x49), (char)KEYBOARD_KEY_PAGE_UP);
+    CHECK_EQ(keyboard_extended_key(0x53), (char)KEYBOARD_KEY_DELETE);
+    CHECK_EQ(keyboard_extended_key(0x4F), (char)KEYBOARD_KEY_END);
+    CHECK_EQ(keyboard_extended_key(0x51), (char)KEYBOARD_KEY_PAGE_DOWN);
+    const uint8_t keypad[8] = {0, 0, 0x54, 0x58, 0, 0, 0, 0};
+    usb_hid_decode_keyboard(&state, keypad, &keys);
+    CHECK_EQ(keys.count, 2);
+    CHECK_EQ(keys.ch[0], '/');
+    CHECK_EQ(keys.ch[1], '\n');
+    CHECK_EQ(keyboard_extended_key(SCANCODE_EXT_KEYPAD_SLASH), '/');
+    CHECK_EQ(keyboard_extended_key(SCANCODE_EXT_KEYPAD_ENTER), '\n');
+}
+
+TEST(usb_hid, the_arrows_after_an_extended_prefix_keep_their_codes) {
+    CHECK_EQ(keyboard_extended_key(0x48), (char)KEYBOARD_KEY_UP);
+    CHECK_EQ(keyboard_extended_key(0x50), (char)KEYBOARD_KEY_DOWN);
+    CHECK_EQ(keyboard_extended_key(0x4B), (char)KEYBOARD_KEY_LEFT);
+    CHECK_EQ(keyboard_extended_key(0x4D), (char)KEYBOARD_KEY_RIGHT);
+    CHECK_EQ(keyboard_extended_key(SCANCODE_EXT_RIGHT_CTRL), 0);
+    CHECK_EQ(keyboard_extended_key(SCANCODE_EXT_LEFT_GUI), 0);
+    CHECK_EQ(keyboard_extended_key(0x2A), 0);
+}
+
+TEST(usb_hid, the_windows_key_let_go_alone_is_the_start_menu) {
+    usb_hid_state_t state = {0};
+    usb_hid_keys_t keys;
+    const uint8_t gui[8] = {0x08, 0, 0, 0, 0, 0, 0, 0};
+    const uint8_t none[8] = {0};
+    usb_hid_decode_keyboard(&state, gui, &keys);
+    CHECK_EQ(keys.count, 0);
+    usb_hid_decode_keyboard(&state, none, &keys);
+    CHECK_EQ(keys.count, 1);
+    CHECK_EQ(keys.ch[0], (char)KEYBOARD_KEY_SUPER);
+    usb_hid_decode_keyboard(&state, none, &keys);
+    CHECK_EQ(keys.count, 0);
+
+    const uint8_t right_gui[8] = {0x80, 0, 0, 0, 0, 0, 0, 0};
+    usb_hid_decode_keyboard(&state, right_gui, &keys);
+    usb_hid_decode_keyboard(&state, none, &keys);
+    CHECK_EQ(keys.count, 1);
+    CHECK_EQ(keys.ch[0], (char)KEYBOARD_KEY_SUPER);
+}
+
+TEST(usb_hid, the_windows_key_in_a_chord_is_not_the_start_menu) {
+    usb_hid_state_t state = {0};
+    usb_hid_keys_t keys;
+    const uint8_t gui[8] = {0x08, 0, 0, 0, 0, 0, 0, 0};
+    const uint8_t gui_e[8] = {0x08, 0, 0x08, 0, 0, 0, 0, 0};
+    const uint8_t none[8] = {0};
+    usb_hid_decode_keyboard(&state, gui, &keys);
+    usb_hid_decode_keyboard(&state, gui_e, &keys);
+    CHECK_EQ(keys.count, 1);
+    CHECK_EQ(keys.ch[0], 'e');
+    usb_hid_decode_keyboard(&state, gui, &keys);
+    usb_hid_decode_keyboard(&state, none, &keys);
+    CHECK_EQ(keys.count, 0);
+}
+
+TEST(usb_hid, the_super_rule_is_one_rule_for_both_keyboards) {
+    keyboard_super_t super_key = {0, 0};
+    CHECK_EQ(keyboard_super_up(&super_key), 0);
+    keyboard_super_down(&super_key);
+    keyboard_super_down(&super_key);
+    CHECK_EQ(keyboard_super_up(&super_key), 1);
+    keyboard_super_down(&super_key);
+    keyboard_super_other_key(&super_key);
+    CHECK_EQ(keyboard_super_up(&super_key), 0);
+    keyboard_super_other_key(&super_key);
+    keyboard_super_down(&super_key);
+    CHECK_EQ(keyboard_super_up(&super_key), 1);
 }

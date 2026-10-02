@@ -37,7 +37,8 @@ typedef struct {
 static const shortcut_t SHORTCUTS[] = {
     {SHORTCUT_CYCLE_BACKWARD, KEYBOARD_MOD_ALT | KEYBOARD_MOD_SHIFT, 0,            '\t',                 "Shift+Alt+Tab",  "Previous window"},
     {SHORTCUT_CYCLE_FORWARD,  KEYBOARD_MOD_ALT,                 KEYBOARD_MOD_SHIFT, '\t',                "Alt+Tab",        "Next window"},
-    {SHORTCUT_LAUNCHER,       KEYBOARD_MOD_CTRL,                0,            ' ',                  "Ctrl+Space",     "Open the launcher"},
+    {SHORTCUT_LAUNCHER,       0,                                0,            (char)KEYBOARD_KEY_SUPER, "Windows key",  "Open the Start menu"},
+    {SHORTCUT_LAUNCHER,       KEYBOARD_MOD_CTRL,                0,            ' ',                  "Ctrl+Space",     "Open the Start menu"},
     {SHORTCUT_TASK_MANAGER,   KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT, 0,           27,                   "Ctrl+Shift+Esc", "Task manager"},
     {SHORTCUT_CLOSE_WINDOW,   KEYBOARD_MOD_ALT,                 0,            (char)KEYBOARD_KEY_FUNCTION(4),  "Alt+F4",         "Close window"},
     {SHORTCUT_WINDOW_TO_PREVIOUS, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT | KEYBOARD_MOD_ALT, 0, (char)KEYBOARD_KEY_LEFT,  "Ctrl+Shift+Alt+Left",  "Window to previous desktop"},

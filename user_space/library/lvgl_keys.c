@@ -20,6 +20,12 @@ uint32_t lvgl_translate_key(char character, uint8_t modifiers) {
         return LV_KEY_BACKSPACE;
     case 27:
         return LV_KEY_ESC;
+    case KEYBOARD_KEY_HOME:
+        return LV_KEY_HOME;
+    case KEYBOARD_KEY_END:
+        return LV_KEY_END;
+    case KEYBOARD_KEY_DELETE:
+        return LV_KEY_DEL;
     case '\t':
         return (modifiers & KEYBOARD_MOD_SHIFT) ? LV_KEY_PREV : LV_KEY_NEXT;
     default:

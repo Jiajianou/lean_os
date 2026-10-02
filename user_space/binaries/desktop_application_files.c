@@ -21,6 +21,7 @@
 #define FILES_SIDEBAR_WIDTH 172
 #define FILES_TOOLBAR_HEIGHT 48
 #define FILES_HEADER_HEIGHT 26
+#define FILES_PAGE_ROWS 12
 #define FILES_ROW_HEIGHT 26
 #define FILES_PATH_BAR_HEIGHT 26
 #define FILES_STATUS_HEIGHT 24
@@ -1790,14 +1791,14 @@ static void open_item_menu(int32_t x, int32_t y) {
     items[n++] = (files_menu_entry_t){ACTION_SEPARATOR, 0, 0, 0};
     if (in_trash) {
         items[n++] = (files_menu_entry_t){ACTION_PUT_BACK, "Put Back", 0, 1};
-        items[n++] = (files_menu_entry_t){ACTION_DELETE, "Delete Immediately...", "Bksp", 1};
+        items[n++] = (files_menu_entry_t){ACTION_DELETE, "Delete Immediately...", "Del", 1};
     } else {
         items[n++] = (files_menu_entry_t){ACTION_RENAME, "Rename...", "F2", chosen == 1};
         items[n++] = (files_menu_entry_t){ACTION_DUPLICATE, "Duplicate", "Ctrl+D", 1};
         items[n++] = (files_menu_entry_t){ACTION_COPY, "Copy", "Ctrl+C", 1};
         items[n++] = (files_menu_entry_t){ACTION_CUT, "Cut", "Ctrl+X", 1};
         items[n++] = (files_menu_entry_t){ACTION_SEPARATOR, 0, 0, 0};
-        items[n++] = (files_menu_entry_t){ACTION_TRASH, "Move to Trash", "Bksp", 1};
+        items[n++] = (files_menu_entry_t){ACTION_TRASH, "Move to Trash", "Del", 1};
     }
     if (virtual_view()) {
         items[n++] = (files_menu_entry_t){ACTION_SEPARATOR, 0, 0, 0};
@@ -3080,7 +3081,20 @@ static int files_key(lvgl_window_t *window, uint32_t ch, uint32_t mods) {
         return 1;
     case '\b':
     case 0x7F:
+    case (char)KEYBOARD_KEY_DELETE:
         run_action(ACTION_TRASH);
+        return 1;
+    case (char)KEYBOARD_KEY_HOME:
+        move_cursor(0, extend);
+        return 1;
+    case (char)KEYBOARD_KEY_END:
+        move_cursor(entry_count - 1, extend);
+        return 1;
+    case (char)KEYBOARD_KEY_PAGE_UP:
+        move_cursor(cursor < 0 ? 0 : cursor - FILES_PAGE_ROWS * step, extend);
+        return 1;
+    case (char)KEYBOARD_KEY_PAGE_DOWN:
+        move_cursor(cursor < 0 ? 0 : cursor + FILES_PAGE_ROWS * step, extend);
         return 1;
     case 27:
         if (here.mode == FILES_MODE_SEARCH) {

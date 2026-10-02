@@ -1370,7 +1370,7 @@ static void build_keyboard(void) {
         {"Space", "Quick Look"},
         {"Ctrl+I", "Get Info"},
         {"Ctrl+N / Ctrl+Shift+N", "New file / new folder"},
-        {"Backspace", "Move to Trash"},
+        {"Delete or Backspace", "Move to Trash"},
         {"Ctrl+Z", "Undo the last move, rename or trash"},
         {"Ctrl+F", "Search"},
         {"Ctrl+1 / Ctrl+2", "List / icons"},

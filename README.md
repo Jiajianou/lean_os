@@ -31,6 +31,13 @@ UEFI firmware
   that is already open brings it forward, and a pane chosen from the
   Start menu lands in the open Settings. The taskbar's clock opens Date &
   Time, the way the Wi-Fi bars beside it open the wizard.
+- **A keyboard with all its keys.** The Windows key opens the Start menu
+  (pressed and let go on its own - a chord with it does not). Delete,
+  Home, End and the page keys work where they mean something - Delete
+  sends a file to the Trash, Home and End go to the start and end of a
+  line or a list, Page Up scrolls the terminal back - and right Ctrl and
+  right Alt are modifiers like the left ones. PS/2 and USB keyboards send
+  the same codes for all of them, and the input suite drives both.
 - **Window chrome that is not from 2005.** A 28px titlebar with its own
   vertical gradient rather than a flat fill, the title centred and bold,
   and an accent hairline along the top of the focused window - so focus

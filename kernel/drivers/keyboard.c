@@ -1,4 +1,5 @@
 #include "keyboard.h"
+#include "keyboard_keys.h"
 
 #include "scheduler/scheduler.h"
 
@@ -28,10 +29,6 @@
 #define SCANCODE_F12 0x58
 
 #define SCANCODE_EXTENDED_PREFIX 0xE0
-#define SCANCODE_EXT_UP           0x48
-#define SCANCODE_EXT_LEFT         0x4B
-#define SCANCODE_EXT_RIGHT        0x4D
-#define SCANCODE_EXT_DOWN         0x50
 
 static const char unshifted_table[0x3A] = {
       0,    27,  '1', '2', '3', '4', '5', '6', '7', '8',
@@ -61,14 +58,17 @@ static volatile uint32_t buffer_tail;
 static volatile int shift_held;
 static volatile int ctrl_held;
 static volatile int alt_held;
+static volatile int right_ctrl_held;
+static volatile int right_alt_held;
 static volatile int extended_prefix;
+static keyboard_super_t super_key;
 
 static int current_modifiers(void) {
     int mods = 0;
-    if (ctrl_held) {
+    if (ctrl_held || right_ctrl_held) {
         mods |= KEYBOARD_MOD_CTRL;
     }
-    if (alt_held) {
+    if (alt_held || right_alt_held) {
         mods |= KEYBOARD_MOD_ALT;
     }
     if (shift_held) {
@@ -101,22 +101,27 @@ static void keyboard_irq(isr_regs_t *regs) {
         extended_prefix = 0;
         uint8_t ext_code = scancode & (uint8_t)~SCANCODE_RELEASE_BIT;
         int ext_released = (scancode & SCANCODE_RELEASE_BIT) != 0;
+        if (ext_code == SCANCODE_EXT_RIGHT_CTRL) {
+            right_ctrl_held = !ext_released;
+            return;
+        }
+        if (ext_code == SCANCODE_EXT_RIGHT_ALT) {
+            right_alt_held = !ext_released;
+            return;
+        }
+        if (ext_code == SCANCODE_EXT_LEFT_GUI || ext_code == SCANCODE_EXT_RIGHT_GUI) {
+            if (!ext_released) {
+                keyboard_super_down(&super_key);
+            } else if (keyboard_super_up(&super_key)) {
+                buffer_push((char)KEYBOARD_KEY_SUPER);
+            }
+            return;
+        }
         if (!ext_released) {
-            switch (ext_code) {
-                case SCANCODE_EXT_UP:
-                    buffer_push((char)KEYBOARD_KEY_UP);
-                    break;
-                case SCANCODE_EXT_DOWN:
-                    buffer_push((char)KEYBOARD_KEY_DOWN);
-                    break;
-                case SCANCODE_EXT_LEFT:
-                    buffer_push((char)KEYBOARD_KEY_LEFT);
-                    break;
-                case SCANCODE_EXT_RIGHT:
-                    buffer_push((char)KEYBOARD_KEY_RIGHT);
-                    break;
-                default:
-                    break;
+            char key = keyboard_extended_key(ext_code);
+            if (key) {
+                keyboard_super_other_key(&super_key);
+                buffer_push(key);
             }
         }
         return;
@@ -124,6 +129,9 @@ static void keyboard_irq(isr_regs_t *regs) {
 
     uint8_t code = scancode & (uint8_t)~SCANCODE_RELEASE_BIT;
     int released = (scancode & SCANCODE_RELEASE_BIT) != 0;
+    if (!released) {
+        keyboard_super_other_key(&super_key);
+    }
 
     if (code == SCANCODE_LSHIFT || code == SCANCODE_RSHIFT) {
         shift_held = !released;
@@ -174,6 +182,10 @@ void keyboard_init(void) {
     shift_held = 0;
     ctrl_held = 0;
     alt_held = 0;
+    right_ctrl_held = 0;
+    right_alt_held = 0;
+    super_key.held = 0;
+    super_key.alone = 0;
     last_read_mods = 0;
     extended_prefix = 0;
 

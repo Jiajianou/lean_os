@@ -3692,6 +3692,9 @@ static void boot_selftests_system(void) {
             {"Alt+Tab", '\t', KEYBOARD_MOD_ALT, SHORTCUT_CYCLE_FORWARD},
             {"Shift+Alt+Tab", '\t', KEYBOARD_MOD_ALT | KEYBOARD_MOD_SHIFT, SHORTCUT_CYCLE_BACKWARD},
             {"Ctrl+Space", ' ', KEYBOARD_MOD_CTRL, SHORTCUT_LAUNCHER},
+            {"the Windows key let go alone", (char)KEYBOARD_KEY_SUPER, 0, SHORTCUT_LAUNCHER},
+            {"Delete, which must NOT be a chord", (char)KEYBOARD_KEY_DELETE, 0, SHORTCUT_NONE},
+            {"Home, which must NOT be a chord", (char)KEYBOARD_KEY_HOME, KEYBOARD_MOD_SHIFT, SHORTCUT_NONE},
             {"Ctrl+Shift+Esc", 27, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT, SHORTCUT_TASK_MANAGER},
             {"Alt+F4", (char)KEYBOARD_KEY_FUNCTION(4), KEYBOARD_MOD_ALT, SHORTCUT_CLOSE_WINDOW},
             {"Ctrl+Alt+Left", (char)KEYBOARD_KEY_LEFT, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT, SHORTCUT_SNAP_LEFT},
@@ -14734,7 +14737,7 @@ display_self_test_done:
              "\n"
              "Getting around\n"
              "  Double-click a name in Files to open it, or .. to go up.\n"
-             "  Ctrl+Space opens the launcher; type a few letters and press Enter.\n"
+             "  Ctrl+Space opens the Start menu; type a few letters and press Enter.\n"
              "  Ctrl+Shift+Esc opens the task manager.\n"
              "  Ctrl+Alt+Left/Right move between the four desktops.\n"
              "\n"

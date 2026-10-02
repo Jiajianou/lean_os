@@ -317,11 +317,35 @@ static void backspace(void) {
     dirty = 1;
 }
 
+/* M216: Delete takes the character after the cursor - at the end of a
+   line, the line break - which is backspace from one place to the right,
+   recorded for undo exactly as that backspace would be. */
+static void delete_forward(void) {
+    if (current_col < line_length[current_row]) {
+        current_col++;
+        backspace();
+    } else if (current_row + 1 < line_count) {
+        current_row++;
+        current_col = 0;
+        backspace();
+    }
+}
+
 static void handle_char(char ch) {
     if (ch == '\n' || ch == '\r') {
         split_at_cursor();
     } else if (ch == '\b' || ch == 0x7F) {
         backspace();
+    } else if (ch == KEYBOARD_KEY_DELETE) {
+        delete_forward();
+    } else if (ch == KEYBOARD_KEY_HOME) {
+        current_col = 0;
+    } else if (ch == KEYBOARD_KEY_END) {
+        current_col = line_length[current_row];
+    } else if (ch == KEYBOARD_KEY_PAGE_UP) {
+        current_row -= TEXT_ROWS;
+    } else if (ch == KEYBOARD_KEY_PAGE_DOWN) {
+        current_row += TEXT_ROWS;
     } else if (ch == KEYBOARD_KEY_UP) {
         current_row--;
     } else if (ch == KEYBOARD_KEY_DOWN) {

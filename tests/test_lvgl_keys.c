@@ -35,7 +35,15 @@ TEST(lvgl_keys, printable_characters_pass_through_unchanged) {
 }
 
 TEST(lvgl_keys, unmapped_control_characters_are_dropped) {
-    CHECK_EQ(lvgl_translate_key(5, 0), 0u);
-    CHECK_EQ(lvgl_translate_key(6, 0), 0u);
-    CHECK_EQ(lvgl_translate_key(0x1F, 0), 0u);
+    CHECK_EQ(lvgl_translate_key(16, 0), 0u);
+    CHECK_EQ(lvgl_translate_key(0x1E, 0), 0u);
+    CHECK_EQ(lvgl_translate_key(KEYBOARD_KEY_SUPER, 0), 0u);
+    CHECK_EQ(lvgl_translate_key(KEYBOARD_KEY_PAGE_UP, 0), 0u);
+}
+
+TEST(lvgl_keys, home_end_and_delete_reach_a_text_field) {
+    CHECK_EQ(lvgl_translate_key(KEYBOARD_KEY_HOME, 0), (uint32_t)LV_KEY_HOME);
+    CHECK_EQ(lvgl_translate_key(KEYBOARD_KEY_END, 0), (uint32_t)LV_KEY_END);
+    CHECK_EQ(lvgl_translate_key(KEYBOARD_KEY_DELETE, 0), (uint32_t)LV_KEY_DEL);
+    CHECK_NE(lvgl_translate_key(KEYBOARD_KEY_DELETE, 0), (uint32_t)LV_KEY_BACKSPACE);
 }

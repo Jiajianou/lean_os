@@ -725,6 +725,12 @@ int main(void) {
             } else if (ev.type == WINDOW_MANAGER_EVENT_MOUSE_WHEEL) {
                 view_scroll(-ev.wheel);
                 changed = 1;
+            } else if (ev.type == WINDOW_MANAGER_EVENT_KEY &&
+                       (ev.ch == (char)KEYBOARD_KEY_PAGE_UP || ev.ch == (char)KEYBOARD_KEY_PAGE_DOWN)) {
+                /* M216: a page of scrollback, as the wheel moves a few lines -
+                   and, like the wheel, without throwing away what is typed. */
+                view_scroll(ev.ch == (char)KEYBOARD_KEY_PAGE_UP ? ROWS - 1 : -(ROWS - 1));
+                changed = 1;
             } else if (ev.type == WINDOW_MANAGER_EVENT_KEY && (running_pid >= 0 || pipe_pid >= 0)) {
                 if ((ev.mods & KEYBOARD_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
                     if (running_pid >= 0) {

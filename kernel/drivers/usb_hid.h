@@ -2,10 +2,13 @@
 
 #include <stdint.h>
 
+#include "keyboard_keys.h"
+
 typedef struct {
     uint8_t last_keys[8];
     uint8_t last_buttons;
     int have_last;
+    keyboard_super_t super_key;
 } usb_hid_state_t;
 
 typedef struct {

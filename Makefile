@@ -726,7 +726,7 @@ TEST_FAKES := tests/fakes/fake_panic.c tests/fakes/fake_klog.c \
               tests/fakes/fake_user_net.c tests/fakes/fake_framebuffer.c \
               tests/fakes/fake_wireless_glue.c
 
-TEST_KERNEL_SRCS := kernel/library/kernel_library.c kernel/memory_management/heap.c kernel/file_system/leanfs.c \
+TEST_KERNEL_SRCS := kernel/drivers/keyboard_keys.c kernel/library/kernel_library.c kernel/memory_management/heap.c kernel/file_system/leanfs.c \
                     kernel/network/arp.c kernel/network/ip.c kernel/network/icmp.c \
                     kernel/network/udp.c kernel/network/ethernet.c kernel/network/tcp.c kernel/network/ieee80211.c \
                     kernel/network/wpa_crypto.c kernel/network/wpa_handshake.c \

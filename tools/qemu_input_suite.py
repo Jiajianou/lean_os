@@ -2788,8 +2788,48 @@ def test_the_taskbar_clock_opens_date_and_time(m):
     wait_for_log_after(m, "[settings] showing Date & Time", mark, "clicking the taskbar clock did not open Date & Time")
     wait_for_windows(m, 1)
 
+def test_the_keys_a_laptop_keyboard_adds(m):
+    # M216: everything after an 0xE0 but the arrows was dropped - Delete,
+    # Home, End, the page keys, keypad Enter, and right Ctrl and Alt as
+    # modifiers - and the Windows key meant nothing.
+    boot(m)
+    m.sendkey("meta_l")
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == LAUNCHER_BG, "the Windows key did not open the Start menu")
+    m.sendkey("meta_l")
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == desktop_px(LAUNCHER_PROBE[1]),
+             "the Windows key a second time did not close the Start menu")
+    m.sendkey("meta_l-e")
+    time.sleep(1.0)
+    check(m.screenshot().px(*LAUNCHER_PROBE) != LAUNCHER_BG,
+          "Windows+E opened the Start menu - only the key let go alone should")
+
+    m.sendkey("meta_l")
+    wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == LAUNCHER_BG, "the Windows key did not open the Start menu again")
+    m.type_text("gui_clo")
+    m.sendkey("kp_enter")
+    wait_for_windows(m, 1)
+
+    m.sendkey("alt-f4")
+    wait_for_windows(m, 0)
+    origin = fm_open(m)
+    before = fm_rows_with_text(m, m.screenshot(), origin)
+    fm_click(m, origin, "item0")
+    time.sleep(0.4)
+    m.sendkey("ctrl-d")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == before + 1,
+             "Ctrl+D did not duplicate the selected file", timeout=15.0)
+    mark = fm_mark(m)
+    m.sendkey("delete")
+    fm_wait_log(m, "[files] trashed /home/", mark, "the Delete key did not move the selection to the Trash")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == before,
+             "the file was still listed after Delete", timeout=15.0)
+    m.sendkey("ctrl_r-z")
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == before + 1,
+             "right Ctrl+Z did not undo - the right Ctrl key is not a modifier", timeout=15.0)
+
 TESTS = [
     ("a_tap_reaches_every_toolkit_control", test_a_tap_reaches_every_toolkit_control),
+    ("the_keys_a_laptop_keyboard_adds", test_the_keys_a_laptop_keyboard_adds),
     ("settings_opens_once_and_takes_the_pane_it_is_asked_for",
      test_settings_opens_once_and_takes_the_pane_it_is_asked_for),
     ("the_taskbar_clock_opens_date_and_time", test_the_taskbar_clock_opens_date_and_time),
@@ -2894,6 +2934,7 @@ def _die_on_signal(signum, _frame):
     raise KeyboardInterrupt("received signal %d" % signum)
 
 QUICK_TESTS = [
+    "the_keys_a_laptop_keyboard_adds",
     "settings_opens_once_and_takes_the_pane_it_is_asked_for",
     "start_menu_search_opens_a_setting_at_its_pane",
     "a_tap_reaches_every_toolkit_control",
