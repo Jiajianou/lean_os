@@ -5,7 +5,9 @@
 #include "tcp.h"
 #include "udp.h"
 
-#define MAX_SOCKETS 32
+/* Machine-wide, and allocated from the heap as they are first needed - the
+   reasoning is TCP_MAX_TCBS's (M209). */
+#define MAX_SOCKETS 512
 #define SOCKET_QUEUE_DEPTH 8
 
 #define SOCKET_MAX_DATAGRAM 512

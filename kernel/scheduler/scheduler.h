@@ -437,6 +437,9 @@ void scheduler_set_task_name(task_t *t, const char *name);
 
 void task_exit_with_signal(int sig) __attribute__((noreturn));
 
+int scheduler_wait_status(const task_t *t);
+int scheduler_recent_exit_status(int pid, int *status_out);
+
 void scheduler_release_env(task_t *t);
 
 /* TASK_CMDLINE_MAX is a ceiling rather than a size: what it has to be bigger

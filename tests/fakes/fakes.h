@@ -9,6 +9,7 @@ uint64_t fake_physical_memory_outstanding(void);
 uint64_t fake_physical_memory_total_allocs(void);
 
 void fake_virtual_memory_reset(void);
+void fake_heap_ensure(void);
 uint64_t fake_virtual_memory_mapped_pages(void);
 void fake_virtual_memory_fail_map_after(int n);
 

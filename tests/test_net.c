@@ -1,5 +1,18 @@
 #include "check.h"
 #include "fakes/fakes.h"
+#include "memory_management/heap.h"
+
+/* The TCP tables come from the heap (M209). A suite that resets the fake
+   physical memory frees pages another suite's scheduler state still points
+   into, so this brings the heap up once, and only if nothing else has. */
+void fake_heap_ensure(void) {
+    static int ready;
+    if (!ready && fake_virtual_memory_mapped_pages() == 0) {
+        fake_virtual_memory_reset();
+        heap_init();
+    }
+    ready = 1;
+}
 
 #include "network/arp.h"
 #include "network/ethernet.h"
@@ -375,6 +388,7 @@ TEST(net_udp, every_truncation_of_a_datagram_is_survived) {
 
 TEST(net_tcp, a_segment_shorter_than_a_header_is_dropped) {
     net_fixture();
+    fake_heap_ensure();
     tcp_init();
     for (uint16_t length = 0; length < 20; length++) {
         uint8_t *heap = malloc(length ? length : 1);
@@ -387,6 +401,7 @@ TEST(net_tcp, a_segment_shorter_than_a_header_is_dropped) {
 
 TEST(net_tcp, a_data_offset_claiming_options_that_are_not_there_is_refused) {
     net_fixture();
+    fake_heap_ensure();
     tcp_init();
     for (uint8_t off = 5; off <= 15; off++) {
         uint8_t seg[20];
@@ -406,6 +421,7 @@ TEST(net_tcp, a_data_offset_claiming_options_that_are_not_there_is_refused) {
 
 TEST(net_tcp, a_malformed_option_length_does_not_walk_off_the_segment) {
     net_fixture();
+    fake_heap_ensure();
     tcp_init();
     const uint8_t bad_lens[] = {0, 1, 200, 255};
     for (unsigned i = 0; i < sizeof(bad_lens); i++) {
@@ -430,6 +446,7 @@ TEST(net_tcp, a_malformed_option_length_does_not_walk_off_the_segment) {
 
 TEST(net_tcp, a_segment_for_a_port_nothing_is_listening_on_is_not_a_crash) {
     net_fixture();
+    fake_heap_ensure();
     tcp_init();
     for (unsigned flags = 0; flags < 64; flags++) {
         uint8_t seg[20];

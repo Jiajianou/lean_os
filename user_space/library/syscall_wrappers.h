@@ -209,6 +209,7 @@ long sys_wait_nb(long pid);
 long sys_yield(void);
 
 long sys_task_alive(long pid);
+long sys_task_end_status(long pid);
 
 long sys_pipe_reset(int fd);
 

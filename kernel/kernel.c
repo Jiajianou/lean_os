@@ -1092,6 +1092,13 @@ static void spinner_task(void *arg) {
     }
 }
 
+static void syscall_spinner_task(void *arg) {
+    (void)arg;
+    for (;;) {
+        do_syscall(SYS_getpid, 0, 0, 0);
+    }
+}
+
 static void quick_task(void *arg) {
     (void)arg;
 }
@@ -1600,8 +1607,8 @@ static void boot_selftests_desktop(void) {
             kernel_log_putc('\n');
             all_ok = 0;
         }
-        if (editor_exit != 1) {
-            kernel_log_puts("[wm36] WM_EVENT_CLOSE_REQUEST self-test: text_editor's exit code did not match its own sys_exit(1) - expected 0x1 got 0x");
+        if (editor_exit != 0) {
+            kernel_log_puts("[wm36] WM_EVENT_CLOSE_REQUEST self-test: text_editor's exit code was not the 0 a quit it chose ends with (M209) - got 0x");
             kernel_log_put_hex32((uint32_t)editor_exit);
             kernel_log_putc('\n');
             all_ok = 0;
@@ -4304,6 +4311,7 @@ static void boot_selftests_system(void) {
                                                        "the faulted client's window to be taken down");
         int alive_after_fault = (int)do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
         long victim_exit = do_syscall(SYS_wait, (uint64_t)victim->id, 0, 0);
+        long victim_end = do_syscall(SYS_task_end_status, (uint64_t)victim->id, 0, 0);
         uint64_t frames_after = physical_memory_free_frame_count();
 
         long seg = do_syscall(SYS_shared_memory_create, 4096, 0, 0);
@@ -4332,6 +4340,12 @@ static void boot_selftests_system(void) {
             kernel_log_puts("[m52] a null dereference in ring 3 did not terminate the offending task (SYS_task_alive 0x");
             kernel_log_put_hex32((uint32_t)alive_after_fault);
             kernel_log_puts(")\n");
+            all_ok = 0;
+        }
+        if (victim_end != SIGSEGV) {
+            kernel_log_puts("[m52] a reaped faulting client's end status is not SIGSEGV, so the compositor cannot tell its crash from a quit - got 0x");
+            kernel_log_put_hex32((uint32_t)victim_end);
+            kernel_log_putc('\n');
             all_ok = 0;
         }
         if (victim_exit != 128 + SIGSEGV) {
@@ -14215,10 +14229,33 @@ display_self_test_done:
     if (spinner->exit_code != 128 + SIGTERM) {
         panic("SYS_kill self-test: unexpected exit code after SIGTERM");
     }
+    task_t *syscall_spinner = task_spawn("syscall-spinner", syscall_spinner_task, NULL);
+    pit_sleep_ms(50);
+    if (do_syscall(SYS_kill, (uint64_t)syscall_spinner->id, SIGTERM, 0) != 0) {
+        panic("SYS_kill self-test: kill on a task in a system call loop failed");
+    }
+    while (syscall_spinner->state != TASK_TERMINATED) {
+        schedule();
+    }
+    if (spinner->exit_signal != SIGTERM || syscall_spinner->exit_signal != SIGTERM) {
+        panic("SYS_kill self-test: a SIGTERM death was recorded as an exit status, so waitpid "
+              "would report WIFEXITED(143) rather than WIFSIGNALED");
+    }
+    int signalled_ids[2] = {spinner->id, syscall_spinner->id};
     kernel_log_puts("[signal] SIGTERM self-test passed (spinner task terminated).\n\n");
 
     while (do_syscall(SYS_wait, (uint64_t)-1, 0, 0) != -1) {
     }
+    for (int i = 0; i < 2; i++) {
+        long end = do_syscall(SYS_task_end_status, (uint64_t)signalled_ids[i], 0, 0);
+        if (end != SIGTERM) {
+            kernel_log_puts("[m209] SYS_task_end_status of a reaped SIGTERM victim = ");
+            kernel_log_put_hex32((uint32_t)end);
+            kernel_log_putc('\n');
+            panic("M209 self-test: how a process ended was forgotten when its parent reaped it");
+        }
+    }
+    kernel_log_puts("[m209] a process killed by a signal says so after it has been reaped.\n");
     task_t *quick_a = task_spawn("quick", quick_task, NULL);
     task_t *quick_b = task_spawn("quick", quick_task, NULL);
     long reaped1 = do_syscall(SYS_wait, (uint64_t)-1, 0, 0);

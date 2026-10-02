@@ -69,6 +69,20 @@ static int un_name(const struct sockaddr *sa, socklen_t length,
     return 0;
 }
 
+/* A program refused a socket, a program out of descriptors and a machine
+   out of sockets are three different problems, and until M209 the second
+   and third both arrived as EMFILE - a browser whose every connection the
+   kernel had lingering was told it held too many descriptors. */
+static int socket_errno(long code) {
+    if (code == -OS_ERROR_ACCESS) {
+        return EACCES;
+    }
+    if (code == -OS_ERROR_NFILE) {
+        return ENFILE;
+    }
+    return EMFILE;
+}
+
 int socket(int domain, int type, int protocol) {
     (void)protocol;
     if (domain == AF_UNIX) {
@@ -78,7 +92,7 @@ int socket(int domain, int type, int protocol) {
         }
         long fd = sys_socket_in(type, OS_AF_UNIX);
         if (fd < 0) {
-            errno = EMFILE;
+            errno = socket_errno(fd);
             return -1;
         }
         return (int)fd;
@@ -98,10 +112,7 @@ int socket(int domain, int type, int protocol) {
     }
     long fd = sys_socket(t);
     if (fd < 0) {
-        /* The kernel names this one refusal, because it is the one a
-           program can do something about: the capability set it was
-           spawned with does not include CAP_NETWORK. */
-        errno = (fd == -OS_ERROR_ACCESS) ? EACCES : EMFILE;
+        errno = socket_errno(fd);
         return -1;
     }
     return (int)fd;
@@ -187,6 +198,10 @@ int accept(int fd, struct sockaddr *address, socklen_t *length) {
                 to_sockaddr(address, length, from.ip, from.port);
             }
             return (int)nfd;
+        }
+        if (nfd == -OS_ERROR_MFILE || nfd == -OS_ERROR_NFILE) {
+            errno = socket_errno(nfd);
+            return -1;
         }
         if (nonblock) {
             errno = EAGAIN;

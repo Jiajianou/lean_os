@@ -431,6 +431,99 @@ static int test_exhaustion(void) {
     return 0;
 }
 
+#define RECORD_BYTES 600
+#define RECORDS_PER_WRITER 40
+
+static int write_records(int fd, char letter) {
+    char record[RECORD_BYTES];
+    memset(record, letter, sizeof(record));
+    for (int i = 0; i < RECORDS_PER_WRITER; i++) {
+        if (write(fd, record, sizeof(record)) != (ssize_t)sizeof(record)) {
+            return 21;
+        }
+    }
+    return 0;
+}
+
+static int test_pipe_writes_are_whole(void) {
+    int pipefd[2];
+    if (pipe(pipefd) != 0 || fcntl(pipefd[1], F_SETFL, O_NONBLOCK) != 0) {
+        FAIL(20);
+    }
+    char bytes[1024];
+    memset(bytes, 'p', sizeof(bytes));
+    if (write(pipefd[1], bytes, 1000) != 1000) {
+        FAIL(20);
+    }
+    errno = 0;
+    if (write(pipefd[1], bytes, 100) != -1 || errno != EAGAIN) {
+        FAIL(20);
+    }
+    char drain[1024];
+    if (read(pipefd[0], drain, sizeof(drain)) != 1000) {
+        FAIL(20);
+    }
+    if (write(pipefd[1], bytes, 1024) != 1024 || write(pipefd[1], bytes, 1) != -1) {
+        FAIL(20);
+    }
+    close(pipefd[0]);
+    close(pipefd[1]);
+
+    if (pipe(pipefd) != 0) {
+        FAIL(21);
+    }
+    pid_t writers[2];
+    for (int w = 0; w < 2; w++) {
+        writers[w] = fork();
+        if (writers[w] < 0) {
+            FAIL(21);
+        }
+        if (writers[w] == 0) {
+            close(pipefd[0]);
+            sys_exit(write_records(pipefd[1], w == 0 ? 'A' : 'B'));
+        }
+    }
+    close(pipefd[1]);
+    char record[RECORD_BYTES];
+    int records = 0;
+    int torn = 0;
+    for (;;) {
+        size_t have = 0;
+        while (have < sizeof(record)) {
+            ssize_t got = read(pipefd[0], record + have, sizeof(record) - have);
+            if (got <= 0) {
+                break;
+            }
+            have += (size_t)got;
+        }
+        if (have == 0) {
+            break;
+        }
+        if (have != sizeof(record)) {
+            torn++;
+            break;
+        }
+        for (size_t i = 1; i < sizeof(record); i++) {
+            if (record[i] != record[0]) {
+                torn++;
+                break;
+            }
+        }
+        records++;
+    }
+    close(pipefd[0]);
+    long first = sys_wait(writers[0]);
+    long second = sys_wait(writers[1]);
+    if (first != 0 || second != 0) {
+        FAIL(21);
+    }
+    if (torn != 0 || records != 2 * RECORDS_PER_WRITER) {
+        printf("epolltest: %d of %d pipe records came out torn\n", torn, records);
+        FAIL(22);
+    }
+    return 0;
+}
+
 int main(void) {
     int rc;
     if ((rc = test_eventfd()) != 0) return rc;
@@ -441,6 +534,7 @@ int main(void) {
     if ((rc = test_it_sleeps()) != 0) return rc;
     if ((rc = test_cross_process_wake()) != 0) return rc;
     if ((rc = test_exhaustion()) != 0) return rc;
-    printf("epolltest: all eight sections passed\n");
+    if ((rc = test_pipe_writes_are_whole()) != 0) return rc;
+    printf("epolltest: all nine sections passed\n");
     return 0;
 }

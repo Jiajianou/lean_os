@@ -27,6 +27,7 @@ static lvgl_window_t task_manager_window;
 static task_info_t tasks[TASK_INFO_MAX];
 static int task_count;
 static int selected = -1;
+static long selected_pid = -1;
 
 #define ROW_CELL_COUNT 5
 
@@ -141,11 +142,27 @@ static void refresh_rows(void) {
     }
 }
 
+static void select_row(int index) {
+    selected = index;
+    selected_pid = (index >= 0 && index < task_count) ? (long)tasks[index].pid : -1;
+}
+
 static void refresh_tasks(void) {
     long n = sys_taskinfo(tasks, TASK_INFO_MAX);
     task_count = n > 0 ? (int)n : 0;
-    if (selected >= task_count) {
-        selected = task_count - 1;
+    /* The selection is a process, not a row. The table is read again every
+       tick, a process that exits above the selection moves everything below
+       it up one, and End Task used to go to whatever had moved into the row
+       (M209). A selected process that is gone leaves nothing selected rather
+       than its neighbour. */
+    selected = -1;
+    for (int i = 0; i < task_count && selected_pid >= 0; i++) {
+        if ((long)tasks[i].pid == selected_pid) {
+            selected = i;
+        }
+    }
+    if (selected < 0) {
+        selected_pid = -1;
     }
     refresh_rows();
 }
@@ -185,7 +202,7 @@ static void on_row_clicked(lv_event_t *event) {
     if (index >= task_count) {
         return;
     }
-    selected = index;
+    select_row(index);
     refresh_rows();
 }
 
@@ -209,7 +226,7 @@ static int on_key(lvgl_window_t *window, uint32_t ch, uint32_t mods) {
     (void)mods;
     if (ch == KEYBOARD_KEY_UP) {
         if (selected > 0) {
-            selected--;
+            select_row(selected - 1);
             refresh_rows();
             scroll_to_selected();
         }
@@ -217,7 +234,7 @@ static int on_key(lvgl_window_t *window, uint32_t ch, uint32_t mods) {
     }
     if (ch == KEYBOARD_KEY_DOWN) {
         if (selected + 1 < task_count) {
-            selected++;
+            select_row(selected + 1);
             refresh_rows();
             scroll_to_selected();
         }

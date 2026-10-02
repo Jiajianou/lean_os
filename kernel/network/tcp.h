@@ -18,7 +18,13 @@ typedef enum {
 
 #define TCP_SEND_BUFFER   4096
 #define TCP_RECEIVE_BUFFER   4096
-#define TCP_MAX_TCBS   16
+/* The whole machine's connections, not one process's. It was 16, which a
+   browser on one search page exhausts: every connection it closes lingers
+   here for TIME_WAIT or until its FIN is acknowledged, and the seventeenth
+   socket(2) failed as EMFILE in a process holding forty descriptors (M209).
+   The blocks come from the heap as they are first needed, because the
+   kernel image has no room left for a static table this size. */
+#define TCP_MAX_TCBS   512
 #define TCP_DEFAULT_MSS 536
 #define TCP_MAX_MSS    1460
 

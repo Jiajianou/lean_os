@@ -53,6 +53,10 @@ int window_manager_toggle_launcher(void);
 
 int window_manager_veto_shutdown(int32_t window_id);
 
+/* Leave, saying so first: the compositor takes the window away with the
+   program and does not report it as having stopped unexpectedly. */
+void window_manager_quit(window_manager_window_t *win, int status) __attribute__((noreturn));
+
 int window_manager_set_display_mode(uint32_t width, uint32_t height);
 int window_manager_confirm_display_mode(void);
 

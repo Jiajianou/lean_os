@@ -1,5 +1,6 @@
 #include "check.h"
 
+#include <setjmp.h>
 #include <string.h>
 
 #define sys_waitfds window_manager_test_waitfds
@@ -369,4 +370,39 @@ TEST(window_manager_client, a_part_hanging_off_the_top_left_is_cut_to_the_window
     reset();
     CHECK_EQ(window_manager_present_rect(&w, -50, 10, 20, 30), 0);
     CHECK_EQ(action_count, 0);
+}
+
+static jmp_buf exited;
+static int exit_status_seen;
+static int actions_before_exit;
+
+void sys_exit(int code) {
+    exit_status_seen = code;
+    actions_before_exit = action_count;
+    longjmp(exited, 1);
+}
+
+TEST(window_manager_client, quitting_says_so_for_this_window_before_it_exits) {
+    reset();
+    window_manager_window_t w = window(12, 5);
+    exit_status_seen = -1;
+    actions_before_exit = -1;
+    if (setjmp(exited) == 0) {
+        window_manager_quit(&w, 0);
+    }
+    CHECK_EQ(exit_status_seen, 0);
+    CHECK_EQ(actions_before_exit, 1);
+    CHECK_EQ(actions[0].action, WINDOW_MANAGER_ACTION_QUITTING);
+    CHECK_EQ(actions[0].window_id, 5);
+}
+
+TEST(window_manager_client, a_window_never_named_quits_without_naming_one) {
+    reset();
+    window_manager_window_t w = window(12, -1);
+    exit_status_seen = -1;
+    if (setjmp(exited) == 0) {
+        window_manager_quit(&w, 3);
+    }
+    CHECK_EQ(exit_status_seen, 3);
+    CHECK_EQ(actions_before_exit, 0);
 }

@@ -3,6 +3,7 @@
 #include "ip.h"
 #include "drivers/kernel_log.h"
 #include "library/kernel_library.h"
+#include "memory_management/heap.h"
 #include "network.h"
 #include "wire.h"
 #include "scheduler/scheduler.h"
@@ -67,7 +68,8 @@ struct tcpcb {
     int pending_accept;
 };
 
-static struct tcpcb tcbs[TCP_MAX_TCBS];
+static struct tcpcb *tcbs[TCP_MAX_TCBS];
+static int tcb_count;
 static uint32_t tick_count;
 static uint32_t isn_counter;
 
@@ -261,20 +263,62 @@ static void try_send(struct tcpcb *t) {
     t->sending = 0;
 }
 
-static struct tcpcb *alloc_tcb(void) {
-    for (int i = 0; i < TCP_MAX_TCBS; i++) {
-        if (!tcbs[i].in_use) {
-            k_memset(&tcbs[i], 0, sizeof(tcbs[i]));
-            tcbs[i].in_use = 1;
-            tcbs[i].state = TCP_CLOSED;
-            tcbs[i].mss = TCP_DEFAULT_MSS;
-            tcbs[i].rto = 10;
-            tcbs[i].cwnd = 2 * TCP_DEFAULT_MSS;
-            tcbs[i].ssthresh = 0xFFFF;
-            return &tcbs[i];
+static void tcb_dispose(struct tcpcb *t);
+
+static struct tcpcb *reclaim_released_tcb(void) {
+    struct tcpcb *lingering = (struct tcpcb *)0;
+    for (int i = 0; i < tcb_count; i++) {
+        struct tcpcb *t = tcbs[i];
+        if (!t->in_use || !t->released) {
+            continue;
+        }
+        if (t->state == TCP_TIME_WAIT) {
+            tcb_dispose(t);
+            return t;
+        }
+        if (!lingering || sequence_geq(lingering->linger_deadline, t->linger_deadline)) {
+            lingering = t;
         }
     }
+    if (lingering) {
+        tcp_abort(lingering);
+        return lingering;
+    }
     return (struct tcpcb *)0;
+}
+
+/* A block nobody holds any more is the first thing given back when the
+   table is full. RFC 1122 4.2.2.13 lets TIME_WAIT be cut short for a new
+   connection, and a released block that is still waiting for its FIN to be
+   acknowledged belongs to a program that has already closed it - refusing a
+   live program a socket to keep that one would be the wrong way round. */
+static struct tcpcb *alloc_tcb(void) {
+    struct tcpcb *t = (struct tcpcb *)0;
+    for (int i = 0; i < tcb_count && !t; i++) {
+        if (!tcbs[i]->in_use) {
+            t = tcbs[i];
+        }
+    }
+    if (!t && tcb_count < TCP_MAX_TCBS) {
+        t = (struct tcpcb *)kmalloc(sizeof(struct tcpcb));
+        if (t) {
+            tcbs[tcb_count++] = t;
+        }
+    }
+    if (!t) {
+        t = reclaim_released_tcb();
+    }
+    if (!t) {
+        return (struct tcpcb *)0;
+    }
+    k_memset(t, 0, sizeof(*t));
+    t->in_use = 1;
+    t->state = TCP_CLOSED;
+    t->mss = TCP_DEFAULT_MSS;
+    t->rto = 10;
+    t->cwnd = 2 * TCP_DEFAULT_MSS;
+    t->ssthresh = 0xFFFF;
+    return t;
 }
 
 static void tcb_dispose(struct tcpcb *t) {
@@ -307,16 +351,16 @@ void tcp_release(struct tcpcb *t) {
 
 static struct tcpcb *find_tcb(uint32_t local_ip, uint16_t local_port,
                               uint32_t remote_ip, uint16_t remote_port) {
-    for (int i = 0; i < TCP_MAX_TCBS; i++) {
-        struct tcpcb *t = &tcbs[i];
+    for (int i = 0; i < tcb_count; i++) {
+        struct tcpcb *t = tcbs[i];
         if (t->in_use && t->state != TCP_LISTEN &&
             t->local_port == local_port && t->remote_port == remote_port &&
             t->remote_ip == remote_ip && t->local_ip == local_ip) {
             return t;
         }
     }
-    for (int i = 0; i < TCP_MAX_TCBS; i++) {
-        struct tcpcb *t = &tcbs[i];
+    for (int i = 0; i < tcb_count; i++) {
+        struct tcpcb *t = tcbs[i];
         if (t->in_use && t->state == TCP_LISTEN && t->local_port == local_port) {
             return t;
         }
@@ -325,8 +369,8 @@ static struct tcpcb *find_tcb(uint32_t local_ip, uint16_t local_port,
 }
 
 static int port_in_use(uint16_t port) {
-    for (int i = 0; i < TCP_MAX_TCBS; i++) {
-        if (tcbs[i].in_use && tcbs[i].local_port == port) {
+    for (int i = 0; i < tcb_count; i++) {
+        if (tcbs[i]->in_use && tcbs[i]->local_port == port) {
             return 1;
         }
     }
@@ -354,7 +398,7 @@ static uint32_t next_isn(void) {
 }
 
 void tcp_init(void) {
-    k_memset(tcbs, 0, sizeof(tcbs));
+    tcb_count = 0;
     tick_count = 0;
     isn_counter = 0x1EA50000u;
     ephemeral = TCP_EPHEMERAL_FIRST;
@@ -417,8 +461,8 @@ struct tcpcb *tcp_accept(struct tcpcb *listener) {
     if (!listener || listener->state != TCP_LISTEN) {
         return (struct tcpcb *)0;
     }
-    for (int i = 0; i < TCP_MAX_TCBS; i++) {
-        struct tcpcb *t = &tcbs[i];
+    for (int i = 0; i < tcb_count; i++) {
+        struct tcpcb *t = tcbs[i];
         if (t->in_use && t->listener == listener && t->pending_accept &&
             t->state == TCP_ESTABLISHED) {
             t->pending_accept = 0;
@@ -434,8 +478,8 @@ int tcp_accept_pending(const struct tcpcb *listener) {
         return 0;
     }
     int n = 0;
-    for (int i = 0; i < TCP_MAX_TCBS; i++) {
-        const struct tcpcb *t = &tcbs[i];
+    for (int i = 0; i < tcb_count; i++) {
+        const struct tcpcb *t = tcbs[i];
         if (t->in_use && t->listener == listener && t->pending_accept &&
             t->state == TCP_ESTABLISHED) {
             n++;
@@ -532,10 +576,10 @@ void tcp_close(struct tcpcb *t) {
     }
     switch (t->state) {
     case TCP_LISTEN:
-        for (int i = 0; i < TCP_MAX_TCBS; i++) {
-            if (tcbs[i].in_use && tcbs[i].listener == t) {
-                tcbs[i].released = 1;
-                tcp_abort(&tcbs[i]);
+        for (int i = 0; i < tcb_count; i++) {
+            if (tcbs[i]->in_use && tcbs[i]->listener == t) {
+                tcbs[i]->released = 1;
+                tcp_abort(tcbs[i]);
             }
         }
         tcb_dispose(t);
@@ -873,8 +917,8 @@ void tcp_tick(void) {
     net_lock_acquire();
     tick_count++;
 
-    for (int i = 0; i < TCP_MAX_TCBS; i++) {
-        struct tcpcb *t = &tcbs[i];
+    for (int i = 0; i < tcb_count; i++) {
+        struct tcpcb *t = tcbs[i];
         if (!t->in_use) {
             continue;
         }

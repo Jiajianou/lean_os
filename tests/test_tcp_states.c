@@ -1,5 +1,6 @@
 #include "check.h"
 #include "fakes/fakes.h"
+#include "memory_management/heap.h"
 
 #include "network/arp.h"
 #include "network/ethernet.h"
@@ -37,6 +38,7 @@ static void tcp_fixture(void) {
     fake_net_reset();
     fake_socket_reset();
     kernel_log_capture_reset();
+    fake_heap_ensure();
     tcp_init();
     arp_learn(PEER_IP, peer_mac);
 }
@@ -709,5 +711,112 @@ TEST(tcp_state, the_control_block_table_is_returned_across_many_connections) {
         CHECK_EQ(tcp_state(c), TCP_ESTABLISHED);
         tcp_abort(c);
     }
+    tcp_release(l);
+}
+
+static struct tcpcb *accepted_on(struct tcpcb *l, uint16_t port) {
+    fake_net_reset();
+    from_peer(OUR_PORT, port, 1000, 0, F_SYN, NULL, 0);
+    sent_t s;
+    if (!last_sent(&s)) { return NULL; }
+    from_peer(OUR_PORT, port, 1001, s.seq + 1, F_ACK, NULL, 0);
+    return tcp_accept(l);
+}
+
+static int open_until_refused(struct tcpcb **held, int capacity) {
+    int n = 0;
+    while (n < capacity) {
+        struct tcpcb *t = tcp_open();
+        if (!t) { break; }
+        held[n++] = t;
+    }
+    return n;
+}
+
+static struct tcpcb *held_blocks[TCP_MAX_TCBS + 1];
+
+TEST(tcp_table, a_browser_s_worth_of_connections_are_open_at_once) {
+    tcp_fixture();
+    struct tcpcb *l = listening();
+    struct tcpcb *open_now[200];
+    for (int i = 0; i < 200; i++) {
+        open_now[i] = accepted_on(l, (uint16_t)(7000 + i));
+        REQUIRE(open_now[i] != NULL);
+        CHECK_EQ(tcp_state(open_now[i]), TCP_ESTABLISHED);
+    }
+    for (int i = 0; i < 200; i++) {
+        CHECK_EQ(tcp_state(open_now[i]), TCP_ESTABLISHED);
+        fake_net_reset();
+        tcp_abort(open_now[i]);
+    }
+    tcp_release(l);
+}
+
+TEST(tcp_table, a_full_table_refuses_rather_than_taking_a_block_somebody_holds) {
+    tcp_fixture();
+    int n = open_until_refused(held_blocks, TCP_MAX_TCBS + 1);
+    CHECK_EQ(n, TCP_MAX_TCBS);
+    CHECK(tcp_open() == NULL);
+    for (int i = 0; i < n; i++) {
+        CHECK_EQ(tcp_state(held_blocks[i]), TCP_CLOSED);
+        tcp_release(held_blocks[i]);
+    }
+    CHECK(tcp_open() != NULL);
+}
+
+TEST(tcp_table, a_full_table_takes_back_a_TIME_WAIT_block_nobody_holds) {
+    tcp_fixture();
+    struct tcpcb *l = NULL;
+    uint32_t pseq = 0, oseq = 0;
+    struct tcpcb *c = established(&l, &pseq, &oseq);
+    REQUIRE(c != NULL);
+    tcp_close(c);
+    sent_t s;
+    REQUIRE(last_sent(&s));
+    from_peer(OUR_PORT, PEER_PORT, pseq, s.seq + 1, F_ACK, NULL, 0);
+    from_peer(OUR_PORT, PEER_PORT, pseq, s.seq + 1, F_ACK | F_FIN, NULL, 0);
+    REQUIRE(tcp_state(c) == TCP_TIME_WAIT);
+    tcp_release(c);
+
+    int n = open_until_refused(held_blocks, TCP_MAX_TCBS + 1);
+    CHECK_EQ(n, TCP_MAX_TCBS - 1);
+    int reused = 0;
+    for (int i = 0; i < n; i++) {
+        reused += held_blocks[i] == c;
+    }
+    CHECK_EQ(reused, 1);
+    CHECK_EQ(tcp_state(l), TCP_LISTEN);
+    for (int i = 0; i < n; i++) {
+        tcp_release(held_blocks[i]);
+    }
+    tcp_release(l);
+}
+
+TEST(tcp_table, a_full_table_resets_the_oldest_closed_connection_still_lingering) {
+    tcp_fixture();
+    struct tcpcb *l = listening();
+    struct tcpcb *older = accepted_on(l, 7100);
+    struct tcpcb *newer = accepted_on(l, 7101);
+    REQUIRE(older != NULL && newer != NULL);
+    tcp_close(older);
+    tcp_release(older);
+    tcp_tick();
+    tcp_close(newer);
+    tcp_release(newer);
+    REQUIRE(tcp_state(older) == TCP_FIN_WAIT_1);
+    REQUIRE(tcp_state(newer) == TCP_FIN_WAIT_1);
+
+    int n = open_until_refused(held_blocks, TCP_MAX_TCBS - 3);
+    REQUIRE(n == TCP_MAX_TCBS - 3);
+    fake_net_reset();
+    struct tcpcb *one_more = tcp_open();
+    CHECK(one_more == older);
+    CHECK_EQ(sent_count_with(F_RST), 1);
+    CHECK_EQ(tcp_state(newer), TCP_FIN_WAIT_1);
+    tcp_release(one_more);
+    for (int i = 0; i < n; i++) {
+        tcp_release(held_blocks[i]);
+    }
+    tcp_abort(newer);
     tcp_release(l);
 }

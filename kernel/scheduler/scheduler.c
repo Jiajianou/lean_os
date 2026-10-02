@@ -1654,6 +1654,55 @@ static void scheduler_deliver_pending_signal(void) {
     }
 }
 
+/* How the last processes to end ended, after their parents have reaped
+   them. The compositor is not the parent of most windows on the desktop -
+   desktop_icons launched the README editor - and the zombie that held the
+   answer is gone the moment its parent waits, so "did that window's program
+   crash or quit" had no answer by the time the compositor asked, and it
+   guessed "crashed" (M209). Threads are not recorded: nobody asks how a
+   thread ended, and Chromium ends hundreds. */
+#define RECENT_EXIT_COUNT 64
+
+typedef struct {
+    int pid;
+    int status;
+} recent_exit_t;
+
+static recent_exit_t recent_exits[RECENT_EXIT_COUNT];
+static int recent_exit_next;
+static spinlock_t recent_exit_lock;
+
+int scheduler_wait_status(const task_t *t) {
+    if (t->exit_signal) {
+        return t->exit_signal & 0x7F;
+    }
+    return (t->exit_code & 0xFF) << 8;
+}
+
+static void remember_exit(const task_t *t) {
+    if (t->is_thread) {
+        return;
+    }
+    uint64_t f = spin_lock_irqsave(&recent_exit_lock);
+    recent_exits[recent_exit_next].pid = t->id;
+    recent_exits[recent_exit_next].status = scheduler_wait_status(t);
+    recent_exit_next = (recent_exit_next + 1) % RECENT_EXIT_COUNT;
+    spin_unlock_irqrestore(&recent_exit_lock, f);
+}
+
+int scheduler_recent_exit_status(int pid, int *status_out) {
+    int found = 0;
+    uint64_t f = spin_lock_irqsave(&recent_exit_lock);
+    for (int i = 0; i < RECENT_EXIT_COUNT && !found; i++) {
+        if (recent_exits[i].pid == pid && pid != 0) {
+            *status_out = recent_exits[i].status;
+            found = 1;
+        }
+    }
+    spin_unlock_irqrestore(&recent_exit_lock, f);
+    return found;
+}
+
 void task_exit_with_signal(int sig) {
     task_t *t = current_task_now();
     if (t) {
@@ -1733,6 +1782,7 @@ void task_exit_with_code(int code) {
     }
 
     t->exit_code = code;
+    remember_exit(t);
     if (t->state == TASK_BLOCKED) {
         blocked_count--;
     }

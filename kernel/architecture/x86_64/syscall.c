@@ -2461,6 +2461,30 @@ static long sys_task_alive(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4, 
     return t->exit_code == 0 ? 2 : 0;
 }
 
+/* How a process ended, as a wait(2) status, for a caller that is not its
+   parent and so cannot wait for it: the compositor deciding whether a window
+   whose program is gone crashed. Answered while the zombie is there and for
+   a while after it has been reaped. -OS_ERROR_AGAIN while it runs. */
+static long sys_task_end_status(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    task_t *t = scheduler_task_by_id((int)pid);
+    if (t && t->state != TASK_TERMINATED) {
+        return -OS_ERROR_AGAIN;
+    }
+    if (t) {
+        return scheduler_wait_status(t);
+    }
+    int status = 0;
+    if (scheduler_recent_exit_status((int)pid, &status)) {
+        return status;
+    }
+    return -OS_ERROR_NOENT;
+}
+
 static long sys_pipe_reset(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2;
     (void)a3;
@@ -3620,7 +3644,7 @@ static long install_socket_file_descriptor(struct socket *s) {
     int fd = alloc_file_descriptor(self);
     if (fd < 0) {
         socket_unref(s);
-        return -1;
+        return -OS_ERROR_MFILE;
     }
     self->descriptor_table->slots[fd].type = FILE_DESCRIPTOR_SOCKET;
     self->descriptor_table->slots[fd].cloexec = 0;
@@ -3633,7 +3657,7 @@ static long install_unix_file_descriptor(struct unix_socket *u) {
     int fd = alloc_file_descriptor(self);
     if (fd < 0) {
         unix_socket_unref(u);
-        return -1;
+        return -OS_ERROR_MFILE;
     }
     self->descriptor_table->slots[fd].type = FILE_DESCRIPTOR_UNIX;
     self->descriptor_table->slots[fd].cloexec = 0;
@@ -3657,7 +3681,7 @@ static long sys_socket(uint64_t type, uint64_t domain, uint64_t a3, uint64_t a4,
             return -1;
         }
         struct unix_socket *u = unix_socket_alloc((int)type);
-        return u ? install_unix_file_descriptor(u) : -1;
+        return u ? install_unix_file_descriptor(u) : -OS_ERROR_NFILE;
     }
     if (domain != OS_AF_INET) {
         return -1;
@@ -3674,7 +3698,7 @@ static long sys_socket(uint64_t type, uint64_t domain, uint64_t a3, uint64_t a4,
     }
     struct socket *s = socket_alloc((int)type);
     if (!s) {
-        return -1;
+        return -OS_ERROR_NFILE;
     }
     return install_socket_file_descriptor(s);
 }
@@ -5223,10 +5247,7 @@ static long sys_fcntl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
 }
 
 static int wait_status_of(const task_t *t) {
-    if (t->exit_signal) {
-        return t->exit_signal & 0x7F;
-    }
-    return (t->exit_code & 0xFF) << 8;
+    return scheduler_wait_status(t);
 }
 
 static int stop_status_of(const task_t *t) {
@@ -5657,6 +5678,7 @@ static const syscall_function_t syscall_table[SYSCALL_COUNT] = {
     [SYS_peek] = sys_peek,
     [SYS_clock_ns] = sys_clock_ns,
     [SYS_thread_detach] = sys_thread_detach,
+    [SYS_task_end_status] = sys_task_end_status,
     [SYS_wireless] = sys_wireless,
     [SYS_getrlimit] = sys_getrlimit,
     [SYS_setrlimit] = sys_setrlimit,
@@ -6044,7 +6066,7 @@ static void syscall_dispatch(isr_regs_t *regs) {
     if (self->pending_signal != 0) {
         int sig = self->pending_signal;
         self->pending_signal = 0;
-        task_exit_with_code(128 + sig);
+        task_exit_with_signal(sig);
     }
     scheduler_take_pending_stop_if_any(self);
 

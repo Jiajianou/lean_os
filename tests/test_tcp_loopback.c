@@ -1,5 +1,6 @@
 #include "check.h"
 #include "fakes/fakes.h"
+#include "memory_management/heap.h"
 
 #include "network/tcp.h"
 
@@ -15,6 +16,7 @@ static uint8_t pattern(long position) {
 static void connect_pair(struct tcpcb **client, struct tcpcb **server, struct tcpcb **listener) {
     fake_net_reset();
     kernel_log_capture_reset();
+    fake_heap_ensure();
     tcp_init();
     *listener = tcp_open();
     REQUIRE(*listener != NULL);

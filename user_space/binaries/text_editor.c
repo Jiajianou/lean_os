@@ -356,8 +356,10 @@ static void reset_to_new_file(void) {
     clear_selection();
 }
 
+static window_manager_window_t win;
+
 static void quit_now(void) {
-    sys_exit(1);
+    window_manager_quit(&win, 0);
 }
 
 static void begin_save_as(void) {
@@ -735,7 +737,6 @@ int main(int argc, char **argv) {
     clamp_cursor();
     status[0] = '\0';
 
-    window_manager_window_t win;
     if (window_manager_connect_confirm_close(WIN_W, WIN_H, "Editor", &win) != 0) {
         sys_exit(1);
     }

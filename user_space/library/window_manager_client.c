@@ -135,14 +135,17 @@ static int connect_common(uint32_t width, uint32_t height, uint32_t panel_dock_h
     }
 
     long vaddr = sys_shared_memory_map(response.shared_memory_id);
-    if (vaddr < 0) {
-        return -1;
-    }
-
     char evt_name[WINDOW_MANAGER_EVENT_PIPE_NAME_LENGTH];
     window_manager_event_pipe_name(response.window_id, evt_name);
-    int evt_file_descriptors[2];
-    if (sys_pipe_open(evt_name, evt_file_descriptors) != 0) {
+    int evt_file_descriptors[2] = {-1, -1};
+    if (vaddr < 0 || sys_pipe_open(evt_name, evt_file_descriptors) != 0) {
+        if (vaddr >= 0) {
+            sys_shared_memory_unmap((void *)vaddr, (unsigned long)response.width * response.height * sizeof(uint32_t));
+        }
+        sys_close(request_file_descriptors[0]);
+        sys_close(request_file_descriptors[1]);
+        sys_close(response_file_descriptors[0]);
+        sys_close(response_file_descriptors[1]);
         return -1;
     }
 
@@ -363,6 +366,13 @@ int window_manager_set_panel_overhang(int32_t window_id, int32_t rows) {
 
 int window_manager_veto_shutdown(int32_t window_id) {
     return window_manager_send_action(window_id, WINDOW_MANAGER_ACTION_VETO_SHUTDOWN);
+}
+
+void window_manager_quit(window_manager_window_t *win, int status) {
+    if (win && win->window_id >= 0) {
+        window_manager_send_action(win->window_id, WINDOW_MANAGER_ACTION_QUITTING);
+    }
+    sys_exit(status);
 }
 
 int window_manager_toggle_launcher(void) {

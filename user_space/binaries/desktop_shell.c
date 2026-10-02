@@ -130,6 +130,7 @@ static int hovered = HOVER_NONE;
 static long start_pressed_until_ms;
 
 static int context_slot = -1;
+static int32_t context_window_id = -1;
 static int32_t context_x, context_y;
 static int context_hover = -1;
 static int32_t context_overhang;
@@ -306,6 +307,23 @@ static void refresh_running_slots(window_manager_window_t *self) {
     }
     if (hovered >= running_count) {
         hovered = HOVER_NONE;
+    }
+    /* The list is rebuilt under an open menu every refresh, and a window
+       opening or closing shifts every slot after it - so the menu follows
+       its window rather than its position, and goes when the window does.
+       It used to keep the position, and its Force Quit could end a program
+       nobody had right-clicked (M209). */
+    if (context_slot >= 0) {
+        context_slot = -1;
+        for (int i = 0; i < running_count; i++) {
+            if (running_slots[i].window_id == context_window_id) {
+                context_slot = i;
+            }
+        }
+        if (context_slot < 0) {
+            context_window_id = -1;
+            context_hover = -1;
+        }
     }
 }
 
@@ -522,6 +540,7 @@ static int button_at(int32_t x, int32_t y) {
 
 static void context_open_on(int slot, int32_t x, int32_t win_w) {
     context_slot = slot;
+    context_window_id = running_slots[slot].window_id;
     context_hover = -1;
     context_x = x;
     if (context_x > win_w - CONTEXT_W) {
@@ -535,6 +554,7 @@ static void context_open_on(int slot, int32_t x, int32_t win_w) {
 
 static void context_close(void) {
     context_slot = -1;
+    context_window_id = -1;
     context_hover = -1;
 }
 
@@ -543,7 +563,7 @@ static void context_activate(int row) {
         context_close();
         return;
     }
-    int32_t window_id = running_slots[context_slot].window_id;
+    int32_t window_id = context_window_id;
     context_close();
     if (row == 0) {
         window_manager_send_action(window_id, WINDOW_MANAGER_ACTION_TOGGLE_MINIMIZE);

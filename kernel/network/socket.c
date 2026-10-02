@@ -1,6 +1,7 @@
 #include "socket.h"
 
 #include "library/kernel_library.h"
+#include "memory_management/heap.h"
 #include "network.h"
 #include "scheduler/scheduler.h"
 
@@ -24,7 +25,8 @@ struct socket {
     datagram_t queue[SOCKET_QUEUE_DEPTH];
 };
 
-static struct socket sockets[MAX_SOCKETS];
+static struct socket *sockets[MAX_SOCKETS];
+static int socket_count;
 
 #define EPHEMERAL_FIRST 49152u
 #define EPHEMERAL_LAST  65535u
@@ -34,7 +36,7 @@ static uint16_t raw_port;
 static socket_raw_handler_t raw_handler;
 
 void socket_init(void) {
-    k_memset(sockets, 0, sizeof(sockets));
+    socket_count = 0;
     ephemeral_cursor = EPHEMERAL_FIRST;
     raw_port = 0;
     raw_handler = (socket_raw_handler_t)0;
@@ -50,28 +52,42 @@ void socket_set_raw_handler(uint16_t port, socket_raw_handler_t handler) {
     }
 }
 
+static struct socket *claim_socket(int type) {
+    net_lock_acquire();
+    struct socket *s = (struct socket *)0;
+    for (int i = 0; i < socket_count && !s; i++) {
+        if (!sockets[i]->in_use) {
+            s = sockets[i];
+        }
+    }
+    if (!s && socket_count < MAX_SOCKETS) {
+        s = (struct socket *)kmalloc(sizeof(struct socket));
+        if (s) {
+            sockets[socket_count++] = s;
+        }
+    }
+    if (s) {
+        k_memset(s, 0, sizeof(*s));
+        s->in_use = 1;
+        s->refs = 1;
+        s->type = type;
+    }
+    net_lock_release();
+    return s;
+}
+
 struct socket *socket_alloc(int type) {
     net_lock_acquire();
-    for (int i = 0; i < MAX_SOCKETS; i++) {
-        if (!sockets[i].in_use) {
-            k_memset(&sockets[i], 0, sizeof(sockets[i]));
-            sockets[i].in_use = 1;
-            sockets[i].refs = 1;
-            sockets[i].type = type;
-            if (type == SOCK_STREAM) {
-                sockets[i].tcb = tcp_open();
-                if (!sockets[i].tcb) {
-                    sockets[i].in_use = 0;
-                    net_lock_release();
-                    return (struct socket *)0;
-                }
-            }
-            net_lock_release();
-            return &sockets[i];
+    struct socket *s = claim_socket(type);
+    if (s && type == SOCK_STREAM) {
+        s->tcb = tcp_open();
+        if (!s->tcb) {
+            s->in_use = 0;
+            s = (struct socket *)0;
         }
     }
     net_lock_release();
-    return (struct socket *)0;
+    return s;
 }
 
 struct tcpcb *socket_tcb(struct socket *s) {
@@ -110,8 +126,8 @@ void socket_unref(struct socket *s) {
 }
 
 static int port_taken(uint16_t port) {
-    for (int i = 0; i < MAX_SOCKETS; i++) {
-        if (sockets[i].in_use && sockets[i].bound && sockets[i].port == port) {
+    for (int i = 0; i < socket_count; i++) {
+        if (sockets[i]->in_use && sockets[i]->bound && sockets[i]->port == port) {
             return 1;
         }
     }
@@ -252,17 +268,12 @@ struct socket *socket_accept(struct socket *s) {
     if (!conn) {
         return (struct socket *)0;
     }
-    for (int i = 0; i < MAX_SOCKETS; i++) {
-        if (!sockets[i].in_use) {
-            k_memset(&sockets[i], 0, sizeof(sockets[i]));
-            sockets[i].in_use = 1;
-            sockets[i].refs = 1;
-            sockets[i].type = SOCK_STREAM;
-            sockets[i].tcb = conn;
-            sockets[i].bound = 1;
-            sockets[i].port = tcp_local_port(conn);
-            return &sockets[i];
-        }
+    struct socket *accepted = claim_socket(SOCK_STREAM);
+    if (accepted) {
+        accepted->tcb = conn;
+        accepted->bound = 1;
+        accepted->port = tcp_local_port(conn);
+        return accepted;
     }
     tcp_abort(conn);
     return (struct socket *)0;
@@ -274,8 +285,8 @@ void socket_deliver(uint16_t destination_port, uint32_t source_ip, uint16_t sour
         raw_handler(source_ip, source_port, data, length);
         return;
     }
-    for (int i = 0; i < MAX_SOCKETS; i++) {
-        struct socket *s = &sockets[i];
+    for (int i = 0; i < socket_count; i++) {
+        struct socket *s = sockets[i];
         if (!s->in_use || !s->bound || s->port != destination_port) {
             continue;
         }

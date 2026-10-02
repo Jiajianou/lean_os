@@ -184,10 +184,37 @@ pipe_t *pipe_named(const char *name) {
     return p;
 }
 
+/* POSIX's PIPE_BUF promise, which this is the whole capacity of: a write
+   that fits in an empty pipe goes in whole or waits, and a non-blocking one
+   goes in whole or not at all. Copying byte by byte until the pipe filled
+   broke both halves. Every window on the desktop writes its fixed-size
+   request into one shared pipe, so two requests that met a nearly full pipe
+   could interleave; and the compositor's events are written without
+   blocking, so a client that fell behind would have been sent half an event
+   and read every one after it shifted (M209). */
+static int pipe_wait_for_room(pipe_t *p, size_t length, int nonblock, uint64_t *f) {
+    while (!p->read_closed && PIPE_BUFFER_SIZE - p->count < length) {
+        scheduler_wake_all(PIPE_DATA_CHAN(p));
+        scheduler_wake_object(p);
+        if (nonblock) {
+            return -OS_ERROR_AGAIN;
+        }
+        scheduler_block_on(PIPE_SPACE_CHAN(p), 0, &pipe_lock, f);
+    }
+    return 0;
+}
+
 long pipe_write(pipe_t *p, const void *buffer, size_t length, int nonblock) {
     const uint8_t *source = (const uint8_t *)buffer;
     size_t written = 0;
     uint64_t f = spin_lock_irqsave(&pipe_lock);
+    if (length <= PIPE_BUFFER_SIZE) {
+        int waited = pipe_wait_for_room(p, length, nonblock, &f);
+        if (waited < 0) {
+            spin_unlock_irqrestore(&pipe_lock, f);
+            return waited;
+        }
+    }
     while (written < length) {
         if (p->read_closed) {
             spin_unlock_irqrestore(&pipe_lock, f);

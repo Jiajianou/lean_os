@@ -145,6 +145,10 @@ typedef enum {
        clients interleave in the one pipe; a window's own come in order. */
     WINDOW_MANAGER_ACTION_PRESENT_ORIGIN = 18,
     WINDOW_MANAGER_ACTION_PRESENT_SIZE = 19,
+    /* M209: the window's own program is about to exit on purpose - its File
+       menu's Quit, or its answer to a close it was asked to confirm. The
+       window goes when the program does, and nobody is told it stopped. */
+    WINDOW_MANAGER_ACTION_QUITTING = 20,
 } window_manager_action_type_t;
 
 static inline int32_t window_manager_pack_pair(uint32_t first, uint32_t second) {

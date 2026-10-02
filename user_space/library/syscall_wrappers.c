@@ -590,6 +590,10 @@ long sys_task_alive(long pid) {
     return do_syscall(SYS_task_alive, pid, 0, 0);
 }
 
+long sys_task_end_status(long pid) {
+    return do_syscall(SYS_task_end_status, pid, 0, 0);
+}
+
 long sys_pipe_reset(int fd) {
     return do_syscall(SYS_pipe_reset, fd, 0, 0);
 }

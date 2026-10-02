@@ -77,6 +77,8 @@ extern "C" {
 #define OS_ERROR_AGAIN 5
 #define OS_ERROR_PERMISSION 1
 #define OS_ERROR_INVALID 22
+#define OS_ERROR_NFILE 23
+#define OS_ERROR_MFILE 24
 #define SYS_rmdir  43
 #define SYS_time   44
 
@@ -286,7 +288,11 @@ typedef struct {
 /* M207: the wireless network - see system_api/include/wireless.h. One call,
    an operation and two arguments, so the next operation is not a new number. */
 #define SYS_wireless              139
-#define SYSCALL_COUNT 140
+
+/* M209: how a process that is not your child ended, as a wait(2) status -
+   which the compositor needs to tell a crash from a program that quit. */
+#define SYS_task_end_status       140
+#define SYSCALL_COUNT 141
 
 #ifdef __cplusplus
 }

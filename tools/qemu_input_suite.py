@@ -694,6 +694,45 @@ def test_editor_in_window_file_menu(m):
     wait_for(m, lambda s: count_app_windows(s) == 0,
              "picking File > Quit did not close the Editor")
 
+def no_toast_after_a_close(m, before, what):
+    probe = toast_stripe_probe(0)
+    time.sleep(1.5)
+    shot = m.screenshot()
+    check(shot.px(*probe) == before,
+          "%s raised a toast (0x%06X where the desktop was 0x%06X) - a program that "
+          "quit when it was asked to is not one that stopped unexpectedly"
+          % (what, shot.px(*probe), before))
+
+# M209: the README editor reported "stopped unexpectedly" every time it was
+# closed, because it quit with status 1 and the compositor called every
+# non-zero exit a crash. Both ways out are graded, and the toast's absence is
+# the point - the window going away was already true.
+def test_closing_the_readme_raises_no_toast(m):
+    boot(m)
+    before = m.screenshot().px(*toast_stripe_probe(0))
+    m.double_click(ICONS[7][3], ICONS[7][2])
+    wait_for_windows(m, 1)
+    x, y = app_origin(FIRST_APP_IDX)
+    m.click(*titlebar_button_center(x, y, 640, BTN_CLOSE))
+    wait_for(m, lambda s: count_app_windows(s) == 0,
+             "the README editor's titlebar close did not close it")
+    no_toast_after_a_close(m, before, "closing the README from its titlebar")
+
+    m.double_click(ICONS[7][3], ICONS[7][2])
+    wait_for_windows(m, 1)
+    x, y = app_origin(FIRST_APP_IDX)
+    m.click(x + EDITOR_MENU_X + 12, y + EDITOR_MENU_ROW_H // 2)
+    wait_for(m,
+             lambda s: s.count_color(EDITOR_MENU_BG, x + EDITOR_MENU_X,
+                                      y + EDITOR_MENU_ROW_H + 2,
+                                      EDITOR_MENU_ITEM_W, EDITOR_MENU_ITEM_H) > 200,
+             "clicking File in the README editor did not open its dropdown")
+    m.click(x + EDITOR_MENU_X + EDITOR_MENU_ITEM_W // 2,
+            y + EDITOR_MENU_ROW_H + 3 * EDITOR_MENU_ITEM_H + EDITOR_MENU_ITEM_H // 2)
+    wait_for(m, lambda s: count_app_windows(s) == 0,
+             "File > Quit did not close the README editor")
+    no_toast_after_a_close(m, before, "File > Quit in the README editor")
+
 def test_launcher_keychord_types_and_launches(m):
     boot(m)
     m.double_click(ICON_X, ICONS[4][2])
@@ -2246,6 +2285,7 @@ TESTS = [
     ("taskbar_click_keeps_app_focused", test_taskbar_click_keeps_app_focused),
     ("taskbar_button_focus_and_minimize", test_taskbar_button_focus_and_minimize),
     ("editor_in_window_file_menu", test_editor_in_window_file_menu),
+    ("closing_the_readme_raises_no_toast", test_closing_the_readme_raises_no_toast),
     ("launcher_keychord_types_and_launches", test_launcher_keychord_types_and_launches),
     ("launcher_click_launches_a_result", test_launcher_click_launches_a_result),
     ("launcher_escape_dismisses", test_launcher_escape_dismisses),
@@ -2327,6 +2367,7 @@ def _die_on_signal(signum, _frame):
 QUICK_TESTS = [
     "double_click_launches_every_icon",
     "titlebar_close_button",
+    "closing_the_readme_raises_no_toast",
     "clicking_a_window_raises_it",
     "editor_undo_restores_the_buffer",
     "terminal_scrollback_scrolls_with_the_wheel",

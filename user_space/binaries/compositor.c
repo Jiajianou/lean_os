@@ -1,4 +1,5 @@
 #include "children.h"
+#include "client_ending.h"
 #include "paths.h"
 #include "user_interface_font.h"
 
@@ -72,7 +73,7 @@
 #define LAUNCHER_ROW_H    20
 #define LAUNCHER_LIST_Y   (LAUNCHER_PAD + LAUNCHER_INPUT_H + 10)
 #define LAUNCHER_ROWS     10
-#define LAUNCHER_MAX_ENTRIES 128
+#define LAUNCHER_MAX_ENTRIES 512
 #define LAUNCHER_NAME_MAX 32
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x) STRINGIFY_(x)
@@ -1540,6 +1541,21 @@ static void send_event(const window_t *win, const window_manager_event_t *ev) {
 
 static void set_focus(int idx);
 
+/* Whatever is on top here gets the keyboard when the window that had it
+   goes - closed, minimised, or left behind on another desktop. Focusing
+   nothing after a close sent the next keystrokes nowhere and greyed every
+   titlebar until somebody clicked (M209). */
+static void focus_topmost_here(void) {
+    for (int z = z_count - 1; z >= 0; z--) {
+        window_t *w = &windows[zorder[z]];
+        if (w->alive && !w->minimized && !w->is_panel && !w->is_desktop && !w->is_popup && window_here(w)) {
+            set_focus(zorder[z]);
+            return;
+        }
+    }
+    set_focus(-1);
+}
+
 static void switch_workspace(int to) {
     to = ((to % WINDOW_MANAGER_WORKSPACE_COUNT) + WINDOW_MANAGER_WORKSPACE_COUNT) % WINDOW_MANAGER_WORKSPACE_COUNT;
     if (to == current_workspace) {
@@ -1551,13 +1567,7 @@ static void switch_workspace(int to) {
         set_focus(-1);
     }
     if (focused_window < 0) {
-        for (int z = z_count - 1; z >= 0; z--) {
-            window_t *w = &windows[zorder[z]];
-            if (w->alive && !w->minimized && !w->is_panel && !w->is_desktop && !w->is_popup && window_here(w)) {
-                set_focus(zorder[z]);
-                break;
-            }
-        }
+        focus_topmost_here();
     }
     dirty = 1;
 }
@@ -1619,6 +1629,13 @@ static void toast_post(uint32_t level, const char *title, const char *body) {
     t->body[i] = '\0';
     t->expires_ms = sys_uptime_ms() + TOAST_TTL_MS;
     dirty = 1;
+
+    static const char prefix[] = "[toast] ";
+    sys_write(1, prefix, sizeof(prefix) - 1);
+    sys_write(1, t->title, strlen(t->title));
+    sys_write(1, ": ", 2);
+    sys_write(1, t->body, strlen(t->body));
+    sys_write(1, "\n", 1);
 }
 
 static void toasts_expire(long now_ms) {
@@ -1690,7 +1707,7 @@ static void reclaim_window(int idx) {
         wmenu_hover = -1;
     }
     if (focused_window == idx) {
-        set_focus(-1);
+        focus_topmost_here();
     }
     dirty = 1;
 }
@@ -1717,22 +1734,26 @@ static void enforce_close_requests(void) {
 static void reap_dead_clients(void) {
     enforce_close_requests();
     for (int i = 0; i < window_count; i++) {
-        /* A client that crashed, or is gone altogether, loses its window.
-           One that exited 0 keeps it - a program may draw and leave, and
-           wm_demo's self-test is exactly that - unless the window had been
-           asked to close. That is what the titlebar button and Chromium's
-           own quit both do, and Chromium answers SIGTERM by exiting 0: the
-           browser's window used to stay on the screen, dead, until its
-           process slot was recycled (M199). */
-        long alive = windows[i].alive ? sys_task_alive(windows[i].client_pid) : 1;
-        if (alive != 1 && (alive != 2 || windows[i].close_requested)) {
-            if (!windows[i].close_requested) {
-                toast_post(WINDOW_MANAGER_NOTIFY_ERROR,
-                            windows[i].title[0] ? windows[i].title : "A program",
-                            "stopped unexpectedly.");
-            }
-            reclaim_window(i);
+        window_t *w = &windows[i];
+        if (!w->alive) {
+            continue;
         }
+        /* A program that exited 0 without saying it was quitting keeps its
+           window - it may draw and leave, and wm_demo's self-test is exactly
+           that. Every other ending takes the window, and only a fault says
+           so: see client_ending.h for why a SIGTERM, a SIGKILL from the Task
+           Manager and an exit status are not crashes (M209). */
+        client_ending_t ending = client_ending(sys_task_end_status(w->client_pid), w->close_requested);
+        if (ending == CLIENT_RUNNING || ending == CLIENT_KEEP_WINDOW) {
+            continue;
+        }
+        const char *who = w->title[0] ? w->title : "A program";
+        if (ending == CLIENT_CRASHED) {
+            toast_post(WINDOW_MANAGER_NOTIFY_ERROR, who, "stopped unexpectedly.");
+        } else if (ending == CLIENT_FAILED) {
+            toast_post(WINDOW_MANAGER_NOTIFY_WARN, who, "quit with an error.");
+        }
+        reclaim_window(i);
     }
 }
 
@@ -1909,6 +1930,7 @@ static void accept_pending_window(int request_read_file_descriptor, int response
             return;
         }
         evt_write_file_descriptor = evt_file_descriptors[1];
+        sys_fcntl(evt_write_file_descriptor, F_SETFL_COMMAND, OS_NONBLOCK_BIT);
     }
 
     window_t *win = &windows[idx];
@@ -2048,7 +2070,7 @@ static void apply_window_action(int idx, uint32_t action, int32_t value) {
         }
         win->minimized = !win->minimized;
         if (win->minimized && focused_window == idx) {
-            set_focus(-1);
+            focus_topmost_here();
         }
         dirty = 1;
     } else if (action == WINDOW_MANAGER_ACTION_CAPTURE) {
@@ -2072,6 +2094,9 @@ static void apply_window_action(int idx, uint32_t action, int32_t value) {
     } else if (action == WINDOW_MANAGER_ACTION_KILL) {
         win->close_requested = 1;
         sys_kill(win->client_pid, SIGKILL);
+    } else if (action == WINDOW_MANAGER_ACTION_QUITTING) {
+        win->close_requested = 1;
+        win->close_deadline_ms = sys_uptime_ms() + CLOSE_GRACE_MS;
     } else if (action == WINDOW_MANAGER_ACTION_SET_PANEL_OVERHANG) {
         int32_t want = value;
         if (!win->is_panel) {
@@ -3701,6 +3726,17 @@ int main(void) {
         sys_exit(1);
     }
     drag_data_write_file_descriptor = drag_data_file_descriptors[1];
+
+    /* Nothing a client does may stop this loop. Every write from here to a
+       client is non-blocking: an event pipe nobody reads fills after thirty
+       events, and a blocking write into it froze the whole desktop - the
+       cursor, every other window, and the Force quit that would have ended
+       the program that stopped reading (M209). A full pipe loses that one
+       message whole, because a write that fits a pipe is atomic. */
+    sys_fcntl(response_file_descriptors[1], F_SETFL_COMMAND, OS_NONBLOCK_BIT);
+    sys_fcntl(query_response_file_descriptors[1], F_SETFL_COMMAND, OS_NONBLOCK_BIT);
+    sys_fcntl(settings_query_response_file_descriptors[1], F_SETFL_COMMAND, OS_NONBLOCK_BIT);
+    sys_fcntl(drag_data_write_file_descriptor, F_SETFL_COMMAND, OS_NONBLOCK_BIT);
 
     sys_pipe_reset(request_file_descriptors[0]);
     sys_pipe_reset(response_file_descriptors[0]);
