@@ -839,3 +839,32 @@ TEST(net_udp, a_payload_larger_than_the_mtu_allows_is_refused) {
     fake_net_reset();
     CHECK(udp_send(PEER_IP, 53, 1053, huge, UDP_MAX_PAYLOAD) >= 0);
 }
+
+/* Before a lease a server may send its offer to the address it is offering,
+   which is not this machine's yet; the client's port takes it anyway, and
+   nothing else addressed elsewhere is let through with it. */
+TEST(net_udp, a_dhcp_offer_to_the_offered_address_reaches_the_client_before_a_lease) {
+    net_fixture();
+    const char *body = "offer";
+    uint16_t blen = (uint16_t)strlen(body);
+    uint8_t udp[8 + 8];
+    be16_put(udp + 0, 67);
+    be16_put(udp + 2, 68);
+    be16_put(udp + 4, (uint16_t)(8 + blen));
+    be16_put(udp + 6, 0);
+    memcpy(udp + 8, body, blen);
+    uint8_t packet[64];
+    uint16_t n = ip_build(packet, 17, OTHER_IP, udp, (uint16_t)(8 + blen));
+    ip_handle_packet(peer_mac, packet, n);
+    REQUIRE(fake_socket_delivered_count() == 1);
+    uint32_t length = 0;
+    uint16_t port = 0;
+    const uint8_t *got = fake_socket_delivered(0, &length, &port);
+    CHECK_EQ(port, 68);
+    CHECK_MEMEQ(got, body, blen);
+
+    be16_put(udp + 2, 1234);
+    n = ip_build(packet, 17, OTHER_IP, udp, (uint16_t)(8 + blen));
+    ip_handle_packet(peer_mac, packet, n);
+    CHECK_EQ(fake_socket_delivered_count(), 1);
+}

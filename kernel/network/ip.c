@@ -123,6 +123,18 @@ static void build_header(uint8_t *packet, uint32_t source_ip, uint32_t destinati
     packet[11] = (uint8_t)(csum & 0xFF);
 }
 
+#define DHCP_CLIENT_PORT 68
+
+/* Before a lease this machine has no address of its own, and a DHCP server
+   is allowed to send its offer to the address it is offering rather than to
+   broadcast - RFC 2131 leaves the broadcast bit a request. That datagram is
+   for this machine although its address says otherwise, so until there is a
+   lease the client's port is taken whatever the destination. */
+static int dhcp_reply_before_lease(uint8_t protocol, const uint8_t *transport, uint16_t length) {
+    return !net_config_is_leased() && protocol == IP_PROTO_UDP && length >= 4 &&
+           ((uint16_t)(transport[2] << 8) | transport[3]) == DHCP_CLIENT_PORT;
+}
+
 void ip_handle_packet(const uint8_t *source_mac, const uint8_t *payload, uint16_t length) {
     if (length < IP_HEADER_LENGTH) {
         return;
@@ -141,7 +153,8 @@ void ip_handle_packet(const uint8_t *source_mac, const uint8_t *payload, uint16_
     uint32_t source_ip = net_read_be32(payload + 12);
     uint32_t destination_ip = net_read_be32(payload + 16);
 
-    if (!net_is_local_ip(destination_ip)) {
+    if (!net_is_local_ip(destination_ip) &&
+        !dhcp_reply_before_lease(protocol, payload + header_length, (uint16_t)(length - header_length))) {
         return;
     }
 

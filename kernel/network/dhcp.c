@@ -2,6 +2,7 @@
 
 #include "drivers/pit.h"
 #include "ethernet.h"
+#include "scheduler/scheduler.h"
 #include "library/kernel_library.h"
 #include "network.h"
 #include "socket.h"
@@ -29,6 +30,9 @@
 #define OPT_SERVER_ID     54
 #define OPT_PARAMETER_LIST    55
 #define OPT_END          255
+
+#define EXCHANGE_WAIT_MS 2000
+#define EXCHANGE_POLL_MS 10
 
 #define BOOTP_FIXED_LENGTH 236
 #define DHCP_MIN_LENGTH    (BOOTP_FIXED_LENGTH + 4)
@@ -119,6 +123,8 @@ static uint16_t build_message(uint8_t *message, uint8_t type, uint32_t requested
     return i;
 }
 
+static dhcp_abandoned_t abandoned;
+
 static int exchange(const uint8_t *message, uint16_t length, uint8_t want, uint32_t ms) {
     have_reply = 0;
     if (udp_send_from(0, NET_BROADCAST_IP, DHCP_SERVER_PORT, DHCP_CLIENT_PORT, message, length) < 0) {
@@ -126,6 +132,9 @@ static int exchange(const uint8_t *message, uint16_t length, uint8_t want, uint3
     }
     uint64_t deadline = pit_get_ticks() + (uint64_t)ms * PIT_HZ / 1000;
     while (pit_get_ticks() < deadline) {
+        if (abandoned && abandoned()) {
+            return 0;
+        }
         if (have_reply) {
             uint8_t opt_length = 0;
             const uint8_t *type = find_option(reply, reply_length, OPT_MESSAGE_TYPE, &opt_length);
@@ -134,7 +143,26 @@ static int exchange(const uint8_t *message, uint16_t length, uint8_t want, uint3
             }
             have_reply = 0;
         }
-        __asm__ volatile("hlt");
+        /* A task waits asleep. Halting kept the radio's DHCP task on a
+           processor at 100% for every second it waited; only the boot, which
+           asks before there are tasks, still has to halt. */
+        if (scheduler_current()) {
+            scheduler_sleep_ms(EXCHANGE_POLL_MS);
+        } else {
+            __asm__ volatile("hlt");
+        }
+    }
+    return 0;
+}
+
+/* The same question asked again, with the same transaction id, the way RFC
+   2131 has a client retransmit: one lost frame should not be the difference
+   between an address and none. */
+static int exchange_retrying(const uint8_t *message, uint16_t length, uint8_t want, uint32_t attempts) {
+    for (uint32_t attempt = 0; attempt < attempts && !(abandoned && abandoned()); attempt++) {
+        if (exchange(message, length, want, EXCHANGE_WAIT_MS)) {
+            return 1;
+        }
     }
     return 0;
 }
@@ -146,6 +174,11 @@ static uint32_t option_ip(uint8_t code) {
 }
 
 int dhcp_configure(void) {
+    return dhcp_configure_retrying(1, (dhcp_abandoned_t)0);
+}
+
+int dhcp_configure_retrying(uint32_t attempts, dhcp_abandoned_t give_up) {
+    abandoned = give_up;
     const uint8_t *mac = net_local_mac();
     our_xid = net_read_be32(mac + 2) ^ (uint32_t)pit_get_ticks() ^ 0x1EA5F00Du;
 
@@ -155,12 +188,12 @@ int dhcp_configure(void) {
     int ok = 0;
 
     uint16_t length = build_message(message, DHCP_DISCOVER, 0, 0);
-    if (exchange(message, length, DHCP_OFFER, 2000)) {
+    if (exchange_retrying(message, length, DHCP_OFFER, attempts)) {
         uint32_t offered = net_read_be32(reply + 16);
         uint32_t server = option_ip(OPT_SERVER_ID);
         if (offered) {
             length = build_message(message, DHCP_REQUEST, offered, server);
-            if (exchange(message, length, DHCP_ACK, 2000)) {
+            if (exchange_retrying(message, length, DHCP_ACK, attempts)) {
                 uint32_t acked = net_read_be32(reply + 16);
                 net_set_config(acked ? acked : offered,
                                option_ip(OPT_SUBNET_MASK),

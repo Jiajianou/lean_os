@@ -53,6 +53,10 @@ int intel_wireless_bring_up(volatile uint8_t *registers, uint32_t pci_device_id,
                             uint32_t firmware_length);
 int intel_wireless_scan(void);
 
+/* Puts the device back in reset and loads the same firmware again, the way
+   Linux recovers from a firmware assertion. Whatever was joined is gone. */
+int intel_wireless_restart(void);
+
 /* The radio as the wireless manager drives it - network/wireless_manager.h. */
 #include "network/wireless_manager.h"
 const wireless_backend_t *intel_wireless_backend(void);

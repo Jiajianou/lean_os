@@ -11,6 +11,7 @@
 #define HBUS_TARG_MEM_RDAT  0x41C
 
 #define POLL_INTERVAL_US 10
+#define COMMAND_SPIN_US 2000
 #define PAGE_BYTES 4096u
 
 #define RX_MASK (INTEL_WIRELESS_RX_RING - 1)
@@ -90,6 +91,10 @@ void intel_wireless_delay_us(uint32_t microseconds) {
 void intel_wireless_sleep_ms(uint32_t milliseconds) {
     intel_wireless_host_delay(milliseconds * 1000u);
 }
+
+static uint64_t wait_clock_us(uint64_t nominal) {
+    return nominal;
+}
 #else
 uint32_t intel_wireless_read32(uint32_t offset) {
     return *(volatile uint32_t *)(transport.registers + offset);
@@ -111,6 +116,13 @@ void intel_wireless_delay_us(uint32_t microseconds) {
    for a firmware taking its time. */
 void intel_wireless_sleep_ms(uint32_t milliseconds) {
     scheduler_sleep_ms(milliseconds);
+}
+
+/* A sleep can run long and a spin cannot, so a timeout is measured on the
+   clock here; the host tests have no clock and count what was asked for. */
+static uint64_t wait_clock_us(uint64_t nominal) {
+    (void)nominal;
+    return tsc_to_us(tsc_read());
 }
 #endif
 
@@ -657,8 +669,16 @@ static int cause_check_due(void) {
 #endif
 }
 
+/* A firmware that has asserted stays asserted until it is loaded again, and
+   the cause bit that said so is cleared by the poll that read it - which may
+   be one whose answer nobody looks at, a leave's wait for a frame to go out.
+   On the laptop that left every later command waiting two seconds on a dead
+   firmware, so the error is remembered and every poll after says it. */
 int intel_wireless_poll(void) {
     transport.statistics.polls++;
+    if (transport.error_seen) {
+        return transport.error_seen;
+    }
     if (transport.rx_stocked && !cause_check_due()) {
         __asm__ volatile("" ::: "memory");
         uint32_t closed = ((volatile intel_wireless_rb_status_t *)transport.rb_status)->closed_rb_number & 0xFFFu;
@@ -686,9 +706,10 @@ int intel_wireless_poll(void) {
     }
     handle_receive_ring();
     if (causes & (CSR_INT_BIT_SW_ERR | CSR_INT_BIT_HW_ERR)) {
-        transport.error_seen = 1;
+        transport.error_seen =
+            (causes & CSR_INT_BIT_HW_ERR) ? INTEL_WIRELESS_HARDWARE_ERROR : INTEL_WIRELESS_FIRMWARE_ERROR;
         transport.statistics.firmware_errors++;
-        return (causes & CSR_INT_BIT_HW_ERR) ? INTEL_WIRELESS_HARDWARE_ERROR : INTEL_WIRELESS_FIRMWARE_ERROR;
+        return transport.error_seen;
     }
     return INTEL_WIRELESS_OK;
 }
@@ -797,8 +818,14 @@ int intel_wireless_send(uint8_t group, uint8_t command, uint8_t version, const v
     intel_wireless_write32(HBUS_TARG_WRPTR, transport.command_write | ((uint32_t)INTEL_WIRELESS_COMMAND_QUEUE << 16));
     transport.statistics.commands_sent++;
 
+    /* Most answers take well under a millisecond, so the first two are
+       spent spinning; after that the wait sleeps, because a firmware that
+       does not answer held a processor for the whole two-second timeout on
+       the laptop - once per command, seven seconds for one leave. */
     int result = INTEL_WIRELESS_TIMED_OUT;
-    for (uint32_t waited = 0; waited <= timeout_ms * 10; waited++) {
+    uint64_t waited_us = 0;
+    uint64_t started = wait_clock_us(0);
+    for (;;) {
         int polled = intel_wireless_poll();
         if (transport.waiting_answered) {
             result = INTEL_WIRELESS_OK;
@@ -808,7 +835,16 @@ int intel_wireless_send(uint8_t group, uint8_t command, uint8_t version, const v
             result = polled;
             break;
         }
-        intel_wireless_delay_us(100);
+        if (wait_clock_us(waited_us) - started > (uint64_t)timeout_ms * 1000u) {
+            break;
+        }
+        if (waited_us < COMMAND_SPIN_US) {
+            intel_wireless_delay_us(100);
+            waited_us += 100;
+        } else {
+            intel_wireless_sleep_ms(1);
+            waited_us += 1000;
+        }
     }
     if (response_length) {
         *response_length = transport.waiting_length;

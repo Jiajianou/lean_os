@@ -663,7 +663,10 @@ _Static_assert(sizeof(intel_wireless_add_station_key_t) == 76, "iwl_mvm_add_sta_
    traffic identifier, and the firmware answers with its number. Removing one
    names the same two things, the identifier as 32 bits where adding has 8
    and three reserved bytes - the same little-endian value when those are
-   zero, so one layout serves both. */
+   zero, so one layout serves both. Both go out at the whole union's
+   length: the firmware checks it, and a removal sent as its own twelve
+   bytes is an assertion in the UMAC - the laptop's error table named this
+   command with 36 expected and 12 given, and the radio was dead after. */
 typedef struct {
     uint32_t operation;
     uint32_t station_mask;

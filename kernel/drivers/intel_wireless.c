@@ -26,6 +26,7 @@
 #define AUTHENTICATION_TIMEOUT_MS 300
 #define ASSOCIATION_TIMEOUT_MS 500
 #define JOIN_ATTEMPTS 3
+#define FIRMWARE_RESTARTS_MAX 5
 #define STATION_ID 0
 #define REASON_LEAVING 3
 
@@ -45,6 +46,9 @@ static const uint8_t nvm_channels[] = {
 
 typedef struct {
     int state;
+    volatile uint8_t *registers;
+    const uint8_t *firmware_file;
+    uint32_t firmware_length;
     uint32_t pci_device_id;
     uint32_t hardware_revision;
     uint32_t rf_id;
@@ -93,6 +97,7 @@ typedef struct {
     uint32_t data_frames_received;
     uint32_t frames_dropped;
     uint32_t transmit_failures;
+    uint32_t frames_queued_at_join;
 } wireless_t;
 
 static wireless_t wireless;
@@ -761,6 +766,9 @@ static int start_firmware(void) {
 int intel_wireless_bring_up(volatile uint8_t *registers, uint32_t pci_device_id, const uint8_t *firmware_file,
                             uint32_t firmware_length) {
     wireless.state = INTEL_WIRELESS_STATE_STARTING;
+    wireless.registers = registers;
+    wireless.firmware_file = firmware_file;
+    wireless.firmware_length = firmware_length;
     wireless.pci_device_id = pci_device_id;
     wireless.init_complete = 0;
     intel_wireless_transport_attach(registers);
@@ -1046,7 +1054,7 @@ static int remove_queue(void) {
     command.station_mask = 1u << STATION_ID;
     command.tid = IWL_MGMT_TID;
     intel_wireless_data_queue_stop();
-    return send(DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD, &command, 12, 0, 0, 0);
+    return send(DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD, &command, sizeof(command), 0, 0, 0);
 }
 
 static int session_protection(uint32_t action) {
@@ -1088,6 +1096,9 @@ static int transmit_frame(const uint8_t *frame, uint32_t length, int management)
     if (length < header_length) {
         return INTEL_WIRELESS_TOO_LARGE;
     }
+    if (header_length > 32) {
+        return INTEL_WIRELESS_TOO_LARGE;
+    }
     intel_wireless_tx_command_t command;
     zero(&command, sizeof(command));
     command.length = (uint16_t)length;
@@ -1095,14 +1106,24 @@ static int transmit_frame(const uint8_t *frame, uint32_t length, int management)
     if (header_length % 4) {
         command.offload_assist |= (uint16_t)(1u << TX_CMD_OFFLD_PAD);
     }
-    if (!wireless.pairwise_key || management) {
+    /* The radio encrypts what the header says is protected and leaves room
+       for the CCMP header itself - Linux sets the bit and reserves nothing
+       on this family. Without it the frame leaves in the clear, the access
+       point acknowledges it and then drops it: the handshake completed on
+       the laptop and not one DHCP discover was ever answered. */
+    uint8_t header[32];
+    copy_bytes(header, frame, header_length);
+    int encrypt = wireless.pairwise_key && !management;
+    if (encrypt) {
+        header[1] |= (uint8_t)(IEEE80211_FRAME_CONTROL_PROTECTED >> 8);
+    } else {
         command.flags |= IWL_TX_FLAGS_ENCRYPT_DIS;
     }
     if (management || !wireless.authorized) {
         command.flags |= IWL_TX_FLAGS_CMD_RATE | IWL_TX_FLAGS_HIGH_PRI;
         command.rate_n_flags = lowest_rate();
     }
-    return intel_wireless_data_send(&command, frame, header_length, frame + header_length, length - header_length);
+    return intel_wireless_data_send(&command, header, header_length, frame + header_length, length - header_length);
 }
 
 static int wait_for_answer(volatile int *flag, uint32_t timeout_ms) {
@@ -1144,6 +1165,10 @@ static int intel_join(const ieee80211_network_t *network, const uint8_t *rsn, ui
     wireless.authorized = 0;
     wireless.last_unicast_pn = 0;
     wireless.last_group_pn = 0;
+    wireless.data_frames_received = 0;
+    wireless.frames_dropped = 0;
+    wireless.transmit_failures = 0;
+    wireless.frames_queued_at_join = intel_wireless_transport_statistics()->frames_queued;
     for (uint32_t i = 0; i < wireless.network_count; i++) {
         if (same_address(wireless.networks[i].network.bssid, network->bssid)) {
             wireless.have_sync = wireless.networks[i].sync_device_time != 0;
@@ -1239,8 +1264,27 @@ static int intel_join(const ieee80211_network_t *network, const uint8_t *rsn, ui
     return 0;
 }
 
+/* What crossed the radio while joined - the one line that says, from a
+   laptop with no serial port, whether a network that gave no address was
+   never sent anything, sent things it ignored, or answered and was not
+   heard. */
+static void log_traffic(void) {
+    kernel_log_puts("[wifi] while joined: ");
+    kernel_log_put_dec(intel_wireless_transport_statistics()->frames_queued - wireless.frames_queued_at_join);
+    kernel_log_puts(" frame(s) sent, ");
+    kernel_log_put_dec(wireless.transmit_failures);
+    kernel_log_puts(" not delivered, ");
+    kernel_log_put_dec(wireless.data_frames_received);
+    kernel_log_puts(" data frame(s) received, ");
+    kernel_log_put_dec(wireless.frames_dropped);
+    kernel_log_puts(" dropped\n");
+}
+
 static void intel_leave(void) {
     static uint8_t frame[64];
+    if (wireless.associated) {
+        log_traffic();
+    }
     if (wireless.associated && wireless.queue_added) {
         uint32_t length = ieee80211_build_deauthentication(frame, wireless.mac_address, wireless.target.bssid,
                                                            REASON_LEAVING);
@@ -1276,6 +1320,33 @@ static void intel_leave(void) {
         phy_context(FW_CTXT_ACTION_REMOVE);
         wireless.phy_added = 0;
     }
+}
+
+/* Everything the firmware held for a network dies with the firmware: after a
+   restart there is no PHY, binding, station or queue to take apart, and a
+   leave that tried would only send commands about things it never added. */
+static void forget_join(void) {
+    wireless.joining = 0;
+    wireless.associated = 0;
+    wireless.phy_added = 0;
+    wireless.binding_added = 0;
+    wireless.station_added = 0;
+    wireless.queue_added = 0;
+    wireless.pairwise_key = 0;
+    wireless.authorized = 0;
+    wireless.session_started = 0;
+    wireless.authentication_answered = 0;
+    wireless.association_answered = 0;
+}
+
+int intel_wireless_restart(void) {
+    intel_wireless_stop();
+    forget_join();
+    if (!wireless.firmware_file) {
+        return INTEL_WIRELESS_NOT_READY;
+    }
+    return intel_wireless_bring_up(wireless.registers, wireless.pci_device_id, wireless.firmware_file,
+                                   wireless.firmware_length);
 }
 
 /* Keys go in at an offset of the firmware's key table: the pairwise key at
@@ -1476,7 +1547,17 @@ static void bring_up_and_run(void) {
     if (intel_wireless_bring_up(registers, device.device_id, file, length) != INTEL_WIRELESS_OK) {
         return;
     }
-    wireless_run(intel_wireless_backend());
+    for (uint32_t restarts = 0;; restarts++) {
+        wireless_run(intel_wireless_backend());
+        if (restarts == FIRMWARE_RESTARTS_MAX) {
+            break;
+        }
+        kernel_log_puts("[wifi] the firmware stopped - loading it again\n");
+        wireless_set_starting();
+        if (intel_wireless_restart() != INTEL_WIRELESS_OK) {
+            break;
+        }
+    }
     const intel_wireless_transport_statistics_t *statistics = intel_wireless_transport_statistics();
     kernel_log_puts("[wifi] the radio stopped after ");
     kernel_log_put_dec(statistics->frames_queued);

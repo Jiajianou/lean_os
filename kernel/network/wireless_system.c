@@ -20,6 +20,10 @@
 #define BUSY_PERIOD_MS 2
 #define IDLE_PERIOD_MS 20
 
+/* Four discovers and four requests, two seconds apart: sixteen seconds at
+   the most, inside the manager's twenty. */
+#define ADDRESSING_ATTEMPTS 4
+
 void wireless_run(const wireless_backend_t *backend) {
     wireless_manager_reset(backend);
     for (;;) {
@@ -74,9 +78,27 @@ static net_link_t wireless_link = {"wlan0", {0}, wireless_link_send};
 static volatile uint32_t addressing_generation;
 static volatile int addressing_result;
 
+/* dhcp.c holds one exchange's state, so one task asks at a time: a task for
+   a network joined again waits for the last one, which notices it has been
+   left within one poll and gives up. */
+static volatile int addressing_busy;
+static volatile uint32_t addressing_asking;
+
+static int addressing_abandoned(void) {
+    return addressing_asking != addressing_generation;
+}
+
 static void addressing_task(void *argument) {
     uint32_t generation = (uint32_t)(uintptr_t)argument;
-    int ok = dhcp_configure();
+    while (__atomic_exchange_n(&addressing_busy, 1, __ATOMIC_ACQUIRE)) {
+        if (generation != addressing_generation) {
+            return;
+        }
+        scheduler_sleep_ms(10);
+    }
+    addressing_asking = generation;
+    int ok = generation == addressing_generation && dhcp_configure_retrying(ADDRESSING_ATTEMPTS, addressing_abandoned);
+    __atomic_store_n(&addressing_busy, 0, __ATOMIC_RELEASE);
     if (generation == addressing_generation) {
         addressing_result = ok ? 1 : -1;
         if (ok) {

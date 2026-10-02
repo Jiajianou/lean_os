@@ -10,7 +10,7 @@
 #define FRAME_MAX 1600
 
 #define SECURING_TIMEOUT_MS 6000
-#define ADDRESSING_TIMEOUT_MS 12000
+#define ADDRESSING_TIMEOUT_MS 20000
 #define AUTOJOIN_RETRY_MS 30000
 #define AUTOSCAN_MS 60000
 #define REJOIN_AFTER_DEPARTURE_MS 5000
@@ -257,6 +257,7 @@ static void load_known(void) {
     static char text[KNOWN_FILE_MAX + 1];
     int length = wireless_storage_read(text, KNOWN_FILE_MAX);
     if (length <= 0) {
+        kernel_log_puts("[wifi] no remembered networks in " WIRELESS_KNOWN_PATH "\n");
         return;
     }
     uint32_t at = 0;
@@ -285,7 +286,7 @@ static void load_known(void) {
     kernel_log_puts(" remembered network(s)\n");
 }
 
-static void save_known(void) {
+static int save_known(void) {
     static char text[KNOWN_FILE_MAX];
     uint32_t at = 0;
     for (uint32_t i = 0; i < manager.known_count; i++) {
@@ -294,10 +295,12 @@ static void save_known(void) {
         at += write_hex(manager.known[i].pmk, 32, text + at);
         text[at++] = '\n';
     }
-    if (wireless_storage_write(text, at) != 0) {
+    int written = wireless_storage_write(text, at) == 0;
+    if (!written) {
         kernel_log_puts("[wifi] could not write " WIRELESS_KNOWN_PATH "\n");
     }
     wipe(text, sizeof(text));
+    return written;
 }
 
 static void remember(const char *ssid, uint32_t length, const uint8_t pmk[32]) {
@@ -315,7 +318,11 @@ static void remember(const char *ssid, uint32_t length, const uint8_t pmk[32]) {
         entry->ssid_length = (uint8_t)length;
     }
     copy(entry->pmk, pmk, 32);
-    save_known();
+    if (save_known()) {
+        kernel_log_puts("[wifi] remembered ");
+        log_name(ssid, length);
+        kernel_log_puts(" in " WIRELESS_KNOWN_PATH "\n");
+    }
 }
 
 static void forget(const char *ssid, uint32_t length) {
@@ -498,6 +505,7 @@ static void begin_addressing(uint64_t now) {
     set_state(WIRELESS_STATE_ADDRESSING, WIRELESS_ERROR_NONE);
     if (manager.remember_after_join) {
         remember(manager.network.ssid, manager.network.ssid_length, manager.pending_pmk);
+        rebuild_rows();
     }
     wipe(manager.pending_pmk, sizeof(manager.pending_pmk));
     if (!wireless_addressing_start(manager.backend->address)) {

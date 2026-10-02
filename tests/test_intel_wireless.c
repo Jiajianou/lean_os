@@ -78,12 +78,16 @@ typedef struct {
     uint16_t frame_subtypes[32];
     uint32_t frame_flags[32];
     uint32_t frame_rates[32];
+    uint8_t frame_protected[32];
+    uint32_t asserted_on_queue_removal;
     uint8_t last_data[512];
     uint32_t last_data_length;
     uint32_t byte_count_mismatches;
     int refuse_association;
     int silent_access_point;
     int follow_association;
+    int dead;
+    uint32_t boots;
 } model_t;
 
 static model_t model;
@@ -172,6 +176,14 @@ static void boot(void) {
     model.used_ring = (uint32_t *)(uintptr_t)context->used_rbd_address;
     model.status = (intel_wireless_rb_status_t *)(uintptr_t)context->status_write_pointer;
     model.tfds = (intel_wireless_tfd_t *)(uintptr_t)context->command_queue_address;
+    /* A second boot is the driver loading the firmware again after it died:
+       every ring starts over, on both sides. */
+    model.dead = 0;
+    model.boots++;
+    model.command_read = 0;
+    model.free_taken = model.free_announced = model.closed = 0;
+    model.pending_count = 0;
+    model.data_queue_added = 0;
     model.booted = 1;
     if (model.never_alive) {
         return;
@@ -326,6 +338,7 @@ static void drain_data(uint32_t write) {
             model.frame_subtypes[n] = (uint16_t)(frame[0] & 0xFC);
             model.frame_flags[n] = tx->flags;
             model.frame_rates[n] = tx->rate_n_flags;
+            model.frame_protected[n] = (uint8_t)((frame[1] & 0x40) != 0);
         }
         intel_wireless_tx_response_t response;
         memset(&response, 0, sizeof(response));
@@ -339,6 +352,9 @@ static void drain_data(uint32_t write) {
 }
 
 static void answer(uint8_t group, uint8_t command, uint16_t sequence, const uint8_t *payload, uint32_t length) {
+    if (model.dead) {
+        return;
+    }
     uint32_t n = model.commands_seen++;
     if (n < 64) {
         model.command_groups[n] = group;
@@ -389,6 +405,15 @@ static void answer(uint8_t group, uint8_t command, uint16_t sequence, const uint
             intel_wireless_queue_config_response_t response = {MODEL_QUEUE, 0, MODEL_WRITE_POINTER, 0};
             queue_packet(group, command, sequence, &response, sizeof(response));
         } else {
+            /* The laptop's firmware asserts on a removal shorter than the
+               whole command - its error table said 36 expected, 12 given -
+               and answers nothing after. */
+            if (length != sizeof(*queue)) {
+                model.asserted_on_queue_removal++;
+                *reg(CSR_INT) |= CSR_INT_BIT_SW_ERR;
+                model.dead = 1;
+                return;
+            }
             model.data_queue_added = 0;
             queue_packet(group, command, sequence, empty, sizeof(empty));
         }
@@ -840,6 +865,7 @@ TEST(intel_wireless, ip_crosses_the_radio_both_ways) {
     uint32_t last = model.frames_sent - 1;
     CHECK(model.frame_flags[last] & IWL_TX_FLAGS_ENCRYPT_DIS);
     CHECK(!(model.frame_flags[last] & IWL_TX_FLAGS_CMD_RATE));
+    CHECK(!model.frame_protected[last]);
 
     uint8_t frame[128];
     uint32_t frame_length = data_from_network(frame, 1, 0, 0);
@@ -884,6 +910,9 @@ TEST(intel_wireless, keys_go_to_the_firmware_and_protected_frames_are_checked) {
     wireless_step(clock_ms);
     uint32_t last = model.frames_sent - 1;
     CHECK(!(model.frame_flags[last] & IWL_TX_FLAGS_ENCRYPT_DIS));
+    CHECK_MSG(model.frame_protected[last], "a frame the radio is to encrypt must say it is protected");
+    CHECK_EQ(model.last_data[1] & 0x40, 0x40);
+    CHECK_EQ(model.last_data_length, 24u + 8u + 28u);
 
     uint32_t ok = IWL_RX_MPDU_STATUS_SEC_CCM | IWL_RX_MPDU_STATUS_MIC_OK;
     uint8_t frame[128];
@@ -950,4 +979,89 @@ TEST(intel_wireless, an_access_point_that_never_answers_times_out) {
     CHECK_EQ(status.state, WIRELESS_STATE_FAILED);
     CHECK_EQ(status.error, WIRELESS_ERROR_TIMED_OUT);
     CHECK_EQ(model.frames_sent, 3u);
+}
+
+/* The laptop's run: a network joined, then left - and the leave's queue
+   removal, sent short, killed the firmware, so every join after it waited on
+   commands nothing would answer. */
+TEST(intel_wireless, leaving_a_network_takes_its_queue_apart_without_killing_the_firmware) {
+    join_open_network();
+    REQUIRE(model.data_queue_added);
+    REQUIRE(wireless_request_disconnect() == 0);
+    clock_ms += 20;
+    wireless_step(clock_ms);
+    CHECK_EQ(model.asserted_on_queue_removal, 0u);
+    CHECK(!model.dead);
+    CHECK(!model.data_queue_added);
+    os_wireless_status_t status;
+    wireless_status(&status);
+    CHECK_EQ(status.state, WIRELESS_STATE_IDLE);
+    CHECK_EQ(intel_wireless_poll(), INTEL_WIRELESS_OK);
+
+    int removed = command_index(0, LONG_GROUP, REMOVE_STA);
+    int queue = command_index((uint32_t)command_index(0, DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD) + 1,
+                              DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD);
+    CHECK(queue >= 0 && removed > queue);
+    CHECK(command_index((uint32_t)removed, LONG_GROUP, PHY_CONTEXT_CMD) > removed);
+}
+
+TEST(intel_wireless, a_firmware_that_asserted_is_reported_by_every_poll_until_it_is_loaded_again) {
+    reset();
+    REQUIRE(intel_wireless_bring_up((volatile uint8_t *)0, 0xA0F0, firmware_file, firmware_length) == 0);
+    CHECK_EQ(intel_wireless_poll(), INTEL_WIRELESS_OK);
+    *reg(CSR_INT) |= CSR_INT_BIT_SW_ERR;
+    model.dead = 1;
+    int first = INTEL_WIRELESS_OK;
+    for (int i = 0; i < 64 && first == INTEL_WIRELESS_OK; i++) {
+        first = intel_wireless_poll();
+    }
+    CHECK_EQ(first, INTEL_WIRELESS_FIRMWARE_ERROR);
+    CHECK_EQ(*reg(CSR_INT) & CSR_INT_BIT_SW_ERR, 0u);
+    for (int i = 0; i < 64; i++) {
+        CHECK_EQ(intel_wireless_poll(), INTEL_WIRELESS_FIRMWARE_ERROR);
+    }
+    CHECK_EQ(intel_wireless_scan(), INTEL_WIRELESS_FIRMWARE_ERROR);
+
+    CHECK_EQ(intel_wireless_restart(), INTEL_WIRELESS_OK);
+    CHECK_EQ(model.boots, 2u);
+    CHECK_EQ(intel_wireless_state(), INTEL_WIRELESS_STATE_READY);
+    CHECK_EQ(intel_wireless_poll(), INTEL_WIRELESS_OK);
+    model.beacons_to_send = 6;
+    CHECK_EQ(intel_wireless_scan(), INTEL_WIRELESS_OK);
+}
+
+/* After a restart the manager starts over, and a remembered network is
+   joined again by itself - the person does not have to notice the firmware
+   died. Nothing from the dead firmware's join is taken apart: those
+   commands would be about a PHY and a station the new one never heard of. */
+TEST(intel_wireless, a_firmware_that_dies_joined_is_reloaded_and_the_network_rejoined) {
+    join_open_network();
+    os_wireless_status_t status;
+    wireless_status(&status);
+    REQUIRE(status.state == WIRELESS_STATE_CONNECTED);
+
+    *reg(CSR_INT) |= CSR_INT_BIT_SW_ERR;
+    model.dead = 1;
+    for (int i = 0; i < 64 && !wireless_manager_failed(); i++) {
+        clock_ms += 20;
+        wireless_step(clock_ms);
+    }
+    REQUIRE(wireless_manager_failed());
+    wireless_status(&status);
+    CHECK_EQ(status.error, WIRELESS_ERROR_DEVICE);
+
+    REQUIRE(intel_wireless_restart() == INTEL_WIRELESS_OK);
+    uint32_t commands_before = model.commands_seen;
+    fake_wireless_glue_reset(1);
+    wireless_manager_reset(intel_wireless_backend());
+    model.beacons_to_send = 6;
+    clock_ms += 20;
+    wireless_step(clock_ms);
+    clock_ms += 20;
+    wireless_step(clock_ms);
+    wireless_status(&status);
+    CHECK_EQ(status.state, WIRELESS_STATE_CONNECTED);
+    CHECK_EQ(memcmp(status.ssid, "net2", 4), 0);
+    CHECK_EQ(command_index(commands_before, LONG_GROUP, REMOVE_STA), -1);
+    CHECK(command_index(commands_before, LONG_GROUP, PHY_CONTEXT_CMD) >= 0);
 }
