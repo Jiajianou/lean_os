@@ -1334,14 +1334,15 @@ static void build_trackpad(void) {
 
     card = lvgl_theme_card(page, "CLICKING");
     tap_switch = toggle(card, "Tap to click", current.trackpad_tap_to_click != 0, on_tap_changed);
-    wrap_caption(card, "A light, quick touch is a click without pressing the pad down.");
+    wrap_caption(card, "A light, quick touch is a click without pressing the pad down. Tap and touch again at once "
+                       "to hold the button: slide to drag, lift to let go.");
 
     card = lvgl_theme_card(page, "GESTURES");
     lv_obj_set_style_pad_row(card, 6, LV_PART_MAIN);
     fact(card, "Scroll", "Two fingers, up or down");
     fact(card, "Secondary click", "Tap with two fingers, or press with two down");
     fact(card, "Middle click", "Tap with three fingers");
-    fact(card, "Drag", "Press the pad and move");
+    fact(card, "Drag", "Press the pad and move, or tap and then slide");
 }
 
 static void build_keyboard(void) {

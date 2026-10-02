@@ -107,7 +107,8 @@ UEFI firmware
   collection and switches it into multi-touch mode with the Input Mode
   feature report, then reads fingers: one moves the pointer, two scroll,
   a quick touch clicks, a two-finger tap or press is the secondary
-  button and three is the middle one. A pad it cannot switch stays a
+  button and three is the middle one. Tap and touch again at once to
+  hold the button down: sliding drags, lifting lets go. A pad it cannot switch stays a
   mouse. The trackpad's settings are its own, apart from the mouse's,
   because the kernel labels every pointer event with the device it came
   from. The gestures are host-tested frame by frame; QEMU has no I2C

@@ -106,11 +106,16 @@ static inline int32_t pointer_settings_wheel(int32_t wheel, uint32_t natural) {
 
 /* Everything one pointer event goes through on its way to the cursor, for
    whichever device it came from. Returns 0 for an event that is to be
-   dropped - a tap on a trackpad whose tap-to-click is off. */
+   dropped - a tap on a trackpad whose tap-to-click is off. A tap-and-drag
+   (M218) on such a trackpad still moves the pointer; it only presses
+   nothing. */
 static inline int pointer_settings_apply(const pointer_profile_t *profile, uint32_t swap, pointer_motion_t *motion,
                                          mouse_event_t *event) {
     if ((event->flags & MOUSE_FLAG_TAP) && !profile->tap_to_click) {
-        return 0;
+        if (event->dx == 0 && event->dy == 0 && event->wheel == 0) {
+            return 0;
+        }
+        event->buttons = 0;
     }
     uint32_t elapsed = event->time_ms - motion->last_ms;
     motion->last_ms = event->time_ms;

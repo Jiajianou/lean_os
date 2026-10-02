@@ -52,11 +52,16 @@ TEST(pointer_settings, no_acceleration_is_no_gain_at_any_speed) {
     CHECK_EQ(pointer_settings_gain(400, 300, 1, 0), 100);
 }
 
-TEST(pointer_settings, slow_movement_keeps_its_precision_with_acceleration_on) {
+/* M218: this was named slow_movement_..., and the runner takes a name that
+   starts with slow_ for a slow test and skips it in every tier - so it had
+   never run, and its last line asked for a pause of four seconds to count
+   as slow, which the gap cap beside it deliberately does not do. */
+TEST(pointer_settings, a_movement_under_the_threshold_keeps_its_precision_with_acceleration_on) {
     CHECK_EQ(pointer_settings_gain(8, 0, 8, 100), 100);
     CHECK_EQ(pointer_settings_gain(0, -8, 8, 100), 100);
     CHECK_EQ(pointer_settings_gain(16, 0, 20, 50), 100);
-    CHECK_EQ(pointer_settings_gain(400, 0, 4000, 100), 100);
+    CHECK_EQ(pointer_settings_gain(50, 0, 50, 100), 100);
+    CHECK(pointer_settings_gain(51, 0, 50, 100) > 100);
 }
 
 TEST(pointer_settings, faster_movement_goes_further_and_never_past_the_ceiling) {
@@ -155,4 +160,20 @@ TEST(pointer_settings, acceleration_multiplies_with_the_speed) {
     uint32_t gain = pointer_settings_gain(100, 0, 20, 100);
     CHECK(gain > 100);
     CHECK_EQ(fast.dx, (int32_t)(100 * (200 * gain / 100) / 100));
+}
+
+TEST(pointer_settings, a_tap_and_drag_still_moves_when_tap_to_click_is_off) {
+    pointer_profile_t profile = {100, 0, 0, 100, 0};
+    pointer_motion_t motion = {0, 0, 0, 0};
+    mouse_event_t press = event_at(0, 0, 0, 1, MOUSE_FLAG_TAP, 10);
+    CHECK_EQ(pointer_settings_apply(&profile, 0, &motion, &press), 0);
+    mouse_event_t drag = event_at(12, -5, 0, 1, MOUSE_FLAG_TAP, 20);
+    CHECK_EQ(pointer_settings_apply(&profile, 0, &motion, &drag), 1);
+    CHECK_EQ(drag.buttons, 0);
+    CHECK_EQ(drag.dx, 12);
+    CHECK_EQ(drag.dy, -5);
+    profile.tap_to_click = 1;
+    drag = event_at(12, -5, 0, 1, MOUSE_FLAG_TAP, 30);
+    CHECK_EQ(pointer_settings_apply(&profile, 0, &motion, &drag), 1);
+    CHECK_EQ(drag.buttons, 1);
 }

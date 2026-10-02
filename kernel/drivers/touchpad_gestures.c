@@ -69,6 +69,16 @@ int touchpad_gestures_frame(touchpad_gestures_t *state, const touchpad_point_t *
         state->remainder_x = 0;
         state->remainder_y = 0;
         state->remainder_scroll = 0;
+        /* M218: tap and drag. A finger that comes down again just after a
+           one-finger tap holds the left button for as long as it stays, so
+           sliding it drags - a window by its title, a slider, a file - without
+           pressing the pad. Lifted at once it is a second click: a double tap
+           is a double click, pressed as the finger lands. */
+        if (count == 1 && state->tap_ended && now_ms - state->tap_ended_ms <= TOUCHPAD_TAP_DRAG_MS) {
+            state->tap_dragging = 1;
+            state->touch_clicked = 1;
+        }
+        state->tap_ended = 0;
     }
     if (count > state->touch_most_fingers) {
         state->touch_most_fingers = count;
@@ -115,7 +125,7 @@ int touchpad_gestures_frame(touchpad_gestures_t *state, const touchpad_point_t *
     int32_t move_x = 0;
     int32_t move_y = 0;
     int32_t wheel = 0;
-    if (matched > 0 && (count == 1 || state->button_held)) {
+    if (matched > 0 && (count == 1 || state->button_held || state->tap_dragging)) {
         move_x = carry((int64_t)best_dx * state->width_tenths_mm * TOUCHPAD_COUNTS_PER_MM,
                        (int64_t)state->x_range * 10, &state->remainder_x);
         move_y = carry((int64_t)best_dy * state->height_tenths_mm * TOUCHPAD_COUNTS_PER_MM,
@@ -138,14 +148,19 @@ int touchpad_gestures_frame(touchpad_gestures_t *state, const touchpad_point_t *
     }
     state->previous_count = count;
 
-    if (move_x != 0 || move_y != 0 || wheel != 0 || state->buttons_out != state->button_mask) {
+    int dragged_by_tap = state->tap_dragging;
+    if (count == 0 && state->tap_dragging) {
+        state->tap_dragging = 0;
+    }
+    uint8_t pressed = (uint8_t)(state->button_mask | (state->tap_dragging ? 1u : 0u));
+    if (move_x != 0 || move_y != 0 || wheel != 0 || state->buttons_out != pressed) {
         out[events].dx = move_x;
         out[events].dy = move_y;
         out[events].wheel = wheel;
-        out[events].buttons = state->button_mask;
-        out[events].tap = 0;
+        out[events].buttons = pressed;
+        out[events].tap = (uint8_t)dragged_by_tap;
         events++;
-        state->buttons_out = state->button_mask;
+        state->buttons_out = pressed;
     }
 
     if (count == 0 && state->touching) {
@@ -154,6 +169,8 @@ int touchpad_gestures_frame(touchpad_gestures_t *state, const touchpad_point_t *
         int still = state->touch_travel_tenths_mm <= TOUCHPAD_TAP_MAXIMUM_TRAVEL_TENTHS_MM;
         if (quick && still && !state->touch_clicked && !state->touch_scrolled && state->touch_most_fingers > 0) {
             uint8_t tapped = state->touch_most_fingers == 1 ? 1 : state->touch_most_fingers == 2 ? 2 : 4;
+            state->tap_ended = tapped == 1;
+            state->tap_ended_ms = now_ms;
             out[events].dx = 0;
             out[events].dy = 0;
             out[events].wheel = 0;

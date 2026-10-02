@@ -8,6 +8,7 @@
 #define TOUCHPAD_SCROLL_TENTHS_MM_PER_DETENT 25
 #define TOUCHPAD_TAP_MAXIMUM_MS 200
 #define TOUCHPAD_TAP_MAXIMUM_TRAVEL_TENTHS_MM 30
+#define TOUCHPAD_TAP_DRAG_MS 220
 #define TOUCHPAD_DEFAULT_WIDTH_TENTHS_MM 1000
 #define TOUCHPAD_DEFAULT_HEIGHT_TENTHS_MM 600
 
@@ -56,6 +57,10 @@ typedef struct {
     uint8_t button_held;
     uint8_t button_mask;
     uint8_t buttons_out;
+
+    uint8_t tap_ended;
+    uint32_t tap_ended_ms;
+    uint8_t tap_dragging;
 } touchpad_gestures_t;
 
 void touchpad_gestures_init(touchpad_gestures_t *state, const hid_touchpad_layout_t *layout);
