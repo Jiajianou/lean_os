@@ -2799,9 +2799,11 @@ def test_the_keys_a_laptop_keyboard_adds(m):
     wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == desktop_px(LAUNCHER_PROBE[1]),
              "the Windows key a second time did not close the Start menu")
     m.sendkey("meta_l-e")
-    time.sleep(1.0)
+    wait_for_windows(m, 1)
     check(m.screenshot().px(*LAUNCHER_PROBE) != LAUNCHER_BG,
           "Windows+E opened the Start menu - only the key let go alone should")
+    m.sendkey("alt-f4")
+    wait_for_windows(m, 0)
 
     m.sendkey("meta_l")
     wait_for(m, lambda s: s.px(*LAUNCHER_PROBE) == LAUNCHER_BG, "the Windows key did not open the Start menu again")
@@ -2827,9 +2829,29 @@ def test_the_keys_a_laptop_keyboard_adds(m):
     wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == before + 1,
              "right Ctrl+Z did not undo - the right Ctrl key is not a modifier", timeout=15.0)
 
+def test_windows_key_chords_snap_and_open(m):
+    # M217: the Windows key's chords, as Windows has them.
+    boot(m)
+    m.double_click(ICON_X, ICONS[4][2])
+    wait_for_windows(m, 1)
+    m.sendkey("meta_l-right")
+    wait_for(m, lambda s: s.px(600, HAIRLINE_Y) == ACCENT, "Windows+Right did not snap the window to the right half")
+    m.sendkey("meta_l-left")
+    wait_for(m, lambda s: s.px(60, HAIRLINE_Y) == ACCENT and s.px(600, HAIRLINE_Y) == desktop_px(HAIRLINE_Y),
+             "Windows+Left did not snap the window to the left half")
+    m.sendkey("meta_l-down")
+    wait_for(m, lambda s: count_app_windows(s) == 1 and focused_slot(s) == -1,
+             "Windows+Down did not minimize the window")
+    check(m.screenshot().px(*LAUNCHER_PROBE) != LAUNCHER_BG, "a Windows chord opened the Start menu as well")
+    mark = len(m.read_log())
+    m.sendkey("meta_l-i")
+    wait_for_log_after(m, "[settings] showing General", mark, "Windows+I did not open Settings")
+    wait_for_windows(m, 2)
+
 TESTS = [
     ("a_tap_reaches_every_toolkit_control", test_a_tap_reaches_every_toolkit_control),
     ("the_keys_a_laptop_keyboard_adds", test_the_keys_a_laptop_keyboard_adds),
+    ("windows_key_chords_snap_and_open", test_windows_key_chords_snap_and_open),
     ("settings_opens_once_and_takes_the_pane_it_is_asked_for",
      test_settings_opens_once_and_takes_the_pane_it_is_asked_for),
     ("the_taskbar_clock_opens_date_and_time", test_the_taskbar_clock_opens_date_and_time),

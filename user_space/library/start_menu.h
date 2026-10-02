@@ -83,5 +83,7 @@ int start_menu_catalogue_command(int kind, int index, char *path, size_t path_ca
 
 int start_menu_setting_named(const char *argument);
 
+int start_menu_app_named(const char *program);
+
 int start_menu_result_command(const start_menu_t *menu, int result, char *path, size_t path_capacity,
                               const char **argument);

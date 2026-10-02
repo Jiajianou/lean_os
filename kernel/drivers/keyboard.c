@@ -74,6 +74,9 @@ static int current_modifiers(void) {
     if (shift_held) {
         mods |= KEYBOARD_MOD_SHIFT;
     }
+    if (super_key.held) {
+        mods |= KEYBOARD_MOD_SUPER;
+    }
     return mods;
 }
 

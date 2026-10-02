@@ -512,6 +512,7 @@ TEST(usb_hid, the_windows_key_in_a_chord_is_not_the_start_menu) {
     usb_hid_decode_keyboard(&state, gui_e, &keys);
     CHECK_EQ(keys.count, 1);
     CHECK_EQ(keys.ch[0], 'e');
+    CHECK_EQ(keys.mods[0], KEYBOARD_MOD_SUPER);
     usb_hid_decode_keyboard(&state, gui, &keys);
     usb_hid_decode_keyboard(&state, none, &keys);
     CHECK_EQ(keys.count, 0);

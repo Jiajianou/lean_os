@@ -408,3 +408,12 @@ int start_menu_setting_named(const char *argument) {
     }
     return -1;
 }
+
+int start_menu_app_named(const char *program) {
+    for (int i = 0; i < START_MENU_APP_COUNT; i++) {
+        if (same(START_MENU_APPS[i].program, program)) {
+            return i;
+        }
+    }
+    return -1;
+}

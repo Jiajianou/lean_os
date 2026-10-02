@@ -37,7 +37,9 @@ UEFI firmware
   sends a file to the Trash, Home and End go to the start and end of a
   line or a list, Page Up scrolls the terminal back - and right Ctrl and
   right Alt are modifiers like the left ones. PS/2 and USB keyboards send
-  the same codes for all of them, and the input suite drives both.
+  the same codes for all of them, and the input suite drives both. Held
+  down, the Windows key is Windows' own chords: Windows+Left and Right
+  snap, Up maximises, Down minimises, E opens Files and I opens Settings.
 - **Window chrome that is not from 2005.** A 28px titlebar with its own
   vertical gradient rather than a flat fill, the title centred and bold,
   and an accent hairline along the top of the focused window - so focus

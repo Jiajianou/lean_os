@@ -50,6 +50,9 @@ static int mods_from_report(uint8_t raw) {
     if (raw & 0x44) {
         mods |= KEYBOARD_MOD_ALT;
     }
+    if (raw & 0x88) {
+        mods |= KEYBOARD_MOD_SUPER;
+    }
     return mods;
 }
 

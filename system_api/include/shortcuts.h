@@ -23,6 +23,8 @@ typedef enum {
     SHORTCUT_WORKSPACE_NEXT,
     SHORTCUT_WINDOW_TO_PREVIOUS,
     SHORTCUT_WINDOW_TO_NEXT,
+    SHORTCUT_OPEN_FILES,
+    SHORTCUT_OPEN_SETTINGS,
 } shortcut_id_t;
 
 typedef struct {
@@ -39,6 +41,13 @@ static const shortcut_t SHORTCUTS[] = {
     {SHORTCUT_CYCLE_FORWARD,  KEYBOARD_MOD_ALT,                 KEYBOARD_MOD_SHIFT, '\t',                "Alt+Tab",        "Next window"},
     {SHORTCUT_LAUNCHER,       0,                                0,            (char)KEYBOARD_KEY_SUPER, "Windows key",  "Open the Start menu"},
     {SHORTCUT_LAUNCHER,       KEYBOARD_MOD_CTRL,                0,            ' ',                  "Ctrl+Space",     "Open the Start menu"},
+    /* M217: the Windows key's chords, as Windows has them. */
+    {SHORTCUT_SNAP_LEFT,      KEYBOARD_MOD_SUPER, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT | KEYBOARD_MOD_SHIFT, (char)KEYBOARD_KEY_LEFT,  "Windows+Left",  "Snap left"},
+    {SHORTCUT_SNAP_RIGHT,     KEYBOARD_MOD_SUPER, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT | KEYBOARD_MOD_SHIFT, (char)KEYBOARD_KEY_RIGHT, "Windows+Right", "Snap right"},
+    {SHORTCUT_MAXIMIZE,       KEYBOARD_MOD_SUPER, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT | KEYBOARD_MOD_SHIFT, (char)KEYBOARD_KEY_UP,    "Windows+Up",    "Maximize"},
+    {SHORTCUT_MINIMIZE,       KEYBOARD_MOD_SUPER, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT | KEYBOARD_MOD_SHIFT, (char)KEYBOARD_KEY_DOWN,  "Windows+Down",  "Minimize"},
+    {SHORTCUT_OPEN_FILES,     KEYBOARD_MOD_SUPER, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT, 'e', "Windows+E", "Open Files"},
+    {SHORTCUT_OPEN_SETTINGS,  KEYBOARD_MOD_SUPER, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_ALT, 'i', "Windows+I", "Open Settings"},
     {SHORTCUT_TASK_MANAGER,   KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT, 0,           27,                   "Ctrl+Shift+Esc", "Task manager"},
     {SHORTCUT_CLOSE_WINDOW,   KEYBOARD_MOD_ALT,                 0,            (char)KEYBOARD_KEY_FUNCTION(4),  "Alt+F4",         "Close window"},
     {SHORTCUT_WINDOW_TO_PREVIOUS, KEYBOARD_MOD_CTRL | KEYBOARD_MOD_SHIFT | KEYBOARD_MOD_ALT, 0, (char)KEYBOARD_KEY_LEFT,  "Ctrl+Shift+Alt+Left",  "Window to previous desktop"},

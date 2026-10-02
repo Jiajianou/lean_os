@@ -24,6 +24,8 @@ typedef struct {
 #define KEYBOARD_MOD_CTRL  1
 #define KEYBOARD_MOD_ALT   2
 #define KEYBOARD_MOD_SHIFT 4
+/* M217: a Windows key held down - the desktop's own chords. */
+#define KEYBOARD_MOD_SUPER 8
 
 #define KEYBOARD_KEY_UP    1
 #define KEYBOARD_KEY_DOWN  2

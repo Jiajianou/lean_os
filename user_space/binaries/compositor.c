@@ -2513,6 +2513,21 @@ static void shutdown_tick(long now) {
     }
 }
 
+/* One of the Start menu's own entries, started by the desktop - for the
+   taskbar's clock (M215) and the Windows key's chords (M217). */
+static void open_catalogue_entry(int kind, int index) {
+    char path[PATH_MAX_LENGTH];
+    const char *argument = "";
+    if (start_menu_catalogue_command(kind, index, path, sizeof(path), &argument) != 0) {
+        return;
+    }
+    long rc = sys_spawn(path, argument);
+    if (rc < 0) {
+        toast_post(WINDOW_MANAGER_NOTIFY_ERROR, "Could not open that", spawn_error_message(rc));
+    }
+    child_track(rc);
+}
+
 static void start_menu_report_geometry(void) {
     int32_t x, y, w, h;
     launcher_rect(&x, &y);
@@ -3073,17 +3088,8 @@ static void accept_one_action(int action_read_file_descriptor) {
         return;
     }
     if (request.action == WINDOW_MANAGER_ACTION_OPEN_CATALOGUE) {
-        char path[PATH_MAX_LENGTH];
-        const char *argument = "";
-        if (start_menu_catalogue_command((int)window_manager_pair_first(request.value),
-                                         (int)window_manager_pair_second(request.value), path, sizeof(path),
-                                         &argument) == 0) {
-            long rc = sys_spawn(path, argument);
-            if (rc < 0) {
-                toast_post(WINDOW_MANAGER_NOTIFY_ERROR, "Could not open that", spawn_error_message(rc));
-            }
-            child_track(rc);
-        }
+        open_catalogue_entry((int)window_manager_pair_first(request.value),
+                             (int)window_manager_pair_second(request.value));
         return;
     }
     if (request.action == WINDOW_MANAGER_ACTION_ASK_POWER) {
@@ -3643,6 +3649,12 @@ static void alt_tab_cycle(int direction) {
 
 static void run_shortcut(int id) {
     switch (id) {
+    case SHORTCUT_OPEN_FILES:
+        open_catalogue_entry(START_MENU_APP, start_menu_app_named("file_manager"));
+        return;
+    case SHORTCUT_OPEN_SETTINGS:
+        open_catalogue_entry(START_MENU_APP, start_menu_app_named("settings"));
+        return;
     case SHORTCUT_CYCLE_FORWARD:
         alt_tab_cycle(1);
         return;
@@ -3712,6 +3724,11 @@ static void handle_keyboard(void) {
         int shortcut = shortcut_lookup(ch, (int)mods);
         if (shortcut != SHORTCUT_NONE) {
             run_shortcut(shortcut);
+            continue;
+        }
+        if (mods & KEYBOARD_MOD_SUPER) {
+            /* A Windows chord the desktop does not know is nobody's - Windows
+               types nothing for one either. */
             continue;
         }
         if (launcher_open) {
