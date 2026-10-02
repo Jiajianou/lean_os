@@ -71,7 +71,7 @@ UEFI firmware
   clock. Files, Tasks and Settings are drawn by a real toolkit; the rest
   still draw themselves.
 - **Files, shaped like a Finder.** A sidebar of places - Home, Recent,
-  Applications, Temporary, Computer, Packages and the Trash - with Back
+  Programs, Temporary, Computer, Packages and the Trash - with Back
   and Forward, a path bar whose every folder is a click, and a list view
   with sortable Name, Date Modified, Size and Kind columns or an icon
   view. **Search** looks through the folder you are in or the whole

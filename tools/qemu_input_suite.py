@@ -907,15 +907,15 @@ def test_task_manager_end_task(m):
     origin = app_origin(FIRST_APP_IDX)
     m.click(origin[0] + TASKS_W - 40, origin[1] + 8)
 
-    for _ in range(90):
-        m.sendkey("down")
+    # M220: programs come first, newest at the top, so the Clock just opened
+    # is the first row - one Down from nothing selected.
+    m.sendkey("down")
 
-    def selection_at_end(shot):
+    def selection_at_top(shot):
         selected, rows = tm_selected_row(m, shot, origin)
-        return selected >= 0 and selected >= rows - 2
+        return selected == 0
 
-    wait_for(m, selection_at_end,
-             "the selection never reached the last row of the task list", timeout=25.0)
+    wait_for(m, selection_at_top, "Down did not select the first row of the task list", timeout=10.0)
 
     m.click(*widget_center(m, origin, "end_task"))
     wait_for(m, lambda s: count_app_windows(s) == 1,
@@ -2893,9 +2893,26 @@ def test_the_middle_button_held_scrolls_a_mouse_with_no_wheel(m):
     found = m.find_cursor(m.screenshot(), here)
     check(found == here, "the pointer moved while the middle button was scrolling: %r, not %r" % (found, here))
 
+def test_task_manager_lists_programs_before_the_kernel(m):
+    boot(m)
+    m.double_click(ICON_X, ICONS[6][2])
+    wait_for_windows(m, 1)
+    log = m.read_log()
+    listed = log[log.rfind("[tasks] "):].split("\n", 1)[0]
+    check("programs listed, newest first" in listed, "the Task Manager did not say how it ordered its list")
+    hidden = int(listed.split()[1])
+    origin = app_origin(FIRST_APP_IDX)
+    mark = len(m.read_log())
+    m.click(*widget_center(m, origin, "show_system"))
+    wait_for_log_after(m, "[tasks] system tasks shown", mark, "the System tasks switch did nothing")
+    shown_line = m.read_log()[mark:]
+    shown = int(shown_line[shown_line.find("shown, ") + 7:].split()[0])
+    check(shown > hidden + 2, "showing system tasks listed %d rather than more than %d" % (shown, hidden + 2))
+
 TESTS = [
     ("a_tap_reaches_every_toolkit_control", test_a_tap_reaches_every_toolkit_control),
     ("the_keys_a_laptop_keyboard_adds", test_the_keys_a_laptop_keyboard_adds),
+    ("task_manager_lists_programs_before_the_kernel", test_task_manager_lists_programs_before_the_kernel),
     ("windows_key_chords_snap_and_open", test_windows_key_chords_snap_and_open),
     ("the_middle_button_held_scrolls_a_mouse_with_no_wheel",
      test_the_middle_button_held_scrolls_a_mouse_with_no_wheel),

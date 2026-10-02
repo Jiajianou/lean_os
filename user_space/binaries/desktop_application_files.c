@@ -81,7 +81,7 @@ typedef struct {
 static const files_place_t PLACES[] = {
     {"Home", LV_SYMBOL_HOME, PATH_HOME, FILES_MODE_FOLDER, "place_home"},
     {"Recent", LV_SYMBOL_LOOP, "", FILES_MODE_RECENT, "place_recent"},
-    {"Applications", LV_SYMBOL_LIST, PATH_BIN, FILES_MODE_FOLDER, "place_applications"},
+    {"Programs", LV_SYMBOL_LIST, PATH_BIN, FILES_MODE_FOLDER, "place_applications"},
     {"Temporary", LV_SYMBOL_DIRECTORY, PATH_TEMPORARY, FILES_MODE_FOLDER, "place_temporary"},
     {"Computer", LV_SYMBOL_DRIVE, "/", FILES_MODE_FOLDER, "place_computer"},
     {"Packages", LV_SYMBOL_DOWNLOAD, PKG_ROOT, FILES_MODE_FOLDER, "place_packages"},

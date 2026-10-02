@@ -25,7 +25,9 @@ static const char *const PROTECTED_NAMES[] = {"init", "kernel", "cpu-idle"};
 static lvgl_window_t task_manager_window;
 
 static task_info_t tasks[TASK_INFO_MAX];
+static task_info_t every_task[TASK_INFO_MAX];
 static int task_count;
+static int show_system_tasks;
 static int selected = -1;
 static long selected_pid = -1;
 
@@ -147,9 +149,50 @@ static void select_row(int index) {
     selected_pid = (index >= 0 && index < task_count) ? (long)tasks[index].pid : -1;
 }
 
+/* M220. The table used to open on sixteen rows of "idle" - the kernel's own
+   tasks, one per processor, which nobody can end - with the programs a
+   person opened this window to find below the fold. Three groups now: what
+   a person started, newest at the top; the desktop's own processes; and,
+   only when asked for, the kernel's tasks, which have no parent process. */
+static const char *const DESKTOP_PARTS[] = {"init", "compositor", "desktop_shell", "desktop_icons"};
+
+static int task_group(const task_info_t *task) {
+    if (task->parent_pid < 0) {
+        return 2;
+    }
+    for (int i = 0; i < (int)(sizeof(DESKTOP_PARTS) / sizeof(DESKTOP_PARTS[0])); i++) {
+        if (strcmp(task->name, DESKTOP_PARTS[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void order_tasks(int total) {
+    task_count = 0;
+    for (int group = 0; group < 3; group++) {
+        if (group == 2 && !show_system_tasks) {
+            break;
+        }
+        int start = task_count;
+        for (int i = 0; i < total; i++) {
+            if (task_group(&every_task[i]) != group) {
+                continue;
+            }
+            int at = task_count++;
+            while (at > start && (group == 0 ? tasks[at - 1].pid < every_task[i].pid
+                                             : tasks[at - 1].pid > every_task[i].pid)) {
+                tasks[at] = tasks[at - 1];
+                at--;
+            }
+            tasks[at] = every_task[i];
+        }
+    }
+}
+
 static void refresh_tasks(void) {
-    long n = sys_taskinfo(tasks, TASK_INFO_MAX);
-    task_count = n > 0 ? (int)n : 0;
+    long n = sys_taskinfo(every_task, TASK_INFO_MAX);
+    order_tasks(n > 0 ? (int)n : 0);
     /* The selection is a process, not a row. The table is read again every
        tick, a process that exits above the selection moves everything below
        it up one, and End Task used to go to whatever had moved into the row
@@ -214,6 +257,12 @@ static void on_end_task(lv_event_t *event) {
 static void on_force_quit(lv_event_t *event) {
     (void)event;
     signal_selected(SIGKILL);
+}
+
+static void on_show_system(lv_event_t *event) {
+    show_system_tasks = lv_obj_has_state((lv_obj_t *)lv_event_get_target(event), LV_STATE_CHECKED) ? 1 : 0;
+    refresh_tasks();
+    printf("[tasks] system tasks %s, %d listed\n", show_system_tasks ? "shown" : "hidden", task_count);
 }
 
 static void on_tick(lv_timer_t *timer) {
@@ -282,6 +331,13 @@ static void build_user_interface(void) {
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
 
     lv_obj_t *footer = lvgl_theme_row(root, NULL);
+    lv_obj_t *system_switch = lv_switch_create(footer);
+    lv_obj_set_size(system_switch, 40, 22);
+    lv_obj_set_style_bg_color(system_switch, lvgl_theme_color(palette->outline), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(system_switch, lvgl_theme_color(palette->accent), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(system_switch, lvgl_theme_color(palette->text), LV_PART_KNOB);
+    lv_obj_add_event_cb(system_switch, on_show_system, LV_EVENT_VALUE_CHANGED, NULL);
+    lvgl_theme_caption(footer, "System tasks");
     status_label = lvgl_theme_caption(footer, "");
     lv_obj_set_flex_grow(status_label, 1);
     lv_obj_t *end_task = lvgl_theme_button(footer, "End Task", 0);
@@ -293,6 +349,7 @@ static void build_user_interface(void) {
     lvgl_window_report_geometry("list", list);
     lvgl_window_report_geometry("end_task", end_task);
     lvgl_window_report_geometry("force_quit", force_quit);
+    lvgl_window_report_geometry("show_system", system_switch);
 }
 
 static unsigned long count_drawn_pixels(void) {
@@ -320,6 +377,7 @@ int desktop_application_task_manager(int selftest) {
 
     build_user_interface();
     refresh_tasks();
+    printf("[tasks] %d programs listed, newest first\n", task_count);
     lv_timer_create(on_tick, TASK_MANAGER_REFRESH_MS, NULL);
 
     for (int frame = 0; frame < 8; frame++) {
