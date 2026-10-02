@@ -776,7 +776,12 @@ TEST_HDRS := $(shell find kernel system_api tests -name '*.h' 2>/dev/null)
 TEST_USER_DEPS := $(shell find user_space/library user_space/libc -name '*.c' \
                           -o -name '*.h' 2>/dev/null)
 
-$(TEST_BIN): $(TEST_SRCS) $(TEST_HDRS) $(TEST_USER_DEPS) $(TEST_SAN_STAMP) | $(TEST_BUILD)
+# A test that #includes a kernel source compiles it as part of itself, so
+# that source is a dependency make cannot see from TEST_SRCS - and an edit to
+# it would leave the fast tier grading the code as it was (found in M215).
+TEST_INCLUDED_KERNEL := $(sort $(patsubst ../%,%,$(shell grep -ho '"\.\./kernel/[^"]*\.c"' tests/test_*.c 2>/dev/null | tr -d '"')))
+
+$(TEST_BIN): $(TEST_SRCS) $(TEST_HDRS) $(TEST_USER_DEPS) $(TEST_INCLUDED_KERNEL) $(TEST_SAN_STAMP) | $(TEST_BUILD)
 	$(HOSTCC) $(TEST_CFLAGS) -o $@ $(TEST_SRCS)
 
 BLOCK_CACHE_SRCS := tests/blockcache/block_cache_test.c tests/runner.c \

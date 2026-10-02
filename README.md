@@ -27,6 +27,10 @@ UEFI firmware
   every command in `/bin` - so a setting is two keystrokes and Enter
   away and opens at its own pane. Restart and Shut Down ask first, with
   buttons as well as Y and N, so a trackpad alone can answer.
+  Settings, Tasks and the Wi-Fi wizard are one window each: opening one
+  that is already open brings it forward, and a pane chosen from the
+  Start menu lands in the open Settings. The taskbar's clock opens Date &
+  Time, the way the Wi-Fi bars beside it open the wizard.
 - **Window chrome that is not from 2005.** A 28px titlebar with its own
   vertical gradient rather than a flat fill, the title centred and bold,
   and an accent hairline along the top of the focused window - so focus

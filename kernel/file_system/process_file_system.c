@@ -4,7 +4,9 @@
 #include "architecture/x86_64/symmetric_multiprocessing.h"
 
 #include "drivers/pit.h"
+#include "drivers/ac97.h"
 #include "drivers/hardware_inventory.h"
+#include "drivers/pci.h"
 #include "drivers/i2c_touchpad.h"
 #include "drivers/mouse.h"
 #include "drivers/xhci.h"
@@ -85,6 +87,7 @@ enum {
     P_SYSCALLS,
     P_CPUINFO,
     P_INPUT,
+    P_SOUND,
 };
 
 static uint32_t buffer_cap_for(int kind) {
@@ -126,6 +129,9 @@ static int classify(const char *rel, int *out_pid) {
     }
     if (k_strcmp(p, "input") == 0) {
         return P_INPUT;
+    }
+    if (k_strcmp(p, "sound") == 0) {
+        return P_SOUND;
     }
 
     int pid = -1;
@@ -339,6 +345,21 @@ static void generate(process_file_t *f, int kind, int pid) {
         }
         break;
     }
+    case P_SOUND: {
+        /* M215: what can make a sound, so Settings says so rather than
+           offering a volume for an output that is not there. A controller
+           with no driver here is named too - the laptop's is Intel HD
+           Audio, and AC'97 is what this kernel drives. */
+        pci_device_t device;
+        if (ac97_available()) {
+            at = put_string(f->buffer, at, cap, "output\tac97\n");
+        }
+        if (pci_find_class(0x04, 0x03, PCI_PROG_IF_ANY, 0, &device)) {
+            at = put_string(f->buffer, at, cap, "undriven\thda\n");
+        }
+        at = put_string(f->buffer, at, cap, "beeper\tpc-speaker\n");
+        break;
+    }
     case P_CPUINFO: {
         char brand[HARDWARE_INVENTORY_BRAND_MAX];
         int named = hardware_inventory_cpu_brand(brand) > 0;
@@ -517,7 +538,7 @@ static int process_handle_stat(int handle, leanfs_stat_t *out) {
 static const char *const PID_FILES[] = {"status", "cmdline", "exe"};
 static const char *const ROOT_FILES[] = {"uptime", "meminfo", "mounts",
                                          "interrupts", "profile", "syscalls",
-                                         "cpuinfo", "input"};
+                                         "cpuinfo", "input", "sound"};
 #define ROOT_FILE_COUNT ((uint32_t)(sizeof(ROOT_FILES) / sizeof(ROOT_FILES[0])))
 
 static int process_readdir(const char *rel, uint32_t *cookie, leanfs_directory_entry_t *out) {

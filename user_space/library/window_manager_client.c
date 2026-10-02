@@ -389,6 +389,11 @@ int window_manager_set_display_scale(uint32_t percent) {
     return window_manager_send_action_value(-1, WINDOW_MANAGER_ACTION_SET_SCALE, (int32_t)percent);
 }
 
+int window_manager_open_catalogue(int kind, int index) {
+    return window_manager_send_action_value(-1, WINDOW_MANAGER_ACTION_OPEN_CATALOGUE,
+                                            window_manager_pack_pair((uint32_t)kind, (uint32_t)index));
+}
+
 int window_manager_ask_power(int mode) {
     return window_manager_send_action_value(-1, WINDOW_MANAGER_ACTION_ASK_POWER, (int32_t)mode);
 }

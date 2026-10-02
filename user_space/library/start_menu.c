@@ -382,3 +382,29 @@ int start_menu_result_command(const start_menu_t *menu, int result, char *path, 
         return join(path, path_capacity, PATH_BIN_DIRECTORY, menu->commands[r->index]);
     }
 }
+
+/* An entry by its place in the catalogue, for a program that is not the
+   menu but wants what the menu would start - refused for anything outside
+   the two lists. */
+int start_menu_catalogue_command(int kind, int index, char *path, size_t path_capacity, const char **argument) {
+    const start_menu_entry_t *entry = 0;
+    if (kind == START_MENU_APP && index >= 0 && index < START_MENU_APP_COUNT) {
+        entry = &START_MENU_APPS[index];
+    } else if (kind == START_MENU_SETTING && index >= 0 && index < START_MENU_SETTING_COUNT) {
+        entry = &START_MENU_SETTINGS[index];
+    }
+    if (!entry) {
+        return -1;
+    }
+    *argument = entry->argument;
+    return join(path, path_capacity, PATH_BIN_DIRECTORY, entry->program);
+}
+
+int start_menu_setting_named(const char *argument) {
+    for (int i = 0; i < START_MENU_SETTING_COUNT; i++) {
+        if (same(START_MENU_SETTINGS[i].argument, argument)) {
+            return i;
+        }
+    }
+    return -1;
+}

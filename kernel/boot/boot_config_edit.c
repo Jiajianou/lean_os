@@ -44,7 +44,7 @@ uint32_t boot_config_content_length(const char *text, uint32_t length) {
     while (end > 0 && (text[end - 1] == '\n' || text[end - 1] == '\0' || is_space(text[end - 1]))) {
         end--;
     }
-    if (end < length && text[end] == '\n') {
+    if (end > 0 && end < length && text[end] == '\n') {
         end++;
     }
     return end;

@@ -14,6 +14,8 @@ int desktop_application_wallpaper_selftest(int selftest);
 
 extern const char *desktop_application_argument;
 
+#define DESKTOP_APPLICATION_SETTINGS_PANE_REQUEST "/tmp/.settings-pane"
+
 #include <stddef.h>
 #include <stdint.h>
 

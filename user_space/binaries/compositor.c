@@ -2281,12 +2281,25 @@ static void accept_pending_window(int request_read_file_descriptor, int response
     }
 }
 
+/* M215. The answer is written without blocking (M209), and it is 632 bytes
+   in a pipe of 1,024: when two programs asked at once - the taskbar polls,
+   Settings and the Task Manager ask too - the second answer did not fit,
+   the write said EAGAIN, the answer was dropped and its asker waited
+   forever. A ping is taken only once the answer owed for the last one has
+   gone; until then it waits in its pipe, and the answer is tried again on
+   the next turn of the loop, made fresh. */
+static int query_answer_owed;
+static int settings_answer_owed;
+
 static void accept_pending_query(int query_read_file_descriptor, int query_response_write_file_descriptor) {
-    if (sys_pipe_poll(query_read_file_descriptor) < 1) {
-        return;
+    if (!query_answer_owed) {
+        if (sys_pipe_poll(query_read_file_descriptor) < 1) {
+            return;
+        }
+        uint8_t ping;
+        sys_read(query_read_file_descriptor, &ping, sizeof(ping));
+        query_answer_owed = 1;
     }
-    uint8_t ping;
-    sys_read(query_read_file_descriptor, &ping, sizeof(ping));
 
     window_manager_query_response_t response;
     response.count = 0;
@@ -2312,7 +2325,9 @@ static void accept_pending_query(int query_read_file_descriptor, int query_respo
         memcpy(response.windows[out].title, win->title, WINDOW_MANAGER_TITLE_MAX);
         response.count++;
     }
-    sys_write(query_response_write_file_descriptor, &response, sizeof(response));
+    if (sys_write(query_response_write_file_descriptor, &response, sizeof(response)) == (long)sizeof(response)) {
+        query_answer_owed = 0;
+    }
 }
 
 static void apply_window_action(int idx, uint32_t action, int32_t value) {
@@ -3057,6 +3072,20 @@ static void accept_one_action(int action_read_file_descriptor) {
         mode_revert_at_ms = sys_uptime_ms() + WINDOW_MANAGER_MODE_REVERT_MS;
         return;
     }
+    if (request.action == WINDOW_MANAGER_ACTION_OPEN_CATALOGUE) {
+        char path[PATH_MAX_LENGTH];
+        const char *argument = "";
+        if (start_menu_catalogue_command((int)window_manager_pair_first(request.value),
+                                         (int)window_manager_pair_second(request.value), path, sizeof(path),
+                                         &argument) == 0) {
+            long rc = sys_spawn(path, argument);
+            if (rc < 0) {
+                toast_post(WINDOW_MANAGER_NOTIFY_ERROR, "Could not open that", spawn_error_message(rc));
+            }
+            child_track(rc);
+        }
+        return;
+    }
     if (request.action == WINDOW_MANAGER_ACTION_ASK_POWER) {
         if (request.value == POWER_REBOOT || request.value == POWER_OFF) {
             launcher_set_open(1);
@@ -3212,12 +3241,15 @@ static void accept_pending_notify(int notify_read_file_descriptor) {
 }
 
 static void accept_pending_settings_query(int query_read_file_descriptor, int query_response_write_file_descriptor) {
-    if (sys_pipe_poll(query_read_file_descriptor) < 1) {
-        return;
-    }
-    uint8_t ping;
-    if (read_exact(query_read_file_descriptor, &ping, sizeof(ping)) != (long)sizeof(ping)) {
-        return;
+    if (!settings_answer_owed) {
+        if (sys_pipe_poll(query_read_file_descriptor) < 1) {
+            return;
+        }
+        uint8_t ping;
+        if (read_exact(query_read_file_descriptor, &ping, sizeof(ping)) != (long)sizeof(ping)) {
+            return;
+        }
+        settings_answer_owed = 1;
     }
     window_manager_settings_request_t response;
     response.volume = audio_volume;
@@ -3229,7 +3261,9 @@ static void accept_pending_settings_query(int query_read_file_descriptor, int qu
     response.clock_24_hour = clock_24_hour;
     response.utc_offset_minutes = utc_offset_minutes;
     response.restore_windows = restore_windows;
-    sys_write(query_response_write_file_descriptor, &response, sizeof(response));
+    if (sys_write(query_response_write_file_descriptor, &response, sizeof(response)) == (long)sizeof(response)) {
+        settings_answer_owed = 0;
+    }
 }
 
 static int window_under_cursor(void) {
@@ -3951,6 +3985,9 @@ static int idle_wait_ms(void) {
     }
     if (mode_revert_at_ms != 0 && mode_revert_at_ms < due) {
         due = mode_revert_at_ms;
+    }
+    if ((query_answer_owed || settings_answer_owed) && now + 2 < due) {
+        due = now + 2;
     }
     if (shutdown_pending_mode != POWER_CONFIRM_NONE && now + 10 < due) {
         due = now + 10;

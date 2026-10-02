@@ -4,6 +4,7 @@
 #include "application_dispatch.h"
 #include "desktop_applications.h"
 #include "syscall_wrappers.h"
+#include "window_manager_client.h"
 
 typedef int (*desktop_application_entry_t)(int selftest);
 
@@ -30,6 +31,55 @@ const char *desktop_application_argument;
 #define DESKTOP_APPLICATION_COUNT \
     ((int)(sizeof(DESKTOP_APPLICATION_NAMES) / sizeof(DESKTOP_APPLICATION_NAMES[0])))
 
+/* M215. Two Settings windows disagree about the same settings, two Task
+   managers about the same tasks, and two Wi-Fi wizards about one radio, so
+   opening one of these when it is already open brings that window forward -
+   onto its own desktop, out of the taskbar if it was minimised - instead of
+   stacking a second. A pane asked for on the way (the Start menu's Display,
+   say) is left where Settings looks for it each tick. */
+typedef struct {
+    const char *name;
+    const char *title;
+} single_window_t;
+
+static const single_window_t SINGLE_WINDOW[] = {
+    {"settings", "Settings"},
+    {"task_manager", "Tasks"},
+    {"wifi", "Wi-Fi"},
+};
+
+static int bring_forward_existing(const char *name) {
+    const char *title = 0;
+    for (int i = 0; i < (int)(sizeof(SINGLE_WINDOW) / sizeof(SINGLE_WINDOW[0])); i++) {
+        if (strcmp(name, SINGLE_WINDOW[i].name) == 0) {
+            title = SINGLE_WINDOW[i].title;
+        }
+    }
+    if (!title) {
+        return 0;
+    }
+    static window_manager_query_response_t windows;
+    if (window_manager_query_windows(&windows) != 0) {
+        return 0;
+    }
+    for (int i = 0; i < windows.count && i < WINDOW_MANAGER_MAX_ROUTABLE_WINDOWS; i++) {
+        if (strcmp(windows.windows[i].title, title) != 0) {
+            continue;
+        }
+        if (desktop_application_argument && desktop_application_argument[0] && strcmp(name, "settings") == 0) {
+            FILE *request = fopen(DESKTOP_APPLICATION_SETTINGS_PANE_REQUEST, "w");
+            if (request) {
+                fputs(desktop_application_argument, request);
+                fclose(request);
+            }
+        }
+        window_manager_send_action(windows.windows[i].window_id, WINDOW_MANAGER_ACTION_FOCUS);
+        printf("[%s] already open - brought its window forward\n", name);
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *invoked = argc > 0 && argv[0] ? argv[0] : "";
     int selftest = 0;
@@ -55,6 +105,9 @@ int main(int argc, char **argv) {
             printf("  %s\n", DESKTOP_APPLICATION_NAMES[i]);
         }
         return 1;
+    }
+    if (!selftest && bring_forward_existing(DESKTOP_APPLICATION_NAMES[index])) {
+        return 0;
     }
     return DESKTOP_APPLICATION_ENTRIES[index](selftest);
 }

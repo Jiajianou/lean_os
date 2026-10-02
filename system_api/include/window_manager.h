@@ -157,6 +157,13 @@ typedef enum {
        is a POWER_ mode). It asks the person, so a program needs no power
        capability to send it: nothing happens until somebody says yes. */
     WINDOW_MANAGER_ACTION_ASK_POWER = 22,
+    /* M215: open one of the Start menu's own entries - value is the kind
+       (an application or a Settings pane) in the high half and its place in
+       that list in the low. The compositor starts it, so it holds what the
+       Start menu would have given it rather than what the asker holds: the
+       taskbar's clock opens Date & Time with Settings' own capabilities.
+       Nothing outside the menu's catalogue can be named this way. */
+    WINDOW_MANAGER_ACTION_OPEN_CATALOGUE = 23,
 } window_manager_action_type_t;
 
 static inline int32_t window_manager_pack_pair(uint32_t first, uint32_t second) {

@@ -1763,7 +1763,10 @@ def test_behaviour_settings_persist(m):
     wait_for(m, lambda s: not motion_is_on(m, s, origin),
              "clicking the Motion switch did not turn animations off")
 
+    mark = len(m.read_log())
     settings_pane(m, origin, "sound")
+    wait_for_log_after(m, "[settings] sound output ac97", mark,
+                       "the Sound pane did not find the AC'97 card this machine has (M215's /proc/sound)")
     check(volume_is_audible(m, m.screenshot(), origin),
           "the volume did not start un-muted, which is the default")
     m.click(*widget_point(m, origin, "volume", 0.0, 0.5))
@@ -2757,8 +2760,39 @@ def test_start_menu_search_opens_a_setting_at_its_pane(m):
     wait_for_log_after(m, "[settings] showing Trackpad", mark,
                        "searching the Start menu for touchpad and pressing Enter did not open Trackpad settings")
 
+def test_settings_opens_once_and_takes_the_pane_it_is_asked_for(m):
+    # M215: a second Settings is the open one brought forward, and a pane
+    # chosen from the Start menu lands in it.
+    boot(m)
+    m.double_click(ICON_X, ICONS[3][2])
+    wait_for_windows(m, 1)
+    geometry(m, "pane_general")
+    mark = len(m.read_log())
+    m.double_click(ICON_X, ICONS[3][2])
+    wait_for_log_after(m, "[settings] already open", mark, "opening Settings again did not find the open one")
+    time.sleep(2.0)
+    check(count_app_windows(m.screenshot()) == 1, "opening Settings a second time made a second window")
+
+    mark = len(m.read_log())
+    m.sendkey("ctrl-spc")
+    m.type_text("wallpaper")
+    m.sendkey("ret")
+    wait_for_log_after(m, "[settings] showing Wallpaper", mark,
+                       "Wallpaper from the Start menu did not switch the open Settings to that pane")
+    check(count_app_windows(m.screenshot()) == 1, "choosing a pane from the Start menu made a second Settings")
+
+def test_the_taskbar_clock_opens_date_and_time(m):
+    boot(m)
+    mark = len(m.read_log())
+    m.click(1024 - 30, PANEL_TOP + PANEL_H // 2)
+    wait_for_log_after(m, "[settings] showing Date & Time", mark, "clicking the taskbar clock did not open Date & Time")
+    wait_for_windows(m, 1)
+
 TESTS = [
     ("a_tap_reaches_every_toolkit_control", test_a_tap_reaches_every_toolkit_control),
+    ("settings_opens_once_and_takes_the_pane_it_is_asked_for",
+     test_settings_opens_once_and_takes_the_pane_it_is_asked_for),
+    ("the_taskbar_clock_opens_date_and_time", test_the_taskbar_clock_opens_date_and_time),
     ("start_menu_confirmation_answers_a_click", test_start_menu_confirmation_answers_a_click),
     ("start_menu_search_opens_a_setting_at_its_pane", test_start_menu_search_opens_a_setting_at_its_pane),
     ("display_scale_and_startup_mode_on_a_fixed_mode_screen",
@@ -2860,6 +2894,7 @@ def _die_on_signal(signum, _frame):
     raise KeyboardInterrupt("received signal %d" % signum)
 
 QUICK_TESTS = [
+    "settings_opens_once_and_takes_the_pane_it_is_asked_for",
     "start_menu_search_opens_a_setting_at_its_pane",
     "a_tap_reaches_every_toolkit_control",
     "desktop_context_menu",

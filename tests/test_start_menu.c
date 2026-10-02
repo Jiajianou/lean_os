@@ -207,3 +207,20 @@ TEST(start_menu, a_name_longer_than_the_menu_keeps_is_left_out_rather_than_cut) 
     CHECK_EQ(menu.command_count, 2);
     CHECK_EQ(strcmp(menu.commands[1], "after"), 0);
 }
+
+TEST(start_menu, the_catalogue_names_only_what_the_menu_would_start) {
+    char path[64];
+    const char *argument = 0;
+    int date_time = start_menu_setting_named("date_time");
+    CHECK(date_time >= 0);
+    CHECK_EQ(start_menu_catalogue_command(START_MENU_SETTING, date_time, path, sizeof(path), &argument), 0);
+    CHECK_EQ(strcmp(path, "/bin/settings"), 0);
+    CHECK_EQ(strcmp(argument, "date_time"), 0);
+    CHECK_EQ(start_menu_catalogue_command(START_MENU_APP, 0, path, sizeof(path), &argument), 0);
+    CHECK_EQ(strcmp(path, "/bin/file_manager"), 0);
+    CHECK_EQ(start_menu_catalogue_command(START_MENU_APP, START_MENU_APP_COUNT, path, sizeof(path), &argument), -1);
+    CHECK_EQ(start_menu_catalogue_command(START_MENU_SETTING, -1, path, sizeof(path), &argument), -1);
+    CHECK_EQ(start_menu_catalogue_command(START_MENU_COMMAND, 0, path, sizeof(path), &argument), -1);
+    CHECK_EQ(start_menu_catalogue_command(START_MENU_RECENT, 0, path, sizeof(path), &argument), -1);
+    CHECK_EQ(start_menu_setting_named("nonsense"), -1);
+}

@@ -1,5 +1,6 @@
 #include "icons.h"
 #include "settings_file.h"
+#include "start_menu.h"
 #include "string_utilities.h"
 #include "syscall_wrappers.h"
 #include "time_format.h"
@@ -611,9 +612,21 @@ static void open_wifi(void) {
     sys_spawn("/bin/wifi", 0);
 }
 
+/* M215: the clock is a way into the setting that decides how it reads -
+   12- or 24-hour, the time zone - the way the bars beside it are a way into
+   Wi-Fi. */
+static int clock_hit(int32_t x, int32_t y, int32_t width) {
+    int32_t left = width - TRAY_PAD - clock_text_w() - TRAY_PAD / 2;
+    return x >= left && x < width && y >= 0 && y < PANEL_HEIGHT;
+}
+
 static void handle_click(int32_t x, int32_t y, int32_t width) {
     if (wifi_hit(x, y, width)) {
         open_wifi();
+        return;
+    }
+    if (clock_hit(x, y, width)) {
+        window_manager_open_catalogue(START_MENU_SETTING, start_menu_setting_named("date_time"));
         return;
     }
     int hit = button_at(x, y);

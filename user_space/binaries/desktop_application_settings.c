@@ -494,8 +494,28 @@ static void wireless_description(char *out, size_t capacity) {
     }
 }
 
+static settings_pane_t pane_named(const char *name);
+static void build_page(void);
+
+/* M215: another start of Settings found this one open and left the pane it
+   was asked for here. */
+static void take_pane_request(void) {
+    char name[32];
+    int length = read_text_file(DESKTOP_APPLICATION_SETTINGS_PANE_REQUEST, name, sizeof(name));
+    if (length < 0) {
+        return;
+    }
+    sys_unlink(DESKTOP_APPLICATION_SETTINGS_PANE_REQUEST);
+    settings_pane_t pane = pane_named(name);
+    if (pane != active_pane) {
+        active_pane = pane;
+        build_page();
+    }
+}
+
 static void on_tick(lv_timer_t *timer) {
     (void)timer;
+    take_pane_request();
     refresh_clipboard_label();
     refresh_clock_labels();
     refresh_display_size_label();
@@ -1187,7 +1207,18 @@ static void build_display(void) {
 
 static void build_sound(void) {
     page_title("Sound", "How loud the machine is.");
-    lv_obj_t *card = lvgl_theme_card(page, "OUTPUT");
+    static char devices[256];
+    int have_list = read_text_file(PATH_PROCESS_DIRECTORY "sound", devices, sizeof(devices)) >= 0;
+    int ac97 = have_list && strstr(devices, "output\tac97") != 0;
+    int hda = have_list && strstr(devices, "undriven\thda") != 0;
+    lv_obj_t *card = lvgl_theme_card(page, "THIS MACHINE");
+    fact(card, "Output", ac97 ? "AC'97 audio" : "None this system can drive");
+    if (hda) {
+        wrap_caption(card, "This machine's sound is Intel High Definition Audio, which lean_os has no driver "
+                           "for yet - so there is no sound but the error beep, and only where the machine has "
+                           "a beeper of its own.");
+    }
+    card = lvgl_theme_card(page, "OUTPUT");
     lv_obj_t *row = lvgl_theme_row(card, "Volume");
     volume_slider = slider(row, 0, 100, (int32_t)current.volume, on_volume_changed);
     char text[8];
@@ -1195,7 +1226,9 @@ static void build_sound(void) {
     volume_value_label = lvgl_theme_value(row, text);
     lv_obj_set_width(volume_value_label, 44);
     lv_obj_set_style_text_align(volume_value_label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-    wrap_caption(card, "Applies to the AC'97 output and the speaker's error beep. Zero is silent.");
+    wrap_caption(card, ac97 ? "Applies to the AC'97 output and the speaker's error beep. Zero is silent."
+                            : "Applies to the error beep. Zero is silent.");
+    printf("[settings] sound output %s\n", ac97 ? "ac97" : hda ? "undriven hda" : "none");
 }
 
 static void build_mouse(void) {

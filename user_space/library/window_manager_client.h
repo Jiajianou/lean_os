@@ -60,6 +60,8 @@ void window_manager_quit(window_manager_window_t *win, int status) __attribute__
 int window_manager_set_display_mode(uint32_t width, uint32_t height);
 int window_manager_set_display_scale(uint32_t percent);
 
+int window_manager_open_catalogue(int kind, int index);
+
 int window_manager_ask_power(int mode);
 
 int window_manager_confirm_display_mode(void);
