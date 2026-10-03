@@ -53,6 +53,7 @@ long sys_mprotect(void *address, unsigned long length, int prot);
 long sys_madvise(void *address, unsigned long length, int advice);
 long sys_mincore(void *address, unsigned long length, unsigned char *vector);
 long sys_sockname(int fd, os_sockaddr_t *out);
+long sys_peername(int fd, os_sockaddr_t *out);
 
 long sys_chdir(const char *path);
 long sys_getcwd(char *buffer, size_t maxlen);

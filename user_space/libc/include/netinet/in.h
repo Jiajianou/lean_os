@@ -80,6 +80,13 @@ struct sockaddr_in6 {
     (__in6_zero12(a) && __in6_byte(a, 12) == 0 && __in6_byte(a, 13) == 0 &&\
      __in6_byte(a, 14) == 0 && __in6_byte(a, 15) == 1)
 #define IN6_IS_ADDR_MULTICAST(a) (__in6_byte(a, 0) == 0xFF)
+#define __in6_mc_scope(a, s)                                              \
+    (IN6_IS_ADDR_MULTICAST(a) && (__in6_byte(a, 1) & 0x0F) == (s))
+#define IN6_IS_ADDR_MC_NODELOCAL(a) __in6_mc_scope(a, 0x1)
+#define IN6_IS_ADDR_MC_LINKLOCAL(a) __in6_mc_scope(a, 0x2)
+#define IN6_IS_ADDR_MC_SITELOCAL(a) __in6_mc_scope(a, 0x5)
+#define IN6_IS_ADDR_MC_ORGLOCAL(a)  __in6_mc_scope(a, 0x8)
+#define IN6_IS_ADDR_MC_GLOBAL(a)    __in6_mc_scope(a, 0xE)
 #define IN6_IS_ADDR_LINKLOCAL(a)                                          \
     (__in6_byte(a, 0) == 0xFE && (__in6_byte(a, 1) & 0xC0) == 0x80)
 #define IN6_IS_ADDR_SITELOCAL(a)                                          \
@@ -227,6 +234,12 @@ struct in6_pktinfo {
 struct ip_mreq {
     struct in_addr imr_multiaddr;
     struct in_addr imr_interface;
+};
+
+struct ip_mreq_source {
+    struct in_addr imr_multiaddr;
+    struct in_addr imr_interface;
+    struct in_addr imr_sourceaddr;
 };
 
 struct ipv6_mreq {

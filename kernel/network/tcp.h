@@ -70,6 +70,10 @@ int tcp_receive(struct tcpcb *tcb, uint8_t *out, uint16_t max);
 int tcp_peek(const struct tcpcb *tcb, uint8_t *out, uint16_t max);
 
 int tcp_bytes_available(const struct tcpcb *tcb);
+/* M223. Whether a read would return end-of-file now - the peer's FIN, a
+   reset, or a connection that has closed - which is what makes a socket
+   readable with nothing in it. A socket that never had a peer has not ended. */
+int tcp_receive_ended(const struct tcpcb *tcb);
 int tcp_send_space(const struct tcpcb *tcb);
 tcp_state_t tcp_state(const struct tcpcb *tcb);
 uint16_t tcp_local_port(const struct tcpcb *tcb);

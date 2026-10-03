@@ -14,6 +14,7 @@
 #include "library/kernel_library.h"
 #include "memory_management/heap.h"
 #include "memory_management/physical_memory.h"
+#include "memory_management/virtual_memory.h"
 #include "library/spinlock.h"
 #include "profile/sampler.h"
 #include "profile/syscall_counters.h"
@@ -83,6 +84,7 @@ enum {
     P_STATUS,
     P_CMDLINE,
     P_EXE,
+    P_STATM,
     P_PROFILE,
     P_SYSCALLS,
     P_CPUINFO,
@@ -170,6 +172,9 @@ static int classify(const char *rel, int *out_pid) {
     }
     if (k_strcmp(rest, "exe") == 0) {
         return P_EXE;
+    }
+    if (k_strcmp(rest, "statm") == 0) {
+        return P_STATM;
     }
     return P_NONE;
 }
@@ -288,8 +293,32 @@ static void generate(process_file_t *f, int kind, int pid) {
         task_t *t = scheduler_task_by_id(pid);
         if (t) {
             at = put_string(f->buffer, at, cap, "/bin/");
-            at = put_string(f->buffer, at, cap, t->name);
+            at = put_string(f->buffer, at, cap, t->program[0] ? t->program : t->name);
         }
+        break;
+    }
+    case P_STATM: {
+        /* M223. statm(5), in pages: size resident shared text lib data dt.
+           Resident is exact - the page tables' own count, which with no swap
+           is what resident means - and it is the field the C library and
+           libuv read. Size is every page the mmap regions reserve plus every
+           resident page, which counts a resident page inside a region twice:
+           an upper bound, because the image and the stack are not regions and
+           a reservation PartitionAlloc never touches is not in a page table.
+           The rest are zero, which Linux also reports for lib and dt. */
+        task_t *t = scheduler_task_by_id(pid);
+        if (!t) {
+            break;
+        }
+        uint64_t resident = virtual_memory_rss_pages(t->pml4_phys);
+        uint64_t reserved = 0;
+        for (uint32_t i = 0; t->mmaps && i < t->mmap_capacity && t->mmaps[i].pages; i++) {
+            reserved += t->mmaps[i].pages;
+        }
+        at = put_dec(f->buffer, at, cap, reserved + resident);
+        at = put_string(f->buffer, at, cap, " ");
+        at = put_dec(f->buffer, at, cap, resident);
+        at = put_string(f->buffer, at, cap, " 0 0 0 0 0\n");
         break;
     }
     case P_PROFILE: {
@@ -535,7 +564,7 @@ static int process_handle_stat(int handle, leanfs_stat_t *out) {
     return 0;
 }
 
-static const char *const PID_FILES[] = {"status", "cmdline", "exe"};
+static const char *const PID_FILES[] = {"status", "cmdline", "exe", "statm"};
 static const char *const ROOT_FILES[] = {"uptime", "meminfo", "mounts",
                                          "interrupts", "profile", "syscalls",
                                          "cpuinfo", "input", "sound"};
@@ -547,7 +576,7 @@ static int process_readdir(const char *rel, uint32_t *cookie, leanfs_directory_e
     uint32_t i = *cookie;
 
     if (k == P_PIDDIR) {
-        if (i >= 3) {
+        if (i >= sizeof(PID_FILES) / sizeof(PID_FILES[0])) {
             return 0;
         }
         out->inode = 0;
@@ -614,7 +643,7 @@ static int64_t process_readlink(const char *rel, char *buffer, size_t maxlen) {
     for (const char *p = prefix; *p && at + 1 < maxlen; p++) {
         buffer[at++] = *p;
     }
-    for (const char *p = t->name; *p && at + 1 < maxlen; p++) {
+    for (const char *p = t->program[0] ? t->program : t->name; *p && at + 1 < maxlen; p++) {
         buffer[at++] = *p;
     }
     buffer[at] = '\0';

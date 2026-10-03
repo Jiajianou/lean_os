@@ -1,0 +1,162 @@
+diff --git a/electron/BUILD.gn b/electron/BUILD.gn
+index ea20aa116..a31eac61a 100644
+--- a/electron/BUILD.gn
++++ b/electron/BUILD.gn
+@@ -1,4 +1,7 @@
++import("//build/config/features.gni")
++import("//build/config/linux/gtk/gtk.gni")
+ import("//build/config/locales.gni")
++import("//build/config/ozone.gni")
+ import("//build/config/ui.gni")
+ import("//build/config/win/manifest.gni")
+ import("//components/spellcheck/spellcheck_build_features.gni")
+@@ -69,10 +72,20 @@ if (is_linux) {
+   import("//electron/build/linux/strip_binary.gni")
+   import("//tools/generate_stubs/rules.gni")
+ 
++}
++
++# Each Linux desktop library behind the flag Chromium already has for it, so a
++# Linux-family platform without GLib, GTK, D-Bus or X11 configures. These are
++# evaluated when the file is read, whatever is being built: pkg_config() runs
++# pkg-config at gn gen time, and a dependency on //ui/gtk loads a file that
++# asserts use_gio.
++if (is_linux && use_gio) {
+   pkg_config("gio_unix") {
+     packages = [ "gio-unix-2.0" ]
+   }
++}
+ 
++if (is_linux && use_glib) {
+   pkg_config("libnotify_config") {
+     packages = [
+       "glib-2.0",
+@@ -102,7 +115,9 @@ if (is_linux) {
+       "notify_notification_close",
+     ]
+   }
++}
+ 
++if (is_linux && use_gtk) {
+   # Generates headers which contain stubs for extracting function ptrs
+   # from the gtk library. Function signatures for which stubs are
+   # required should be declared in the sig files.
+@@ -747,35 +762,57 @@ source_set("electron_lib") {
+     }
+   }
+   if (is_linux) {
+-    libs = [ "xshmfence" ]
+     deps += [
+-      ":electron_gtk_stubs",
+-      ":libnotify_loader",
+-      "//build/config/linux/gtk",
+       "//components/crash/content/browser",
+-      "//components/os_crypt/async/browser:freedesktop_secret_key_provider",
+       "//components/os_crypt/async/browser:posix_key_provider",
+-      "//components/os_crypt/async/browser:secret_portal_key_provider",
+-      "//dbus",
+       "//device/bluetooth",
+       "//third_party/crashpad/crashpad/client",
+       "//ui/base/ime/linux",
+-      "//ui/events/devices/x11",
+-      "//ui/events/platform/x11",
+-      "//ui/gtk:gtk_config",
+       "//ui/linux:display_server_utils",
+       "//ui/linux:linux_ui",
+       "//ui/linux:linux_ui_factory",
+       "//ui/wm",
+     ]
++    if (use_gtk) {
++      deps += [
++        ":electron_gtk_stubs",
++        "//build/config/linux/gtk",
++        "//ui/gtk:gtk_config",
++      ]
++      sources += [
++        "shell/browser/ui/gtk_util.cc",
++        "shell/browser/ui/gtk_util.h",
++      ]
++    }
++    if (use_glib) {
++      deps += [ ":libnotify_loader" ]
++    }
++    if (use_gio) {
++      configs += [ ":gio_unix" ]
++    }
++    if (use_dbus) {
++      deps += [
++        "//components/os_crypt/async/browser:freedesktop_secret_key_provider",
++        "//components/os_crypt/async/browser:secret_portal_key_provider",
++        "//dbus",
++      ]
++    }
+     if (ozone_platform_x11) {
++      libs = [ "xshmfence" ]
+       sources += filenames.lib_sources_linux_x11
++      deps += [
++        "//ui/events/devices/x11",
++        "//ui/events/platform/x11",
++      ]
+       public_deps += [
+         "//ui/base/x",
+         "//ui/ozone/platform/x11",
+       ]
++      sources += [
++        "shell/browser/linux/x11_util.cc",
++        "shell/browser/linux/x11_util.h",
++      ]
+     }
+-    configs += [ ":gio_unix" ]
+     defines += [
+       # Disable warnings for g_settings_list_schemas.
+       "GLIB_DISABLE_DEPRECATION_WARNINGS",
+@@ -784,10 +821,6 @@ source_set("electron_lib") {
+     sources += [
+       "shell/browser/certificate_manager_model.cc",
+       "shell/browser/certificate_manager_model.h",
+-      "shell/browser/linux/x11_util.cc",
+-      "shell/browser/linux/x11_util.h",
+-      "shell/browser/ui/gtk_util.cc",
+-      "shell/browser/ui/gtk_util.h",
+     ]
+   }
+   if (is_win) {
+@@ -1090,7 +1123,11 @@ if (electron_generate_js2c_code_cache) {
+ # of toolchain, so this is only well-formed in the default toolchain (where
+ # $root_out_dir == $root_build_dir). It is also only needed there -- only the
+ # shipped framework reads snapshot_checksum.h.
+-if (current_toolchain == default_toolchain) {
++# Defined under the condition it is used under. With the startup data linked
++# into the binary there is no v8_context_snapshot.bin for it to read, and gn
++# refuses a target whose input nothing generates even when nothing needs it.
++if (current_toolchain == default_toolchain && v8_use_external_startup_data &&
++    use_v8_context_snapshot) {
+   action("mksnapshot_checksum_gen") {
+     script = "build/checksum_header.py"
+ 
+diff --git a/electron/chromium_src/BUILD.gn b/electron/chromium_src/BUILD.gn
+index bf459cbdc..ee6551c0c 100644
+--- a/electron/chromium_src/BUILD.gn
++++ b/electron/chromium_src/BUILD.gn
+@@ -216,13 +216,15 @@ static_library("chrome") {
+       "//chrome/browser/ui/views/frame/caption_button_placeholder_container.h",
+       "//chrome/browser/ui/views/status_icons/concat_menu_model.cc",
+       "//chrome/browser/ui/views/status_icons/concat_menu_model.h",
+-      "//chrome/browser/ui/views/status_icons/status_icon_linux_dbus.cc",
+-      "//chrome/browser/ui/views/status_icons/status_icon_linux_dbus.h",
+-    ]
+-    public_deps += [
+-      "//components/dbus",
+-      "//ui/linux:dark_mode_manager",
+     ]
++    if (use_dbus) {
++      public_deps += [ "//ui/linux:dark_mode_manager" ]
++      sources += [
++        "//chrome/browser/ui/views/status_icons/status_icon_linux_dbus.cc",
++        "//chrome/browser/ui/views/status_icons/status_icon_linux_dbus.h",
++      ]
++      public_deps += [ "//components/dbus" ]
++    }
+     if (use_aura && use_dbus) {
+       sources += [
+         "//chrome/browser/ui/views/eye_dropper/eye_dropper_portal.cc",

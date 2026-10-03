@@ -108,7 +108,7 @@ if [ -d "$SRC/electron" ]; then
   check $? "this fork's series, Electron's and tools/electron-port all apply exactly - no fuzz"
 
   python3 tools/electron-fit.py --self-test
-  check $? "and that measurement refuses a drifted anchor, a fuzzed hunk and an unused fit"
+  check $? "and that measurement refuses a drifted anchor, a fuzzed hunk, an unused fit and a plain diff that does not apply"
 else
   echo "chromium-test: no Electron checkout - run tools/fetch-electron.sh for M222"
 fi

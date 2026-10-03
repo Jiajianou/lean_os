@@ -1479,8 +1479,12 @@ def test_file_manager_puts_back_and_undoes(m):
     mark = fm_mark(m)
     fm_click(m, origin, "place_trash")
     fm_showing(m, FILES_TRASH, mark, "the Trash did not open")
-    check(fm_rows_with_text(m, m.screenshot(), origin) == 0,
-          "undo left something behind in the Trash")
+    # The log line is written when the list changes and the frame after it is
+    # painted later, so a screenshot taken the moment it appears can still be
+    # /home's rows. Every other step here waits for its end state; so does
+    # this one, and the state it waits for is the same: an empty Trash.
+    wait_for(m, lambda s: fm_rows_with_text(m, s, origin) == 0,
+             "undo left something behind in the Trash", timeout=15.0)
 
     mark = fm_mark(m)
     fm_click(m, origin, "back")

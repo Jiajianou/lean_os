@@ -54,6 +54,10 @@ struct hostent {
 
 #define NI_NUMERICHOST 1
 #define NI_NUMERICSERV 2
+#define NI_NOFQDN      4
+#define NI_NAMEREQD    8
+#define NI_DGRAM       16
+#define NI_NUMERICSCOPE 0x100
 #define NI_MAXHOST     256
 #define NI_MAXSERV     32
 
@@ -75,6 +79,23 @@ int  getnameinfo(const struct sockaddr *addr, socklen_t addrlen,
                  char *serv, socklen_t servlen, int flags);
 
 struct hostent *gethostbyname(const char *name);
+
+/* The services database is /etc/services in its usual format. A machine
+   without one has no names for ports, and these say so by returning null
+   rather than by carrying a table of their own. */
+struct servent {
+    char  *s_name;
+    char **s_aliases;
+    int    s_port;
+    char  *s_proto;
+};
+
+struct servent *getservbyname(const char *name, const char *proto);
+struct servent *getservbyport(int port, const char *proto);
+int getservbyname_r(const char *name, const char *proto, struct servent *result,
+                    char *buffer, size_t length, struct servent **out);
+int getservbyport_r(int port, const char *proto, struct servent *result,
+                    char *buffer, size_t length, struct servent **out);
 
 #ifdef __cplusplus
 }

@@ -30,6 +30,7 @@ typedef struct open_file {
     int refcount;
     char path[OPEN_FILE_PATH_MAX];
     uint8_t is_directory;
+    uint8_t synchronous;
 } open_file_t;
 
 open_file_t *open_file_alloc(int handle, int writable, const char *path, int is_directory);

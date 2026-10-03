@@ -543,11 +543,18 @@ int getsockname(int fd, struct sockaddr *address, socklen_t *length) {
 }
 
 int getpeername(int fd, struct sockaddr *address, socklen_t *length) {
-    (void)fd;
-    (void)address;
-    (void)length;
-    errno = ENOTCONN;
-    return -1;
+    os_sockaddr_t peer;
+    long r = sys_peername(fd, &peer);
+    if (r == -2) {
+        errno = ENOTCONN;
+        return -1;
+    }
+    if (r != 0) {
+        errno = ENOTSOCK;
+        return -1;
+    }
+    to_sockaddr(address, length, peer.ip, peer.port);
+    return 0;
 }
 
 int setsockopt(int fd, int level, int option, const void *value, socklen_t length) {

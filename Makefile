@@ -75,7 +75,7 @@ USER_LIBOBJS := $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/syscall_wrappers.o $(UOBJ)
                 $(UOBJ)/libc_fnmatch.o $(UOBJ)/libc_strings.o $(UOBJ)/libc_sysinfo.o \
                 $(UOBJ)/libc_libintl.o \
                 $(UOBJ)/libc_regex.o $(UOBJ)/libc_syslog.o \
-                $(UOBJ)/libc_socket.o $(UOBJ)/libc_netdb.o \
+                $(UOBJ)/libc_socket.o $(UOBJ)/libc_netdb.o $(UOBJ)/libc_inet.o \
                 $(UOBJ)/libc_resolv.o $(UOBJ)/libc_ifaddrs.o $(UOBJ)/libc_uchar.o \
                 $(UOBJ)/libc_wctype.o $(UOBJ)/libc_ctype.o \
                 $(UOBJ)/libc_fcntl.o $(UOBJ)/libc_scanf.o $(UOBJ)/libc_mntent.o \
@@ -454,6 +454,13 @@ SYSROOT := $(BUILD)/sysroot
 LIBC_A  := $(BUILD)/libc.a
 
 LIBC_A_OBJS := $(filter-out $(UOBJ)/crt0.o $(UOBJ)/crti.o $(UOBJ)/crtn.o,$(USER_LIBOBJS))
+
+# M223: backtrace(3) walks the stack with libgcc's unwinder, which a program
+# built by x86_64-lean_os-gcc or -clang links and one of this tree's own -
+# linked by bare ld, with no libgcc_eh - does not. So it is in the archive a
+# ported program draws from and not in the object list every program here is
+# linked from: an archive member only arrives when something calls it.
+LIBC_A_OBJS += $(UOBJ)/libc_execinfo.o
 
 $(LIBC_A): $(LIBC_A_OBJS)
 	@rm -f $@

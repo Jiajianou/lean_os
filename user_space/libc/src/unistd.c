@@ -650,6 +650,14 @@ int setgid(gid_t gid) {
     return -1;
 }
 
+int seteuid(uid_t uid) {
+    return setuid(uid);
+}
+
+int setegid(gid_t gid) {
+    return setgid(gid);
+}
+
 int chown(const char *path, uid_t uid, gid_t gid) {
     (void)path;
     (void)uid;

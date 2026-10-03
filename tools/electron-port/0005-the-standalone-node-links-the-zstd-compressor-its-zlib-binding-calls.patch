@@ -1,0 +1,16 @@
+diff --git a/third_party/electron_node/unofficial.gni b/third_party/electron_node/unofficial.gni
+--- a/third_party/electron_node/unofficial.gni
++++ b/third_party/electron_node/unofficial.gni
+@@ -312,6 +312,12 @@
+       ":libnode",
+       ":node_snapshot_stub",
+       "//build/win:default_exe_manifest",
++
++      # libnode depends on zstd's decompressor only, and its zlib binding
++      # calls the compressor too. Electron adds this where it links - the
++      # electron binary and node_mksnapshot - and never links this target, so
++      # the standalone node is the one place nothing did.
++      "//third_party/zstd:compress",
+     ]
+     # Electron: the snapshot stub vs generated node_snapshot.cc is now handled
+     # in the libnode source_set above (toolchain-conditional), so the standalone

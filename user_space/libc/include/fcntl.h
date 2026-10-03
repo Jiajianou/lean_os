@@ -18,6 +18,9 @@ extern "C" {
 #define O_NONBLOCK 0x800
 #define O_NDELAY   O_NONBLOCK
 #define O_CLOEXEC  OPEN_CLOEXEC
+#define O_SYNC     OPEN_SYNC
+#define O_DSYNC    O_SYNC
+#define O_RSYNC    O_SYNC
 
 #define O_ACCMODE  (OPEN_READ | OPEN_WRITE)
 

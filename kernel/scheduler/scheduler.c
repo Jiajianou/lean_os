@@ -286,14 +286,23 @@ void scheduler_set_task_name(task_t *t, const char *name) {
     set_task_name(t, name);
 }
 
-static void set_task_name(task_t *t, const char *name) {
+static void copy_task_name(char *out, const char *name) {
     int i = 0;
     if (name) {
         for (; name[i] && i < TASK_NAME_MAX - 1; i++) {
-            t->name[i] = name[i];
+            out[i] = name[i];
         }
     }
-    t->name[i] = '\0';
+    out[i] = '\0';
+}
+
+static void set_task_name(task_t *t, const char *name) {
+    copy_task_name(t->name, name);
+    copy_task_name(t->program, name);
+}
+
+void scheduler_set_thread_name(task_t *t, const char *name) {
+    copy_task_name(t->name, name);
 }
 
 /* A task's first frame carries rflags with IF CLEAR, and interrupts are
@@ -2958,6 +2967,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->heap_mapped_end = space->heap_mapped_end;
     t->shared_memory_next_vaddr = space->shared_memory_next_vaddr;
     set_task_name(t, parent->name);
+    copy_task_name(t->program, parent->program);
 
     isr_regs_t *child_frame =
         (isr_regs_t *)(t->kernel_stack_top - sizeof(isr_regs_t));

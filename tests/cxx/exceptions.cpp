@@ -1,6 +1,9 @@
 extern "C" {
+#include <execinfo.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 }
 
 static int destroyed;
@@ -53,6 +56,25 @@ __attribute__((noinline)) static void rethrower() {
         b.v += 1;
         throw;
     }
+}
+
+static void *trace[8];
+static int traced;
+
+__attribute__((noinline)) static void trace_inner() {
+    traced = backtrace(trace, 8);
+    __asm__ volatile("" ::: "memory");
+}
+
+__attribute__((noinline)) static void trace_outer() {
+    trace_inner();
+    __asm__ volatile("" ::: "memory");
+}
+
+static int within(void *address, void (*function)()) {
+    uintptr_t a = (uintptr_t)address;
+    uintptr_t f = (uintptr_t)function;
+    return a > f && a < f + 256;
 }
 
 int main(void) {
@@ -130,8 +152,24 @@ int main(void) {
         return 2;
     }
 
+    trace_outer();
+    if (traced < 3 || !within(trace[0], trace_inner) || !within(trace[1], trace_outer)) {
+        printf("cxxtest: backtrace gave %d frames, first %p %p\n", traced,
+               traced > 0 ? trace[0] : (void *)0, traced > 1 ? trace[1] : (void *)0);
+        return 10;
+    }
+    void *one[1];
+    if (backtrace(one, 1) != 1) {
+        return 10;
+    }
+    char **names = backtrace_symbols(trace, traced);
+    if (!names || !strstr(names[0], "0x")) {
+        return 10;
+    }
+    free(names);
+
     printf("cxxtest: %d destructors, in order %d %d %d; every catch matched "
            "by type; rethrow preserved the object; static ctor ran before "
-           "main\n", destroyed, order[0], order[1], order[2]);
+           "main; backtrace walked %d frames through the same unwinder\n", destroyed, order[0], order[1], order[2], traced);
     return 0;
 }

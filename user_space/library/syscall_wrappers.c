@@ -114,6 +114,10 @@ long sys_sockname(int fd, os_sockaddr_t *out) {
     return do_syscall(SYS_sockname, (long)fd, (long)out, 0);
 }
 
+long sys_peername(int fd, os_sockaddr_t *out) {
+    return do_syscall(SYS_sockname, (long)fd, (long)out, 1);
+}
+
 long sys_getrlimit(int resource, void *out) {
     return do_syscall(SYS_getrlimit, resource, (long)out, 0);
 }

@@ -52,12 +52,64 @@ def is_repository_root(src, relative):
 
 
 def sections(text):
-    parts = re.split(rb"(?m)^(?=diff --git )", text)
-    return parts[0], [p for p in parts[1:] if p.startswith(b"diff --git ")]
+    # A patch is a run of per-file sections, and this series writes them two
+    # ways: git's, which open with "diff --git", and plain unified diffs, which
+    # open with a "---"/"+++" pair and nothing before it - seven of this fork's
+    # patches are only the second kind and two are both. Splitting on the git
+    # line alone saw no file at all in those seven and counted them applied.
+    # A "---" line inside a hunk is a removed line that begins "--", so the
+    # hunks' own line counts say where a header can be.
+    lines = text.split(b"\n")
+    starts = []
+    old = new = 0
+    in_git_header = False
+    for i, line in enumerate(lines):
+        if old > 0 or new > 0:
+            if line.startswith(b"-"):
+                old -= 1
+            elif line.startswith(b"+"):
+                new -= 1
+            elif line.startswith(b"\\"):
+                pass
+            else:
+                old -= 1
+                new -= 1
+            continue
+        if line.startswith(b"diff --git "):
+            starts.append(i)
+            in_git_header = True
+            continue
+        if line.startswith(b"--- ") and i + 1 < len(lines) and \
+                lines[i + 1].startswith(b"+++ "):
+            if not in_git_header:
+                starts.append(i)
+            in_git_header = False
+            continue
+        match = re.match(rb"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)
+        if match:
+            old = int(match.group(1)) if match.group(1) is not None else 1
+            new = int(match.group(2)) if match.group(2) is not None else 1
+            in_git_header = False
+    if not starts:
+        return text, []
+    header = b"\n".join(lines[:starts[0]]) + (b"\n" if starts[0] else b"")
+    parts = []
+    for n, start in enumerate(starts):
+        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+        chunk = b"\n".join(lines[start:end])
+        if end < len(lines):
+            chunk += b"\n"
+        parts.append(chunk)
+    return header, parts
 
 
 def section_path(section):
-    return re.match(rb"diff --git a/(\S+) b/", section).group(1).decode()
+    match = re.match(rb"diff --git a/(\S+) b/", section)
+    if match:
+        return match.group(1).decode()
+    match = re.search(rb"(?m)^--- a/(\S+)", section) or \
+        re.search(rb"(?m)^\+\+\+ b/(\S+)", section)
+    return match.group(1).decode()
 
 
 def owning_repository(src, path, cache):
@@ -144,7 +196,8 @@ def own_series(directory):
             if n.endswith(".patch")]
 
 
-def measure(src, electron, fits_path, emit=None, verbose=False, only=None):
+def measure(src, electron, fits_path, emit=None, verbose=False, only=None,
+            lean_os_port=LEAN_OS_PORT):
     fits = load_fits(fits_path)
     used = set()
     report = {"lean_os": {"applied": 0, "failed": []},
@@ -164,6 +217,10 @@ def measure(src, electron, fits_path, emit=None, verbose=False, only=None):
             for path in paths:
                 with open(path, "rb") as f:
                     _, parts = sections(f.read())
+                if not parts:
+                    report[key]["failed"].append(os.path.basename(path) +
+                                                 " (no file in it)")
+                    continue
                 groups = {}
                 for section in parts:
                     relative = owning_repository(src, section_path(section),
@@ -186,8 +243,9 @@ def measure(src, electron, fits_path, emit=None, verbose=False, only=None):
                 else:
                     report[key]["failed"].append(os.path.basename(path))
 
-        apply_own(own_series(LEAN_OS_PORT), "lean_os")
+        apply_own(own_series(lean_os_port), "lean_os")
 
+        order = []
         for series, relative, directory, names in electron_series(electron):
             key = relative or "src"
             if only is not None and relative != only:
@@ -228,6 +286,7 @@ def measure(src, electron, fits_path, emit=None, verbose=False, only=None):
                     r"error: (?:patch failed: )?([^:\s]+)", error)))
                 entry["failed"][name] = files
             if emit:
+                order.append(series)
                 with open(os.path.join(emit, series, ".patches"), "w") as f:
                     f.write("".join(n + "\n" for n in names))
                 with open(os.path.join(emit, series, ".repository"), "w") as f:
@@ -235,6 +294,8 @@ def measure(src, electron, fits_path, emit=None, verbose=False, only=None):
 
         apply_own(own_series(ELECTRON_PORT), "electron_port")
         if emit:
+            with open(os.path.join(emit, ".series"), "w") as f:
+                f.write("".join(s + "\n" for s in order))
             for path in own_series(ELECTRON_PORT):
                 out = os.path.join(emit, "lean_os")
                 os.makedirs(out, exist_ok=True)
@@ -311,11 +372,65 @@ def self_test(src, electron):
         report = measure(src, electron, path, only="")
         if not any("matched no patch" in line for line in failures(report)):
             problems.append("a fit that matched nothing was not reported")
+        port = os.path.join(scratch, "port")
+        shutil.copytree(LEAN_OS_PORT, port)
+        with open(os.path.join(port, "9999-plain.patch"), "w") as f:
+            f.write("--- a/base/BUILD.gn\n+++ b/base/BUILD.gn\n"
+                    "@@ -1,1 +1,1 @@\n-this line is in no file\n+nor is this\n")
+        report = measure(src, electron, os.path.join(ELECTRON_PORT, "fits.json"),
+                         only="", lean_os_port=port)
+        if "9999-plain.patch" not in report["lean_os"]["failed"]:
+            problems.append("a plain diff that cannot apply was counted applied")
     for problem in problems:
         print("electron-fit self-test: " + problem)
     if not problems:
-        print("electron-fit self-test: 3 broken inputs, 3 refused")
+        print("electron-fit self-test: 4 broken inputs, 4 refused")
     return 1 if problems else 0
+
+
+def changed_paths(text):
+    found = []
+    for section in sections(text)[1]:
+        old = re.search(rb"(?m)^--- (\S+)", section)
+        new = re.search(rb"(?m)^\+\+\+ (\S+)", section)
+        if old and old.group(1) == b"/dev/null" and new:
+            found.append(("A", new.group(1).decode()[2:]))
+        else:
+            found.append(("M", section_path(section)))
+    return found
+
+
+def every_path(fitted):
+    # Every file any of the three series modifies or creates, relative to src,
+    # so a build can put each one back before applying the series it wants.
+    # A browser build has to reset what ELECTRON touched as well as what this
+    # fork touched, or the next /bin/chrome is built from Electron's edits.
+    found = set()
+    for path in own_series(LEAN_OS_PORT) + own_series(ELECTRON_PORT):
+        with open(path, "rb") as f:
+            found.update(changed_paths(f.read()))
+    order = os.path.join(fitted, ".series")
+    if os.path.exists(order):
+        with open(order) as f:
+            series = [s.strip() for s in f if s.strip()]
+        for name in series:
+            directory = os.path.join(fitted, name)
+            with open(os.path.join(directory, ".repository")) as f:
+                repository = f.read().strip()
+            prefix = "" if repository == "src" else repository + "/"
+            with open(os.path.join(directory, ".patches")) as f:
+                names = [n.strip() for n in f if n.strip()]
+            for patch in names:
+                with open(os.path.join(directory, patch), "rb") as f:
+                    for kind, rel in changed_paths(f.read()):
+                        found.add((kind, prefix + rel))
+    # A file one patch creates and a later one edits is still a file no
+    # repository has: it is put back by removing it, never by a checkout,
+    # which would fail on it quietly and leave the next apply to stop on
+    # "already exists".
+    created = {rel for kind, rel in found if kind == "A"}
+    return sorted((kind, rel) for kind, rel in found
+                  if kind == "A" or rel not in created)
 
 
 def main():
@@ -326,11 +441,16 @@ def main():
     parser.add_argument("--json", default=None)
     parser.add_argument("--emit", default=None)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--paths", default=None, metavar="FITTED")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     electron = args.electron or os.path.join(args.src, "electron")
     if args.self_test:
         return self_test(args.src, electron)
+    if args.paths:
+        for kind, rel in every_path(args.paths):
+            print(kind, rel)
+        return 0
     if args.emit and os.path.exists(args.emit):
         shutil.rmtree(args.emit)
     report = measure(args.src, electron, args.fits, args.emit, args.verbose)

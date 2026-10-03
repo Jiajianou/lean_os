@@ -39,4 +39,18 @@ fetch_at "$SRC/third_party/electron_node" https://github.com/nodejs/node.git \
 fetch_at "$SRC/third_party/nan" https://github.com/nodejs/nan.git \
   "$(pin NAN)" || exit 1
 
+# The one DEPS hook this checkout needs. Electron's own JavaScript - lib/,
+# the part of Electron that is not C++ - is type-checked and bundled during
+# the build by TypeScript and a bundler out of electron/node_modules, so the
+# HOST needs them, the way it needs bison for NetSurf. Electron vendors the
+# yarn it installs them with. The others are this project's own (patching,
+# the mtime cache), Debian sysroots for a Linux this target is not, and the
+# profiles an official PGO build reads.
+if [ ! -f "$SRC/electron/node_modules/.yarn-state.yml" ] ||
+   [ "$SRC/electron/yarn.lock" -nt "$SRC/electron/node_modules/.yarn-state.yml" ]; then
+  echo "fetch-electron: installing Electron's build-time npm packages"
+  (cd "$SRC/electron" &&
+   node .yarn/releases/yarn-4.18.0.cjs install --immutable) || exit 1
+fi
+
 python3 "$ROOT/tools/electron-fit.py"

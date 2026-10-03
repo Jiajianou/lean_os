@@ -235,6 +235,85 @@ static uint8_t *read_program(const char *path, size_t *out_size) {
     return image;
 }
 
+/* M223. Run a program from /bin with its standard output and error on a pipe,
+   copy what it printed into the log a line at a time, and return its exit
+   status - or -1 if it is still running when the deadline passes. Each
+   self-test that runs a ported program used to carry its own copy of this. */
+static long run_captured_program(const char *name, const char *const *argv,
+                                 long seconds) {
+    char path[64];
+    k_strlcpy(path, PATH_BIN_DIRECTORY, sizeof(path));
+    size_t used = k_strlen(path);
+    k_strlcpy(path + used, name, sizeof(path) - used);
+    int fds[2];
+    if (do_syscall(SYS_pipe, (uint64_t)fds, 0, 0) != 0) {
+        panic("run_captured_program: could not make a pipe for the report");
+    }
+    do_syscall(SYS_dup2, (uint64_t)fds[1], 1, 0);
+    do_syscall(SYS_dup2, (uint64_t)fds[1], 2, 0);
+    size_t bytes = 0;
+    uint8_t *image = read_program(path, &bytes);
+    task_t *child = process_spawnv(name, image, bytes, argv);
+    kfree(image);
+
+    static char out[16384];
+    size_t got = 0;
+    long rc = -1;
+    long deadline = (long)pit_get_ticks() + seconds * PIT_HZ;
+    for (;;) {
+        long avail = do_syscall(SYS_pipe_poll, (uint64_t)fds[0], 0, 0);
+        if (avail > 0 && got < sizeof(out) - 1) {
+            size_t room = sizeof(out) - 1 - got;
+            long n = do_syscall(SYS_read, (uint64_t)fds[0], (uint64_t)(out + got),
+                                (uint64_t)((size_t)avail < room ? (size_t)avail : room));
+            if (n > 0) {
+                got += (size_t)n;
+            }
+            continue;
+        }
+        long done = child ? do_syscall(SYS_wait_nb, (uint64_t)child->id, 0, 0) : -1;
+        if (done != -2) {
+            rc = done;
+            long n;
+            while ((n = do_syscall(SYS_pipe_poll, (uint64_t)fds[0], 0, 0)) > 0 &&
+                   got < sizeof(out) - 1) {
+                size_t room = sizeof(out) - 1 - got;
+                long r = do_syscall(SYS_read, (uint64_t)fds[0], (uint64_t)(out + got),
+                                    (uint64_t)((size_t)n < room ? (size_t)n : room));
+                if (r <= 0) {
+                    break;
+                }
+                got += (size_t)r;
+            }
+            break;
+        }
+        if ((long)pit_get_ticks() > deadline) {
+            break;
+        }
+        do_syscall(SYS_yield, 0, 0, 0);
+    }
+    out[got] = '\0';
+    do_syscall(SYS_close, (uint64_t)fds[0], 0, 0);
+    do_syscall(SYS_close, (uint64_t)fds[1], 0, 0);
+    file_descriptor_release(&scheduler_current()->descriptor_table->slots[1]);
+    scheduler_current()->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
+    file_descriptor_release(&scheduler_current()->descriptor_table->slots[2]);
+    scheduler_current()->descriptor_table->slots[2].type = FILE_DESCRIPTOR_STDOUT;
+    for (char *line = out; *line;) {
+        char *end = line;
+        while (*end && *end != '\n') {
+            end++;
+        }
+        char saved = *end;
+        *end = '\0';
+        kernel_log_puts(line);
+        kernel_log_putc('\n');
+        *end = saved;
+        line = saved ? end + 1 : end;
+    }
+    return rc;
+}
+
 static void kernel_log_perf(const char *name, uint64_t value, const char *unit) {
     kernel_log_puts("[perf] ");
     kernel_log_puts(name);
@@ -2360,6 +2439,28 @@ static void selftest_oom(void) {
 }
 
 static void boot_selftests_system(void) {
+    {
+        /* M223. One script through /bin/node, its output in the log, and the
+           machine off - the battery reaches Node minutes in, and what is
+           being iterated on is one program. The script's path comes from
+           outside the image, as the browser's page does. */
+        static char node_script[256];
+        k_memset(node_script, 0, sizeof(node_script));
+        int node_length = fwcfg_read_file("opt/leanos/node", node_script,
+                                          sizeof(node_script) - 1);
+        if (node_length > 0) {
+            const char *node_argv[] = {PATH_BIN_DIRECTORY "node", node_script, 0};
+            kernel_log_puts("[node] running ");
+            kernel_log_puts(node_script);
+            kernel_log_putc('\n');
+            long node_rc = run_captured_program("node", node_argv, 600);
+            kernel_log_puts("[node] exit ");
+            kernel_log_put_dec((uint32_t)node_rc);
+            kernel_log_puts("\n[node] done\n");
+            power_shutdown(POWER_OFF);
+        }
+    }
+
     {
         /* M198. Two processes running one program map the same frames for
            its text; the cache reads the file once; a program rewritten on
@@ -10372,6 +10473,24 @@ static void boot_selftests_system(void) {
             if (cv_rc != 0) {
                 panic("M156 self-test: V8 does not work on this machine - "
                       "see the chromiumv8 lines above");
+            }
+            kernel_log_putc('\n');
+        }
+    }
+
+    {
+        os_stat_t nd;
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/node", (uint64_t)&nd, 0) != 0) {
+            kernel_log_puts("[m223] /bin/node is not on this image - skipped. "
+                       "tools/build-chromium.sh builds it out of Electron's "
+                       "configuration and tools/node-test.sh installs it.\n\n");
+        } else {
+            const char *node_argv[] = {PATH_BIN_DIRECTORY "node",
+                                       "/lib/node-test/smoke.js", 0};
+            long node_rc = run_captured_program("node", node_argv, 240);
+            if (node_rc != 0) {
+                panic("M223 self-test: Node.js does not work on this machine - "
+                      "see the node lines above");
             }
             kernel_log_putc('\n');
         }

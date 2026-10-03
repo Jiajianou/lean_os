@@ -284,6 +284,7 @@ REQUIRED_MARKERS=(
   "chromiumnet: done"
   "[m156] V8 runs on this machine:"
   "chromiumv8: done"
+  "[m223] Node.js ran 8 checks, 0 failed"
   "[m157] Skia rasterises on this machine:"
   "chromiumskia: done"
   "[m158] cc rasters on this machine:"

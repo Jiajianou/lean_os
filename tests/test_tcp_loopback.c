@@ -131,3 +131,62 @@ TEST(tcp_loopback, a_receiver_that_reads_late_gets_every_byte_once) {
     tcp_close(s);
     tcp_release(l);
 }
+
+static int pump_receive(struct tcpcb *t, uint8_t *out, int max) {
+    for (int stalls = 0; stalls < 1000; stalls++) {
+        int n = tcp_receive(t, out, (uint16_t)max);
+        if (n != 0) {
+            return n;
+        }
+        tcp_tick();
+    }
+    return 0;
+}
+
+TEST(tcp_loopback, a_half_close_delivers_its_data_then_end_of_file_and_keeps_receiving) {
+    struct tcpcb *c, *s, *l;
+    connect_pair(&c, &s, &l);
+    CHECK_EQ(tcp_send(c, (const uint8_t *)"abc", 3), 3);
+    tcp_close(c);
+    CHECK_EQ(tcp_state(c), TCP_FIN_WAIT_1);
+
+    uint8_t got[16];
+    CHECK_EQ(pump_receive(s, got, sizeof(got)), 3);
+    CHECK(memcmp(got, "abc", 3) == 0);
+    CHECK(tcp_receive_ended(s));
+    CHECK_EQ(pump_receive(s, got, sizeof(got)), -1);
+
+    CHECK(!tcp_receive_ended(c));
+    CHECK_EQ(tcp_send(s, (const uint8_t *)"echo:abc", 8), 8);
+    CHECK_EQ(pump_receive(c, got, sizeof(got)), 8);
+    CHECK(memcmp(got, "echo:abc", 8) == 0);
+}
+
+TEST(tcp_loopback, a_peer_fin_with_data_still_queued_ends_only_after_the_data) {
+    struct tcpcb *c, *s, *l;
+    connect_pair(&c, &s, &l);
+    CHECK_EQ(tcp_send(c, (const uint8_t *)"hello", 5), 5);
+    tcp_close(c);
+    for (int i = 0; i < 50; i++) {
+        tcp_tick();
+    }
+    CHECK(tcp_receive_ended(s));
+    CHECK_EQ(tcp_bytes_available(s), 5);
+    uint8_t got[16];
+    CHECK_EQ(tcp_receive(s, got, sizeof(got)), 5);
+    CHECK_EQ(tcp_receive(s, got, sizeof(got)), -1);
+}
+
+TEST(tcp_loopback, a_socket_that_never_had_a_peer_has_not_ended) {
+    fake_net_reset();
+    fake_heap_ensure();
+    tcp_init();
+    struct tcpcb *fresh = tcp_open();
+    REQUIRE(fresh != NULL);
+    CHECK(!tcp_receive_ended(fresh));
+    struct tcpcb *listener = tcp_open();
+    REQUIRE(listener != NULL);
+    CHECK_EQ(tcp_bind(listener, PORT), PORT);
+    CHECK_EQ(tcp_listen(listener), 0);
+    CHECK(!tcp_receive_ended(listener));
+}

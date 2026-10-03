@@ -17,6 +17,7 @@ struct socket {
     int refs;
     int type;
     struct tcpcb *tcb;
+    int read_shut;
     int bound;
     uint16_t port;
     volatile uint16_t head;
@@ -235,6 +236,44 @@ int socket_pending(const struct socket *s) {
         return tcp_bytes_available(s->tcb);
     }
     return (int)s->count;
+}
+
+int socket_read_ended(const struct socket *s) {
+    if (!s || !s->in_use || s->type != SOCK_STREAM) {
+        return 0;
+    }
+    if (s->read_shut) {
+        return 1;
+    }
+    if (tcp_state(s->tcb) == TCP_LISTEN) {
+        return 0;
+    }
+    return tcp_receive_ended(s->tcb);
+}
+
+int socket_read_shut(const struct socket *s) {
+    return s && s->in_use && s->read_shut;
+}
+
+int socket_shutdown(struct socket *s, int how) {
+    if (!s || !s->in_use || s->type != SOCK_STREAM) {
+        return -1;
+    }
+    net_lock_acquire();
+    tcp_state_t state = tcp_state(s->tcb);
+    if (state == TCP_LISTEN || state == TCP_SYN_SENT ||
+        (state == TCP_CLOSED && tcp_remote_port(s->tcb) == 0)) {
+        net_lock_release();
+        return -1;
+    }
+    if (how == 0 || how == 2) {
+        s->read_shut = 1;
+    }
+    if ((how == 1 || how == 2) && (state == TCP_ESTABLISHED || state == TCP_CLOSE_WAIT)) {
+        tcp_close(s->tcb);
+    }
+    net_lock_release();
+    return 0;
 }
 
 int socket_listen(struct socket *s) {

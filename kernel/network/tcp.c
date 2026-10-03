@@ -527,6 +527,13 @@ int tcp_receive(struct tcpcb *t, uint8_t *out, uint16_t max) {
     return (int)n;
 }
 
+int tcp_receive_ended(const struct tcpcb *t) {
+    if (!t || !t->in_use) {
+        return 1;
+    }
+    return t->peer_fin || t->reset || (t->state == TCP_CLOSED && t->remote_port != 0);
+}
+
 int tcp_peek(const struct tcpcb *t, uint8_t *out, uint16_t max) {
     if (!t || !t->in_use) {
         return -1;

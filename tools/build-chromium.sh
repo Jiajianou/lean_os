@@ -8,7 +8,19 @@ SRC="$ROOT/build/chromium/src"
 DEPOT="$ROOT/build/chromium/depot_tools"
 FORK="$ROOT/third_party/chromium/lean_os"
 LINK="$SRC/lean_os"
-OUT_NAME="${LEANOS_CHROMIUM_OUT:-LeanOS}"
+if [ "${LEANOS_CHROMIUM_SERIES:-chromium}" = "electron" ] &&
+   [ "${1:-}" = "third_party/electron_node:node" ]; then
+  # M223: the standalone node is a configuration of its own. Electron sets
+  # node_use_v8_platform = false because inside Electron gin owns V8's
+  # platform; a node that is the whole program has to own it, which is Node's
+  # own default. One output directory cannot hold both - libnode is compiled
+  # one way or the other - so this one gets its own.
+  OUT_NAME="${LEANOS_CHROMIUM_OUT:-ElectronNode}"
+elif [ "${LEANOS_CHROMIUM_SERIES:-chromium}" = "electron" ]; then
+  OUT_NAME="${LEANOS_CHROMIUM_OUT:-Electron}"
+else
+  OUT_NAME="${LEANOS_CHROMIUM_OUT:-LeanOS}"
+fi
 OUT="$SRC/out/$OUT_NAME"
 PREFIX="$ROOT/build/toolchain/bin/x86_64-lean_os-"
 CHROMIUM_CLANG="$SRC/third_party/llvm-build/Release+Asserts/bin"
@@ -87,51 +99,119 @@ fi
 # later one has moved past fails. Resetting first makes the question
 # unnecessary, and it also means an edit made by hand in the checkout is
 # discarded rather than silently becoming part of the build.
-PATCH_FILES=$(ls "$ROOT"/tools/chromium-port/*.patch 2>/dev/null)
-if [ -n "$PATCH_FILES" ]; then
-  TOUCHED=$(sed -n 's|^--- a/||p' $PATCH_FILES | sort -u)
-  # M200: reset-and-reapply writes every file the series touches, and the
-  # build takes a new time for a change - see tools/keep-mtimes.py.
-  KEEP_STATE="$ROOT/build/chromium-patched-mtimes.json"
-  python3 "$ROOT/tools/keep-mtimes.py" save "$SRC" "$KEEP_STATE" $TOUCHED
-  for f in $TOUCHED; do
-    if (cd "$SRC" && git ls-files --error-unmatch "$f" > /dev/null 2>&1); then
-      (cd "$SRC" && git checkout -- "$f") || exit 1
-      continue
+#
+# M222: and the same checkout builds Electron, whose own series goes on top of
+# this one - 145 patches to Chromium, 54 to Node, a few to V8 and the rest -
+# fitted to this revision by tools/electron-fit.py. LEANOS_CHROMIUM_SERIES
+# says which program is being built. Either way, every file ANY series touches
+# is put back first, because a browser build that reset only this fork's files
+# would be built from whatever Electron's series left in the rest, and nothing
+# would say so.
+SERIES="${LEANOS_CHROMIUM_SERIES:-chromium}"
+FITTED="$ROOT/build/electron-fitted"
+if [ -d "$SRC/electron" ]; then
+  if ! python3 "$ROOT/tools/electron-fit.py" --emit "$FITTED" \
+       > "$ROOT/build/electron-fit.log" 2>&1; then
+    if [ "$SERIES" = "electron" ]; then
+      cat "$ROOT/build/electron-fit.log" >&2
+      echo "build-chromium: Electron's series does not fit this checkout" >&2
+      exit 1
     fi
-    # A path the top-level checkout does not track belongs to one of the
-    # sub-repositories it is assembled from - third_party/angle, dawn, webrtc,
-    # perfetto and a hundred others, each with its own .git. M161: leaving
-    # those alone was wrong, and wrong in a way that wastes an afternoon
-    # rather than failing loudly. The series is applied to a CLEAN tree every
-    # time precisely so that "is this patch already applied" needs no answer -
-    # and a sub-repository file that never got reset makes the question come
-    # back, as "does not apply to this checkout" on a patch that is perfectly
-    # good. It cost this milestone three builds before it was worth fixing.
-    #
-    # git -C finds the sub-repository from the file's own directory, so this
-    # needs no list of which ones there are.
-    d=$(dirname "$SRC/$f")
-    top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || continue
-    [ "$top" = "$SRC" ] && continue
-    rel=${f#${top#$SRC/}/}
-    (cd "$top" && git checkout -- "$rel" 2>/dev/null) || true
-  done
-fi
-for patch in $PATCH_FILES; do
-  name=$(basename "$patch")
-  if (cd "$SRC" && git apply -p1 < "$patch") 2>/dev/null; then
-    echo "build-chromium: $name applied"
-  elif (cd "$SRC" && git apply --check --reverse -p1 < "$patch") 2>/dev/null; then
-    echo "build-chromium: $name already applied - it is outside this repository"
-  else
-    echo "build-chromium: $name does not apply to this checkout" >&2
-    exit 1
   fi
-done
-if [ -n "$PATCH_FILES" ]; then
-  python3 "$ROOT/tools/keep-mtimes.py" restore "$SRC" "$KEEP_STATE"
+elif [ "$SERIES" = "electron" ]; then
+  echo "build-chromium: no Electron checkout - run tools/fetch-electron.sh" >&2
+  exit 1
+else
+  rm -rf "$FITTED"
 fi
+
+PATCH_FILES=$(ls "$ROOT"/tools/chromium-port/*.patch 2>/dev/null)
+ELECTRON_PORT_FILES=$(ls "$ROOT"/tools/electron-port/*.patch 2>/dev/null)
+python3 "$ROOT/tools/electron-fit.py" --paths "$FITTED" > "$ROOT/build/series-paths.txt" || exit 1
+MODIFIED=$(awk '$1 == "M" {print $2}' "$ROOT/build/series-paths.txt")
+CREATED=$(awk '$1 == "A" {print $2}' "$ROOT/build/series-paths.txt")
+# M200: reset-and-reapply writes every file the series touches, and the
+# build takes a new time for a change - see tools/keep-mtimes.py.
+KEEP_STATE="$ROOT/build/chromium-patched-mtimes.json"
+python3 "$ROOT/tools/keep-mtimes.py" save "$SRC" "$KEEP_STATE" $MODIFIED $CREATED
+# One git ls-files for the lot rather than one a file: each call reads an
+# index of a million paths, which was a second a file at 183 files and would
+# be a quarter of an hour at the 860 three series touch.
+TRACKED=$(cd "$SRC" && git ls-files -- $MODIFIED)
+if [ -n "$TRACKED" ]; then
+  (cd "$SRC" && git checkout -- $TRACKED) || exit 1
+fi
+UNTRACKED=$(printf '%s\n' $MODIFIED | grep -vxF -f <(printf '%s\n' $TRACKED))
+for f in $UNTRACKED; do
+  # A path the top-level checkout does not track belongs to one of the
+  # sub-repositories it is assembled from - third_party/angle, dawn, webrtc,
+  # perfetto and a hundred others, each with its own .git. M161: leaving
+  # those alone was wrong, and wrong in a way that wastes an afternoon
+  # rather than failing loudly. The series is applied to a CLEAN tree every
+  # time precisely so that "is this patch already applied" needs no answer -
+  # and a sub-repository file that never got reset makes the question come
+  # back, as "does not apply to this checkout" on a patch that is perfectly
+  # good. It cost this milestone three builds before it was worth fixing.
+  #
+  # git -C finds the sub-repository from the file's own directory, so this
+  # needs no list of which ones there are.
+  d=$(dirname "$SRC/$f")
+  top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || continue
+  [ "$top" = "$SRC" ] && continue
+  rel=${f#${top#$SRC/}/}
+  (cd "$top" && git checkout -- "$rel" 2>/dev/null) || true
+done
+# A file a series CREATES is put back by removing it, or the next apply stops
+# on "already exists". Only a path no repository tracks is removed.
+for f in $CREATED; do
+  [ -e "$SRC/$f" ] || continue
+  d=$(dirname "$SRC/$f")
+  if git -C "$d" ls-files --error-unmatch "$SRC/$f" > /dev/null 2>&1; then
+    continue
+  fi
+  rm -f "$SRC/$f"
+done
+
+apply_series() {
+  local label="$1"
+  shift
+  for patch in "$@"; do
+    name=$(basename "$patch")
+    if (cd "$SRC" && git apply -p1 < "$patch") 2>/dev/null; then
+      echo "build-chromium: $label $name applied"
+    elif (cd "$SRC" && git apply --check --reverse -p1 < "$patch") 2>/dev/null; then
+      echo "build-chromium: $label $name already applied - it is outside this repository"
+    else
+      echo "build-chromium: $label $name does not apply to this checkout" >&2
+      exit 1
+    fi
+  done
+}
+apply_series lean_os $PATCH_FILES
+
+if [ "$SERIES" = "electron" ]; then
+  # Electron's series in the order its patches/config.json gives, each patch
+  # applied inside the repository it was written for. A patch the fitting
+  # emptied - its one file is carried by tools/electron-port - is skipped.
+  while read -r series; do
+    repository=$(cat "$FITTED/$series/.repository")
+    directory="$SRC"
+    [ "$repository" = "src" ] || directory="$SRC/$repository"
+    applied=0
+    while read -r name; do
+      [ -n "$name" ] || continue
+      grep -q '^diff --git ' "$FITTED/$series/$name" || continue
+      if ! git -C "$directory" apply -p1 < "$FITTED/$series/$name"; then
+        echo "build-chromium: electron $series $name does not apply" >&2
+        exit 1
+      fi
+      applied=$((applied + 1))
+    done < "$FITTED/$series/.patches"
+    echo "build-chromium: electron $series - $applied patches applied"
+  done < "$FITTED/.series"
+  apply_series electron-port $ELECTRON_PORT_FILES
+fi
+python3 "$ROOT/tools/keep-mtimes.py" restore "$SRC" "$KEEP_STATE"
 
 # Rust. Chromium builds the standard library from the rust-src beside its own
 # rustc, and that is the configuration it supports: an external sysroot turns
@@ -722,6 +802,33 @@ use_dbus = false
 # on a machine with no GPU and a 2 GiB image.
 use_on_device_model_service = false
 ARGS
+
+if [ "$SERIES" = "electron" ]; then
+  cat >> "$OUT/args.gn" <<ARGS
+
+# M222: Electron, out of the same checkout. all.gn is the half of Electron's
+# own configuration that says what Electron IS - is_electron_build, //electron
+# as a root, Node against BoringSSL, the V8 options Node's API needs. Its
+# release.gn is not imported: it is an official, PGO-profiled build with
+# ffmpeg as a shared library, and this machine has no dynamic linking.
+import("//electron/build/args/all.gn")
+
+# "This flag speeds up the performance of fork/execve on linux systems" - by
+# madvise(MADV_DONTFORK) on V8's pages, which is advice Linux invented (patch
+# 0032's sentence). This kernel's fork has no such advice to take.
+v8_enable_private_mapping_fork_optimization = false
+ARGS
+  if [ "$TARGET" = "third_party/electron_node:node" ]; then
+    cat >> "$OUT/args.gn" <<ARGS
+
+# The standalone node owns V8's platform, as Node does outside Electron.
+# Electron's false is right for libnode inside Electron, where gin has
+# already initialised it; here nothing else would, and V8 stops with
+# "Wrong initialization order: from 0 to 1, expected to 3".
+node_use_v8_platform = true
+ARGS
+  fi
+fi
 
 PATH="$DEPOT:$DEPOT/.cipd_bin:$PATH"
 export PATH

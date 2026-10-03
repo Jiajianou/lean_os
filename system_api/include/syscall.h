@@ -61,6 +61,7 @@ extern "C" {
 #define OPEN_CLOEXEC  0x20
 #define OPEN_EXCL     0x40
 #define OPEN_NOFOLLOW 0x80
+#define OPEN_SYNC     0x100
 
 #define SEEK_SET 0
 #define SEEK_CUR 1

@@ -401,6 +401,9 @@ static long sys_write(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4
             return -1;
         }
         slot->file->offset += (uint32_t)n;
+        if (slot->file->synchronous && virtual_file_system_sync() != 0) {
+            return -1;
+        }
         return (long)n;
     }
     return -1;
@@ -499,6 +502,9 @@ static long sys_read(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4,
         if (!tcb) {
             return -1;
         }
+        if (socket_read_shut(slot->sock)) {
+            return 0;
+        }
         uint16_t want = length > TCP_MAX_MSS ? TCP_MAX_MSS : (uint16_t)length;
         uint8_t staging[TCP_MAX_MSS];
         for (;;) {
@@ -592,6 +598,9 @@ static long sys_pwrite(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t o
     }
     int64_t n = virtual_file_system_handle_write(slot->file->handle, (const char *)buffer,
                                  (size_t)length, (uint32_t)offset);
+    if (n >= 0 && slot->file->synchronous && virtual_file_system_sync() != 0) {
+        return -1;
+    }
     return n < 0 ? -1 : (long)n;
 }
 
@@ -647,7 +656,7 @@ static long sys_thread_setname(uint64_t name_pointer, uint64_t a2, uint64_t a3,
     if (copy_string_from_user(name, name_pointer, sizeof(name)) != 0) {
         return -1;
     }
-    scheduler_set_task_name(scheduler_current(), name);
+    scheduler_set_thread_name(scheduler_current(), name);
     return 0;
 }
 
@@ -692,6 +701,9 @@ static long sys_thread_create(uint64_t entry, uint64_t arg, uint64_t stack_top,
     }
     task_t *self = scheduler_current();
     task_t *t = process_spawn_thread(self->name, entry, entry_rsp, arg);
+    if (t) {
+        k_memcpy(t->program, self->program, sizeof(t->program));
+    }
     return t ? (long)t->id : -1;
 }
 
@@ -2784,6 +2796,10 @@ static long sys_open(uint64_t path_pointer, uint64_t flags, uint64_t a3, uint64_
     if (flags & OPEN_APPEND) {
         of->offset = virtual_file_system_handle_size(handle);
     }
+    /* O_SYNC belongs to the open file rather than to the descriptor, so a dup
+       of it writes through too. M223: Node maps WASI's sync flags to it, and a
+       constant the kernel ignored would promise durability nothing provided. */
+    of->synchronous = (flags & OPEN_SYNC) ? 1 : 0;
     self->descriptor_table->slots[fd].type = FILE_DESCRIPTOR_FILE;
     self->descriptor_table->slots[fd].cloexec = (flags & OPEN_CLOEXEC) ? 1 : 0;
     self->descriptor_table->slots[fd].file = of;
@@ -3988,10 +4004,17 @@ static long sys_memfd_seal(uint64_t fd, uint64_t add, uint64_t a3, uint64_t a4, 
 static long sys_sockshut(uint64_t fd, uint64_t how, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3; (void)a4; (void)a5; (void)a6;
     struct unix_socket *u = unix_for_file_descriptor(fd);
-    if (!u) {
+    if (u) {
+        return unix_socket_shutdown(u, (int)how);
+    }
+    /* M223: and a TCP connection, which until now had no shutdown at all -
+       so a half-close sent no FIN and the peer waited for an end-of-file
+       that never came. Node's socket.end() is exactly that call. */
+    struct socket *s = socket_for_file_descriptor(fd);
+    if (!s || how > 2) {
         return -1;
     }
-    return unix_socket_shutdown(u, (int)how);
+    return socket_shutdown(s, (int)how);
 }
 
 static long sys_listen(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -4031,9 +4054,9 @@ static long sys_connstat(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uin
    right about the address and a lie about the port - and a program that
    binds to port zero and then asks which port it got, as every server that
    does not want a fixed one does, was told nothing. */
-static long sys_sockname(uint64_t fd, uint64_t out_pointer, uint64_t a3,
+static long sys_sockname(uint64_t fd, uint64_t out_pointer, uint64_t peer,
                          uint64_t a4, uint64_t a5, uint64_t a6) {
-    (void)a3; (void)a4; (void)a5; (void)a6;
+    (void)a4; (void)a5; (void)a6;
     os_sockaddr_t out;
     k_memset(&out, 0, sizeof(out));
     struct unix_socket *u = unix_for_file_descriptor(fd);
@@ -4046,6 +4069,19 @@ static long sys_sockname(uint64_t fd, uint64_t out_pointer, uint64_t a3,
     struct socket *s = socket_for_file_descriptor(fd);
     if (!s) {
         return -1;
+    }
+    if (peer) {
+        /* M223: getpeername(2), which answered ENOTCONN for every socket.
+           The peer is the TCP connection's remote end, and a socket without
+           one - unconnected, listening, or a datagram socket - is the
+           ENOTCONN case it always claimed. */
+        struct tcpcb *tcb = socket_tcb(s);
+        if (!tcb || tcp_remote_port(tcb) == 0 || tcp_state(tcb) == TCP_LISTEN) {
+            return -2;
+        }
+        out.ip = tcp_remote_ip(tcb);
+        out.port = tcp_remote_port(tcb);
+        return copy_to_user(out_pointer, &out, sizeof(out)) == 0 ? 0 : -1;
     }
     out.ip = socket_local_ip(s);
     out.port = socket_local_port(s);
@@ -4518,7 +4554,7 @@ static int file_descriptor_is_ready(task_t *self, int fd) {
     case FILE_DESCRIPTOR_PIPE_READ:
         return (pipe_buffered(slot->pipe) > 0 || pipe_write_closed(slot->pipe)) ? 1 : 0;
     case FILE_DESCRIPTOR_SOCKET:
-        return socket_pending(slot->sock) > 0 ? 1 : 0;
+        return (socket_pending(slot->sock) > 0 || socket_read_ended(slot->sock)) ? 1 : 0;
     case FILE_DESCRIPTOR_UNIX:
         return unix_socket_pending(slot->un);
     case FILE_DESCRIPTOR_EVENT:
@@ -5234,7 +5270,8 @@ static long sys_fcntl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
         case FILE_DESCRIPTOR_PIPE_READ:  access = OPEN_READ; break;
         case FILE_DESCRIPTOR_PIPE_WRITE: access = OPEN_WRITE; break;
         case FILE_DESCRIPTOR_FILE:
-            access = OPEN_READ | (self->descriptor_table->slots[fd].file->writable ? OPEN_WRITE : 0);
+            access = OPEN_READ | (self->descriptor_table->slots[fd].file->writable ? OPEN_WRITE : 0) |
+                     (self->descriptor_table->slots[fd].file->synchronous ? OPEN_SYNC : 0);
             break;
         case FILE_DESCRIPTOR_SOCKET:     access = OPEN_READ | OPEN_WRITE; break;
         case FILE_DESCRIPTOR_UNIX:       access = OPEN_READ | OPEN_WRITE; break;

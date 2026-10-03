@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <net/if.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,32 +66,6 @@ char *inet_ntoa(struct in_addr address) {
              (unsigned)(h >> 24) & 0xFF, (unsigned)(h >> 16) & 0xFF,
              (unsigned)(h >> 8) & 0xFF, (unsigned)h & 0xFF);
     return buffer;
-}
-
-const char *inet_ntop(int af, const void *source, char *destination, socklen_t size) {
-    if (af != AF_INET || !source || !destination) {
-        errno = EAFNOSUPPORT;
-        return (const char *)0;
-    }
-    uint32_t h = ntohl(((const struct in_addr *)source)->s_addr);
-    char buffer[INET_ADDRSTRLEN];
-    int n = snprintf(buffer, sizeof(buffer), "%u.%u.%u.%u",
-                     (unsigned)(h >> 24) & 0xFF, (unsigned)(h >> 16) & 0xFF,
-                     (unsigned)(h >> 8) & 0xFF, (unsigned)h & 0xFF);
-    if (n < 0 || (socklen_t)n >= size) {
-        errno = ENOSPC;
-        return (const char *)0;
-    }
-    memcpy(destination, buffer, (size_t)n + 1);
-    return destination;
-}
-
-int inet_pton(int af, const char *source, void *destination) {
-    if (af != AF_INET) {
-        errno = EAFNOSUPPORT;
-        return -1;
-    }
-    return inet_aton(source, (struct in_addr *)destination) ? 1 : 0;
 }
 
 static int service_port(const char *name, int *out) {
@@ -202,21 +177,188 @@ const char *gai_strerror(int errcode) {
     }
 }
 
+typedef struct {
+    char *name;
+    char *proto;
+    char *aliases[8];
+    int port;
+} service_line_t;
+
+static int parse_service_line(char *line, service_line_t *out) {
+    char *hash = strchr(line, '#');
+    if (hash) {
+        *hash = 0;
+    }
+    char *save = (char *)0;
+    char *name = strtok_r(line, " \t\r\n", &save);
+    char *port_proto = strtok_r((char *)0, " \t\r\n", &save);
+    if (!name || !port_proto) {
+        return 0;
+    }
+    char *slash = strchr(port_proto, '/');
+    if (!slash || slash == port_proto || !slash[1]) {
+        return 0;
+    }
+    *slash = 0;
+    char *end = (char *)0;
+    long port = strtol(port_proto, &end, 10);
+    if (*end || port < 0 || port > 65535) {
+        return 0;
+    }
+    out->name = name;
+    out->proto = slash + 1;
+    out->port = (int)port;
+    int n = 0;
+    char *alias;
+    while (n < 7 && (alias = strtok_r((char *)0, " \t\r\n", &save))) {
+        out->aliases[n++] = alias;
+    }
+    out->aliases[n] = (char *)0;
+    return 1;
+}
+
+static int service_matches(const service_line_t *line, const char *name, int port,
+                           const char *proto) {
+    if (proto && strcmp(proto, line->proto) != 0) {
+        return 0;
+    }
+    if (!name) {
+        return line->port == port;
+    }
+    if (strcmp(line->name, name) == 0) {
+        return 1;
+    }
+    for (int i = 0; line->aliases[i]; i++) {
+        if (strcmp(line->aliases[i], name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int find_service(const char *name, int port, const char *proto,
+                        struct servent *result, char *buffer, size_t length,
+                        struct servent **out) {
+    *out = (struct servent *)0;
+    FILE *f = fopen("/etc/services", "r");
+    if (!f) {
+        return ENOENT;
+    }
+    char line[512];
+    service_line_t parsed;
+    int status = ENOENT;
+    while (fgets(line, sizeof(line), f)) {
+        if (!parse_service_line(line, &parsed) ||
+            !service_matches(&parsed, name, port, proto)) {
+            continue;
+        }
+        int aliases = 0;
+        while (parsed.aliases[aliases]) {
+            aliases++;
+        }
+        size_t need = sizeof(char *) * (size_t)(aliases + 1) + strlen(parsed.name) + 1 +
+                      strlen(parsed.proto) + 1;
+        for (int i = 0; i < aliases; i++) {
+            need += strlen(parsed.aliases[i]) + 1;
+        }
+        if (need + sizeof(char *) > length) {
+            status = ERANGE;
+            break;
+        }
+        uintptr_t aligned = ((uintptr_t)buffer + sizeof(char *) - 1) & ~(uintptr_t)(sizeof(char *) - 1);
+        char **alias_table = (char **)aligned;
+        char *cursor = (char *)(alias_table + aliases + 1);
+        for (int i = 0; i < aliases; i++) {
+            strcpy(cursor, parsed.aliases[i]);
+            alias_table[i] = cursor;
+            cursor += strlen(cursor) + 1;
+        }
+        alias_table[aliases] = (char *)0;
+        strcpy(cursor, parsed.name);
+        result->s_name = cursor;
+        cursor += strlen(cursor) + 1;
+        strcpy(cursor, parsed.proto);
+        result->s_proto = cursor;
+        result->s_aliases = alias_table;
+        result->s_port = (int)htons((uint16_t)parsed.port);
+        *out = result;
+        status = 0;
+        break;
+    }
+    fclose(f);
+    return status == ENOENT ? 0 : status;
+}
+
+int getservbyname_r(const char *name, const char *proto, struct servent *result,
+                    char *buffer, size_t length, struct servent **out) {
+    if (!name || !result || !buffer || !out) {
+        return EINVAL;
+    }
+    return find_service(name, 0, proto, result, buffer, length, out);
+}
+
+int getservbyport_r(int port, const char *proto, struct servent *result,
+                    char *buffer, size_t length, struct servent **out) {
+    if (!result || !buffer || !out) {
+        return EINVAL;
+    }
+    return find_service((const char *)0, (int)ntohs((uint16_t)port), proto,
+                        result, buffer, length, out);
+}
+
+static struct servent service_entry;
+static char service_buffer[1024];
+
+struct servent *getservbyname(const char *name, const char *proto) {
+    struct servent *out = (struct servent *)0;
+    getservbyname_r(name, proto, &service_entry, service_buffer, sizeof(service_buffer), &out);
+    return out;
+}
+
+struct servent *getservbyport(int port, const char *proto) {
+    struct servent *out = (struct servent *)0;
+    getservbyport_r(port, proto, &service_entry, service_buffer, sizeof(service_buffer), &out);
+    return out;
+}
+
 int getnameinfo(const struct sockaddr *address, socklen_t addrlen,
                 char *host, socklen_t hostlen,
                 char *serv, socklen_t servlen, int flags) {
-    (void)flags;
-    if (!address || addrlen < (socklen_t)sizeof(struct sockaddr_in)) {
+    if (!address) {
         return EAI_FAMILY;
     }
-    const struct sockaddr_in *in = (const struct sockaddr_in *)(const void *)address;
+    const void *bytes;
+    uint16_t port;
+    if (address->sa_family == AF_INET && addrlen >= (socklen_t)sizeof(struct sockaddr_in)) {
+        const struct sockaddr_in *in = (const struct sockaddr_in *)(const void *)address;
+        bytes = &in->sin_addr;
+        port = in->sin_port;
+    } else if (address->sa_family == AF_INET6 &&
+               addrlen >= (socklen_t)sizeof(struct sockaddr_in6)) {
+        const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)(const void *)address;
+        bytes = &in6->sin6_addr;
+        port = in6->sin6_port;
+    } else {
+        return EAI_FAMILY;
+    }
     if (host && hostlen) {
-        if (!inet_ntop(AF_INET, &in->sin_addr, host, hostlen)) {
-            return EAI_MEMORY;
+        if (flags & NI_NAMEREQD) {
+            return EAI_NONAME;
+        }
+        if (!inet_ntop(address->sa_family, bytes, host, hostlen)) {
+            return EAI_OVERFLOW;
         }
     }
     if (serv && servlen) {
-        snprintf(serv, servlen, "%u", (unsigned)ntohs(in->sin_port));
+        struct servent *named = (struct servent *)0;
+        if (!(flags & NI_NUMERICSERV)) {
+            named = getservbyport((int)port, (flags & NI_DGRAM) ? "udp" : "tcp");
+        }
+        int n = named ? snprintf(serv, servlen, "%s", named->s_name)
+                      : snprintf(serv, servlen, "%u", (unsigned)ntohs(port));
+        if (n < 0 || (socklen_t)n >= servlen) {
+            return EAI_OVERFLOW;
+        }
     }
     return 0;
 }

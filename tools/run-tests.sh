@@ -111,6 +111,9 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$TIER" != "fast" ] && [ "$HOST_ONLY" -eq 0 ]; the
 
   run_stage "Chromium's //base, //mojo and //net, onto the image" \
     ./tools/chromium-test.sh
+
+  run_stage "Node.js, out of Electron's configuration, onto the image" \
+    ./tools/node-test.sh
 fi
 
 if [ "$TIER" = "full" ]; then
@@ -136,9 +139,12 @@ run_stage "what bindgen believes this target is, against gcc" \
   python3 ./tools/chromium-bindgen-test.py
 run_stage "the wireless driver's structures, against Linux's" ./tools/intel-wireless-test.sh
 run_stage "realpath, against the host's" ./tools/realpath-test.sh
+run_stage "inet_ntop and inet_pton, against the host's" ./tools/inet-test.sh
 run_stage "memory and string primitives, against the host's" ./tools/string-test.sh
 run_stage "where a thread_local is, against the linker's own answer" ./tools/tls-layout-test.sh
 run_stage "set-resolution's modes are the driver's" ./tools/set-resolution.sh --check
+run_stage "a patched file's time follows its contents across two builds" \
+  python3 tools/keep-mtimes.py --self-test
 
 if [ "$TIER" = "full" ]; then
   run_stage "coverage, and the ratchet" make --no-print-directory coverage-check

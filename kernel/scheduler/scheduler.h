@@ -334,6 +334,12 @@ typedef struct task {
     uint8_t reaping;
     uint8_t exiting;
     char name[TASK_NAME_MAX];
+    /* M223. The program this task is running, which is not its name: a
+       name is what pthread_setname_np last said - Node calls its main
+       thread "MainThread" - and /proc/<pid>/exe answered with it, so
+       process.execPath became /bin/MainThread. Set when a process is spawned
+       or execs, inherited by its threads, and never renamed. */
+    char program[TASK_NAME_MAX];
 } task_t;
 
 void scheduler_init(void);
@@ -434,6 +440,10 @@ task_t *scheduler_task_by_id(int pid);
 int scheduler_set_env(task_t *t, const char *block, uint32_t length, uint32_t count);
 
 void scheduler_set_task_name(task_t *t, const char *name);
+
+/* A thread's display name alone - pthread_setname_np - leaving the program
+   it runs as it was. */
+void scheduler_set_thread_name(task_t *t, const char *name);
 
 void task_exit_with_signal(int sig) __attribute__((noreturn));
 

@@ -104,6 +104,10 @@ static const cap_grant_t CAP_GRANTS[] = {
     {"chromiumshell", CAP_APP_DEFAULT | CAP_NETWORK},
     {"chrome",        CAP_APP_DEFAULT | CAP_NETWORK},
     {"browser",       CAP_APP_DEFAULT | CAP_NETWORK},
+    /* M223: Node.js, built out of Electron's configuration of this Chromium.
+       A runtime people write servers and package downloads in holds network
+       and nothing an ordinary application does not. */
+    {"node",          CAP_APP_DEFAULT | CAP_NETWORK},
     {"audiograb",     CAP_APP_DEFAULT | CAP_AUDIO},
     {"text_editor",   CAP_APP_DEFAULT | CAP_CLIPBOARD},
     {"badptr",        CAP_ALL},

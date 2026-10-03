@@ -53,6 +53,7 @@ open_file_t *open_file_alloc(int handle, int writable, const char *path, int is_
             table[i].writable = (uint8_t)(writable != 0);
             table[i].refcount = 1;
             table[i].is_directory = (uint8_t)(is_directory != 0);
+            table[i].synchronous = 0;
             table[i].path[0] = 0;
             if (path) {
                 int n = 0;

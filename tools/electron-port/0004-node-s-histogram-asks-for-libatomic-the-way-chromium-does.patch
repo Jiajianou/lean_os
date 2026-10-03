@@ -1,0 +1,16 @@
+diff --git a/third_party/electron_node/deps/histogram/unofficial.gni b/third_party/electron_node/deps/histogram/unofficial.gni
+index 1173ab29..289305a9 100644
+--- a/third_party/electron_node/deps/histogram/unofficial.gni
++++ b/third_party/electron_node/deps/histogram/unofficial.gni
+@@ -25,7 +25,10 @@ template("histogram_gn_build") {
+         "-Wno-unused-function",
+       ]
+     }
+-    if (is_linux) {
++    # libatomic is a C library's, not the architecture's: glibc ships one and
++    # a libc whose compiler inlines every atomic this target has does not.
++    # Chromium's own uses of it ask the same question.
++    if (is_linux && libc_provides_libatomic) {
+       libs = [ "atomic" ]
+     }
+   }

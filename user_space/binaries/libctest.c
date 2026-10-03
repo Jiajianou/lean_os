@@ -1,9 +1,12 @@
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <locale.h>
 #include <langinfo.h>
 #include <math.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 #include <poll.h>
 #include <sys/select.h>
 #include <pthread.h>
@@ -1319,6 +1322,161 @@ int main(void) {
         if (!WIFEXITED(st) || WEXITSTATUS(st) != 127) {
             printf("[libctest] system status %d for a program that is not there\n", st);
             fail("system did not answer 127 for a command that cannot run");
+        }
+    }
+
+    {
+        int fd = open("/tmp/libctest-sync", O_WRONLY | O_CREAT | O_TRUNC | O_SYNC, 0644);
+        if (fd < 0) {
+            fail("open with O_SYNC was refused");
+        } else {
+            if (!(fcntl(fd, F_GETFL) & O_SYNC)) {
+                fail("F_GETFL did not report the O_SYNC the file was opened with");
+            }
+            if (write(fd, "durable", 7) != 7) {
+                fail("a write through an O_SYNC descriptor did not complete");
+            }
+            int copy = dup(fd);
+            if (copy < 0 || !(fcntl(copy, F_GETFL) & O_SYNC)) {
+                fail("O_SYNC belongs to the open file, so a dup has to carry it");
+            }
+            close(copy);
+            close(fd);
+        }
+        fd = open("/tmp/libctest-sync", O_RDONLY);
+        if (fd < 0 || (fcntl(fd, F_GETFL) & O_SYNC)) {
+            fail("a descriptor opened without O_SYNC reported it");
+        }
+        close(fd);
+        unlink("/tmp/libctest-sync");
+    }
+
+    {
+        unsigned long size = 0, before = 0, after = 0;
+        FILE *statm = fopen("/proc/self/statm", "r");
+        if (!statm || fscanf(statm, "%lu %lu", &size, &before) != 2 || before == 0 ||
+            size < before) {
+            fail("/proc/self/statm did not give a resident page count");
+        }
+        if (statm) {
+            fclose(statm);
+        }
+        size_t bytes = 4u << 20;
+        char *block = (char *)malloc(bytes);
+        if (block) {
+            for (size_t i = 0; i < bytes; i += 4096) {
+                block[i] = (char)i;
+            }
+            statm = fopen("/proc/self/statm", "r");
+            if (!statm || fscanf(statm, "%lu %lu", &size, &after) != 2 || after < before + 1000) {
+                printf("[libctest] resident %lu pages, then %lu after touching 4 MiB\n", before, after);
+                fail("statm's resident count did not grow with the pages this process touched");
+            }
+            if (statm) {
+                fclose(statm);
+            }
+            free(block);
+        }
+        int listed = 0;
+        DIR *self = opendir("/proc/self");
+        struct dirent *entry;
+        while (self && (entry = readdir(self))) {
+            listed |= strcmp(entry->d_name, "statm") == 0;
+        }
+        if (self) {
+            closedir(self);
+        }
+        if (!listed) {
+            fail("statm is readable but missing from /proc/self's listing");
+        }
+    }
+
+    {
+        char before[64];
+        char after[64];
+        char name[32];
+        ssize_t n = readlink("/proc/self/exe", before, sizeof(before) - 1);
+        before[n > 0 ? n : 0] = 0;
+        if (pthread_setname_np(pthread_self(), "MainThread") != 0) {
+            fail("pthread_setname_np refused a name that fits");
+        }
+        n = readlink("/proc/self/exe", after, sizeof(after) - 1);
+        after[n > 0 ? n : 0] = 0;
+        if (strcmp(before, "/bin/libctest") != 0 || strcmp(after, before) != 0) {
+            printf("[libctest] /proc/self/exe was %s, then %s after naming the thread\n", before, after);
+            fail("naming a thread changed which program /proc/self/exe says is running");
+        }
+        if (pthread_getname_np(pthread_self(), name, sizeof(name)) != 0 ||
+            strcmp(name, "MainThread") != 0) {
+            fail("the thread's own name did not come back");
+        }
+        pthread_setname_np(pthread_self(), "libctest");
+    }
+
+    if (access("/etc/services", F_OK) != 0) {
+        if (getservbyname("http", "tcp")) {
+            fail("getservbyname named a service on a machine with no /etc/services");
+        }
+        FILE *services = fopen("/etc/services", "w");
+        if (!services) {
+            fail("could not write an /etc/services to look things up in");
+        } else {
+            fputs("# a comment line\n"
+                  "ftp             21/tcp\n"
+                  "http            80/tcp     www www-http   # World Wide Web\n"
+                  "domain          53/udp\n", services);
+            fclose(services);
+            struct servent *s = getservbyname("www", "tcp");
+            if (!s || strcmp(s->s_name, "http") != 0 || ntohs((uint16_t)s->s_port) != 80 ||
+                strcmp(s->s_proto, "tcp") != 0) {
+                fail("getservbyname did not find http by its alias");
+            }
+            if (getservbyname("domain", "tcp")) {
+                fail("getservbyname matched a udp-only service for tcp");
+            }
+            s = getservbyport((int)htons(53), (const char *)0);
+            if (!s || strcmp(s->s_name, "domain") != 0) {
+                fail("getservbyport did not find port 53");
+            }
+            struct servent entry;
+            struct servent *found = (struct servent *)0;
+            char small[8];
+            if (getservbyname_r("http", "tcp", &entry, small, sizeof(small), &found) != ERANGE ||
+                found) {
+                fail("getservbyname_r did not report a buffer too small with ERANGE");
+            }
+            struct sockaddr_in in;
+            memset(&in, 0, sizeof(in));
+            in.sin_family = AF_INET;
+            in.sin_port = htons(80);
+            in.sin_addr.s_addr = htonl(0x7F000001);
+            char host[64];
+            char serv[32];
+            if (getnameinfo((struct sockaddr *)&in, sizeof(in), host, sizeof(host),
+                            serv, sizeof(serv), 0) != 0 ||
+                strcmp(host, "127.0.0.1") != 0 || strcmp(serv, "http") != 0) {
+                fail("getnameinfo did not name port 80 from /etc/services");
+            }
+            if (getnameinfo((struct sockaddr *)&in, sizeof(in), host, sizeof(host),
+                            serv, sizeof(serv), NI_NUMERICSERV) != 0 || strcmp(serv, "80") != 0) {
+                fail("getnameinfo named a service NI_NUMERICSERV asked to keep numeric");
+            }
+            if (getnameinfo((struct sockaddr *)&in, sizeof(in), host, sizeof(host),
+                            (char *)0, 0, NI_NAMEREQD) != EAI_NONAME) {
+                fail("getnameinfo invented a host name NI_NAMEREQD required");
+            }
+            struct sockaddr_in6 in6;
+            memset(&in6, 0, sizeof(in6));
+            in6.sin6_family = AF_INET6;
+            in6.sin6_port = htons(21);
+            in6.sin6_addr.s6_addr[15] = 1;
+            if (getnameinfo((struct sockaddr *)&in6, sizeof(in6), host, sizeof(host),
+                            serv, sizeof(serv), 0) != 0 ||
+                strcmp(host, "::1") != 0 || strcmp(serv, "ftp") != 0) {
+                printf("[libctest] getnameinfo gave %s %s\n", host, serv);
+                fail("getnameinfo did not handle an IPv6 address");
+            }
+            unlink("/etc/services");
         }
     }
 

@@ -49,6 +49,20 @@ int socket_recvfrom(struct socket *s, uint8_t *out, uint16_t max,
 
 int socket_pending(const struct socket *s);
 
+/* M223. A stream socket whose reads would return end-of-file now, which
+   poll(2) reports as readable: a read that does not block is what POLLIN
+   means, whether or not there are bytes behind it. */
+int socket_read_ended(const struct socket *s);
+
+/* shutdown(2) on a stream socket. The write half sends the FIN - the
+   connection carries on receiving in FIN_WAIT - and the read half makes
+   every later read end-of-file. -1 for a socket with no connection to shut. */
+int socket_shutdown(struct socket *s, int how);
+
+/* Whether shutdown(SHUT_RD) has been called. A peer's FIN is not this: what
+   the peer sent before it is still there to be read. */
+int socket_read_shut(const struct socket *s);
+
 void socket_deliver(uint16_t destination_port, uint32_t source_ip, uint16_t source_port,
                     const uint8_t *data, uint16_t length);
 

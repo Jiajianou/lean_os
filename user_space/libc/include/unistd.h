@@ -78,6 +78,9 @@ int fchownat(int dirfd, const char *path, uid_t uid, gid_t gid, int flags);
 
 int setuid(uid_t uid);
 int setgid(gid_t gid);
+int seteuid(uid_t uid);
+int setegid(gid_t gid);
+int setgroups(size_t size, const gid_t *list);
 
 pid_t getppid(void);
 
