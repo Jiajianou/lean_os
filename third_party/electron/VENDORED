@@ -1,0 +1,14 @@
+ELECTRON 1c36d90659266988fb4fb8814b30489ca8d02e60 (github.com/electron/electron)
+CHROMIUM 155.0.8059.0 - the revision Electron's series was written against
+NODE v24.21.0 955266bfdd854cd280dffd47548673914484e4c0 (github.com/nodejs/node)
+NAN a1b4ba8f4bf2f46d2f270dbbb7bc0af482dc3e32 (github.com/nodejs/nan)
+
+Electron is built out of the SAME checkout as the browser, at the revision
+third_party/chromium/VENDORED pins (155.0.8057.0), not at the 155.0.8059.0
+its own DEPS names. Electron's rolls went from 155.0.8046.0 to 155.0.8059.0
+with nothing between, and 8059 is the nearer of the two; where its series
+meets 8057 or this fork's own series, tools/electron-port/fits.json says so.
+
+tools/fetch-electron.sh puts these into build/chromium/src/electron,
+third_party/electron_node and third_party/nan. Squirrel.Mac and its three
+Carthage checkouts are macOS's updater and are not fetched.

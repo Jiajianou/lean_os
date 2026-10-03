@@ -90,6 +90,29 @@ python3 "$ROOT/tools/keep-mtimes.py" restore "$SRC" "$KEEP_STATE" >&2
 [ "$DRIFTED" = "0" ]
 check $? "all $APPLIED fork patches apply to the pinned revision, in order"
 
+# M222. Electron is built out of this same checkout, so its series has to sit
+# on top of this fork's rather than on a Chromium of its own - and Electron
+# writes its series against a revision this checkout is not at. Whether the
+# three fit together is measured in a temporary index rather than in the
+# tree, because applying Electron's 145 Chromium patches to the files the
+# browser is built from would make the next /bin/chrome an Electron.
+if [ -d "$SRC/electron" ]; then
+  ELECTRON_PIN=$(awk '/^ELECTRON /{print $2}' third_party/electron/VENDORED)
+  [ "$(git -C "$SRC/electron" rev-parse HEAD 2>/dev/null)" = "$ELECTRON_PIN" ]
+  check $? "the Electron checkout is at the commit third_party/electron/VENDORED pins"
+
+  FIT=$(python3 tools/electron-fit.py 2>&1)
+  FIT_STATUS=$?
+  echo "$FIT" | sed 's/^/  /'
+  [ "$FIT_STATUS" = "0" ]
+  check $? "this fork's series, Electron's and tools/electron-port all apply exactly - no fuzz"
+
+  python3 tools/electron-fit.py --self-test
+  check $? "and that measurement refuses a drifted anchor, a fuzzed hunk and an unused fit"
+else
+  echo "chromium-test: no Electron checkout - run tools/fetch-electron.sh for M222"
+fi
+
 if [ ! -x "$BASELINE" ]; then
   echo "chromium-test: no baseline build - skipping the render check"
 else

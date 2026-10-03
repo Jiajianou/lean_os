@@ -1,0 +1,50 @@
+[
+ {
+  "series": "chromium",
+  "patch": "mas_avoid_private_macos_api_usage.patch.patch",
+  "because": "Electron's series is written against 155.0.8059.0 and this checkout is 155.0.8057.0. Between the two, upstream qualified this call as ::features:: - one context line, in a file only a macOS build compiles.",
+  "find": [
+   "   if (is_key && ::features::IsAccessibilityRemoteUIAppEnabled()) {"
+  ],
+  "replace": [
+   "   if (is_key && features::IsAccessibilityRemoteUIAppEnabled()) {"
+  ]
+ },
+ {
+  "series": "chromium",
+  "patch": "feat_corner_smoothing_css_rule_and_blink_painting.patch",
+  "because": "lean_os patch 0045 puts an if (use_dawn) block between the end of this sources list and the line after it. The hunk's trailing context is that line, so it is cut: the two files go inside the list either way, and the leading context alone places them.",
+  "find": [
+   "@@ -1690,6 +1690,8 @@ component(\"platform\") {",
+   "     \"widget/widget_base.h\",",
+   "     \"widget/widget_base_client.h\",",
+   "     \"windows_keyboard_codes.h\",",
+   "+    \"//electron/shell/renderer/electron_smooth_round_rect.h\",",
+   "+    \"//electron/shell/renderer/electron_smooth_round_rect.cc\",",
+   "   ]",
+   " ",
+   "   sources -= blink_platform_avx_files"
+  ],
+  "replace": [
+   "@@ -1690,4 +1690,6 @@ component(\"platform\") {",
+   "     \"widget/widget_base.h\",",
+   "     \"widget/widget_base_client.h\",",
+   "     \"windows_keyboard_codes.h\",",
+   "+    \"//electron/shell/renderer/electron_smooth_round_rect.h\",",
+   "+    \"//electron/shell/renderer/electron_smooth_round_rect.cc\",",
+   "   ]"
+  ]
+ },
+ {
+  "series": "chromium",
+  "patch": "allow_new_privileges_in_unsandboxed_child_processes.patch",
+  "because": "lean_os patch 0047 gates the zygote in this block, and this hunk calls GetZygote(), which only exists with one. The merged edit is tools/electron-port/0001.",
+  "drop_file": "content/browser/child_process_launcher_helper_linux.cc"
+ },
+ {
+  "series": "chromium",
+  "patch": "feat_configure_launch_options_for_service_process.patch",
+  "because": "The same block as the patch above, built on top of it. tools/electron-port/0001 carries both.",
+  "drop_file": "content/browser/child_process_launcher_helper_linux.cc"
+ }
+]
