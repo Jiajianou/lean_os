@@ -193,6 +193,16 @@ typedef struct task {
        thread creation as well. */
     file_descriptor_table_t *descriptor_table;
     int parent_id;
+    /* M224: who this task descends from, for kill(2)'s permission check
+       only. It starts as parent_id, and when a process's slot goes its
+       children's lineage moves to that process's own lineage - so an orphan
+       stays a descendant of whoever started the process that orphaned it.
+       parent_id cannot do this: it is also who may WAIT, and a grandparent
+       that never asked for these children must not find them in waitpid(-1).
+       Without it the walk stopped at the first reaped process, and a test
+       runner could not kill a worker its own test had left spinning - the
+       one that then starved every test after it. */
+    int lineage_id;
     uint32_t caps;
     int pgid;
     int sid;
@@ -280,6 +290,11 @@ typedef struct task {
     uint32_t sig_blocked;
     uint32_t sig_siginfo;
     uint32_t sig_onstack;
+    /* M224: SA_RESETHAND, per signal - the handler is put back to SIG_DFL as
+       it is entered. Node's SIGTERM handler restores the terminal and
+       re-raises; without this the re-raise ran the handler again, for ever,
+       and a process that had been told to terminate never did. */
+    uint32_t sig_resethand;
     uint64_t sig_alt_stack_base;
     uint64_t sig_alt_stack_size;
     uint8_t  sig_on_alt_stack;

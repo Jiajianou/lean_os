@@ -249,6 +249,7 @@ void scheduler_spawn_idle_tasks(void) {
         }
         t->is_idle = 1;
         t->parent_id = -1;
+        t->lineage_id = -1;
     }
 }
 
@@ -526,7 +527,9 @@ void scheduler_init(void) {
     }
     tasks[0].descriptor_table->slots[0].type = FILE_DESCRIPTOR_STDIN;
     tasks[0].descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
+    tasks[0].descriptor_table->slots[2].type = FILE_DESCRIPTOR_STDOUT;
     tasks[0].parent_id = -1;
+    tasks[0].lineage_id = -1;
     tasks[0].pgid = 0;
     tasks[0].sid = 0;
     tasks[0].caps = CAP_ALL;
@@ -580,7 +583,9 @@ void scheduler_init_ap(int cpu_id) {
     }
     t->descriptor_table->slots[0].type = FILE_DESCRIPTOR_STDIN;
     t->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
+    t->descriptor_table->slots[2].type = FILE_DESCRIPTOR_STDOUT;
     t->parent_id = -1;
+    t->lineage_id = -1;
     t->pgid = 0;
     t->sid = 0;
     t->pending_signal = 0;
@@ -631,6 +636,25 @@ static int nobody_will_join(const task_t *thread) {
     return thread->detached || !thread_group_has_live_members(thread->tgid, (const task_t *)0);
 }
 
+/* M224: a process that has ended is a ZOMBIE until its parent has waited for
+   it, and only then is its slot anybody's. M168 wrote this sweep to release
+   leaders whose wait() had been held back by live threads, and it released
+   every terminated leader instead - so the next spawn, by anybody, destroyed
+   the exit status of every child whose parent had not collected it yet.
+   libuv asks waitpid(pid, WNOHANG) of each child it started, got "no such
+   child", and never reported the exit: Node spawning forty `ls` and then
+   forking once heard from none of the forty, ever.
+
+   Released without a wait only when nobody is left who could wait - the
+   parent process has ended, or the parent is the kernel, whose self-tests
+   reap by slot and have always relied on this sweep to do it. */
+static int nobody_will_wait(const task_t *leader) {
+    if (leader->reaped || leader->parent_id <= 0) {
+        return 1;
+    }
+    return !thread_group_has_live_members(leader->parent_id, (const task_t *)0);
+}
+
 void scheduler_release_finished_tasks(void) {
     for (int i = 0; i < task_count; i++) {
         task_t *o = &tasks[i];
@@ -644,7 +668,7 @@ void scheduler_release_finished_tasks(void) {
         if (o->state != TASK_TERMINATED || o->is_thread) {
             continue;
         }
-        if (thread_group_has_live_members(o->tgid, o)) {
+        if (thread_group_has_live_members(o->tgid, o) || !nobody_will_wait(o)) {
             continue;
         }
         scheduler_reap_slot(o);
@@ -722,12 +746,25 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
         descriptor_table_reference(t->descriptor_table);
     } else {
         t->descriptor_table = fresh;
+        /* M224: a program the KERNEL starts gets the three standard
+           descriptors and nothing else. The boot self-tests open pipes on the
+           kernel task's own table, and every one left open - two before this
+           milestone, and a third that libctest's check then found - went to every
+           program spawned afterwards as a descriptor 3 nobody had given it.
+           Auditing each test found them one at a time; this ends the class.
+           A test that captures a program's output still points 1 and 2 at
+           its pipe first, which is inheritance this keeps; and a kernel
+           THREAD, which shares the kernel's address space, keeps the table
+           it is a part of. */
+        const int from_kernel = caller->pml4_phys == virtual_memory_kernel_pml4_phys() &&
+                                pml4_phys != virtual_memory_kernel_pml4_phys();
         for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
             t->descriptor_table->slots[i] = caller->descriptor_table->slots[i];
             /* Close-on-exec, and this IS the exec: a spawn replaces the
                image, which is what the flag is about. A thread above takes
                the other branch and keeps them. */
             if (t->descriptor_table->slots[i].cloexec ||
+                (from_kernel && i > 2) ||
                 t->descriptor_table->slots[i].type == FILE_DESCRIPTOR_RESERVED) {
                 t->descriptor_table->slots[i].type = FILE_DESCRIPTOR_NONE;
                 t->descriptor_table->slots[i].cloexec = 0;
@@ -736,7 +773,12 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
             file_descriptor_retain(&t->descriptor_table->slots[i]);
         }
     }
-    t->parent_id = caller->id;
+    /* M224: the parent is a PROCESS. It was the calling thread's own id, so a
+       child spawned on one thread could not be waited for from another -
+       waitpid answered "no such child" - which is not POSIX's rule and is
+       exactly how libuv works: the loop thread reaps what any thread spawned. */
+    t->parent_id = caller->tgid;
+    t->lineage_id = caller->tgid;
     t->pgid = caller->pgid;
     t->sid = caller->sid;
     t->pending_signal = 0;
@@ -772,6 +814,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->sig_pending = 0;
     t->sig_blocked = 0;
     t->sig_siginfo = 0;
+    t->sig_resethand = 0;
     t->sig_onstack = 0;
     t->sig_alt_stack_base = 0;
     t->sig_alt_stack_size = 0;
@@ -1699,6 +1742,23 @@ static void remember_exit(const task_t *t) {
     spin_unlock_irqrestore(&recent_exit_lock, f);
 }
 
+void scheduler_log_recent_exits(void) {
+    kernel_log_puts("[hang] recent process exits (pid, wait status):");
+    uint64_t f = spin_lock_irqsave(&recent_exit_lock);
+    for (int i = 0; i < RECENT_EXIT_COUNT; i++) {
+        int at = (recent_exit_next + i) % RECENT_EXIT_COUNT;
+        if (recent_exits[at].pid == 0) {
+            continue;
+        }
+        kernel_log_puts(" ");
+        kernel_log_put_dec((uint32_t)recent_exits[at].pid);
+        kernel_log_puts("=0x");
+        kernel_log_put_hex32((uint32_t)recent_exits[at].status);
+    }
+    spin_unlock_irqrestore(&recent_exit_lock, f);
+    kernel_log_putc('\n');
+}
+
 int scheduler_recent_exit_status(int pid, int *status_out) {
     int found = 0;
     uint64_t f = spin_lock_irqsave(&recent_exit_lock);
@@ -1712,10 +1772,18 @@ int scheduler_recent_exit_status(int pid, int *status_out) {
     return found;
 }
 
+/* M224: a signal that terminates terminates the PROCESS. Each thread here is
+   a task, and this ended only the one the signal reached - so SIGTERM to a
+   Node process ended its main thread and left the platform workers, the
+   libuv pool and the inspector thread running with no main thread, holding
+   every descriptor the process had. A parent reading that child's stdout
+   waited for an EOF that never came. exit() has always taken the group with
+   it; death by a signal does the same now. */
 void task_exit_with_signal(int sig) {
     task_t *t = current_task_now();
     if (t) {
         t->exit_signal = sig;
+        scheduler_kill_thread_group(t);
     }
     task_exit_with_code(128 + sig);
 }
@@ -2067,6 +2135,15 @@ void scheduler_reap_slot(task_t *t) {
         }
     }
 
+    if (!reaped_a_thread) {
+        for (int i = 0; i < task_count; i++) {
+            task_t *o = &tasks[i];
+            if (o != t && o->state != TASK_FREE && o->lineage_id == reaped_group) {
+                o->lineage_id = t->lineage_id;
+            }
+        }
+    }
+
     uint8_t *stack = t->stack_base;
     t->stack_base = NULL;
     t->kernel_stack_top = 0;
@@ -2095,6 +2172,7 @@ void scheduler_reap_slot(task_t *t) {
     t->prio = PRIO_INTERACTIVE;
     t->full_slices = 0;
     t->parent_id = -1;
+    t->lineage_id = -1;
     t->caps = 0;
     scheduler_reset_file_descriptors_to_std(t);
     t->env_block = NULL;
@@ -2106,6 +2184,7 @@ void scheduler_reap_slot(task_t *t) {
     t->sig_blocked = 0;
     t->sig_restorer = 0;
     t->sig_siginfo = 0;
+    t->sig_resethand = 0;
     t->sig_onstack = 0;
     t->sig_alt_stack_base = 0;
     t->sig_alt_stack_size = 0;
@@ -2145,7 +2224,7 @@ void scheduler_reap_slot(task_t *t) {
         !thread_group_has_live_members(reaped_group, (const task_t *)0)) {
         task_t *leader = scheduler_task_by_id(reaped_group);
         if (leader && leader != t && leader->state == TASK_TERMINATED &&
-            !leader->is_thread) {
+            !leader->is_thread && nobody_will_wait(leader)) {
             scheduler_reap_slot(leader);
         }
     }
@@ -2890,7 +2969,8 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->stamp_syscalls_seen = 0;
 
     t->descriptor_table = fresh;
-    t->parent_id = parent->id;
+    t->parent_id = parent->tgid;
+    t->lineage_id = parent->tgid;
     t->pgid = parent->pgid;
     t->sid = parent->sid;
     t->pending_signal = 0;
@@ -2939,6 +3019,7 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->sig_blocked = parent->sig_blocked;
     t->sig_pending = 0;
     t->sig_siginfo = parent->sig_siginfo;
+    t->sig_resethand = parent->sig_resethand;
     t->si_pid = 0;
     t->si_status = 0;
     t->si_address = 0;
@@ -3367,4 +3448,5 @@ void scheduler_reset_file_descriptors_to_std(task_t *t) {
     }
     t->descriptor_table->slots[0].type = FILE_DESCRIPTOR_STDIN;
     t->descriptor_table->slots[1].type = FILE_DESCRIPTOR_STDOUT;
+    t->descriptor_table->slots[2].type = FILE_DESCRIPTOR_STDOUT;
 }

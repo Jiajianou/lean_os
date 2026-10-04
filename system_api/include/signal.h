@@ -46,6 +46,7 @@ extern "C" {
 
 #define SA_SIGINFO 0x00000004
 #define SA_ONSTACK 0x08000000
+#define SA_RESETHAND 0x80000000
 
 #define OS_SS_ONSTACK 1
 #define OS_SS_DISABLE 2
@@ -146,7 +147,7 @@ typedef struct {
 #define SIG_DFL_CONTINUE  3
 
 #define SIG_DEFAULT_ACTION(sig)                                              \
-    (((sig) == SIGCHLD || (sig) == SIGWINCH) ? SIG_DFL_IGNORE                \
+    (((sig) == SIGCHLD || (sig) == SIGWINCH || (sig) == SIGURG) ? SIG_DFL_IGNORE \
      : ((sig) == SIGCONT ? SIG_DFL_CONTINUE                                  \
         : (((sig) == SIGSTOP || (sig) == SIGTSTP || (sig) == SIGTTIN ||      \
             (sig) == SIGTTOU)                                                \

@@ -44,7 +44,12 @@ extern "C" {
 #define S_ISGID 02000
 #define S_ISVTX 01000
 
-#define O_DIRECTORY 0
+/* M224: a flag rather than zero. Zero opened a FILE "as a directory"
+   without a word, and libc++'s filesystem::remove_all - which is how Node's
+   fs.rm and Rust's remove_dir_all tell a file from a directory - then read
+   every file as an empty directory and removed nothing. The kernel never
+   sees it: open() checks what it opened. */
+#define O_DIRECTORY 0x10000
 #define O_NOCTTY    0
 #define O_LARGEFILE 0
 #define O_NOFOLLOW  OPEN_NOFOLLOW

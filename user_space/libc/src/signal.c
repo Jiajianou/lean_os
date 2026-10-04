@@ -20,12 +20,23 @@ sighandler_t signal(int sig, sighandler_t handler) {
     return (sighandler_t)previous;
 }
 
+/* Only a negative result is a refusal. raise() hands back whatever the
+   syscall's RAX is when the signal returns, and basetest edits it in a
+   ucontext to prove the edit takes effect. */
+static int kill_result(long r) {
+    if (r >= 0) {
+        return (int)r;
+    }
+    errno = r == -OS_ERROR_SEARCH ? ESRCH : r == -OS_ERROR_PERMISSION ? EPERM : EINVAL;
+    return -1;
+}
+
 int kill(int pid, int sig) {
-    return (int)sys_kill(pid, sig);
+    return kill_result(sys_kill(pid, sig));
 }
 
 int raise(int sig) {
-    return (int)sys_kill(sys_getpid(), sig);
+    return kill_result(sys_kill(sys_getpid(), sig));
 }
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *old) {

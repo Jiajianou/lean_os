@@ -50,6 +50,13 @@ LIBC="$ROOT/build/sysroot/usr/lib/libc.a"
 [ ! -f "$LIBC" ] || [ "$NODE" -nt "$LIBC" ]
 check $? "node is newer than the sysroot's libc.a (rm it and rebuild if not - ninja will not)"
 
+# M224: and the sysroot's libc.a is the tree's. make all builds build/libc.a
+# and nothing copies it into the sysroot but `make sysroot`, so the check
+# above passed for a whole milestone of libc fixes that node never had -
+# kill(2) still left errno alone on the machine after it had been fixed here.
+cmp -s "$ROOT/build/libc.a" "$LIBC"
+check $? "the sysroot's libc.a is build/libc.a (run make sysroot if not)"
+
 HEADER=$("${PREFIX}readelf" -h "$NODE")
 grep -q 'Type: *EXEC' <<< "$HEADER" && grep -q 'Machine: *Advanced Micro Devices X86-64' <<< "$HEADER"
 check $? "out/ElectronNode/node is an x86-64 ELF executable"

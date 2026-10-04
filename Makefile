@@ -393,7 +393,8 @@ toybox: $(TOYBOX_BIN) $(IMAGE) $(LEANFS_PUT) preseed
 		$(LEANFS_PUT) -s $(IMAGE) /bin/toybox /bin/$$c >/dev/null || exit 1; \
 		n=$$((n+1)); \
 	done; \
-	echo "toybox: /bin/toybox plus $$n command names ($$k kept lean_os's own)"
+	$(LEANFS_PUT) -s $(IMAGE) /bin/env /usr/bin/env >/dev/null || exit 1; \
+	echo "toybox: /bin/toybox plus $$n command names ($$k kept lean_os's own), and /usr/bin/env"
 
 NETSURF_BIN := $(BUILD)/netsurf/netsurf
 

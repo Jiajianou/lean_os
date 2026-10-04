@@ -37,7 +37,7 @@ qemu-system-x86_64 \
   -device virtio-blk-pci,drive=disk0 -display none \
   -netdev user,id=net0 -device rtl8139,netdev=net0 \
   -fw_cfg name=opt/leanos/selftest,string=1 \
-  -fw_cfg "name=opt/leanos/node,string=$SCRIPT" \
+  -fw_cfg "name=opt/leanos/node,string=$SCRIPT${LEANOS_NODE_ARGS:+ $LEANOS_NODE_ARGS}" \
   -serial file:"$LOG" -monitor none &
 QEMU_PID=$!
 disown "$QEMU_PID" 2>/dev/null || true

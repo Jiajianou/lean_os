@@ -1080,7 +1080,7 @@ static long sys_wait(uint64_t pid_argument, uint64_t a2, uint64_t a3, uint64_t a
             int total = scheduler_task_count();
             for (int i = 0; i < total; i++) {
                 task_t *t = scheduler_task_by_slot(i);
-                if (!t || t->parent_id != self->id || t->reaped) {
+                if (!t || t->parent_id != self->tgid || t->reaped) {
                     continue;
                 }
                 any_children = 1;
@@ -1270,10 +1270,10 @@ static int may_signal(task_t *self, task_t *t) {
     }
     task_t *up = t;
     for (int depth = 0; up && depth < MAX_TASKS; depth++) {
-        if (up->parent_id == self->id) {
+        if (up->lineage_id == self->tgid) {
             return 1;
         }
-        up = up->parent_id >= 0 ? scheduler_task_by_id(up->parent_id) : (task_t *)0;
+        up = up->lineage_id >= 0 ? scheduler_task_by_id(up->lineage_id) : (task_t *)0;
     }
     return has_cap(CAP_KILL_ANY);
 }
@@ -1283,14 +1283,18 @@ static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint6
     (void)a4;
     (void)a5;
     (void)a6;
+    /* M224: three refusals, told apart. They were all -1, and kill(2)'s
+       caller asks which: ESRCH is how anything - Node's process.kill, a
+       shell's `kill %1` - learns a process is gone rather than protected. */
     if ((long)sig < 0 || sig > SIG_MAX) {
-        return -1;
+        return -OS_ERROR_INVALID;
     }
 
     if ((long)pid <= 0) {
         task_t *self_g = scheduler_current();
         int target_pgid = ((long)pid == 0) ? self_g->pgid : (int)(-(long)pid);
         int delivered = 0;
+        int refused = 0;
         int total = scheduler_task_count();
         for (int i = 0; i < total; i++) {
             task_t *m = scheduler_task_by_slot(i);
@@ -1299,6 +1303,7 @@ static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint6
                 continue;
             }
             if (!may_signal(self_g, m)) {
+                refused++;
                 continue;
             }
             delivered++;
@@ -1306,16 +1311,19 @@ static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint6
                 scheduler_raise_signal(m, (int)sig);
             }
         }
-        return delivered > 0 ? 0 : -1;
+        if (delivered > 0) {
+            return 0;
+        }
+        return refused ? -OS_ERROR_PERMISSION : -OS_ERROR_SEARCH;
     }
 
     task_t *t = scheduler_task_by_id((int)pid);
     if (!t || t->state == TASK_TERMINATED) {
-        return -1;
+        return -OS_ERROR_SEARCH;
     }
     task_t *self = scheduler_current();
     if (!may_signal(self, t)) {
-        return -1;
+        return -OS_ERROR_PERMISSION;
     }
     if (sig == 0) {
         return 0;
@@ -1973,7 +1981,7 @@ static long sys_setpgid(uint64_t pid_argument, uint64_t pgid_argument, uint64_t 
     if (!t || t->state == TASK_TERMINATED || t->state == TASK_FREE) {
         return -1;
     }
-    if (t != self && t->parent_id != self->id) {
+    if (t != self && t->parent_id != self->tgid) {
         return -1;
     }
     if (pgid == 0) {
@@ -5016,6 +5024,11 @@ static long sys_sigaction(uint64_t signo, uint64_t handler, uint64_t restorer,
     } else {
         self->sig_onstack &= ~(1u << signo);
     }
+    if (flags & SA_RESETHAND) {
+        self->sig_resethand |= (1u << signo);
+    } else {
+        self->sig_resethand &= ~(1u << signo);
+    }
     if (handler == SIG_IGN_ADDR || handler == SIG_DFL_ADDR) {
         self->sig_pending &= ~(1u << signo);
     }
@@ -5383,7 +5396,7 @@ static long sys_waitpid(uint64_t pid_argument, uint64_t status_pointer, uint64_t
         want_pgid = self->pgid;
     }
     if (status_pointer && !user_range_ok(status_pointer, sizeof(int), 1)) {
-        return -1;
+        return -OS_ERROR_FAULT;
     }
 
     for (;;) {
@@ -5393,7 +5406,7 @@ static long sys_waitpid(uint64_t pid_argument, uint64_t status_pointer, uint64_t
 
         if (want > 0) {
             task_t *t = scheduler_task_by_id((int)want);
-            if (!t || t->reaped || t->parent_id != self->id) {
+            if (!t || t->reaped || t->parent_id != self->tgid) {
                 return -1;
             }
             any_children = 1;
@@ -5420,7 +5433,7 @@ static long sys_waitpid(uint64_t pid_argument, uint64_t status_pointer, uint64_t
             int total = scheduler_task_count();
             for (int i = 0; i < total; i++) {
                 task_t *t = scheduler_task_by_slot(i);
-                if (!t || t->parent_id != self->id || t->reaped) {
+                if (!t || t->parent_id != self->tgid || t->reaped) {
                     continue;
                 }
                 if (want_pgid && t->pgid != want_pgid) {
@@ -5625,6 +5638,7 @@ static long sys_execve(isr_regs_t *regs) {
     self->sig_restorer = 0;
     self->sig_siginfo = 0;
     self->sig_onstack = 0;
+    self->sig_resethand = 0;
     /* The new program's address space is not the old one's, so an alternate
        stack registered by what came before is an address it does not own. */
     self->sig_alt_stack_base = 0;
@@ -5913,6 +5927,13 @@ static int signal_deliver(isr_regs_t *regs) {
     }
 
     int want_info = (self->sig_siginfo & (1u << signo)) != 0;
+    if (self->sig_resethand & (1u << signo)) {
+        /* One delivery, then the default - which is what lets a handler that
+           cleans up and re-raises actually end the process. */
+        self->sig_handler[signo] = SIG_DFL_ADDR;
+        self->sig_resethand &= ~(1u << signo);
+        self->sig_siginfo &= ~(1u << signo);
+    }
     siginfo_t info;
     if (want_info) {
         k_memset(&info, 0, sizeof(info));

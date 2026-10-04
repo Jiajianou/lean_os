@@ -1,10 +1,15 @@
+#include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
+#include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "syscall_wrappers.h"
@@ -462,6 +467,18 @@ static int futex_mode(void) {
    with. Chromium's static pipe descriptors were exactly this. */
 static int written_by_the_kernel_after_fork[PAGE / sizeof(int)] __attribute__((aligned(PAGE)));
 
+static int stuck_pipe[2];
+
+static void *block_forever(void *arg) {
+    char byte;
+    (void)read(stuck_pipe[0], &byte, 1);
+    return arg;
+}
+
+static void *sweep_trigger(void *arg) {
+    return arg;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && argv[1] && strcmp(argv[1], "futex") == 0) {
         return futex_mode();
@@ -643,6 +660,104 @@ int main(int argc, char **argv) {
                    (int)got, (int)mine);
             return 12;
         }
+    }
+
+    {
+        pid_t first = fork();
+        if (first == 0) {
+            _exit(7);
+        }
+        if (first < 0) {
+            return 14;
+        }
+        int st = 0;
+        while (kill(first, 0) == 0) {
+            sched_yield();
+        }
+        pthread_t sweeper;
+        if (pthread_create(&sweeper, NULL, sweep_trigger, NULL) != 0 ||
+            pthread_join(sweeper, NULL) != 0) {
+            return 14;
+        }
+        if (waitpid(first, &st, 0) != first || !WIFEXITED(st) || WEXITSTATUS(st) != 7) {
+            printf("forktest: a child that exited before a thread was started "
+                   "could not be waited for - the spawn's sweep took its status\n");
+            return 14;
+        }
+        errno = 0;
+        if (kill(first, 0) != -1 || errno != ESRCH) {
+            printf("forktest: kill of a reaped child said errno %d, not ESRCH\n", errno);
+            return 15;
+        }
+    }
+
+    {
+        int link[2];
+        if (pipe(link) != 0) {
+            return 16;
+        }
+        pid_t middle = fork();
+        if (middle == 0) {
+            pid_t spinner = fork();
+            if (spinner == 0) {
+                for (;;) {
+                    sched_yield();
+                }
+            }
+            (void)write(link[1], &spinner, sizeof(spinner));
+            _exit(0);
+        }
+        pid_t spinner = -1;
+        if (middle < 0 || read(link[0], &spinner, sizeof(spinner)) != sizeof(spinner) ||
+            waitpid(middle, NULL, 0) != middle) {
+            return 16;
+        }
+        close(link[0]);
+        close(link[1]);
+        if (kill(spinner, SIGKILL) != 0) {
+            printf("forktest: a grandchild whose parent had been reaped could not be "
+                   "killed by the process that started it (errno %d)\n", errno);
+            return 16;
+        }
+    }
+
+    {
+        int held[2];
+        if (pipe(held) != 0 || pipe(stuck_pipe) != 0) {
+            return 17;
+        }
+        pid_t victim = fork();
+        if (victim == 0) {
+            close(held[0]);
+            pthread_t sleeper;
+            if (pthread_create(&sleeper, NULL, block_forever, NULL) != 0) {
+                _exit(3);
+            }
+            for (;;) {
+                pause();
+            }
+        }
+        close(held[1]);
+        if (victim < 0) {
+            return 17;
+        }
+        struct timespec settle = {0, 200000000};
+        nanosleep(&settle, NULL);
+        kill(victim, SIGTERM);
+        int st = 0;
+        if (waitpid(victim, &st, 0) != victim || !WIFSIGNALED(st) || WTERMSIG(st) != SIGTERM) {
+            return 17;
+        }
+        struct pollfd hangup = {held[0], POLLIN, 0};
+        char byte;
+        if (poll(&hangup, 1, 5000) != 1 || read(held[0], &byte, 1) != 0) {
+            printf("forktest: SIGTERM ended a process's main thread and left its "
+                   "other thread holding the process's descriptors\n");
+            return 17;
+        }
+        close(held[0]);
+        close(stuck_pipe[0]);
+        close(stuck_pipe[1]);
     }
 
     printf("forktest: all checks passed\n");

@@ -2,6 +2,7 @@
 #include <stdarg.h>
 #include <sys/file.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -76,11 +77,27 @@ int chdir(const char *path) {
     return 0;
 }
 
+/* M224: a null buffer is allocated, which is what every Unix this side of
+   2008 does and what toybox's pwd relies on - it called getcwd(NULL, 0),
+   got nothing, and every `pwd` on this machine printed "xgetcwd". */
 char *getcwd(char *buffer, size_t size) {
-    if (!buffer || size == 0) {
+    if (buffer && size == 0) {
+        errno = EINVAL;
         return 0;
     }
+    char *own = (char *)0;
+    if (!buffer) {
+        size = size ? size : PATH_MAX;
+        own = (char *)malloc(size);
+        if (!own) {
+            errno = ENOMEM;
+            return 0;
+        }
+        buffer = own;
+    }
     if (sys_getcwd(buffer, size) < 0) {
+        free(own);
+        errno = ERANGE;
         return 0;
     }
     return buffer;
@@ -273,9 +290,27 @@ int pipe2(int file_descriptors[2], int flags) {
 }
 
 int open(const char *path, int flags, ...) {
-    int fd = (int)sys_open(path, (uint32_t)flags);
+    int fd = (int)sys_open(path, (uint32_t)(flags & ~O_DIRECTORY));
     if (fd < 0) {
-        errno = __lean_path_errno(path, (flags & O_CREAT) != 0);
+        /* M224: O_NOFOLLOW refusing a symbolic link is ELOOP, and callers
+           tell it apart from EACCES: libc++'s remove_all unlinks the LINK on
+           ELOOP and gives up on EACCES, which left a link to an ancestor in
+           every directory fs.rm was asked to delete. */
+        struct stat link;
+        if ((flags & O_NOFOLLOW) && lstat(path, &link) == 0 && S_ISLNK(link.st_mode)) {
+            errno = ELOOP;
+        } else {
+            errno = __lean_path_errno(path, (flags & O_CREAT) != 0);
+        }
+        return fd;
+    }
+    if (flags & O_DIRECTORY) {
+        struct stat st;
+        if (fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            close(fd);
+            errno = ENOTDIR;
+            return -1;
+        }
     }
     return fd;
 }
@@ -284,8 +319,17 @@ int creat(const char *path, mode_t mode) {
     return open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
 }
 
+static int fcntl_result(long r) {
+    if (r < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    return (int)r;
+}
+
 int fcntl(int fd, int command, ...) {
     if (fd < 0) {
+        errno = EBADF;
         return -1;
     }
     switch (command) {
@@ -313,17 +357,22 @@ int fcntl(int fd, int command, ...) {
         }
         return (int)copy;
     }
+    /* M224: every failure here says why. These three returned -1 and left
+       errno as it was - and the idiom is do { r = fcntl(...); } while
+       (r == -1 && errno == EINTR), so a stale EINTR from anywhere earlier made
+       a bad descriptor an infinite loop. libuv's close-on-exec loop spun in
+       exactly that, at the start of every Node process. */
     case F_GETFD:
-        return (int)sys_fcntl(fd, F_GETFD_COMMAND, 0);
+        return fcntl_result(sys_fcntl(fd, F_GETFD_COMMAND, 0));
     case F_SETFD: {
         __builtin_va_list ap;
         __builtin_va_start(ap, command);
         int arg = __builtin_va_arg(ap, int);
         __builtin_va_end(ap);
-        return (int)sys_fcntl(fd, F_SETFD_COMMAND, arg & FD_CLOEXEC);
+        return fcntl_result(sys_fcntl(fd, F_SETFD_COMMAND, arg & FD_CLOEXEC));
     }
     case F_GETFL:
-        return (int)sys_fcntl(fd, F_GETFL_COMMAND, 0);
+        return fcntl_result(sys_fcntl(fd, F_GETFL_COMMAND, 0));
     case F_SETFL: {
         __builtin_va_list ap;
         __builtin_va_start(ap, command);
@@ -529,7 +578,20 @@ int execle(const char *path, const char *arg, ...) {
 }
 
 pid_t waitpid(pid_t pid, int *status, int options) {
-    return (pid_t)sys_waitpid(pid, status, options);
+    /* M224: and say why it failed. The idiom is do { r = waitpid(...); }
+       while (r == -1 && errno == EINTR), so an errno left as it was turned a
+       child that was not ours into an infinite loop - libuv's reaper spun in
+       it, intermittently, whenever an earlier call had left EINTR behind. */
+    long r = sys_waitpid(pid, status, options);
+    if (r == -OS_ERROR_FAULT) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (r < 0) {
+        errno = ECHILD;
+        return -1;
+    }
+    return (pid_t)r;
 }
 
 pid_t wait(int *status) {

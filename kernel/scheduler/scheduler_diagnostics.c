@@ -547,6 +547,7 @@ void scheduler_hang_check(void) {
    is what comes home. Every live task, what it is waiting for, what it has
    pending, and for one that is not running, where in the kernel it sleeps. */
 void scheduler_log_task_table(void) {
+    scheduler_log_recent_exits();
     kernel_log_puts("[hang] task table:\n");
     for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
         task_t *current = scheduler_cpu_current(cpu);
@@ -585,6 +586,13 @@ void scheduler_log_task_table(void) {
         kernel_log_put_hex32(t->sig_pending);
         kernel_log_puts(" locks ");
         kernel_log_put_dec(t->sleep_locks_held);
+        kernel_log_puts(" blocked 0x");
+        kernel_log_put_hex32(t->sig_blocked);
+        kernel_log_puts(" chld 0x");
+        kernel_log_put_hex64(t->sig_handler[17]);
+        kernel_log_puts(" parent ");
+        kernel_log_put_dec((uint32_t)t->parent_id);
+        kernel_log_puts(t->reaped ? " reaped" : "");
         if (t->exiting) {
             kernel_log_puts(" exiting");
         }

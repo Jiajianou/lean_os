@@ -91,6 +91,12 @@ static void *tss_worker(void *arg) {
 }
 
 static volatile int usr_seen;
+static volatile int winch_seen;
+
+static void winch_handler(int sig) {
+    (void)sig;
+    winch_seen++;
+}
 
 static void usr_handler(int sig) {
     (void)sig;
@@ -1411,6 +1417,80 @@ int main(void) {
             fail("the thread's own name did not come back");
         }
         pthread_setname_np(pthread_self(), "libctest");
+    }
+
+    {
+        static const char line[] = "[libctest] written to descriptor 2\n";
+        if (write(2, line, sizeof(line) - 1) != (ssize_t)(sizeof(line) - 1)) {
+            fail("descriptor 2 - stderr - would not take a write");
+        }
+        errno = 0;
+        if (fcntl(3, F_GETFD) != -1 || errno != EBADF) {
+            fail("descriptor 3 was open in a program nothing gave one to");
+        }
+    }
+
+    {
+        struct sigaction once;
+        memset(&once, 0, sizeof(once));
+        once.sa_handler = winch_handler;
+        once.sa_flags = SA_RESETHAND;
+        struct sigaction now;
+        if (sigaction(SIGWINCH, &once, (struct sigaction *)0) != 0) {
+            fail("sigaction refused SA_RESETHAND");
+        }
+        raise(SIGWINCH);
+        sigaction(SIGWINCH, (const struct sigaction *)0, &now);
+        raise(SIGWINCH);
+        if (winch_seen != 1 || now.sa_handler != SIG_DFL) {
+            printf("[libctest] SA_RESETHAND handler ran %d time(s)\n", winch_seen);
+            fail("an SA_RESETHAND handler was not put back to SIG_DFL as it ran");
+        }
+    }
+
+    {
+        char fixed[256];
+        char *grown = getcwd(NULL, 0);
+        if (!grown || !getcwd(fixed, sizeof(fixed)) || strcmp(grown, fixed) != 0) {
+            fail("getcwd(NULL, 0) did not allocate the working directory");
+        }
+        free(grown);
+        errno = 0;
+        if (getcwd(fixed, 1) != NULL || errno != ERANGE) {
+            fail("getcwd into a one-byte buffer did not say ERANGE");
+        }
+    }
+
+    {
+        static const char *const directories[] = {"/", "/bin", "/tmp"};
+        for (size_t i = 0; i < sizeof(directories) / sizeof(directories[0]); i++) {
+            int dfd = open(directories[i], O_RDONLY | O_DIRECTORY);
+            if (dfd < 0) {
+                printf("[libctest] O_DIRECTORY refused %s\n", directories[i]);
+                fail("open(O_DIRECTORY) refused a directory");
+            }
+            close(dfd);
+        }
+        errno = 0;
+        int ffd = open("/bin/libctest", O_RDONLY | O_DIRECTORY);
+        if (ffd >= 0 || errno != ENOTDIR) {
+            fail("open(O_DIRECTORY) opened a regular file instead of saying ENOTDIR");
+        }
+    }
+
+    {
+        unlink("/tmp/libctest-nofollow");
+        if (symlink("/bin/libctest", "/tmp/libctest-nofollow") == 0) {
+            errno = 0;
+            int lfd = open("/tmp/libctest-nofollow", O_RDONLY | O_NOFOLLOW);
+            if (lfd >= 0 || errno != ELOOP) {
+                printf("[libctest] O_NOFOLLOW on a link said errno %d\n", errno);
+                fail("open(O_NOFOLLOW) of a symbolic link did not say ELOOP");
+            }
+            unlink("/tmp/libctest-nofollow");
+        } else {
+            fail("symlink into /tmp failed");
+        }
     }
 
     if (access("/etc/services", F_OK) != 0) {

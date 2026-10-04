@@ -231,6 +231,7 @@ typedef struct {
 #define SYS_pwrite 112
 
 #define OS_ERROR_SPIPE 29
+#define OS_ERROR_SEARCH 3
 
 #define SYS_socketpair 113
 #define SYS_bindun     114

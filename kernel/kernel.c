@@ -2449,11 +2449,54 @@ static void boot_selftests_system(void) {
         int node_length = fwcfg_read_file("opt/leanos/node", node_script,
                                           sizeof(node_script) - 1);
         if (node_length > 0) {
-            const char *node_argv[] = {PATH_BIN_DIRECTORY "node", node_script, 0};
+            /* The switch is a command line - a script and its arguments,
+               separated by spaces - so a test runner can be told what to run. */
+            const char *node_argv[10] = {PATH_BIN_DIRECTORY "node", 0};
+            int node_argc = 1;
+            for (char *c = node_script; *c && node_argc < 9;) {
+                while (*c == ' ') {
+                    *c++ = '\0';
+                }
+                if (!*c) {
+                    break;
+                }
+                node_argv[node_argc++] = c;
+                while (*c && *c != ' ') {
+                    c++;
+                }
+            }
+            node_argv[node_argc] = 0;
             kernel_log_puts("[node] running ");
             kernel_log_puts(node_script);
             kernel_log_putc('\n');
-            long node_rc = run_captured_program("node", node_argv, 600);
+            /* Not captured: the program's standard output IS the serial line,
+               written as it runs, so a suite of thousands of lines streams
+               out instead of filling a buffer, and a hang still shows how far
+               it got. The deadline is generous on purpose - Node's own test
+               suite runs through this switch and takes hours under TCG. */
+            size_t node_bytes = 0;
+            uint8_t *node_image = read_program(PATH_BIN_DIRECTORY "node", &node_bytes);
+            task_t *node_task = process_spawnv("node", node_image, node_bytes, node_argv);
+            kfree(node_image);
+            long node_rc = -1;
+            long node_deadline = (long)pit_get_ticks() + 6L * 3600 * PIT_HZ;
+            /* A program still running after a minute gets the task table
+               logged once - who is blocked on what, with the kernel frames
+               they are blocked in - because a hang under this switch is the
+               thing being looked for and a quiet machine says nothing. */
+            long node_report_at = (long)pit_get_ticks() + 60L * PIT_HZ;
+            while (node_task && (long)pit_get_ticks() < node_deadline) {
+                long done = do_syscall(SYS_wait_nb, (uint64_t)node_task->id, 0, 0);
+                if (done != -2) {
+                    node_rc = done;
+                    break;
+                }
+                if (node_report_at && (long)pit_get_ticks() > node_report_at) {
+                    scheduler_log_task_table();
+                    node_report_at = 0;
+                }
+                scheduler_sleep_ms(100);
+            }
             kernel_log_puts("[node] exit ");
             kernel_log_put_dec((uint32_t)node_rc);
             kernel_log_puts("\n[node] done\n");
@@ -13814,7 +13857,9 @@ static void boot_selftests_system(void) {
     {
         task_t *boot_task = scheduler_current();
         int leaked = 0;
-        for (int i = 2; i < MAX_FILE_DESCRIPTORS; i++) {
+        /* M224: descriptor 2 is the console now, as 0 and 1 are - so what
+           counts as left behind starts at 3. */
+        for (int i = 3; i < MAX_FILE_DESCRIPTORS; i++) {
             if (boot_task->descriptor_table->slots[i].type != FILE_DESCRIPTOR_NONE) {
                 leaked++;
             }
@@ -13823,12 +13868,13 @@ static void boot_selftests_system(void) {
             panic("M40 fd-inheritance self-test: expected the boot self-tests above to have left fds open on task 0 - if that is genuinely no longer true, delete this check and sched_reset_fds_to_std with it");
         }
         scheduler_reset_file_descriptors_to_std(boot_task);
-        for (int i = 2; i < MAX_FILE_DESCRIPTORS; i++) {
+        for (int i = 3; i < MAX_FILE_DESCRIPTORS; i++) {
             if (boot_task->descriptor_table->slots[i].type != FILE_DESCRIPTOR_NONE) {
                 panic("M40 fd-inheritance self-test: sched_reset_fds_to_std left an fd behind");
             }
         }
-        if (boot_task->descriptor_table->slots[0].type != FILE_DESCRIPTOR_STDIN || boot_task->descriptor_table->slots[1].type != FILE_DESCRIPTOR_STDOUT) {
+        if (boot_task->descriptor_table->slots[0].type != FILE_DESCRIPTOR_STDIN || boot_task->descriptor_table->slots[1].type != FILE_DESCRIPTOR_STDOUT ||
+            boot_task->descriptor_table->slots[2].type != FILE_DESCRIPTOR_STDOUT) {
             panic("M40 fd-inheritance self-test: sched_reset_fds_to_std did not leave stdin/stdout intact");
         }
         kernel_log_puts("[m40] boot-task fd reset self-test passed (0x");
@@ -14437,6 +14483,15 @@ display_self_test_done:
     if (pipe_read_n != (long)sizeof(pipe_message) - 1 || k_strcmp(pipe_readback, pipe_message) != 0) {
         panic("SYS_pipe self-test: SYS_read returned unexpected data");
     }
+    /* M224: and closed. Left open, its two ends were descriptors 2 and 3 of
+       the kernel task - 2 being the lowest free slot - and every program on
+       the machine inherits that table: stderr was the read end of a pipe
+       nobody wrote, so a write to it failed with EIO, and descriptor 3 kept
+       the other end alive for ever. C programs never noticed because this
+       libc's stderr is descriptor 1; Node writes descriptor 2, and its test
+       suite died of EPIPE on console.error. */
+    do_syscall(SYS_close, (uint64_t)pipe_file_descriptors[0], 0, 0);
+    do_syscall(SYS_close, (uint64_t)pipe_file_descriptors[1], 0, 0);
     kernel_log_puts("[pipe] SYS_pipe/SYS_write/SYS_read self-test passed.\n\n");
 
     task_t *spinner = task_spawn("spinner", spinner_task, NULL);
