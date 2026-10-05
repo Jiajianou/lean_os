@@ -52,7 +52,25 @@ static int slot_of(uint64_t phys) {
     return -1;
 }
 
+static void (*alloc_hook)(void);
+
+static void clear_alloc_hook(void) {
+    alloc_hook = 0;
+}
+
+void fake_spinlock_at_test_end(void (*clear)(void));
+void fake_physical_memory_on_alloc(void (*hook)(void));
+void fake_physical_memory_on_alloc(void (*hook)(void)) {
+    fake_spinlock_at_test_end(clear_alloc_hook);
+    alloc_hook = hook;
+}
+
 uint64_t physical_memory_try_alloc_frame(void) {
+    if (alloc_hook) {
+        void (*hook)(void) = alloc_hook;
+        alloc_hook = 0;
+        hook();
+    }
     if (fail_after >= 0 && (int64_t)total_allocs >= fail_after) {
         return 0;
     }

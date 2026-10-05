@@ -57,7 +57,7 @@ expl	1	-11000	11000	513	2	f2xm1 of a reduced argument, scaled - the reduction co
 exp2l	1	-16000	16000	513	1	f2xm1 needs no reduction here; the argument already is the exponent
 expm1l	1	-1	1	513	2	f2xm1 is exactly this function while |x| stays inside its domain, which reaches ln 2 rather than the 0.34 this first claimed. Past it the form is exp(x) - 1 and the subtraction costs a bit; two ulp is what that costs and the first claim of one was wrong about the function rather than about the code
 logl	L	-16000	16000	513	1	fyl2x by ln2
-log2l	L	-16000	16000	513	0.5	fyl2x by one, which is the instruction itself
+log2l	L	-16000	16000	513	1	fyl2x by one, which is the instruction itself - but the instruction is not correctly rounded on silicon. Intel documents FYL2X to within one ulp and an Intel x87 under -accel hvf measured 1.00 at 30 of 513 points; the half-ulp this first claimed was QEMU's softfloat FYL2X, which rounds correctly, rather than the laptop's
 log10l	L	-16000	16000	513	1	fyl2x by log10(2)
 log1pl	1	-0.9	10	513	2	fyl2xp1 below its domain edge, log of one plus x above it. Above it the one in 1 + x rounds, and log multiplies that error by 1/log(1+x), which at the edge is about four - so two ulp, measured
 sinl	1	-1e6	1e6	513	1	not fsin: a five-piece reduction of pi/2 and an eleven-term polynomial, in this format. The range is wide on purpose - it is the reduction that the sweep is for, and thirty radians never asks it anything

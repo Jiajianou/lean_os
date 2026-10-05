@@ -5,7 +5,7 @@
 #define MSR_FS_BASE 0xC0000100u
 #define MSR_GS_BASE 0xC0000101u
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) && !defined(LEANOS_HOST_TEST)
 static inline void cpu_write_msr(unsigned int msr, unsigned long long value) {
     __asm__ volatile("wrmsr"
                      :
@@ -23,7 +23,7 @@ void cpu_write_msr(unsigned int msr, unsigned long long value);
 unsigned long long cpu_read_msr(unsigned int msr);
 #endif
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) && !defined(LEANOS_HOST_TEST)
 static inline void cpu_enable_interrupts(void) { __asm__ volatile("sti"); }
 static inline void cpu_disable_interrupts(void) { __asm__ volatile("cli"); }
 static inline void cpu_spin_hint(void) { __asm__ volatile("pause"); }

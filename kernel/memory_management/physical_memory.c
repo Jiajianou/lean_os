@@ -15,6 +15,27 @@
 
 extern uint8_t __kernel_end[];
 
+/* Where a physical address is to the code that reads it, the physical
+   address of a pointer the code was handed, and where the kernel's image
+   ends. On the machine physical memory is identity-mapped and the linker
+   says where the image ends, so these are the plain answers.
+   tests/test_physical_memory.c runs this file on the host over a firmware
+   map whose RAM is a buffer the test owns, and says so by defining all
+   three. The middle one is there because the firmware map's own pages are
+   reserved by their address, and a host pointer is wherever that host keeps
+   its stack: far above any map on an x86_64 Mac, but about 6 GiB on an
+   arm64 Mac's main thread - inside the test's 4-17 GiB of RAM - so without
+   it the count of reserved frames would depend on which Mac ran the test. */
+#ifndef PHYSICAL_MEMORY_POINTER
+#define PHYSICAL_MEMORY_POINTER(physical) ((uint8_t *)(uintptr_t)(physical))
+#endif
+#ifndef PHYSICAL_MEMORY_ADDRESS_OF
+#define PHYSICAL_MEMORY_ADDRESS_OF(pointer) ((uint64_t)(uintptr_t)(pointer))
+#endif
+#ifndef PHYSICAL_MEMORY_KERNEL_END
+#define PHYSICAL_MEMORY_KERNEL_END ((uint64_t)(uintptr_t)__kernel_end)
+#endif
+
 static uint64_t metadata_end;
 static uint8_t *bitmap;
 static uint64_t bitmap_bytes;
@@ -22,7 +43,21 @@ static uint64_t bitmap_bytes;
 static uint8_t *frame_refs;
 
 static uint64_t free_frames;
-static uint64_t total_frames;
+
+/* Two different numbers, and until they were two the machine misreported
+   itself. tracked_frames is the SPAN: the highest usable address divided by
+   a page, which is how far the bitmap and the reference counts have to
+   reach, because a frame's index is its address. ram_frames is the MEMORY:
+   the frames the firmware handed over as usable. Between them is every hole
+   in the map, and on a PC the big one is the PCI window below 4 GiB - QEMU
+   puts 3 GiB of a 16 GiB guest under it and 13 above, so the span is
+   17 GiB, and "[inventory] memory: 17408 MiB" is what a 16 GiB machine
+   said. The ThinkPad M188 booted on has 16 GB and was written down as 18.
+   physical_memory_total_frame_count() is the memory, and it is what
+   sysinfo(2), sysconf(_SC_PHYS_PAGES), Settings and the image cache's
+   budget are told; physical_memory_tracked_limit() is the span. */
+static uint64_t tracked_frames;
+static uint64_t ram_frames;
 static uint64_t dma_frames;
 static uint64_t search_hint;
 
@@ -57,7 +92,7 @@ static inline uint64_t align_up(uint64_t x, uint64_t a) {
 }
 
 static void reserve_range(uint64_t start, uint64_t end) {
-    uint64_t limit = total_frames * PAGE_SIZE;
+    uint64_t limit = tracked_frames * PAGE_SIZE;
     if (end > limit) end = limit;
     if (start >= end) return;
     uint64_t first = start / PAGE_SIZE;
@@ -71,7 +106,7 @@ static void reserve_range(uint64_t start, uint64_t end) {
 }
 
 static void free_range(uint64_t start, uint64_t end) {
-    uint64_t limit = total_frames * PAGE_SIZE;
+    uint64_t limit = tracked_frames * PAGE_SIZE;
     if (end > limit) end = limit;
     if (start >= end) return;
     uint64_t first = (start + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -122,22 +157,22 @@ void physical_memory_init(const uint32_t *e820_map) {
         panic("pmm_init: no usable memory found");
     }
 
-    total_frames = highest_usable_end / PAGE_SIZE;
-    dma_frames = total_frames;
+    tracked_frames = highest_usable_end / PAGE_SIZE;
+    dma_frames = tracked_frames;
     if (dma_frames > PHYSICAL_MEMORY_DMA_LIMIT / PAGE_SIZE) {
         dma_frames = PHYSICAL_MEMORY_DMA_LIMIT / PAGE_SIZE;
     }
 
-    bitmap_bytes = (total_frames + 7) / 8;
-    uint64_t meta_bytes = align_up(bitmap_bytes, 8) + total_frames;
+    bitmap_bytes = (tracked_frames + 7) / 8;
+    uint64_t meta_bytes = align_up(bitmap_bytes, 8) + tracked_frames;
     meta_bytes = align_up(meta_bytes, PAGE_SIZE);
 
     exclusion_t excl[3];
     excl[0].base = 0;
     excl[0].end = LOW_MEMORY_LIMIT;
     excl[1].base = KERNEL_LOAD_ADDRESS;
-    excl[1].end = align_up((uint64_t)(uintptr_t)__kernel_end, PAGE_SIZE);
-    excl[2].base = (uint64_t)(uintptr_t)e820_map;
+    excl[1].end = align_up(PHYSICAL_MEMORY_KERNEL_END, PAGE_SIZE);
+    excl[2].base = PHYSICAL_MEMORY_ADDRESS_OF(e820_map);
     excl[2].end = align_up(excl[2].base + 8 + (uint64_t)count * sizeof(e820_entry_t), PAGE_SIZE);
 
     uint64_t meta_base = 0;
@@ -153,7 +188,7 @@ void physical_memory_init(const uint32_t *e820_map) {
     }
 
     metadata_end = meta_base + meta_bytes;
-    bitmap = (uint8_t *)(uintptr_t)meta_base;
+    bitmap = PHYSICAL_MEMORY_POINTER(meta_base);
     frame_refs = bitmap + align_up(bitmap_bytes, 8);
 
     free_frames = 0;
@@ -161,7 +196,7 @@ void physical_memory_init(const uint32_t *e820_map) {
     for (uint64_t i = 0; i < bitmap_bytes; i++) {
         bitmap[i] = 0xFF;
     }
-    for (uint64_t i = 0; i < total_frames; i++) {
+    for (uint64_t i = 0; i < tracked_frames; i++) {
         frame_refs[i] = 0;
     }
 
@@ -170,6 +205,12 @@ void physical_memory_init(const uint32_t *e820_map) {
             free_range(entries[i].base, entries[i].base + entries[i].length);
         }
     }
+    /* Counted here, between marking the usable regions free and taking the
+       kernel's own pieces back out of them: free_range counts only a frame
+       it actually changes, so two firmware entries that overlap are one
+       frame of memory and not two, and a part-page at an entry's edge -
+       which the allocator can never hand out - is not memory either. */
+    ram_frames = free_frames;
 
     reserve_range(excl[0].base, excl[0].end);
     reserve_range(excl[1].base, excl[1].end);
@@ -183,8 +224,10 @@ void physical_memory_init(const uint32_t *e820_map) {
     kernel_log_puts("[pmm] ");
     kernel_log_put_hex64(free_frames);
     kernel_log_puts(" / ");
-    kernel_log_put_hex64(total_frames);
-    kernel_log_puts(" frames free, tracking to 0x");
+    kernel_log_put_hex64(ram_frames);
+    kernel_log_puts(" frames of RAM free, tracking 0x");
+    kernel_log_put_hex64(tracked_frames);
+    kernel_log_puts(" frames to 0x");
     kernel_log_put_hex64(highest_usable_end);
     kernel_log_puts(" (");
     kernel_log_put_hex64(highest_usable_end / (1024 * 1024));
@@ -211,7 +254,7 @@ static uint64_t claim_first_free(uint64_t first, uint64_t limit) {
 
 uint64_t physical_memory_try_alloc_frame(void) {
     uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
-    uint64_t phys = claim_first_free(search_hint, total_frames);
+    uint64_t phys = claim_first_free(search_hint, tracked_frames);
     if (phys != 0) {
         search_hint = phys / PAGE_SIZE + 1;
     }
@@ -239,7 +282,7 @@ uint64_t physical_memory_alloc_frame_dma(void) {
 
 uint64_t physical_memory_alloc_frame_above(uint64_t min_phys) {
     uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
-    uint64_t phys = claim_first_free(min_phys / PAGE_SIZE, total_frames);
+    uint64_t phys = claim_first_free(min_phys / PAGE_SIZE, tracked_frames);
     spin_unlock_irqrestore(&physical_memory_lock, irq_flags);
     return phys;
 }
@@ -247,17 +290,17 @@ uint64_t physical_memory_alloc_frame_above(uint64_t min_phys) {
 void physical_memory_free_frame(uint64_t phys_address) {
     uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
     uint64_t f = phys_address / PAGE_SIZE;
-    if (f >= total_frames || !bitmap_test(f) || frame_refs[f] == 0) {
+    if (f >= tracked_frames || !bitmap_test(f) || frame_refs[f] == 0) {
         kernel_log_puts("[pmm] free frame 0x");
         kernel_log_put_hex64(phys_address);
         kernel_log_puts(" index 0x");
         kernel_log_put_hex64(f);
         kernel_log_puts(" of 0x");
-        kernel_log_put_hex64(total_frames);
+        kernel_log_put_hex64(tracked_frames);
         kernel_log_puts(" bitmap ");
-        kernel_log_put_dec((uint32_t)(f < total_frames ? bitmap_test(f) : 0));
+        kernel_log_put_dec((uint32_t)(f < tracked_frames ? bitmap_test(f) : 0));
         kernel_log_puts(" refs ");
-        kernel_log_put_dec((uint32_t)(f < total_frames ? frame_refs[f] : 0));
+        kernel_log_put_dec((uint32_t)(f < tracked_frames ? frame_refs[f] : 0));
         kernel_log_puts(" site ");
         kernel_log_puts(pmm_free_site);
         kernel_log_puts(" virt 0x");
@@ -280,11 +323,11 @@ uint64_t physical_memory_free_frame_count(void) {
 }
 
 uint64_t physical_memory_total_frame_count(void) {
-    return total_frames;
+    return ram_frames;
 }
 
 uint64_t physical_memory_tracked_limit(void) {
-    return total_frames * PAGE_SIZE;
+    return tracked_frames * PAGE_SIZE;
 }
 
 uint64_t physical_memory_try_alloc_contiguous(uint64_t count) {
@@ -335,7 +378,7 @@ uint64_t physical_memory_try_alloc_contiguous_anywhere(uint64_t count) {
     }
     uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
     uint64_t run_length = 0;
-    for (uint64_t f = total_frames; f-- > 0;) {
+    for (uint64_t f = tracked_frames; f-- > 0;) {
         if (bitmap_test(f)) {
             run_length = 0;
             continue;
@@ -370,7 +413,7 @@ uint64_t physical_memory_alloc_contiguous(uint64_t count) {
 void physical_memory_free_contiguous(uint64_t phys_address, uint64_t count) {
     uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
     uint64_t first = phys_address / PAGE_SIZE;
-    if (first + count > total_frames) {
+    if (first + count > tracked_frames) {
         panic("pmm_free_contiguous: invalid range");
     }
     for (uint64_t f = first; f < first + count; f++) {
@@ -391,7 +434,7 @@ void physical_memory_free_contiguous(uint64_t phys_address, uint64_t count) {
 void physical_memory_frame_reference(uint64_t phys_address) {
     uint64_t irq_flags = spin_lock_irqsave(&physical_memory_lock);
     uint64_t f = phys_address / PAGE_SIZE;
-    if (f >= total_frames || !bitmap_test(f) || frame_refs[f] == 0) {
+    if (f >= tracked_frames || !bitmap_test(f) || frame_refs[f] == 0) {
         panic("pmm_frame_ref: no such allocated frame");
     }
     if (frame_refs[f] == 0xFF) {
@@ -403,7 +446,7 @@ void physical_memory_frame_reference(uint64_t phys_address) {
 
 uint8_t physical_memory_frame_refs(uint64_t phys_address) {
     uint64_t f = phys_address / PAGE_SIZE;
-    if (f >= total_frames) {
+    if (f >= tracked_frames) {
         return 0;
     }
     return frame_refs[f];

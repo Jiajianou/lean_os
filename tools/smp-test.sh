@@ -51,9 +51,24 @@ if grep -qF "KERNEL PANIC" "$LOG"; then
   fail=1
 fi
 
+# [logwrite] is here because one core cannot fail it: several programs write
+# whole lines at once and the kernel reads every one back out of its log. On
+# a lock taken per character - sys_write until it staged a write - four cores
+# tore 15 of 480 lines, and eight tore a battery marker.
+#
+# M225: every [logwrite] line is one kernel_log_write, so it is contiguous
+# wherever it lands - but a kernel line built from several calls can still
+# be split around it, and nothing here is anchored at a line's start for
+# that reason. The self-test grades itself (it panics on a write that is
+# not in the log whole exactly once, or on an interrupts-off section that
+# handed the serial port and console more than KERNEL_LOG_DRAIN_BATCH
+# characters); these lines are its numbers, shown.
+grep -ao '\[logwrite\] \(interrupts off\|per character\|forktest\|the first\)[[:print:]]*' "$LOG" | head -4
+
 want_online=$(printf '[smp] %08X CPU(s) online.' "$CORES")
 for m in "$want_online" \
          "[smp] self-test passed." \
+         "[logwrite] one write() is one piece of the log:" \
          "[m106] cores this machine can use:"; do
   if grep -qF "$m" "$LOG"; then
     echo "ok    $m"
@@ -63,7 +78,7 @@ for m in "$want_online" \
   fi
 done
 
-cost=$(grep -a '^\[perf\] smp_parallel_cost_pct ' "$LOG" | tail -1 | awk '{print $3}')
+cost=$(grep -ao '\[perf\] smp_parallel_cost_pct [0-9][0-9]*' "$LOG" | tail -1 | awk '{print $3}')
 if [ -z "${cost:-}" ]; then
   echo "MISS  a parallel-cost measurement"
   fail=1
@@ -78,7 +93,7 @@ else
   fi
 fi
 
-grep -a '^\[m106\]' "$LOG" | head -2
+grep -ao '\[m106\][[:print:]]*' "$LOG" | head -2
 echo "($outcome)"
 [ "$fail" = 0 ] && echo "PASS - $CORES cores start, know themselves, and share the work." || echo "FAIL"
 exit "$fail"

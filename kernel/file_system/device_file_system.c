@@ -182,10 +182,10 @@ static int64_t dev_write(int handle, const void *buffer, size_t length, uint32_t
         return (int64_t)length;
     case DEV_TTY:
     case DEV_CONSOLE:
-        for (size_t i = 0; i < length; i++) {
-            kernel_log_putc(b[i]);
-        }
-        return (int64_t)length;
+        /* The same log a write to descriptor 1 reaches, so the same rule:
+           staged out of the caller's buffer with no lock held, then whole
+           pieces (kernel_log.h). sys_write has checked the range. */
+        return (int64_t)kernel_log_write_from(b, length, 0);
     default:
         return -1;
     }

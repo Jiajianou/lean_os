@@ -115,6 +115,10 @@ fi
 
 if [ ! -x "$BASELINE" ]; then
   echo "chromium-test: no baseline build - skipping the render check"
+elif ! WHY=$("$ROOT/tools/chromium-host.sh" --runs "$BASELINE"); then
+  # A host program, so it has to be this Mac's architecture: a Baseline built
+  # on the other kind of Mac is not a Chromium that failed to render.
+  echo "chromium-test: $WHY - skipping the render check (rebuild out/Baseline here)"
 else
   OUT=$("$BASELINE" --dump-dom --disable-gpu \
         "file://$ROOT/tests/chromium/dom.html" 2>/dev/null)

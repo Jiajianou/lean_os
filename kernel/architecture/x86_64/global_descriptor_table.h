@@ -18,7 +18,7 @@ static inline uint16_t gdt_tss_selector(int cpu_id) {
     return (uint16_t)(GDT_TSS_SEL_BASE + cpu_id * 16);
 }
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) && !defined(LEANOS_HOST_TEST)
 static inline int gdt_current_cpu(void) {
     uint16_t sel;
     __asm__ volatile("str %0" : "=r"(sel));

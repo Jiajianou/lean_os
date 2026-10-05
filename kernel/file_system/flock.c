@@ -1,5 +1,7 @@
 #include "flock.h"
 
+#include "library/spinlock.h"
+
 typedef struct {
     uint8_t used;
     uint8_t type;
@@ -13,6 +15,16 @@ typedef struct {
 
 static flock_entry_t table[FLOCK_MAX];
 
+/* M225: the table had no lock at all. Every entry point decides from what
+   it reads (conflict() finds no holder, claim() finds a free entry) and then
+   writes, and fcntl(F_SETLKW)'s waiters are woken together by every unlock
+   (FLOCK_CHAN) - so on more than one processor two of them retried at the
+   same moment, both found the range free, and both were told they held the
+   write lock; or two claims took the same entry and one lock vanished. A
+   thread exiting (flock_release_pid) cleared entries under a third's scan.
+   Nothing in here takes another lock or sleeps, so this is a leaf. */
+static spinlock_t flock_lock;
+
 static uint64_t range_end(uint64_t start, uint64_t length) {
     if (length == 0 || start > FLOCK_EOF - length) {
         return FLOCK_EOF;
@@ -24,7 +36,7 @@ static int overlaps(const flock_entry_t *e, uint64_t start, uint64_t end) {
     return e->start < end && start < e->end;
 }
 
-int flock_count(void) {
+static int count_locked(void) {
     int n = 0;
     for (int i = 0; i < FLOCK_MAX; i++) {
         n += table[i].used;
@@ -32,8 +44,15 @@ int flock_count(void) {
     return n;
 }
 
+int flock_count(void) {
+    uint64_t flags = spin_lock_irqsave(&flock_lock);
+    int n = count_locked();
+    spin_unlock_irqrestore(&flock_lock, flags);
+    return n;
+}
+
 static int free_entries(void) {
-    return FLOCK_MAX - flock_count();
+    return FLOCK_MAX - count_locked();
 }
 
 static flock_entry_t *claim(void) {
@@ -67,23 +86,36 @@ static const flock_entry_t *conflict(uint32_t ino, int pid, int type,
 int flock_test(uint32_t ino, int pid, int type, uint64_t start, uint64_t length,
                os_flock_t *out) {
     uint64_t end = range_end(start, length);
+    os_flock_t answer;
+    answer.whence = 0;
+    uint64_t flags = spin_lock_irqsave(&flock_lock);
     const flock_entry_t *e = conflict(ino, pid, type, start, end);
-    out->whence = 0;
-    if (!e) {
-        out->type = OS_FLOCK_UNLCK;
-        out->start = 0;
-        out->length = 0;
-        out->pid = 0;
-        return 0;
+    if (e) {
+        answer.type = e->type;
+        answer.start = (int64_t)e->start;
+        answer.length = e->end == FLOCK_EOF ? 0 : (int64_t)(e->end - e->start);
+        answer.pid = e->pid;
+    } else {
+        answer.type = OS_FLOCK_UNLCK;
+        answer.start = 0;
+        answer.length = 0;
+        answer.pid = 0;
     }
-    out->type = e->type;
-    out->start = (int64_t)e->start;
-    out->length = e->end == FLOCK_EOF ? 0 : (int64_t)(e->end - e->start);
-    out->pid = e->pid;
-    return 1;
+    spin_unlock_irqrestore(&flock_lock, flags);
+    *out = answer;
+    return e ? 1 : 0;
 }
 
+static int set_locked(uint32_t ino, int pid, int type, uint64_t start, uint64_t length);
+
 int flock_set(uint32_t ino, int pid, int type, uint64_t start, uint64_t length) {
+    uint64_t flags = spin_lock_irqsave(&flock_lock);
+    int result = set_locked(ino, pid, type, start, length);
+    spin_unlock_irqrestore(&flock_lock, flags);
+    return result;
+}
+
+static int set_locked(uint32_t ino, int pid, int type, uint64_t start, uint64_t length) {
     uint64_t end = range_end(start, length);
     if (type != OS_FLOCK_UNLCK && conflict(ino, pid, type, start, end)) {
         return FLOCK_CONFLICT;
@@ -147,22 +179,26 @@ int flock_set(uint32_t ino, int pid, int type, uint64_t start, uint64_t length) 
 
 int flock_release_file(uint32_t ino, int pid) {
     int released = 0;
+    uint64_t flags = spin_lock_irqsave(&flock_lock);
     for (int i = 0; i < FLOCK_MAX; i++) {
         if (table[i].used && table[i].ino == ino && table[i].pid == pid) {
             table[i].used = 0;
             released++;
         }
     }
+    spin_unlock_irqrestore(&flock_lock, flags);
     return released;
 }
 
 int flock_release_pid(int pid) {
     int released = 0;
+    uint64_t flags = spin_lock_irqsave(&flock_lock);
     for (int i = 0; i < FLOCK_MAX; i++) {
         if (table[i].used && table[i].pid == pid) {
             table[i].used = 0;
             released++;
         }
     }
+    spin_unlock_irqrestore(&flock_lock, flags);
     return released;
 }

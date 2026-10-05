@@ -12,3 +12,6 @@ void tsc_init(void);
 
 uint64_t tsc_to_us(uint64_t cycles);
 
+/* What tsc_init measured the TSC to run at. */
+uint64_t tsc_cycles_per_us(void);
+

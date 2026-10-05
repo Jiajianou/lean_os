@@ -339,10 +339,26 @@ static void ring_discard(unix_socket_t *s, uint32_t length) {
     s->count -= length;
 }
 
+/* M225: SCM_RIGHTS. The descriptors are the CALLER's held copies - each
+   with a reference the caller took under its table's lock and keeps until
+   this returns (file_descriptor_hold) - so the reference taken here for the
+   queue is taken on an object somebody is known to hold. A copy read straight
+   out of a slot and retained here afterwards was a reference taken on an
+   object a sibling thread's close could already have let go of.
+
+   A slot that names nothing - free, or RESERVED by a thread still filling it
+   in - is refused rather than queued: it used to arrive in the receiver as a
+   reserved slot nobody would ever fill. */
 long unix_socket_send(struct unix_socket *s, const uint8_t *data, uint32_t length,
                    const file_descriptor_slot_t *file_descriptors, int nfds) {
     if (!s || nfds < 0 || nfds > UNIX_MAX_FILE_DESCRIPTORS || (nfds > 0 && !file_descriptors)) {
         return -1;
+    }
+    for (int i = 0; i < nfds; i++) {
+        if (file_descriptors[i].type == FILE_DESCRIPTOR_NONE ||
+            file_descriptors[i].type == FILE_DESCRIPTOR_RESERVED) {
+            return -1;
+        }
     }
     file_descriptor_slot_t kept[UNIX_MAX_FILE_DESCRIPTORS];
     for (int i = 0; i < nfds; i++) {

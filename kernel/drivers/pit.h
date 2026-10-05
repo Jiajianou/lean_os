@@ -7,6 +7,22 @@
 void pit_init(void);
 uint64_t pit_get_ticks(void);
 
+/* Every timer interrupt taken, and those of them that were not a tick
+   because the TSC said the next tick was not due yet (tick_clock.h). Where
+   the interrupt controller sees one edge per period the second stays near
+   zero; under QEMU's I/O APIC it is half the first. */
+uint64_t pit_get_interrupts(void);
+uint64_t pit_get_echoes(void);
+
+/* TSC cycles while channel 2 counts `counts` of the timer's own clock,
+   polled - no interrupt involved. 0 if the channel never answered. */
+int pit_channel2_cycles(uint16_t counts, uint64_t *cycles);
+
+/* From here on, a timer interrupt is a tick only when the TSC says one is
+   due: window_cycles TSC cycles were measured over window_counts of the
+   timer's input clock, which is the clock channel 0 divides. */
+void pit_start_tick_clock(uint64_t window_cycles, uint32_t window_counts);
+
 void pit_sleep_ms(uint32_t ms);
 
 void pit_set_tick_hook(void (*hook)(void));

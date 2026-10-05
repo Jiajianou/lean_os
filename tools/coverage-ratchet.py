@@ -4,6 +4,10 @@ import re
 import subprocess
 import sys
 
+# A constant, as in tree-stamps.py: the cleanup that stripped every
+# docstring in tools/ left print(__doc__) printing None.
+USAGE = "usage: coverage-ratchet.py REPORT FLOOR_TSV"
+
 def parse_report(path):
     out = {}
     with open(path) as f:
@@ -44,7 +48,7 @@ def commit():
 
 def main():
     if len(sys.argv) != 3:
-        print(__doc__)
+        print(USAGE, file=sys.stderr)
         return 2
     report, floor_path = sys.argv[1], sys.argv[2]
     got = parse_report(report)

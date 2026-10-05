@@ -1,9 +1,12 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -442,7 +445,335 @@ static int as_many_threads_as_promised(void) {
     return 0;
 }
 
+/* The region table, read by one thread's page fault while another thread is
+   changing it.
+
+   A page fault answers "is this address mine" from the process's table of
+   mmap regions WITHOUT the table's lock (M181 measured why), and every
+   mmap, munmap and mprotect by a sibling thread rewrites that table under
+   the lock: a split shrinks a region and then inserts its tail, an unmap
+   shifts every entry above it down by one, a merge moves a region's base
+   before it grows its length. A fault that read the table half way through
+   one of those was told its own fresh page was nobody's, and the thread
+   was killed for touching memory mmap had just handed it. [m79] met it on
+   four processors as threadtest's TLS block faulting in two new threads at
+   once (error code 6, cr2 inside the block __lean_tls_setup had mapped a
+   moment before).
+
+   So: several threads at once, each mapping three pages next to whatever
+   the others mapped, touching each one for the first time (three faults
+   that have to find their region), splitting the middle page off with
+   mprotect and unmapping the lot. On one processor nothing can interleave
+   and this passes on any kernel; on more it is the race. A lost fault ends
+   the whole process with SIGSEGV, which is the exit code [m79] reports. */
+#define REGION_THREADS 4
+
+static unsigned long region_rounds = 1500;
+static volatile int region_go;
+
+static void *region_churn(void *argument) {
+    unsigned char mark = (unsigned char)(0x40 + (long)argument);
+    while (!__atomic_load_n(&region_go, __ATOMIC_ACQUIRE)) {
+        sched_yield();
+    }
+    for (unsigned long round = 0; round < region_rounds; round++) {
+        volatile unsigned char *p = (volatile unsigned char *)mmap(
+            0, 3 * 4096, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        if (p == (volatile unsigned char *)MAP_FAILED) {
+            return (void *)1;
+        }
+        p[0] = mark;
+        p[4096] = (unsigned char)(mark + 1);
+        p[8192] = (unsigned char)(mark + 2);
+        if (mprotect((void *)(p + 4096), 4096, PROT_READ) != 0) {
+            return (void *)2;
+        }
+        if (p[0] != mark || p[4096] != (unsigned char)(mark + 1) ||
+            p[8192] != (unsigned char)(mark + 2)) {
+            return (void *)3;
+        }
+        if (munmap((void *)p, 3 * 4096) != 0) {
+            return (void *)4;
+        }
+    }
+    return (void *)0;
+}
+
+static int region_table_under_threads(void) {
+    pthread_t threads[REGION_THREADS];
+    int made = 0;
+    __atomic_store_n(&region_go, 0, __ATOMIC_RELEASE);
+    for (long i = 0; i < REGION_THREADS; i++) {
+        if (pthread_create(&threads[i], 0, region_churn, (void *)i) != 0) {
+            break;
+        }
+        made++;
+    }
+    __atomic_store_n(&region_go, 1, __ATOMIC_RELEASE);
+    int failed = made != REGION_THREADS;
+    for (int i = 0; i < made; i++) {
+        void *value = 0;
+        if (pthread_join(threads[i], &value) != 0 || value != (void *)0) {
+            printf("threadtest: region thread %d answered %ld - mmap, mprotect "
+                   "or munmap refused a range it had just been given\n",
+                   i, (long)value);
+            failed = 1;
+        }
+    }
+    return failed ? 45 : 0;
+}
+
+/* M225. A process whose main thread has left is still a process.
+
+   Since M225 wait() says so - it reports the process when its LAST thread
+   ends - but kill(2) answered ESRCH the moment the main thread had gone, so
+   a parent had a child it could neither signal nor stop waiting for: the
+   compositor's SIGTERM-then-SIGKILL to a client, the Task Manager's End,
+   Node's subprocess.kill, all of them ESRCH and then a wait with no end.
+   Linux delivers a signal for a pid to the thread group. The child here
+   leaves through pthread_exit with a thread still running; the parent waits
+   until /proc says the main thread has terminated, and then asks: is it
+   there (kill 0), and can it be ended (SIGKILL, then a wait that returns). */
+static void *lingers(void *argument) {
+    (void)argument;
+    for (;;) {
+        usleep(20000);
+    }
+    return 0;
+}
+
+static int leader_state_is_terminated(int pid) {
+    char path[48];
+    snprintf(path, sizeof(path), "/proc/%d/status", pid);
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        return 0;
+    }
+    char text[512];
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    fclose(f);
+    text[n] = '\0';
+    return strstr(text, "State:\tterminated") != 0;
+}
+
+static int leaderless_mode(void) {
+    pid_t child = fork();
+    if (child < 0) {
+        return 50;
+    }
+    if (child == 0) {
+        pthread_t thread;
+        if (pthread_create(&thread, 0, lingers, 0) != 0) {
+            _exit(41);
+        }
+        pthread_exit(0);
+        _exit(42);
+    }
+    int left = 0;
+    for (int i = 0; i < 3000 && !left; i++) {
+        left = leader_state_is_terminated((int)child);
+        if (!left) {
+            usleep(10000);
+        }
+    }
+    if (!left) {
+        kill(child, SIGKILL);
+        printf("threadtest: leaderless - the child's main thread never left\n");
+        return 51;
+    }
+    int status = 0;
+    if (waitpid(child, &status, WNOHANG) != 0) {
+        printf("threadtest: leaderless - wait reported a process still running\n");
+        return 52;
+    }
+    if (kill(child, 0) != 0) {
+        printf("threadtest: leaderless - kill(pid, 0) said %d (errno %d) of a running process\n",
+               -1, errno);
+        kill(child, SIGKILL);
+        return 53;
+    }
+    if (kill(child, SIGKILL) != 0) {
+        printf("threadtest: leaderless - kill(pid, SIGKILL) refused (errno %d)\n", errno);
+        return 54;
+    }
+    for (int i = 0; i < 3000; i++) {
+        pid_t done = waitpid(child, &status, WNOHANG);
+        if (done == child) {
+            if (kill(child, 0) == 0 || errno != ESRCH) {
+                printf("threadtest: leaderless - a reaped process still answers kill(pid, 0)\n");
+                return 56;
+            }
+            printf("threadtest: leaderless - a process whose main thread had left was "
+                   "there for kill(pid, 0), ended by kill(pid, SIGKILL) and reaped\n");
+            return 0;
+        }
+        if (done < 0) {
+            printf("threadtest: leaderless - waitpid failed (errno %d)\n", errno);
+            return 55;
+        }
+        usleep(10000);
+    }
+    printf("threadtest: leaderless - SIGKILL was accepted and the process never ended\n");
+    return 57;
+}
+
+/* M225 (process-lifetimes): fcntl record locks across the threads of ONE
+   process. POSIX makes them the process's: a second thread asking for a
+   range its process holds is not in conflict, any thread may unlock what
+   another took, F_GETLK from outside names the process (getpid()), a lock
+   outlives the thread that took it, and closing ANY descriptor for the file
+   gives back all of the process's locks on it. The kernel keyed them by the
+   task, so each of those was the opposite. What another process sees is
+   asked of a forked child, which answers in its exit status. */
+/* M225 (fd-use-holds): one file per PROCESS. It was one fixed path opened
+   with O_TRUNC, so two threadtests at once - the battery's [m79] and a
+   harness's, or two harnesses - truncated, locked and unlinked each other's
+   file, and each saw the other's locks as its own process's. */
+static char record_lock_file[48];
+
+static int record_lock_fd;
+
+static int record_lock(int fd, int command, short type, off_t start, off_t length,
+                       struct flock *answer) {
+    struct flock request;
+    memset(&request, 0, sizeof(request));
+    request.l_type = type;
+    request.l_whence = SEEK_SET;
+    request.l_start = start;
+    request.l_len = length;
+    int rc = fcntl(fd, command, &request);
+    if (answer) {
+        *answer = request;
+    }
+    return rc;
+}
+
+#define SEEN_UNLOCKED 0
+#define SEEN_HELD_BY_US 1
+#define SEEN_SOMETHING_ELSE 2
+
+/* What a different process is told about [start, start+length). */
+static int seen_from_another_process(off_t start, off_t length) {
+    pid_t us = getpid();
+    pid_t child = fork();
+    if (child < 0) {
+        return -1;
+    }
+    if (child == 0) {
+        struct flock seen;
+        if (record_lock(record_lock_fd, F_GETLK, F_WRLCK, start, length, &seen) != 0) {
+            _exit(3);
+        }
+        if (seen.l_type == F_UNLCK) {
+            _exit(SEEN_UNLOCKED);
+        }
+        if (seen.l_type == F_WRLCK && seen.l_pid == us) {
+            _exit(SEEN_HELD_BY_US);
+        }
+        printf("threadtest: recordlocks - another process was told type %d pid %d "
+               "(we are %d)\n", seen.l_type, (int)seen.l_pid, (int)us);
+        _exit(SEEN_SOMETHING_ELSE);
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status)) {
+        return -1;
+    }
+    return WEXITSTATUS(status);
+}
+
+static void *takes_its_own_process_lock_again(void *unused) {
+    (void)unused;
+    /* [0,10) is held by the main thread - by this process. */
+    if (record_lock(record_lock_fd, F_SETLK, F_WRLCK, 0, 10, 0) != 0) {
+        return (void *)1;
+    }
+    struct flock seen;
+    if (record_lock(record_lock_fd, F_GETLK, F_WRLCK, 0, 10, &seen) != 0 ||
+        seen.l_type != F_UNLCK) {
+        return (void *)2;
+    }
+    /* And one of its own, which it leaves holding. */
+    if (record_lock(record_lock_fd, F_SETLK, F_WRLCK, 20, 10, 0) != 0) {
+        return (void *)3;
+    }
+    return (void *)0;
+}
+
+static void *unlocks_what_main_took(void *unused) {
+    (void)unused;
+    return record_lock(record_lock_fd, F_SETLK, F_UNLCK, 0, 10, 0) == 0 ? (void *)0 : (void *)1;
+}
+
+static int record_locks_across_threads(void) {
+    snprintf(record_lock_file, sizeof(record_lock_file), "/tmp/threadtest.%d.locks",
+             (int)getpid());
+    record_lock_fd = open(record_lock_file, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (record_lock_fd < 0) {
+        return 60;
+    }
+    int code = 0;
+    pthread_t t;
+    void *r = (void *)1;
+    if (record_lock(record_lock_fd, F_SETLK, F_WRLCK, 0, 10, 0) != 0) {
+        code = 60;
+    } else if (pthread_create(&t, 0, takes_its_own_process_lock_again, 0) != 0 ||
+               pthread_join(t, &r) != 0 || r != (void *)0) {
+        printf("threadtest: recordlocks - a second thread was refused (or not told it "
+               "held) a range its own process holds (%ld)\n", (long)r);
+        code = 61;
+    } else if (seen_from_another_process(0, 10) != SEEN_HELD_BY_US) {
+        printf("threadtest: recordlocks - another process was not told this process "
+               "holds [0,10)\n");
+        code = 62;
+    } else if (seen_from_another_process(20, 10) != SEEN_HELD_BY_US) {
+        printf("threadtest: recordlocks - the lock a thread took went when the thread "
+               "did; it is its process's\n");
+        code = 63;
+    } else if (pthread_create(&t, 0, unlocks_what_main_took, 0) != 0 ||
+               pthread_join(t, &r) != 0 || r != (void *)0 ||
+               seen_from_another_process(0, 10) != SEEN_UNLOCKED) {
+        printf("threadtest: recordlocks - a thread could not unlock what another "
+               "thread of its process took\n");
+        code = 64;
+    } else {
+        /* POSIX's close rule: closing any descriptor for the file gives back
+           every lock this process has on it - here the one the first thread
+           took, through another descriptor. */
+        int other = open(record_lock_file, O_RDONLY);
+        if (other < 0 || close(other) != 0 ||
+            seen_from_another_process(20, 10) != SEEN_UNLOCKED) {
+            printf("threadtest: recordlocks - closing another descriptor for the "
+                   "file left the process's lock in place\n");
+            code = 65;
+        }
+    }
+    close(record_lock_fd);
+    unlink(record_lock_file);
+    if (code == 0) {
+        printf("threadtest: recordlocks - one process's threads share its record "
+               "locks: no conflict, any may unlock, the lock outlives its thread, "
+               "F_GETLK names the process, a close gives them all back\n");
+    }
+    return code;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && argv[1] && strcmp(argv[1], "recordlocks") == 0) {
+        return record_locks_across_threads();
+    }
+    if (argc > 1 && argv[1] && strcmp(argv[1], "leaderless") == 0) {
+        return leaderless_mode();
+    }
+    if (argc > 1 && argv[1] && strcmp(argv[1], "regions") == 0) {
+        region_rounds = count_argument(argc > 2 ? argv[2] : 0, region_rounds);
+        int rc = region_table_under_threads();
+        if (rc == 0) {
+            printf("threadtest: regions - %d threads, %lu rounds each of map, "
+                   "first touch, split and unmap, no fault lost\n",
+                   REGION_THREADS, region_rounds);
+        }
+        return rc;
+    }
     if (argc > 1 && argv[1] && strcmp(argv[1], "leaderexit") == 0) {
         return leader_exit_mode(argc > 2 ? argv[2] : 0);
     }
@@ -637,6 +968,16 @@ int main(int argc, char **argv) {
     int many = as_many_threads_as_promised();
     if (many != 0) {
         return many;
+    }
+
+    int regions = region_table_under_threads();
+    if (regions != 0) {
+        return regions;
+    }
+
+    int locks = record_locks_across_threads();
+    if (locks != 0) {
+        return locks;
     }
 
     printf("threadtest: all checks passed (protected %ld of %ld; unprotected lost %ld)\n",

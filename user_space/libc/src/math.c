@@ -10,7 +10,21 @@
    A NaN that ARRIVES as an argument is not an error and must stay quiet, so
    every caller below settles that case before it gets here. That distinction
    is the whole difference between a library that reports errors and one that
-   reports arguments. */
+   reports arguments.
+
+   "Settles that case" has to mean before any relational operator sees the
+   NaN, or with a comparison that cannot signal. C's x < y is a SIGNALING
+   comparison in IEC 60559's terms, and x86_64-elf-gcc compiles it as COMISD
+   (and fcomi for a long double), which raises FE_INVALID for a quiet NaN -
+   so `if (x < 0.0)` in front of a NaN was itself the domain error this
+   library reported. On the machine that was fabs, sqrt, trunc, round,
+   modf, asin, acos, atan, atan2, pow, hypot and copysign, their float
+   twins, and floorl - 30 calls of /bin/mathltest's 214. Apple's clang on an
+   arm64 host emits a quiet fcmp for the same source, which is why the host
+   test had never seen it; on an x86 host it emits cmpnltsd and saw asin.
+   So a guard here is either NaN-first, a bit operation, or one of the
+   isless family, which C defines as quiet. Equality is quiet already
+   (UCOMISD, fucomi). */
 static double domain_error(void) {
     feraiseexcept(FE_INVALID);
     return NAN;
@@ -26,12 +40,24 @@ static double overflow_error(int negative) {
     return negative ? -HUGE_VAL : HUGE_VAL;
 }
 
+/* Annex F calls fabs and copysign bit operations, and they are written as
+   bit operations: neither may raise anything, and neither may lose the sign
+   of a zero or a NaN. */
+union double_bits {
+    double value;
+    unsigned long long bits;
+};
+
+#define DOUBLE_SIGN_BIT 0x8000000000000000ull
+
 double fabs(double x) {
-    return x < 0.0 ? -x : x;
+    union double_bits b = {x};
+    b.bits &= ~DOUBLE_SIGN_BIT;
+    return b.value;
 }
 
 double sqrt(double x) {
-    if (x < 0.0) {
+    if (isless(x, 0.0)) {
         return domain_error();
     }
 #if defined(__x86_64__)
@@ -50,7 +76,9 @@ double floor(double x) {
         return x;
     }
     double t = (double)(long long)x;
-    return (x < 0.0 && t != x) ? t - 1.0 : t;
+    /* The conversion has no negative zero, and floor(-0) is -0: a floor's
+       sign is always its argument's, and so is a ceiling's. */
+    return copysign((x < 0.0 && t != x) ? t - 1.0 : t, x);
 }
 
 double ceil(double x) {
@@ -58,7 +86,7 @@ double ceil(double x) {
         return x;
     }
     double t = (double)(long long)x;
-    return (x > 0.0 && t != x) ? t + 1.0 : t;
+    return copysign((x > 0.0 && t != x) ? t + 1.0 : t, x);
 }
 
 double fmod(double x, double y) {
@@ -129,7 +157,7 @@ static int quadrant(double x, double *r) {
 }
 
 double sin(double x) {
-    if (isnan(x)) {
+    if (isnan(x) || x == 0.0) {
         return x;
     }
     if (!isfinite(x) || fabs(x) > TRIG_MAX_ARGUMENT) {
@@ -161,7 +189,7 @@ double cos(double x) {
 }
 
 double tan(double x) {
-    if (isnan(x)) {
+    if (isnan(x) || x == 0.0) {
         return x;
     }
     if (!isfinite(x) || fabs(x) > TRIG_MAX_ARGUMENT) {
@@ -175,6 +203,9 @@ double tan(double x) {
 }
 
 double atan(double x) {
+    if (isnan(x) || x == 0.0) {
+        return x;
+    }
     int neg = 0;
     if (x < 0.0) {
         neg = 1;
@@ -207,6 +238,18 @@ double atan(double x) {
 }
 
 double atan2(double y, double x) {
+    if (isnan(x) || isnan(y)) {
+        return x + y;
+    }
+    /* F.10.1.4: a zero y keeps its sign, and which of 0 and pi it is
+       decided by the sign of x - including the sign of a zero x, which no
+       comparison can see. */
+    if (y == 0.0) {
+        if (signbit(x)) {
+            return copysign(M_PI, y);
+        }
+        return y;
+    }
     if (isinf(y) && isinf(x)) {
         double d = (y > 0.0 ? 1.0 : -1.0) * (x > 0.0 ? M_PI_4_ : 3.0 * M_PI_4_);
         return d;
@@ -227,6 +270,9 @@ double atan2(double y, double x) {
 }
 
 double asin(double x) {
+    if (isnan(x) || x == 0.0) {
+        return x;
+    }
     if (x > 1.0 || x < -1.0) {
         return domain_error();
     }
@@ -248,6 +294,10 @@ double acos(double x) {
 double exp(double x) {
     if (isnan(x)) {
         return x;
+    }
+    /* F.10.3.1: exp(+inf) is +inf exactly, which is not an overflow. */
+    if (isinf(x)) {
+        return signbit(x) ? 0.0 : x;
     }
     if (x > 709.0) {
         return overflow_error(0);
@@ -313,20 +363,57 @@ double log10(double x) {
     return log(x) / 2.302585092994045684;
 }
 
+#define TWO_POW_53 9007199254740992.0
+
+/* An odd integer has a units bit, and no double at or past 2^53 does. */
+static int is_odd_integer(double y) {
+    if (!isless(fabs(y), TWO_POW_53)) {
+        return 0;
+    }
+    long long n = (long long)y;
+    return (double)n == y && (n & 1);
+}
+
+/* F.10.4.4 is a table, and every row of it is answered here before any
+   logarithm is taken: exp(y * log(x)) is right for none of them, and for a
+   negative base or an infinite exponent it was an invalid operation where
+   the table has a number. powl answers the same table the same way. */
 double pow(double x, double y) {
     if (y == 0.0) {
         return 1.0;
     }
-    if (x == 0.0) {
-        return y > 0.0 ? 0.0 : pole_error(0);
+    /* One to any power is one, a NaN power included - the other case where
+       a NaN argument does not make a NaN result. */
+    if (x == 1.0) {
+        return 1.0;
     }
-    if (x < 0.0) {
-        double ry = (double)(long long)y;
-        if (ry != y) {
+    if (isnan(x) || isnan(y)) {
+        return x + y;
+    }
+    int odd = is_odd_integer(y);
+    if (x == 0.0) {
+        if (signbit(y)) {
+            return pole_error(odd && signbit(x));
+        }
+        return odd ? x : 0.0;
+    }
+    if (isinf(y)) {
+        double a = fabs(x);
+        if (a == 1.0) {
+            return 1.0;
+        }
+        return isgreater(a, 1.0) == !signbit(y) ? HUGE_VAL : 0.0;
+    }
+    if (isinf(x)) {
+        double r = signbit(y) ? 0.0 : HUGE_VAL;
+        return (signbit(x) && odd) ? -r : r;
+    }
+    if (signbit(x)) {
+        if (trunc(y) != y) {
             return domain_error();
         }
-        double mag = exp(y * log(-x));
-        return ((long long)y & 1) ? -mag : mag;
+        double magnitude = exp(y * log(-x));
+        return odd ? -magnitude : magnitude;
     }
     return exp(y * log(x));
 }
@@ -373,7 +460,7 @@ double ldexp(double x, int exp) {
 }
 
 double trunc(double x) {
-    return x < 0 ? ceil(x) : floor(x);
+    return signbit(x) ? ceil(x) : floor(x);
 }
 
 double modf(double x, double *ipart) {
@@ -381,10 +468,18 @@ double modf(double x, double *ipart) {
     if (ipart) {
         *ipart = i;
     }
-    return x - i;
+    /* inf - inf would be an invalid operation; F.10.3.12 says the
+       fraction of an infinity is a zero of its sign. */
+    if (isinf(x)) {
+        return copysign(0.0, x);
+    }
+    return copysign(x - i, x);
 }
 
 double round(double x) {
+    if (!isfinite(x)) {
+        return x;
+    }
     double t = trunc(x);
     double frac = x - t;
     if (frac >= 0.5) {
@@ -396,11 +491,17 @@ double round(double x) {
     return t;
 }
 
+/* F.10.6.7: a NaN, an infinity or a value past the integer type has no
+   answer, and invalid is REQUIRED - the one place in this file a NaN
+   argument raises. It is raised on purpose rather than left to whatever a
+   compiler makes of the range check, which on one host is a signaling
+   compare that raises and on another a quiet one that does not. */
 long lround(double x) {
     double r = round(x);
-    if (r >= (double)LONG_MIN && r < (double)LONG_MAX) {
+    if (isgreaterequal(r, (double)LONG_MIN) && isless(r, (double)LONG_MAX)) {
         return (long)r;
     }
+    feraiseexcept(FE_INVALID);
     return LONG_MIN;
 }
 
@@ -410,9 +511,10 @@ long lroundf(float x) {
 
 long long llround(double x) {
     double r = round(x);
-    if (r >= (double)LLONG_MIN && r < (double)LLONG_MAX) {
+    if (isgreaterequal(r, (double)LLONG_MIN) && isless(r, (double)LLONG_MAX)) {
         return (long long)r;
     }
+    feraiseexcept(FE_INVALID);
     return LLONG_MIN;
 }
 
@@ -421,13 +523,22 @@ long long llroundf(float x) {
 }
 
 double copysign(double x, double y) {
-    double m = x < 0 ? -x : x;
-    return signbit(y) ? -m : m;
+    union double_bits bx = {x}, by = {y};
+    bx.bits = (bx.bits & ~DOUBLE_SIGN_BIT) | (by.bits & DOUBLE_SIGN_BIT);
+    return bx.value;
 }
 
 double hypot(double x, double y) {
-    double ax = x < 0 ? -x : x;
-    double ay = y < 0 ? -y : y;
+    /* F.10.4.3: an infinity wins over a NaN, so the infinity is asked
+       about first. */
+    if (isinf(x) || isinf(y)) {
+        return HUGE_VAL;
+    }
+    if (isnan(x) || isnan(y)) {
+        return x + y;
+    }
+    double ax = fabs(x);
+    double ay = fabs(y);
     if (ax < ay) {
         double t = ax;
         ax = ay;
@@ -445,7 +556,7 @@ double log2(double x) {
 }
 
 double sinh(double x) {
-    if (isnan(x) || isinf(x)) {
+    if (isnan(x) || isinf(x) || x == 0.0) {
         return x;
     }
     double e = exp(x);
@@ -464,7 +575,7 @@ double cosh(double x) {
 }
 
 double tanh(double x) {
-    if (isnan(x)) {
+    if (isnan(x) || x == 0.0) {
         return x;
     }
     if (x > 20.0) {
@@ -484,6 +595,11 @@ double fmax(double a, double b) {
     if (isnan(b)) {
         return a;
     }
+    /* Annex F does not require fmax(-0, +0) to be +0, and says why (the
+       footnote to F.10.9.2); here it costs one quiet comparison, so it is. */
+    if (a == b) {
+        return signbit(a) ? b : a;
+    }
     return a > b ? a : b;
 }
 
@@ -494,11 +610,14 @@ double fmin(double a, double b) {
     if (isnan(b)) {
         return a;
     }
+    if (a == b) {
+        return signbit(a) ? a : b;
+    }
     return a < b ? a : b;
 }
 
 double expm1(double x) {
-    if (isnan(x)) {
+    if (isnan(x) || x == 0.0) {
         return x;
     }
     if (fabs(x) >= 1.0) {
@@ -633,6 +752,27 @@ double erfc(double x) {
     return erfc_cf(x);
 }
 
+/* Which way to step is decided on the bits, as sign-magnitude integers,
+   rather than by comparing the doubles - and not for want of a NaN guard,
+   which is above. Apple's clang on an x86 host compiled nextafterf's two
+   comparisons into one CMPLTPS across the whole xmm register, whose other
+   three lanes hold whatever the caller left there; a stale NaN in one of
+   them raised FE_INVALID for nextafterf(1, inf). isgreater did not stop it:
+   once the compiler has proved both operands ordered it treats the quiet
+   comparison as the signaling one, because by default it does not model
+   the flags at all. An integer comparison has no flags to raise. */
+static long long double_order(double x) {
+    union double_bits b = {x};
+    long long magnitude = (long long)(b.bits & ~DOUBLE_SIGN_BIT);
+    return (b.bits & DOUBLE_SIGN_BIT) ? -magnitude : magnitude;
+}
+
+static int float_order(float x) {
+    union { float f; unsigned int u; } b = {x};
+    int magnitude = (int)(b.u & 0x7FFFFFFFu);
+    return (b.u & 0x80000000u) ? -magnitude : magnitude;
+}
+
 double nextafter(double x, double y) {
     if (isnan(x) || isnan(y)) {
         return x + y;
@@ -643,10 +783,11 @@ double nextafter(double x, double y) {
     union { double d; unsigned long long u; } v;
     if (x == 0.0) {
         v.u = 1;
-        return y > 0.0 ? v.d : -v.d;
+        return signbit(y) ? -v.d : v.d;
     }
     v.d = x;
-    if ((y > x) == (x > 0.0)) {
+    long long from = double_order(x);
+    if ((double_order(y) > from) == (from > 0)) {
         v.u++;
     } else {
         v.u--;
@@ -677,6 +818,9 @@ double cbrt(double x) {
 double exp2(double x) {
     if (isnan(x)) {
         return x;
+    }
+    if (isinf(x)) {
+        return signbit(x) ? 0.0 : x;
     }
     if (x > 1024.0) {
         return overflow_error(0);
@@ -818,10 +962,11 @@ float nextafterf(float x, float y) {
     union { float f; unsigned int u; } v;
     if (x == 0.0f) {
         v.u = 1;
-        return y > 0.0f ? v.f : -v.f;
+        return signbit(y) ? -v.f : v.f;
     }
     v.f = x;
-    if ((y > x) == (x > 0.0f)) {
+    int from = float_order(x);
+    if ((float_order(y) > from) == (from > 0)) {
         v.u++;
     } else {
         v.u--;
@@ -906,7 +1051,7 @@ double nexttoward(double x, long double y) {
     if ((long double)x == y) {
         return (double)y;
     }
-    return nextafter(x, (long double)x < y ? HUGE_VAL : -HUGE_VAL);
+    return nextafter(x, isless((long double)x, y) ? HUGE_VAL : -HUGE_VAL);
 }
 
 /* The float family. Every one of these computes in double and rounds once,
@@ -1256,5 +1401,5 @@ float nexttowardf(float x, long double y) {
     if ((long double)x == y) {
         return (float)y;
     }
-    return nextafterf(x, (long double)x < y ? HUGE_VALF : -HUGE_VALF);
+    return nextafterf(x, isless((long double)x, y) ? HUGE_VALF : -HUGE_VALF);
 }

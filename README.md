@@ -423,7 +423,12 @@ UEFI firmware
 ## Build and run
 
 Needs an `x86_64-elf` cross-toolchain, `nasm`, `clang`+`lld` (for the
-EFI app), `mtools` and `qemu-system-x86_64`.
+EFI app), `mtools` and `qemu-system-x86_64`, on either kind of Mac - Apple
+Silicon or Intel - and the harnesses are written for both. On an Intel Mac,
+`-accel hvf -cpu host,xlevel=0x80000008` after a harness's ceiling
+(`tools/qemu-serial-test.sh 1500 -accel hvf -cpu host,xlevel=0x80000008`)
+runs the guest on the real CPU rather than under TCG, and `QEMU_CPUS=8 QEMU_MEM=16384` in front of a command boots a
+laptop-sized machine.
 
 ```sh
 ./tools/run-qemu.sh          # builds everything, fetches OVMF the first time, boots
@@ -554,7 +559,7 @@ print **is** the instrument: photograph it.
 One command, three tiers. Each is a superset of the one above it.
 
 ```sh
-./tools/run-tests.sh --fast    # host unit tests. No QEMU. Under a second.
+./tools/run-tests.sh --fast    # host stages only. No QEMU. A few minutes.
 ./tools/run-tests.sh           # ...plus a graded boot and the quick input subset.
 ./tools/run-tests.sh --full    # ...plus the whole input suite and the slow host tests.
 ```
@@ -579,8 +584,13 @@ Several instruments, and none of them subsumes another:
   reach at all**: its namespace has 512-byte blocks, so a 4Kn drive's
   read-modify-write path is dead code here and would first execute on
   somebody's real filesystem. 645 tests.
+- **The same host code, for the other Mac** (`tools/cross-arch-test.sh`,
+  in `--fast`): the unit tests, make's host tools and every compile the
+  differential tests make, built and linked for arm64 on an Intel Mac and
+  for x86_64 on Apple Silicon, so code that builds on only one of the two
+  is found on whichever desk it was written at.
 - **The boot self-tests** (`tools/qemu-serial-test.sh`) boot the real
-  image and grade the serial log against 162 markers and 44 performance
+  image and grade the serial log against 194 markers and 45 performance
   budgets. They prove every subsystem still works from the inside.
 - **The input suite** (`tools/qemu-input-test.sh`) drives real clicks and
   keys through QEMU's monitor and grades real framebuffer pixels. It

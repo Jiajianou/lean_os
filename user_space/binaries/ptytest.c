@@ -1,6 +1,7 @@
 #include <fcntl.h>
 #include <pty.h>
 #include <signal.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -154,15 +155,19 @@ int main(void) {
         }
     }
     if (kill(pid, SIGCONT) != 0) {
+        printf("ptytest: SIGCONT to the stopped job failed (errno %d)\n", errno);
         return 12;
     }
     if (write(m, "k\n", 2) != 2) {
+        printf("ptytest: the master would not take the line that ends the job\n");
         return 12;
     }
     {
         int status = 0;
         pid_t w = waitpid(pid, &status, WUNTRACED);
         if (w != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            printf("ptytest: after SIGCONT, waitpid said %d with status 0x%x, wanted %d "
+                   "exiting 0\n", (int)w, status, (int)pid);
             return 12;
         }
     }

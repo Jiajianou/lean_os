@@ -290,3 +290,115 @@ TEST(mmap_regions, fork_is_told_every_shared_region_and_nothing_private) {
     CHECK(ranges == NULL);
     task.mmaps[1].pages = 4;
 }
+
+/* M225: the page fault's look at the table while another core is part way
+   through changing it. A split - mprotect over the back half of a region,
+   or munmap of its middle - shrinks the region and only then inserts the
+   tail, so between the two the tail's pages are in no region at all. The
+   fault path reads without the lock (M181), found nothing, and the thread
+   was killed for touching a page mmap had handed it: [m79]'s threadtest on
+   four processors, two new threads faulting on their own TLS blocks.
+
+   Here the other core is the test. It begins the change, leaves the table
+   half split, and finishes only when somebody waits for its lock - which a
+   look that knows a writer is in the table must do. */
+#define SPLIT_BASE 0xA000010000ULL
+
+static uint64_t other_core_flags;
+static int other_core_finished;
+
+static void other_core_inserts_the_tail(void) {
+    task.mmaps[1] = (mmap_region_t){.base = SPLIT_BASE + 2 * 4096, .pages = 2,
+                                    .prot = 1, .handle = -1};
+    scheduler_regions_end_change(&task, other_core_flags);
+    other_core_finished = 1;
+}
+
+TEST(mmap_regions, a_fault_in_the_middle_of_a_split_still_finds_its_page) {
+    fixture();
+    other_core_finished = 0;
+    REQUIRE(scheduler_regions_reserve(&task) == 0);
+    task.mmaps[0] = (mmap_region_t){.base = SPLIT_BASE, .pages = 4, .prot = 3, .handle = -1};
+    CHECK(scheduler_region_covers(&task, SPLIT_BASE + 3 * 4096));
+
+    other_core_flags = scheduler_regions_begin_change(&task);
+    task.mmaps[0].pages = 2;
+    fake_spinlock_on_contention(other_core_inserts_the_tail);
+
+    CHECK(scheduler_region_covers(&task, SPLIT_BASE + 3 * 4096));
+    CHECK(scheduler_region_covers(&task, SPLIT_BASE + 2 * 4096));
+    CHECK(other_core_finished);
+
+    if (!other_core_finished) {
+        fake_spinlock_on_contention(0);
+        scheduler_regions_end_change(&task, other_core_flags);
+    }
+    /* And a page that really is nobody's is still nobody's, writer or not. */
+    CHECK(!scheduler_region_covers(&task, SPLIT_BASE + 4 * 4096));
+    scheduler_regions_release(&task);
+}
+
+/* The other half of the bargain: a look that meets no writer takes no lock,
+   because every fault waiting on a per-process lock is what M181 measured
+   starving four cores under TCG. The lock is marked held as if by a reader
+   elsewhere (msync's scan, fork's copy - holders that change nothing); a look
+   that tried to take it would be a recursive acquire here. */
+TEST(mmap_regions, a_fault_that_meets_no_writer_takes_no_lock) {
+    fixture();
+    REQUIRE(scheduler_regions_reserve(&task) == 0);
+    task.mmaps[0] = (mmap_region_t){.base = SPLIT_BASE, .pages = 4, .prot = 3, .handle = -1};
+    uint64_t flags = scheduler_regions_begin_change(&task);
+    scheduler_regions_end_change(&task, flags);
+    CHECK_EQ(task.mmap_sequence % 2, 0u);
+
+    task.mmap_lock.locked = 1;
+    int covered = 0;
+    CHECK_NO_PANIC(covered = scheduler_region_covers(&task, SPLIT_BASE + 4096));
+    CHECK(covered);
+    task.mmap_lock.locked = 0;
+    scheduler_regions_release(&task);
+}
+
+/* M225: the other half of the region table's seqlock - the look again
+   after an unlocked walk, which catches a writer that STARTED while the
+   reader was walking. The first test of it only had a writer already in the table when the look began
+   (an odd sequence, so the reader went straight to the lock), and the
+   re-check could be deleted with every test passing. Here the reader is
+   looking for the third region; it has passed the first two when another
+   core unmaps the first and shifts the rest down, so the entry it wanted
+   moves into the place it has already looked at and the walk falls off the
+   end. Only the second look finds it. */
+#define WALK_BASE 0xA000300000ULL
+
+static int walk_writer_ran;
+
+static void other_core_unmaps_the_first_region(void *walked, uint32_t index) {
+    if (walked != &task || index != 1 || walk_writer_ran) {
+        return;
+    }
+    walk_writer_ran = 1;
+    fake_objects_on_region_walk_step(0);
+    uint64_t flags = scheduler_regions_begin_change(&task);
+    task.mmaps[0] = task.mmaps[1];
+    task.mmaps[1] = task.mmaps[2];
+    task.mmaps[2] = (mmap_region_t){0};
+    scheduler_regions_end_change(&task, flags);
+}
+
+TEST(mmap_regions, a_writer_that_starts_during_an_unlocked_walk_is_caught_after_it) {
+    fixture();
+    REQUIRE(scheduler_regions_reserve(&task) == 0);
+    task.mmaps[0] = (mmap_region_t){.base = WALK_BASE, .pages = 1, .prot = 3, .handle = -1};
+    task.mmaps[1] = (mmap_region_t){.base = WALK_BASE + 0x10000, .pages = 1, .prot = 3, .handle = -1};
+    task.mmaps[2] = (mmap_region_t){.base = WALK_BASE + 0x20000, .pages = 1, .prot = 3, .handle = -1};
+    CHECK_EQ(task.mmap_sequence % 2, 0u);
+
+    walk_writer_ran = 0;
+    fake_objects_on_region_walk_step(other_core_unmaps_the_first_region);
+    CHECK(scheduler_region_covers(&task, WALK_BASE + 0x20000));
+    fake_objects_on_region_walk_step(0);
+    CHECK(walk_writer_ran);
+    /* And what the writer removed is gone, to a look that meets no writer. */
+    CHECK(!scheduler_region_covers(&task, WALK_BASE));
+    scheduler_regions_release(&task);
+}

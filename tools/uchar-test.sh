@@ -21,6 +21,11 @@ DEFS="-Dmbstate_t=lean_mbstate_t -Dmbrtowc=lean_mbrtowc -Dwcrtomb=lean_wcrtomb"
 DEFS="$DEFS -Dmbrtoc16=lean_mbrtoc16 -Dc16rtomb=lean_c16rtomb"
 DEFS="$DEFS -Dmbrtoc32=lean_mbrtoc32 -Dc32rtomb=lean_c32rtomb"
 DEFS="$DEFS -Dchar16_t=lean_char16_t -Dchar32_t=lean_char32_t"
+# wchar.h names locale_t, which the host's <locale.h> only declares from the
+# macOS 26 SDK on; <xlocale.h> has always had it.
+if [ "$(uname)" = "Darwin" ]; then
+  DEFS="$DEFS -include xlocale.h"
+fi
 
 $HOSTCC -O2 -std=c11 -Wall -Wextra -Werror -c \
   -I "$INC" $DEFS -o "$OUT/uchar.o" user_space/libc/src/uchar.c || exit 1

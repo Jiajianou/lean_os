@@ -165,8 +165,11 @@ long double truncl(long double x) {
 }
 
 long double floorl(long double x) {
+    if (!isfinite(x)) {
+        return x;
+    }
     long double t = truncl(x);
-    if (!isfinite(x) || t == x) {
+    if (t == x) {
         return x < 0.0L ? copysignl(t, x) : t;
     }
     return x < 0.0L ? t - 1.0L : t;
@@ -203,20 +206,34 @@ long double nearbyintl(long double x) {
     return rintl(x);
 }
 
+/* F.10.6.5 and F.10.6.7: an integer this format's value does not fit -
+   a NaN, an infinity, or anything at or past 2^63 - raises invalid, and
+   that is REQUIRED. fistp happens to raise it, but a conversion out of
+   range is undefined in C, so the flag is raised here rather than left to
+   whichever instruction a compiler picks. long and long long are both 64
+   bits on this target, so one range serves all four. */
+static long long to_integer(long double r) {
+    if (isgreaterequal(r, -TWO_POW_63) && isless(r, TWO_POW_63)) {
+        return (long long)r;
+    }
+    feraiseexcept(FE_INVALID);
+    return LLONG_MIN;
+}
+
 long lrintl(long double x) {
-    return (long)rintl(x);
+    return (long)to_integer(rintl(x));
 }
 
 long long llrintl(long double x) {
-    return (long long)rintl(x);
+    return to_integer(rintl(x));
 }
 
 long lroundl(long double x) {
-    return (long)roundl(x);
+    return (long)to_integer(roundl(x));
 }
 
 long long llroundl(long double x) {
-    return (long long)roundl(x);
+    return to_integer(roundl(x));
 }
 
 long double frexpl(long double x, int *exponent) {
@@ -260,14 +277,22 @@ long double scalblnl(long double x, long exponent) {
     return scale_by(x, exponent);
 }
 
+/* C11 7.12.6.5 lets ilogb report a domain error for zero, an infinity or
+   a NaN; IEEE 754-2008 5.3.3 and C23 F.10.3.8 require it, as invalid, since
+   none of the three has an exponent an int can hold. This raises it - the
+   only family besides the integer roundings where a NaN argument does, and
+   what the host's libm does too. */
 int ilogbl(long double x) {
     if (x == 0.0L) {
+        feraiseexcept(FE_INVALID);
         return FP_ILOGB0;
     }
     if (isnan(x)) {
+        feraiseexcept(FE_INVALID);
         return FP_ILOGBNAN;
     }
     if (isinf(x)) {
+        feraiseexcept(FE_INVALID);
         return INT_MAX;
     }
     long double e, s;
@@ -277,7 +302,7 @@ int ilogbl(long double x) {
 
 long double logbl(long double x) {
     if (x == 0.0L) {
-        return -(long double)INFINITY;
+        return pole_error_l(1);
     }
     if (!isfinite(x)) {
         return fabsl(x);
@@ -833,7 +858,21 @@ long double nexttowardl(long double x, long double y) {
     return nextafterl(x, y);
 }
 
+/* x - y if x > y, else +0 - and when x > y is false 7.12.12.1 performs no
+   subtraction for fdim(inf, inf) to be invalid about. x86_64-elf-gcc
+   compiles this as a branch, because its default -ftrapping-math forbids
+   doing an operation that can raise before the test that guards it. Apple's
+   clang assumes by default that nothing is watching the flags, and compiled
+   it as fsubp, then fcmov - inf - inf done whatever the comparison said, and
+   invalid raised. Choosing the operands first does not help: it folded the
+   choices back into the same fsubp. tools/math-test.sh found it, once it
+   graded this file rather than the host's fdiml, and FENV_ACCESS is the
+   standard's own way to say that the flags here are observed. GCC does not
+   know the pragma and does not need it. */
 long double fdiml(long double x, long double y) {
+#if defined(__clang__)
+#pragma STDC FENV_ACCESS ON
+#endif
     if (isnan(x) || isnan(y)) {
         return (long double)NAN;
     }

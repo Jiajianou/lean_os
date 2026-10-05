@@ -12984,7 +12984,7 @@ const struct long_double_function LONG_DOUBLE_FUNCTIONS[] = {
     {"exp2l", case_exp2l, 513, 0, 0, 1L},
     {"expm1l", case_expm1l, 513, 0, 0, 2L},
     {"logl", case_logl, 513, 0, 0, 1L},
-    {"log2l", case_log2l, 513, 0, 0, 0.5L},
+    {"log2l", case_log2l, 513, 0, 0, 1L},
     {"log10l", case_log10l, 513, 0, 0, 1L},
     {"log1pl", case_log1pl, 513, 0, 0, 2L},
     {"sinl", case_sinl, 513, 0, 0, 1L},

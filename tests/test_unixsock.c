@@ -860,3 +860,25 @@ TEST(unix_socket, the_epoll_accessors_refuse_a_null_socket) {
     CHECK_EQ(unix_socket_rdhup(NULL), 1);
     expect_nothing_left();
 }
+
+/* M225: a slot that names nothing is not something SCM_RIGHTS can carry.
+   sys_sendmsg checked only for NONE, so a descriptor another thread had
+   claimed and not yet filled (RESERVED) went into the queue as one, and the
+   receiver was handed a slot nobody would ever fill. Refused here, whole -
+   nothing queued and no reference taken on the descriptors beside it. */
+TEST(unix_socket, a_slot_that_names_nothing_is_not_sent) {
+    clean();
+    struct unix_socket *a = NULL, *b = NULL;
+    REQUIRE(unix_socket_pair(UNIX_SOCKET_STREAM, &a, &b) == 0);
+    file_descriptor_slot_t two[2] = {a_pipe(1), a_pipe(2)};
+    two[1].type = FILE_DESCRIPTOR_RESERVED;
+    CHECK_EQ(unix_socket_send(a, (const uint8_t *)"x", 1, two, 2), -1);
+    two[1].type = FILE_DESCRIPTOR_NONE;
+    CHECK_EQ(unix_socket_send(a, (const uint8_t *)"x", 1, two, 2), -1);
+    CHECK_EQ(unix_socket_queued_file_descriptors(), 0);
+    CHECK_EQ(fake_objects_pipe_read_refs(), 0);
+    CHECK_EQ(unix_socket_pending(b), 0);
+    unix_socket_unref(a);
+    unix_socket_unref(b);
+    expect_nothing_left();
+}

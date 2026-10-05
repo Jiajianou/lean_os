@@ -217,7 +217,9 @@ def run_suite(extra=()):
     return "survived", time.time() - started
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
+    ap = argparse.ArgumentParser(description="Mutate a C source one change at a time and run the host "
+                                             "suite against each mutant: a mutant the suite does not "
+                                             "kill is a fault it cannot see.",
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("files", nargs="*", help="sources to mutate")
     ap.add_argument("--limit", type=int, default=0,

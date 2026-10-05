@@ -60,6 +60,22 @@ uint32_t fake_socket_delivered_source_ip(int i);
 
 void fake_spinlock_release_all(void);
 int fake_spinlock_order_pairs(void);
+/* The next acquire of a lock that is held runs this first, as the other
+   processor that holds it finishing and letting go (fake_spinlock.c). */
+void fake_spinlock_on_contention(void (*hook)(void));
+/* M225: runs after every lock release while installed (never inside its own
+   run) - the moment another processor could act on what the lock guarded.
+   Cleared by passing 0, and at the end of every test. */
+void fake_spinlock_on_release(void (*hook)(void));
+/* M225: `clear` runs at the end of every test from now on (deduplicated) -
+   how a one-shot hook makes sure a failed test does not leave it armed. */
+void fake_spinlock_at_test_end(void (*clear)(void));
+/* M225: while on, a spinlock is a real one - an atomic exchange, waited on
+   with sched_yield - for a test that runs kernel code on several host
+   threads at once. The single-threaded checks (recursion, lock order, the
+   hooks) are off meanwhile: they keep state no lock protects. Off again at
+   the end of every test. */
+void fake_spinlock_threaded(int on);
 
 void fake_arch_reset(void);
 void fake_arch_set_cpu(int cpu);
@@ -87,6 +103,39 @@ int fake_objects_file_refs(void);
 int fake_objects_socket_refs(void);
 int fake_objects_address_spaces_destroyed(void);
 int fake_objects_shared_memory_frees(void);
+/* M225: count a pipe-write reference taken while the count was at or below
+   `floor` - a reference on an object its last holder already let go of. */
+void fake_objects_pipe_write_floor(int floor);
+int fake_objects_pipe_write_revivals(void);
+/* M225 (fd-use-holds): a pipe write end USED - read, written, asked whether
+   it is ready - by a caller that believes it holds it. Counted as dead when
+   the count is at or below the floor at that moment: the object's last
+   holder had already let it go, so on the machine the use was of freed
+   memory. */
+void fake_objects_pipe_write_use(void);
+int fake_objects_pipe_write_dead_uses(void);
+/* M225 (fd-use-holds): the one fake pipe address pipe_is_persistent says yes
+   to - a named pipe, never counted down; null (the reset) is none. */
+struct pipe;
+void fake_objects_pipe_persistent(const struct pipe *p);
+/* Runs once, inside the next shared_memory_free_by_owner - which is the first
+   thing task_exit_with_code does. */
+void fake_objects_on_shared_memory_free(void (*hook)(int owner_task_id));
+/* M225: runs after each entry an mmap region walk has looked at and passed
+   over, until cleared (0) - the other core changing the table under an
+   unlocked reader. */
+void fake_objects_on_region_walk_step(void (*hook)(void *task, uint32_t index));
+
+/* M225: runs once, at the start of the next frame allocation. */
+void fake_physical_memory_on_alloc(void (*hook)(void));
+
+/* M225: user pages, modelled. Off (the default), the fake answers every
+   user range as mapped, as it always has; on, mappings outside the kernel
+   heap's reserved region are remembered per page, so a fault path can be
+   followed end to end. Turning it on or off forgets them all. */
+void fake_virtual_memory_model_user_pages(int on);
+/* Whether `virt` is mapped in the model, and to what (either may be 0). */
+int fake_virtual_memory_user_page(uint64_t virt, uint64_t *phys_out, uint64_t *flags_out);
 
 void fake_user_heap_reset(void);
 void fake_user_sbrk_refuse(int on);

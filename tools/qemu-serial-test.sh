@@ -15,29 +15,90 @@ EXTRA_ARGS=("$@")
 IMAGE="${LEANOS_IMAGE:-build/os-image.bin}"
 OVMF_CODE="build/ovmf/OVMF_CODE.fd"
 OVMF_VARS_TEMPLATE="build/ovmf/OVMF_VARS.fd"
+
+# LEANOS_SERIAL_GRADE_LOG=<log> grades a serial log that already exists -
+# against the image it was booted from, which is still $IMAGE - without
+# booting anything and without writing to build/'s history files. It is how
+# tools/battery_payloads.py --self-test grades this script's wiring in
+# seconds, and how a captured log is re-graded after the marker list changes.
+GRADE_ONLY="${LEANOS_SERIAL_GRADE_LOG:-}"
+
+if [ ! -f "$IMAGE" ]; then
+  echo "No image at $IMAGE yet - run 'make' first." >&2
+  exit 1
+fi
+
+# What the image the guest is about to boot has on it, read on this side
+# before the boot (tools/battery_payloads.py, through the reader the input
+# suite decides its skips with). About sixty of the markers below grade a
+# payload no make target builds - the cross compilers, Python, packages, Rust,
+# Chromium, Node - and on a host that never built one, the guest's "... is not
+# on this image - skipped." is the right answer and the marker is SKIPPED,
+# listed and counted apart. Built here and missing from the image is not: an
+# image `make all` recreated after the payloads went on reads exactly like a
+# broken kernel and has cost this project three graded boots (M186), and now
+# it is named here, before eight minutes are spent asking the machine, and
+# FAILS at the end. Read-only on purpose: a check that writes to the thing it
+# is checking is not a check.
+PAYLOAD_STATE="$(mktemp -t leanos-payloads-XXXXXX)"
+PAYLOAD_SUMMARY="$(mktemp -t leanos-payload-summary-XXXXXX)"
+# Whatever ends this script - the end, a FAIL, ^C, a caller's timeout - ends
+# the machine it started and removes what it made in $TMPDIR. Before this an
+# interrupted run left QEMU booting to its own ceiling (it is disowned below)
+# and its firmware variables, NIC stream and log behind. QEMU_PID is the one
+# process this script started, and is cleared once it has been waited for, so
+# nothing else is ever signalled.
+QEMU_PID=""
+OVMF_VARS_RUNTIME=""
+NIC_STREAM=""
+TEMP_LOG=""
+cleanup() {
+  if [ -n "$QEMU_PID" ]; then
+    kill "$QEMU_PID" 2>/dev/null || true
+  fi
+  rm -f "$PAYLOAD_STATE" "$PAYLOAD_SUMMARY"
+  for f in "$OVMF_VARS_RUNTIME" "$NIC_STREAM" "$TEMP_LOG"; do
+    [ -z "$f" ] || rm -f "$f"
+  done
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+python3 tools/battery_payloads.py probe --image "$IMAGE" --state "$PAYLOAD_STATE" || true
+
+if [ -n "$GRADE_ONLY" ]; then
+  if [ ! -f "$GRADE_ONLY" ]; then
+    echo "No serial log at $GRADE_ONLY to grade." >&2
+    exit 1
+  fi
+  LOG="$GRADE_ONLY"
+  outcome="graded $LOG without booting"
+  elapsed=0
+  echo "[harness] $outcome."
+else
+# The boot itself, left at the indentation it has always had - down to the
+# matching `fi` after the log is printed.
+
 OVMF_VARS_RUNTIME="$(mktemp -t qemu-serial-ovmf-vars-XXXXXX.fd)"
 IOAPIC_FWCFG=""
 if [ "${LEANOS_IOAPIC:-0}" = "1" ]; then
   IOAPIC_FWCFG="-fw_cfg name=opt/leanos/ioapic,string=1"
 fi
 
-NIC_STREAM_BYTES=262144
-NIC_STREAM="$(mktemp -t leanos-nicstream-XXXXXX)"
-python3 -c "
-import sys
-n = int(sys.argv[2])
-sys.stdout = open(sys.argv[1], 'wb')
-sys.stdout.write(bytes(((i * 7 + (i >> 9)) & 0xFF) for i in range(n)))
-" "$NIC_STREAM" "$NIC_STREAM_BYTES"
-NETDEV="user,id=net0,guestfwd=tcp:10.0.2.100:7777-cmd:cat $NIC_STREAM"
+# The stream [m116] reads, and the shared guest RAM that keeps SLIRP's fork
+# of its `cat` from stopping an hvf guest for four seconds per GiB - both in
+# tools/nic-stream-env.sh, which says why, and which tools/nic-stream-test.sh
+# uses too.
+. "$(dirname "$0")/nic-stream-env.sh"
+nic_stream_prepare
 
-LOG="${LEANOS_SERIAL_LOG:-$(mktemp -t qemu-serial-XXXXXX.log)}"
-: > "$LOG"
-
-if [ ! -f "$IMAGE" ]; then
-  echo "No image at $IMAGE yet - run 'make' first." >&2
-  exit 1
+if [ -n "${LEANOS_SERIAL_LOG:-}" ]; then
+  LOG="$LEANOS_SERIAL_LOG"
+else
+  LOG="$(mktemp -t qemu-serial-XXXXXX.log)"
+  TEMP_LOG="$LOG"
 fi
+: > "$LOG"
 
 if [ ! -f "$OVMF_CODE" ] || [ ! -f "$OVMF_VARS_TEMPLATE" ]; then
   echo "No OVMF firmware at build/ovmf/ yet - building it now from source" >&2
@@ -49,27 +110,7 @@ cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_RUNTIME"
 
 QEMU_MEM=${QEMU_MEM:-4096}
 QEMU_CPUS=${QEMU_CPUS:-1}
-# An image the build has just recreated has a boot loader, a kernel and an
-# empty filesystem: every ported-software marker below will be missing and
-# none of them is a regression. That reads exactly like a broken kernel and
-# has cost this project three graded boots - the last one to a rebuild that
-# was incidental, a driver fix, rather than a deliberate build. Ask the image
-# before spending eight minutes asking the machine. Read-only on purpose:
-# a check that writes to the thing it is checking is not a check.
-if [ -f "$IMAGE" ]; then
-  if ! python3 - "$IMAGE" <<'PROBE'
-import sys
-with open(sys.argv[1], "rb") as image:
-    image.seek(16384 * 512)
-    sys.exit(0 if b"toybox" in image.read(256 * 1024 * 1024) else 1)
-PROBE
-  then
-    echo "WARNING: there is no toybox in $IMAGE, so the build has recreated it since" >&2
-    echo "         the payloads were installed. Around 60 of the markers below will be" >&2
-    echo "         missing and none of them is a regression - repopulate first. The" >&2
-    echo "         chain is in the M186 commit message." >&2
-  fi
-fi
+guest_ram_args "$QEMU_MEM"
 
 case "${QEMU_DISK:-virtio}" in
   ide)
@@ -109,7 +150,7 @@ if [ "${QEMU_USB:-1}" = "0" ]; then
 fi
 
 qemu-system-x86_64 \
-  -m "$QEMU_MEM" -smp "$QEMU_CPUS" \
+  "${GUEST_RAM_ARGS[@]}" -smp "$QEMU_CPUS" \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS_RUNTIME" \
   "${DISK_ARGS[@]}" -display none \
@@ -147,11 +188,12 @@ elapsed=$(( $(date +%s) - (deadline - SECONDS_TO_RUN) ))
 
 kill "$QEMU_PID" 2>/dev/null || true
 wait "$QEMU_PID" 2>/dev/null || true
+QEMU_PID=""  # signalled once; the exit trap has nothing left to stop
 
 cat "$LOG"
-
 echo
 echo "[harness] $outcome after ${elapsed}s (ceiling ${SECONDS_TO_RUN}s)."
+fi # the boot
 
 REQUIRED_MARKERS=(
   "[vmm] map/unmap self-test passed."
@@ -246,6 +288,7 @@ REQUIRED_MARKERS=(
   "[m97] and C++ nobody here wrote:"
   "[m98] binutils runs here:"
   "[m99] somebody else's language runs here:"
+  "[logwrite] one write() is one piece of the log:"
   "[m106] cores this machine can use:"
   "[m105] the journal's two conditions, measured together:"
   "[m81] a filesystem that can hold somebody else's program:"
@@ -269,6 +312,7 @@ REQUIRED_MARKERS=(
   "[m120] a buffer shared across a channel:"
   "[m140] the surface a C++ runtime asks a libc for:"
   "[m142] a long double library for the x87's own format:"
+  "[m142q] a quiet NaN through every function <math.h> declares:"
   "[m143] the POSIX surface //base's own sources ask for:"
   "[m144] what a fault was, not that one happened:"
   "[m145] Chromium's //base links and runs on this machine:"
@@ -326,6 +370,10 @@ REQUIRED_MARKERS=(
   "[m198] one program, two processes, one copy of its text:"
   "[m199] a 3 ms sleep wakes "
   "[m199] the hang detector named the holder of a sleep lock"
+  # The TSC and the tick held to the CMOS clock on whichever controller this
+  # boot is on: QEMU's I/O APIC took the PIT's interrupt twice a period, and
+  # every clock the kernel had - so every measured millisecond - ran double.
+  "[timekeeping] the clock keeps time through either interrupt controller:"
   "[m201] a program's first read no longer holds up every other exec"
   "[m91] an address space that is a set of mappings:"
   "a file mapped MAP_PRIVATE reading back as its own bytes"
@@ -358,7 +406,7 @@ if grep -qF "*** KERNEL PANIC:" "$LOG"; then
 fi
 
 mkdir -p build
-if [ ! -f build/perf-history.tsv ]; then
+if [ -z "$GRADE_ONLY" ] && [ ! -f build/perf-history.tsv ]; then
   printf 'when\tcommit\tmeasurement\tvalue\tunit\tceiling\n' > build/perf-history.tsv
 fi
 BUDGETS="tests/budgets.tsv"
@@ -385,7 +433,7 @@ if [ -n "$perf_lines" ]; then
       printf '  %-28s %10s %-3s  ok (ceiling %s, was %s at %s)\n' \
         "$name" "$value" "$unit" "$ceiling" "$measured" "$at"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    [ -n "$GRADE_ONLY" ] || printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" \
       "perf:$name" "$value" "$unit" "$ceiling" >> build/perf-history.tsv
@@ -399,12 +447,36 @@ for marker in "${REQUIRED_MARKERS[@]}"; do
   fi
 done
 
+# A missing marker is a FAIL unless tools/battery_payloads.py can say it is a
+# payload's, the payload is not on the image, this host never built it, and
+# the machine said it skipped it - those are listed under SKIPPED, counted
+# apart, and are not "found". Anything else it lists under FAIL, with why.
+skipped_count=0
 if [ "${#missing[@]}" -gt 0 ]; then
-  pass=0
-  echo "FAIL: ${#missing[@]}/${#REQUIRED_MARKERS[@]} required boot markers never appeared (log capture ended too early, or a real regression - try a longer SECONDS first):"
-  for marker in "${missing[@]}"; do
-    echo "  - $marker"
-  done
+  failed_count=""
+  if ! printf '%s\n' "${missing[@]}" | python3 tools/battery_payloads.py grade \
+       --state "$PAYLOAD_STATE" --log "$LOG" --total "${#REQUIRED_MARKERS[@]}" \
+       --summary "$PAYLOAD_SUMMARY"; then
+    pass=0
+  fi
+  read -r skipped_count failed_count < "$PAYLOAD_SUMMARY" || true
+  # The grader is not allowed to be the reason a run passes: if it said
+  # nothing, or accounted for fewer markers than are missing, that is a FAIL.
+  if [ -z "${skipped_count:-}" ] || [ -z "${failed_count:-}" ] ||
+     [ $(( skipped_count + failed_count )) -ne "${#missing[@]}" ]; then
+    pass=0
+    skipped_count=0
+    echo "FAIL: ${#missing[@]} required boot markers never appeared, and the payload grader did not account for them:"
+    printf '  - %s\n' "${missing[@]}"
+  fi
+fi
+
+if [ -n "$GRADE_ONLY" ]; then
+  if [ "$pass" -eq 1 ]; then
+    echo "PASS: $(( ${#REQUIRED_MARKERS[@]} - skipped_count ))/${#REQUIRED_MARKERS[@]} required boot markers found, $skipped_count skipped (payloads not on this image and not built on this host), no kernel panic."
+    exit 0
+  fi
+  exit 1
 fi
 
 mkdir -p build
@@ -421,10 +493,14 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
   "${boot_secs:-}" >> build/test-history.tsv
 
 [ -n "${LEANOS_SERIAL_LOG:-}" ] || rm -f "$LOG"
-rm -f "$OVMF_VARS_RUNTIME"
+rm -f "$OVMF_VARS_RUNTIME" "$NIC_STREAM"
 
 if [ "$pass" -eq 1 ]; then
-  echo "PASS: ${#REQUIRED_MARKERS[@]}/${#REQUIRED_MARKERS[@]} required boot markers found, no kernel panic."
+  if [ "$skipped_count" -gt 0 ]; then
+    echo "PASS: $(( ${#REQUIRED_MARKERS[@]} - skipped_count ))/${#REQUIRED_MARKERS[@]} required boot markers found, $skipped_count skipped (payloads not on this image and not built on this host), no kernel panic."
+  else
+    echo "PASS: ${#REQUIRED_MARKERS[@]}/${#REQUIRED_MARKERS[@]} required boot markers found, no kernel panic."
+  fi
   exit 0
 fi
 exit 1

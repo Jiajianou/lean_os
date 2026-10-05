@@ -1,6 +1,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "capabilities.h"
 #include "os_network.h"
@@ -34,6 +35,12 @@ static void check(int ok, const char *what) {
 }
 
 int main(int argc, char **argv) {
+    /* M225: the child below, which has to be alive when it is killed. */
+    if (argc > 1 && strcmp(argv[1], "linger") == 0) {
+        sleep(10);
+        return 0;
+    }
+
     uint32_t mine = (uint32_t)sys_getcaps();
 
     check(mine == CAP_APP_DEFAULT,
@@ -58,20 +65,30 @@ int main(int argc, char **argv) {
 
     check((mine & CAP_POWER) == 0, "an ordinary program holds the power capability");
 
-    int victim = 0;
-    if (argc > 1) {
-        for (const char *p = argv[1]; *p >= '0' && *p <= '9'; p++) {
+    /* M225: every argument is a victim - a process this program did not
+       start, and a kernel thread - and each kill must be refused. */
+    int victims = 0;
+    for (int a = 1; a < argc; a++) {
+        int victim = 0;
+        for (const char *p = argv[a]; *p >= '0' && *p <= '9'; p++) {
             victim = victim * 10 + (*p - '0');
         }
+        if (victim > 0) {
+            victims++;
+            check(sys_kill(victim, SIGKILL) < 0,
+                  "an ordinary program killed a process that is not its child");
+        }
     }
-    if (victim > 0) {
-        check(sys_kill(victim, SIGKILL) < 0,
-              "an ordinary program killed a process that is not its child");
-    } else {
+    if (victims == 0) {
         check(0, "no victim pid on the command line - nothing to prove the kill refusal against");
     }
 
-    long child = sys_spawn("/bin/hello", 0);
+    /* M225: a child that is still running. It was /bin/hello, which on four
+       processors could print and exit before the kill was sent - and a kill
+       of a process that has ended is ESRCH here, so "a program could not kill
+       its own child" failed [m65] on a kernel that was right (seen at
+       QEMU_CPUS=4 on 5733665, before any M225 change). */
+    long child = sys_spawn("/bin/captest", "linger");
     if (child > 0) {
         check(sys_kill((int)child, SIGKILL) == 0, "a program could not kill its own child");
         sys_wait((int)child);

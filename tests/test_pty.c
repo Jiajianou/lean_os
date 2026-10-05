@@ -11,6 +11,7 @@
 void q13_boot(void);
 task_t *q13_spawn(const char *name);
 void q13_kill(task_t *t);
+task_t *q13_spawn_program(const char *name);
 
 static int fresh_pty(void) {
     int n = pty_alloc();
@@ -81,8 +82,8 @@ TEST(pty, control_c_at_the_master_signals_the_foreground_group) {
     tty_t *t = pty_tty(n);
     REQUIRE(t != NULL);
 
-    task_t *fg = q13_spawn("fg");
-    task_t *bg = q13_spawn("bg");
+    task_t *fg = q13_spawn_program("fg");
+    task_t *bg = q13_spawn_program("bg");
     REQUIRE(fg != NULL);
     REQUIRE(bg != NULL);
     fg->pgid = fg->id;
@@ -356,7 +357,7 @@ TEST(pty, a_session_leaders_death_releases_only_its_own_terminal) {
     tb->sid = 600;
     tb->fg_pgid = 600;
 
-    task_t *victim = q13_spawn("in-session-500");
+    task_t *victim = q13_spawn_program("in-session-500");
     REQUIRE(victim != NULL);
     victim->pgid = 500;
 

@@ -22,6 +22,8 @@ pipe_t *pipe_create(void);
 #define NAMED_PIPE_NAME_LENGTH 16
 
 pipe_t *pipe_named(const char *name);
+/* A named pipe: made once, kept for good, never counted down or reused. */
+int pipe_is_persistent(const pipe_t *p);
 void pipe_close_write(pipe_t *p);
 
 void pipe_reference_read(pipe_t *p);

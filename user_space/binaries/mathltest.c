@@ -1,3 +1,5 @@
+#include <fenv.h>
+#include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -374,17 +376,442 @@ static void grade_special_values(void) {
           sizeof(long double) == 16 && __LDBL_MANT_DIG__ == 64);
 }
 
+/* The edges tools/math-test.sh grades by the clause that decides them,
+   for the functions built on this long double half: fdim, ilogb and lrint
+   are fdiml, ilogbl and lrintl cast down. On an x86_64 Mac that harness
+   links this half and grades them; on an arm64 one it cannot run x87 code,
+   stands the host's long double libm in for it and grades none of those
+   answers. So the machine grades them, whichever Mac built the image.
+
+   fdim of equal infinities is +0 and raises nothing - x > y is false, so
+   7.12.12.1 performs no subtraction (an x86_64 Mac's own fdim raises
+   invalid there). ilogb at a zero or an infinity raises invalid (C23
+   F.10.3.8) and returns FP_ILOGB0 or INT_MAX (7.12.6.5). lrint and llrint
+   of an infinity raise invalid (F.10.6.5). */
+static volatile double edge_inf_d = INFINITY, edge_zero_d = 0.0;
+static volatile float edge_inf_f = INFINITY, edge_zero_f = 0.0f;
+static volatile long double edge_inf_l = INFINITY, edge_zero_l = 0.0L;
+
+#define DECIDED(invalid_required, call, value_right)                          \
+    do {                                                                      \
+        feclearexcept(FE_ALL_EXCEPT);                                         \
+        volatile __typeof__(call) decided_result = (call);                    \
+        int decided_invalid = fetestexcept(FE_INVALID) != 0;                  \
+        __typeof__(call) r = decided_result;                                  \
+        check(#call " raises what the standard says and returns its value",   \
+              decided_invalid == (invalid_required) && (value_right));        \
+    } while (0)
+
+static void grade_decided_edges(void) {
+    DECIDED(0, fdim(edge_inf_d, edge_inf_d), r == 0.0 && !signbit(r));
+    DECIDED(0, fdim(-edge_inf_d, -edge_inf_d), r == 0.0 && !signbit(r));
+    DECIDED(0, fdimf(edge_inf_f, edge_inf_f), r == 0.0f && !signbit(r));
+    DECIDED(0, fdimf(-edge_inf_f, -edge_inf_f), r == 0.0f && !signbit(r));
+    DECIDED(0, fdiml(edge_inf_l, edge_inf_l), r == 0.0L && !signbit(r));
+    DECIDED(0, fdiml(-edge_inf_l, -edge_inf_l), r == 0.0L && !signbit(r));
+    DECIDED(1, ilogb(edge_zero_d), r == FP_ILOGB0);
+    DECIDED(1, ilogb(-edge_zero_d), r == FP_ILOGB0);
+    DECIDED(1, ilogb(edge_inf_d), r == INT_MAX);
+    DECIDED(1, ilogb(-edge_inf_d), r == INT_MAX);
+    DECIDED(1, ilogbf(edge_zero_f), r == FP_ILOGB0);
+    DECIDED(1, ilogbf(edge_inf_f), r == INT_MAX);
+    DECIDED(1, ilogbl(edge_zero_l), r == FP_ILOGB0);
+    DECIDED(1, ilogbl(edge_inf_l), r == INT_MAX);
+    DECIDED(1, lrint(edge_inf_d), ((void)r, 1));
+    DECIDED(1, llrint(-edge_inf_d), ((void)r, 1));
+    DECIDED(1, lrintf(edge_inf_f), ((void)r, 1));
+    DECIDED(1, llrintf(-edge_inf_f), ((void)r, 1));
+    DECIDED(1, lrintl(edge_inf_l), ((void)r, 1));
+    DECIDED(1, llrintl(-edge_inf_l), ((void)r, 1));
+}
+#undef DECIDED
+
+/* A quiet NaN through every function <math.h> declares, in all three
+   formats, asking what each RAISED - on this machine, from the code
+   x86_64-elf-gcc built, which is the code that ships.
+
+   That last part is why this is here rather than only in tools/math-test.sh.
+   C's x < y is a signaling comparison, and this compiler emits COMISD for it
+   (fcomi for a long double), which raises FE_INVALID for a quiet NaN - so
+   `if (x < 0.0)` in front of a NaN made asin(NaN), sqrt(NaN), fabs(NaN) and
+   others report a domain error that was never there. The host test compiles
+   the same source with the host's compiler, and whether a comparison
+   signals is the compiler's decision: Apple's clang on arm64 emits a quiet
+   fcmp and that host had never seen it. Only the shipped object answers for
+   the shipped object.
+
+   C11 Annex F decides each answer. A NaN argument is not an error and
+   raises nothing, except where the result cannot be a NaN: the integer
+   roundings (F.10.6.5, F.10.6.7) and ilogb (IEEE 754-2008 5.3.3, C23
+   F.10.3.8) REQUIRE invalid, and are graded on raising it. Where Annex F
+   gives a NaN argument a number instead - pow(NaN, 0), pow(1, NaN),
+   hypot(inf, NaN), fmax and fmin - that number is checked too.
+
+   Each probe is one line naming the function once, then its argument list:
+   QUIET(f, (arguments)) is f arguments, and the macro writes the call and
+   the label from that one name. A quiet NaN reaches an argument list only
+   through NAN_D, NAN_F or NAN_L, which count their reads - so a probe whose
+   arguments hold no NaN fails here, as that, instead of passing as a
+   function that raised nothing. And because the name and the arguments are
+   fields, tools/math-long-double-test.sh can check mechanically that every
+   function <math.h> declares has a probe whose arguments hold a quiet NaN -
+   not merely a call somewhere in this function - and checks that the check
+   fails when one is taken away. */
+static volatile double quiet_nan_d, zero_d = 0.0, one_d = 1.0, two_d = 2.0;
+static volatile float quiet_nan_f, zero_f = 0.0f, one_f = 1.0f, two_f = 2.0f;
+static volatile long double quiet_nan_l, zero_l = 0.0L, one_l = 1.0L,
+                            two_l = 2.0L;
+static volatile double inf_d;
+static volatile float inf_f;
+static volatile long double inf_l;
+static int quiet_checks, quiet_failures, quiet_nan_reads;
+
+#define NAN_D (quiet_nan_reads++, quiet_nan_d)
+#define NAN_F (quiet_nan_reads++, quiet_nan_f)
+#define NAN_L (quiet_nan_reads++, quiet_nan_l)
+
+static void grade_quiet(const char *call, int raised_invalid,
+                        int invalid_required, int value_right,
+                        int had_quiet_nan) {
+    quiet_checks++;
+    if ((raised_invalid != 0) == (invalid_required != 0) && value_right &&
+        had_quiet_nan) {
+        return;
+    }
+    quiet_failures++;
+    if (quiet_failures > 60) {
+        return;
+    }
+    if (!had_quiet_nan) {
+        printf("mathltest: FAIL %s is a quiet NaN probe with no quiet NaN "
+               "among its arguments - it can only ever pass\n", call);
+    } else if ((raised_invalid != 0) != (invalid_required != 0)) {
+        printf("mathltest: FAIL %s raised %s, where Annex F %s\n", call,
+               raised_invalid ? "FE_INVALID" : "nothing",
+               invalid_required ? "requires invalid"
+                                : "says a quiet NaN raises nothing");
+    } else {
+        printf("mathltest: FAIL %s returned the wrong value\n", call);
+    }
+}
+
+/* Volatile in, volatile out: a call on a constant would be folded, and one
+   whose result is unused could be dropped - and either raises nothing. The
+   label is stringified by the macro the line names, so it reads fabs(NAN_D)
+   rather than what NAN_D expands to. */
+#define PROBE(label, invalid_required, function, arguments, value_right)     \
+    do {                                                                     \
+        int reads_before = quiet_nan_reads;                                  \
+        feclearexcept(FE_ALL_EXCEPT);                                        \
+        volatile __typeof__(function arguments) probe_result =               \
+            function arguments;                                              \
+        int probe_invalid = fetestexcept(FE_INVALID);                        \
+        __typeof__(function arguments) r = probe_result;                     \
+        grade_quiet(label, probe_invalid, (invalid_required),                \
+                    (value_right), quiet_nan_reads != reads_before);         \
+    } while (0)
+/* Raises nothing and returns a NaN; raises nothing and returns what
+   value_right says; raises invalid; raises invalid and returns what
+   value_right says. */
+#define QUIET(function, arguments)                                           \
+    PROBE(#function #arguments, 0, function, arguments, isnan(r))
+#define EXACT(function, arguments, value_right)                              \
+    PROBE(#function #arguments, 0, function, arguments, value_right)
+#define LOUD(function, arguments)                                            \
+    PROBE(#function #arguments, 1, function, arguments, ((void)r, 1))
+#define LOUD_EXACT(function, arguments, value_right)                         \
+    PROBE(#function #arguments, 1, function, arguments, value_right)
+/* The probe's own premise, which is the one call here with no NaN in it:
+   sqrt(-1) must raise invalid and return a NaN, or nothing above could have
+   failed. */
+#define PREMISE(function, arguments)                                         \
+    do {                                                                     \
+        feclearexcept(FE_ALL_EXCEPT);                                        \
+        volatile __typeof__(function arguments) premise_result =             \
+            function arguments;                                              \
+        int premise_invalid = fetestexcept(FE_INVALID);                      \
+        grade_quiet(#function #arguments, premise_invalid, 1,                \
+                    isnan(premise_result), 1);                               \
+    } while (0)
+
+static void grade_quiet_nan(void) {
+    quiet_nan_d = (double)NAN;
+    quiet_nan_f = NAN;
+    quiet_nan_l = (long double)NAN;
+    inf_d = (double)INFINITY;
+    inf_f = INFINITY;
+    inf_l = (long double)INFINITY;
+    int exponent = 0, quotient = 0;
+    double whole_d = 0.0;
+    float whole_f = 0.0f;
+    long double whole_l = 0.0L;
+
+    QUIET(fabs, (NAN_D));
+    QUIET(sqrt, (NAN_D));
+    QUIET(floor, (NAN_D));
+    QUIET(ceil, (NAN_D));
+    QUIET(trunc, (NAN_D));
+    QUIET(round, (NAN_D));
+    QUIET(nearbyint, (NAN_D));
+    QUIET(rint, (NAN_D));
+    QUIET(sin, (NAN_D));
+    QUIET(cos, (NAN_D));
+    QUIET(tan, (NAN_D));
+    QUIET(asin, (NAN_D));
+    QUIET(acos, (NAN_D));
+    QUIET(atan, (NAN_D));
+    QUIET(exp, (NAN_D));
+    QUIET(exp2, (NAN_D));
+    QUIET(expm1, (NAN_D));
+    QUIET(log, (NAN_D));
+    QUIET(log10, (NAN_D));
+    QUIET(log2, (NAN_D));
+    QUIET(log1p, (NAN_D));
+    QUIET(logb, (NAN_D));
+    QUIET(sinh, (NAN_D));
+    QUIET(cosh, (NAN_D));
+    QUIET(tanh, (NAN_D));
+    QUIET(asinh, (NAN_D));
+    QUIET(acosh, (NAN_D));
+    QUIET(atanh, (NAN_D));
+    QUIET(erf, (NAN_D));
+    QUIET(erfc, (NAN_D));
+    QUIET(tgamma, (NAN_D));
+    QUIET(lgamma, (NAN_D));
+    QUIET(cbrt, (NAN_D));
+    QUIET(frexp, (NAN_D, &exponent));
+    QUIET(ldexp, (NAN_D, 3));
+    QUIET(scalbn, (NAN_D, 3));
+    QUIET(scalbln, (NAN_D, 3L));
+    EXACT(modf, (NAN_D, &whole_d), isnan(r) && isnan(whole_d));
+    QUIET(atan2, (NAN_D, one_d));
+    QUIET(atan2, (one_d, NAN_D));
+    QUIET(pow, (NAN_D, two_d));
+    QUIET(pow, (two_d, NAN_D));
+    EXACT(pow, (NAN_D, zero_d), r == 1.0);
+    EXACT(pow, (one_d, NAN_D), r == 1.0);
+    QUIET(fmod, (NAN_D, one_d));
+    QUIET(fmod, (one_d, NAN_D));
+    QUIET(remainder, (NAN_D, one_d));
+    QUIET(remainder, (one_d, NAN_D));
+    QUIET(remquo, (NAN_D, one_d, &quotient));
+    QUIET(remquo, (one_d, NAN_D, &quotient));
+    QUIET(hypot, (NAN_D, one_d));
+    EXACT(hypot, (inf_d, NAN_D), isinf(r));
+    EXACT(hypot, (NAN_D, inf_d), isinf(r));
+    QUIET(copysign, (NAN_D, one_d));
+    EXACT(copysign, (two_d, NAN_D), fabs(r) == 2.0);
+    QUIET(nextafter, (NAN_D, one_d));
+    QUIET(nextafter, (one_d, NAN_D));
+    QUIET(nexttoward, (NAN_D, one_l));
+    QUIET(nexttoward, (one_d, NAN_L));
+    QUIET(fdim, (NAN_D, one_d));
+    QUIET(fdim, (one_d, NAN_D));
+    EXACT(fmax, (NAN_D, two_d), r == 2.0);
+    EXACT(fmax, (two_d, NAN_D), r == 2.0);
+    EXACT(fmin, (NAN_D, two_d), r == 2.0);
+    EXACT(fmin, (two_d, NAN_D), r == 2.0);
+    QUIET(fma, (NAN_D, one_d, one_d));
+    QUIET(fma, (one_d, NAN_D, one_d));
+    QUIET(fma, (one_d, one_d, NAN_D));
+    LOUD(lround, (NAN_D));
+    LOUD(llround, (NAN_D));
+    LOUD(lrint, (NAN_D));
+    LOUD(llrint, (NAN_D));
+    LOUD_EXACT(ilogb, (NAN_D), r == FP_ILOGBNAN);
+
+    QUIET(fabsf, (NAN_F));
+    QUIET(sqrtf, (NAN_F));
+    QUIET(floorf, (NAN_F));
+    QUIET(ceilf, (NAN_F));
+    QUIET(truncf, (NAN_F));
+    QUIET(roundf, (NAN_F));
+    QUIET(nearbyintf, (NAN_F));
+    QUIET(rintf, (NAN_F));
+    QUIET(sinf, (NAN_F));
+    QUIET(cosf, (NAN_F));
+    QUIET(tanf, (NAN_F));
+    QUIET(asinf, (NAN_F));
+    QUIET(acosf, (NAN_F));
+    QUIET(atanf, (NAN_F));
+    QUIET(expf, (NAN_F));
+    QUIET(exp2f, (NAN_F));
+    QUIET(expm1f, (NAN_F));
+    QUIET(logf, (NAN_F));
+    QUIET(log10f, (NAN_F));
+    QUIET(log2f, (NAN_F));
+    QUIET(log1pf, (NAN_F));
+    QUIET(logbf, (NAN_F));
+    QUIET(sinhf, (NAN_F));
+    QUIET(coshf, (NAN_F));
+    QUIET(tanhf, (NAN_F));
+    QUIET(asinhf, (NAN_F));
+    QUIET(acoshf, (NAN_F));
+    QUIET(atanhf, (NAN_F));
+    QUIET(erff, (NAN_F));
+    QUIET(erfcf, (NAN_F));
+    QUIET(tgammaf, (NAN_F));
+    QUIET(lgammaf, (NAN_F));
+    QUIET(cbrtf, (NAN_F));
+    QUIET(frexpf, (NAN_F, &exponent));
+    QUIET(ldexpf, (NAN_F, 3));
+    QUIET(scalbnf, (NAN_F, 3));
+    QUIET(scalblnf, (NAN_F, 3L));
+    EXACT(modff, (NAN_F, &whole_f), isnan(r) && isnan(whole_f));
+    QUIET(atan2f, (NAN_F, one_f));
+    QUIET(atan2f, (one_f, NAN_F));
+    QUIET(powf, (NAN_F, two_f));
+    QUIET(powf, (two_f, NAN_F));
+    EXACT(powf, (NAN_F, zero_f), r == 1.0f);
+    EXACT(powf, (one_f, NAN_F), r == 1.0f);
+    QUIET(fmodf, (NAN_F, one_f));
+    QUIET(fmodf, (one_f, NAN_F));
+    QUIET(remainderf, (NAN_F, one_f));
+    QUIET(remainderf, (one_f, NAN_F));
+    QUIET(remquof, (NAN_F, one_f, &quotient));
+    QUIET(remquof, (one_f, NAN_F, &quotient));
+    QUIET(hypotf, (NAN_F, one_f));
+    EXACT(hypotf, (inf_f, NAN_F), isinf(r));
+    QUIET(copysignf, (NAN_F, one_f));
+    EXACT(copysignf, (two_f, NAN_F), fabsf(r) == 2.0f);
+    QUIET(nextafterf, (NAN_F, one_f));
+    QUIET(nextafterf, (one_f, NAN_F));
+    QUIET(nexttowardf, (NAN_F, one_l));
+    QUIET(nexttowardf, (one_f, NAN_L));
+    QUIET(fdimf, (NAN_F, one_f));
+    QUIET(fdimf, (one_f, NAN_F));
+    EXACT(fmaxf, (NAN_F, two_f), r == 2.0f);
+    EXACT(fmaxf, (two_f, NAN_F), r == 2.0f);
+    EXACT(fminf, (NAN_F, two_f), r == 2.0f);
+    EXACT(fminf, (two_f, NAN_F), r == 2.0f);
+    QUIET(fmaf, (NAN_F, one_f, one_f));
+    QUIET(fmaf, (one_f, NAN_F, one_f));
+    QUIET(fmaf, (one_f, one_f, NAN_F));
+    LOUD(lroundf, (NAN_F));
+    LOUD(llroundf, (NAN_F));
+    LOUD(lrintf, (NAN_F));
+    LOUD(llrintf, (NAN_F));
+    LOUD_EXACT(ilogbf, (NAN_F), r == FP_ILOGBNAN);
+
+    QUIET(fabsl, (NAN_L));
+    QUIET(sqrtl, (NAN_L));
+    QUIET(floorl, (NAN_L));
+    QUIET(ceill, (NAN_L));
+    QUIET(truncl, (NAN_L));
+    QUIET(roundl, (NAN_L));
+    QUIET(nearbyintl, (NAN_L));
+    QUIET(rintl, (NAN_L));
+    QUIET(sinl, (NAN_L));
+    QUIET(cosl, (NAN_L));
+    QUIET(tanl, (NAN_L));
+    QUIET(asinl, (NAN_L));
+    QUIET(acosl, (NAN_L));
+    QUIET(atanl, (NAN_L));
+    QUIET(expl, (NAN_L));
+    QUIET(exp2l, (NAN_L));
+    QUIET(expm1l, (NAN_L));
+    QUIET(logl, (NAN_L));
+    QUIET(log10l, (NAN_L));
+    QUIET(log2l, (NAN_L));
+    QUIET(log1pl, (NAN_L));
+    QUIET(logbl, (NAN_L));
+    QUIET(sinhl, (NAN_L));
+    QUIET(coshl, (NAN_L));
+    QUIET(tanhl, (NAN_L));
+    QUIET(asinhl, (NAN_L));
+    QUIET(acoshl, (NAN_L));
+    QUIET(atanhl, (NAN_L));
+    QUIET(cbrtl, (NAN_L));
+    QUIET(frexpl, (NAN_L, &exponent));
+    QUIET(ldexpl, (NAN_L, 3));
+    QUIET(scalbnl, (NAN_L, 3));
+    QUIET(scalblnl, (NAN_L, 3L));
+    EXACT(modfl, (NAN_L, &whole_l), isnan(r) && isnan(whole_l));
+    QUIET(atan2l, (NAN_L, one_l));
+    QUIET(atan2l, (one_l, NAN_L));
+    QUIET(powl, (NAN_L, two_l));
+    QUIET(powl, (two_l, NAN_L));
+    EXACT(powl, (NAN_L, zero_l), r == 1.0L);
+    EXACT(powl, (one_l, NAN_L), r == 1.0L);
+    QUIET(fmodl, (NAN_L, one_l));
+    QUIET(fmodl, (one_l, NAN_L));
+    QUIET(remainderl, (NAN_L, one_l));
+    QUIET(remainderl, (one_l, NAN_L));
+    QUIET(remquol, (NAN_L, one_l, &quotient));
+    QUIET(remquol, (one_l, NAN_L, &quotient));
+    QUIET(hypotl, (NAN_L, one_l));
+    EXACT(hypotl, (inf_l, NAN_L), isinf(r));
+    QUIET(copysignl, (NAN_L, one_l));
+    EXACT(copysignl, (two_l, NAN_L), fabsl(r) == 2.0L);
+    QUIET(nextafterl, (NAN_L, one_l));
+    QUIET(nextafterl, (one_l, NAN_L));
+    QUIET(nexttowardl, (NAN_L, one_l));
+    QUIET(nexttowardl, (one_l, NAN_L));
+    QUIET(fdiml, (NAN_L, one_l));
+    QUIET(fdiml, (one_l, NAN_L));
+    EXACT(fmaxl, (NAN_L, two_l), r == 2.0L);
+    EXACT(fmaxl, (two_l, NAN_L), r == 2.0L);
+    EXACT(fminl, (NAN_L, two_l), r == 2.0L);
+    EXACT(fminl, (two_l, NAN_L), r == 2.0L);
+    LOUD(lroundl, (NAN_L));
+    LOUD(llroundl, (NAN_L));
+    LOUD(lrintl, (NAN_L));
+    LOUD(llrintl, (NAN_L));
+    LOUD_EXACT(ilogbl, (NAN_L), r == FP_ILOGBNAN);
+
+    /* The probe's own premise: the flag is readable at all, and the NaN it
+       hands out is quiet. A machine where nothing could raise would pass
+       every QUIET above and fail only here. */
+    PREMISE(sqrt, (-one_d));
+    PREMISE(sqrtf, (-one_f));
+    PREMISE(sqrtl, (-one_l));
+    feclearexcept(FE_ALL_EXCEPT);
+    volatile double sum = quiet_nan_d + one_d;
+    (void)sum;
+    if (fetestexcept(FE_INVALID)) {
+        printf("mathltest: FAIL the probe's NaN is signaling - arithmetic on "
+               "it raised invalid\n");
+        quiet_failures++;
+    }
+    quiet_checks++;
+}
+#undef PREMISE
+#undef LOUD_EXACT
+#undef LOUD
+#undef EXACT
+#undef QUIET
+#undef PROBE
+#undef NAN_L
+#undef NAN_F
+#undef NAN_D
+
 int main(void) {
     printf("mathltest: grading %u functions against GCC's own MPFR, folded "
            "at 64 bits of mantissa\n", LONG_DOUBLE_FUNCTION_COUNT);
+    grade_quiet_nan();
     grade_table();
     grade_rounding_mode();
     grade_identities();
     grade_special_values();
+    grade_decided_edges();
 
+    if (quiet_failures == 0) {
+        printf("[m142q] a quiet NaN through every function <math.h> declares: "
+               "%d calls in double, float and long double, compiled by the "
+               "compiler that ships, invalid raised only where Annex F "
+               "requires it.\n", quiet_checks);
+    } else {
+        printf("mathltest: FAILED - %d of %d quiet NaN checks\n",
+               quiet_failures, quiet_checks);
+    }
     if (failures != 0) {
         printf("mathltest: FAILED - %d of %d checks\n", failures, checks);
-        return 1;
+    }
+    /* Which half failed is the exit status, so the M142 panic can say
+       which: 1 for the long double library's own checks, 2 for the quiet
+       NaN probe, 3 for both. */
+    if (failures != 0 || quiet_failures != 0) {
+        return (failures != 0 ? 1 : 0) | (quiet_failures != 0 ? 2 : 0);
     }
     printf("[m142] a long double library for the x87's own format: %d checks "
            "over %u functions, every swept answer from MPFR at this target's "

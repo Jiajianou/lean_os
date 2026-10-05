@@ -242,8 +242,20 @@ long lseek(int fd, long offset, int whence) {
     return r;
 }
 
+/* EBUSY is Linux's answer for a newfd another thread has numbered and not
+   yet filled (M225); everything else dup2 refuses is a descriptor that is
+   not open or a number out of range, which is EBADF either way. */
 int dup2(int oldfd, int newfd) {
-    return (int)sys_dup2(oldfd, newfd);
+    long r = sys_dup2(oldfd, newfd);
+    if (r == -OS_ERROR_BUSY) {
+        errno = EBUSY;
+        return -1;
+    }
+    if (r < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    return (int)r;
 }
 
 pid_t gettid(void) {

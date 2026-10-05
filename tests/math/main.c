@@ -1,4 +1,5 @@
 #include <fenv.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 /* Without this, a compiler is allowed to move a floating point operation
@@ -43,14 +44,23 @@ long long lean_llround(double), lean_llroundf(float);
 
 /* This file speaks two dialects of <fenv.h> and has to translate between
    them. The library under test is compiled against THIS PROJECT's headers,
-   where the exception flags have the x87's own bit layout, and it is linked
-   against the host's libm, whose feraiseexcept takes the host's. So a
-   domain error raised by this libm arrives in the host's flag word at the
-   bit this project's FE_INVALID names, and the two words have to be read
-   with different tables. Getting this wrong is quiet rather than loud: the
-   first run of this table reported that log(0) raises FE_OVERFLOW, which is
-   this project's FE_DIVBYZERO (0x04) read as the host's FE_OVERFLOW (0x04).
-   Both libraries were right and the reader was wrong.
+   where the exception flags have the x87's own bit layout, and it runs on
+   the host, whose flag word has the host's. Getting this wrong is quiet
+   rather than loud: the first run of this table reported that log(0) raises
+   FE_OVERFLOW, which is this project's FE_DIVBYZERO (0x04) read as the
+   host's FE_OVERFLOW (0x04). Both libraries were right and the reader was
+   wrong.
+
+   The translation happens where the library RAISES, not where this file
+   reads. tools/math-test.sh compiles math.c with feraiseexcept renamed to
+   lean_test_feraiseexcept below, which maps this project's bits onto the
+   host's and raises those. Reading instead with two tables - which is what
+   this file did until the x86_64 host - is only right where the two layouts
+   agree, and they agree on an x86_64 Mac and not on an arm64 one: there a
+   flag the library's ARITHMETIC raises lands at the host's bit while a flag
+   it raises by hand landed at this project's, and 0x04 meant both overflow
+   and divide-by-zero in the same word. Now every flag in the word is the
+   host's, whichever way it got there, and host_errors reads all of it.
 
    The values are the ones in user_space/libc/include/fenv.h. They are spelled
    out rather than included because the host's <fenv.h> is already in scope
@@ -58,7 +68,17 @@ long long lean_llround(double), lean_llroundf(float);
 #define LEAN_FE_INVALID   0x01
 #define LEAN_FE_DIVBYZERO 0x04
 #define LEAN_FE_OVERFLOW  0x08
-#define LEAN_FE_ALL       0x3F
+#define LEAN_FE_UNDERFLOW 0x10
+#define LEAN_FE_INEXACT   0x20
+
+int lean_test_feraiseexcept(int flags);
+int lean_test_feraiseexcept(int flags) {
+    return feraiseexcept((flags & LEAN_FE_INVALID ? FE_INVALID : 0) |
+                         (flags & LEAN_FE_DIVBYZERO ? FE_DIVBYZERO : 0) |
+                         (flags & LEAN_FE_OVERFLOW ? FE_OVERFLOW : 0) |
+                         (flags & LEAN_FE_UNDERFLOW ? FE_UNDERFLOW : 0) |
+                         (flags & LEAN_FE_INEXACT ? FE_INEXACT : 0));
+}
 
 /* Everything this table compares, in the one vocabulary the comparison can
    use. FE_INEXACT accompanies an overflow in both libraries and is not among
@@ -74,12 +94,6 @@ static int host_errors(int flags) {
     return (flags & FE_INVALID ? ERROR_INVALID : 0) |
            (flags & FE_DIVBYZERO ? ERROR_DIVBYZERO : 0) |
            (flags & FE_OVERFLOW ? ERROR_OVERFLOW : 0);
-}
-
-static int lean_errors(int flags) {
-    return (flags & LEAN_FE_INVALID ? ERROR_INVALID : 0) |
-           (flags & LEAN_FE_DIVBYZERO ? ERROR_DIVBYZERO : 0) |
-           (flags & LEAN_FE_OVERFLOW ? ERROR_OVERFLOW : 0);
 }
 
 /* Names for a diagnostic, so a disagreement says which flag rather than
@@ -278,6 +292,585 @@ static double error_of(double got, double want) {
     return scale > 1e-300 ? d / scale : d;
 }
 
+/* Every function at the arguments Annex F has a rule for rather than a
+   value: a quiet NaN in each position, both zeros and both infinities -
+   and what it RAISED there, against the host's libm, as well as what it
+   returned.
+
+   The table in main grades twenty-eight error cases somebody thought of.
+   This grades the arguments nobody has to think of, and the reason it
+   exists is the one it found first: asin(NaN) raised FE_INVALID here, and
+   so did sqrt, fabs, atan and others, because `if (x < 0.0)` is a
+   signaling comparison and x86's COMISD signals on a quiet NaN. The sweeps
+   never noticed - they compare values, and NaN was the right value. And on
+   an arm64 host nothing here could have noticed, because that host's
+   compiler emits a quiet compare for the same line. What signals is decided
+   by the compiler, so the compiler that ships is graded as well:
+   /bin/mathltest asks the same question of x86_64-elf-gcc's output on the
+   machine, and that is the [m142q] boot marker.
+
+   An integer result is compared only where the argument is a zero; at a
+   NaN or an infinity its value is unspecified and the flag is the whole of
+   the answer. */
+double lean_frexp(double, int *), lean_ldexp(double, int);
+double lean_modf(double, double *), lean_remquo(double, double, int *);
+double lean_scalbn(double, int), lean_scalbln(double, long);
+double lean_nexttoward(double, long double);
+float lean_fmaf(float, float, float), lean_scalblnf(float, long);
+float lean_frexpf(float, int *), lean_modff(float, float *);
+float lean_remquof(float, float, int *), lean_nexttowardf(float, long double);
+int lean_ilogbf(float);
+
+/* The '-' rows' functions, in the shapes TABLE already has. An exponent or
+   a quotient that is unspecified at a NaN is simply not returned. */
+static double lean_frexp_fraction(double x) { int e; return lean_frexp(x, &e); }
+static double host_frexp_fraction(double x) { int e; return frexp(x, &e); }
+static double lean_ldexp_3(double x) { return lean_ldexp(x, 3); }
+static double host_ldexp_3(double x) { return ldexp(x, 3); }
+static double lean_modf_fraction(double x) { double i; return lean_modf(x, &i); }
+static double host_modf_fraction(double x) { double i; return modf(x, &i); }
+static double lean_modf_whole(double x) { double i; lean_modf(x, &i); return i; }
+static double host_modf_whole(double x) { double i; modf(x, &i); return i; }
+static double lean_remquo_remainder(double x, double y) { int q; return lean_remquo(x, y, &q); }
+static double host_remquo_remainder(double x, double y) { int q; return remquo(x, y, &q); }
+static double lean_scalbn_3(double x) { return lean_scalbn(x, 3); }
+static double host_scalbn_3(double x) { return scalbn(x, 3); }
+static double lean_scalbln_3(double x) { return lean_scalbln(x, 3L); }
+static double host_scalbln_3(double x) { return scalbln(x, 3L); }
+static double lean_nexttoward_double(double x, double y) { return lean_nexttoward(x, (long double)y); }
+static double host_nexttoward_double(double x, double y) { return nexttoward(x, (long double)y); }
+static long lean_ilogbf_long(float x) { return lean_ilogbf(x); }
+static long host_ilogbf_long(float x) { return ilogbf(x); }
+static float lean_scalblnf_3(float x) { return lean_scalblnf(x, 3L); }
+static float host_scalblnf_3(float x) { return scalblnf(x, 3L); }
+static float lean_frexpf_fraction(float x) { int e; return lean_frexpf(x, &e); }
+static float host_frexpf_fraction(float x) { int e; return frexpf(x, &e); }
+static float lean_modff_fraction(float x) { float i; return lean_modff(x, &i); }
+static float host_modff_fraction(float x) { float i; return modff(x, &i); }
+static float lean_modff_whole(float x) { float i; lean_modff(x, &i); return i; }
+static float host_modff_whole(float x) { float i; modff(x, &i); return i; }
+static float lean_remquof_remainder(float x, float y) { int q; return lean_remquof(x, y, &q); }
+static float host_remquof_remainder(float x, float y) { int q; return remquof(x, y, &q); }
+static float lean_nexttowardf_float(float x, float y) { return lean_nexttowardf(x, (long double)y); }
+static float host_nexttowardf_float(float x, float y) { return nexttowardf(x, (long double)y); }
+static float lean_fmaf_entry(float x, float y, float z) { return lean_fmaf(x, y, z); }
+
+static const struct entry UNSWEPT[] = {
+    {.name = "frexp", .ours1 = lean_frexp_fraction, .theirs1 = host_frexp_fraction},
+    {.name = "ldexp", .ours1 = lean_ldexp_3, .theirs1 = host_ldexp_3},
+    {.name = "modf", .ours1 = lean_modf_fraction, .theirs1 = host_modf_fraction},
+    {.name = "modf", .ours1 = lean_modf_whole, .theirs1 = host_modf_whole},
+    {.name = "remquo", .ours2 = lean_remquo_remainder, .theirs2 = host_remquo_remainder},
+    {.name = "scalbn", .ours1 = lean_scalbn_3, .theirs1 = host_scalbn_3},
+    {.name = "scalbln", .ours1 = lean_scalbln_3, .theirs1 = host_scalbln_3},
+    {.name = "nexttoward", .ours2 = lean_nexttoward_double, .theirs2 = host_nexttoward_double},
+    {.name = "fmaf"},
+    {.name = "ilogbf", .ourslf = lean_ilogbf_long, .theirslf = host_ilogbf_long},
+    {.name = "scalblnf", .oursf = lean_scalblnf_3, .theirsf = host_scalblnf_3},
+    {.name = "frexpf", .oursf = lean_frexpf_fraction, .theirsf = host_frexpf_fraction},
+    {.name = "modff", .oursf = lean_modff_fraction, .theirsf = host_modff_fraction},
+    {.name = "modff", .oursf = lean_modff_whole, .theirsf = host_modff_whole},
+    {.name = "remquof", .oursF = lean_remquof_remainder, .theirsF = host_remquof_remainder},
+    {.name = "nexttowardf", .oursF = lean_nexttowardf_float, .theirsF = host_nexttowardf_float},
+};
+
+/* Where the host is not the oracle. Everywhere else in this sweep the
+   host's libm is, and it is a fair one only where the standard has one
+   answer AND both Macs this harness runs on give it. Three kinds of edge
+   are decided here instead, by the clause that decides them, so that what
+   is graded is this library and not the host it happens to run on:
+
+   - a quiet NaN argument, which is what this sweep is for. C11 F.10: it
+     returns a NaN and raises nothing - except the integer roundings and
+     ilogb, whose result cannot be a NaN and which must raise invalid, and
+     the few functions Annex F gives a number instead. /bin/mathltest's
+     [m142q] probe holds the compiler that ships to the same rules.
+   - an edge where a host is MEASURED to break the standard. fdim(inf, inf)
+     is +0 and raises nothing - x > y is false, so 7.12.12.1 performs no
+     subtraction to be invalid about. An x86_64 Mac's fdim subtracts first
+     and masks after (vsubsd, vcmpltsd, vandpd) and raises invalid; its fdimf
+     masks the operands first and does not, and neither does its fdiml.
+     What an arm64 Mac's fdim does there cannot be measured from an Intel
+     one, and does not have to be: the clause decides, and the host's answer
+     is only counted. (Until this rule graded this library rather than the
+     host, this library's fdim WAS the host's fdiml - see tools/math-test.sh
+     - and once it was this library's, Apple's clang turned its own fdiml
+     into the same speculated subtraction; math_long_double.c says how that
+     was closed.) fmod's and lgamma's are FLAG_CASE_STANDARD_SAYS's rules
+     below.
+   - an edge where the standard lets the HOST choose: the value of
+     FP_ILOGB0, and whether ilogb raises invalid at a zero or an infinity,
+     which C11 7.12.6.5 permits and C23 F.10.3.8 requires. This library does
+     what C23 says, and its FP_ILOGB0 is its own <math.h>'s.
+   - an edge where the standard lets EVERY implementation choose, and so
+     neither the host's answer nor this library's can be the oracle for the
+     other: pow(+-0, -inf) is +inf and "may raise" divide-by-zero (C11
+     F.10.4.4, and still "may" in C23; IEEE 754-2008 9.2.1 raises
+     nothing). This library raises it (math.c's pole_error) and so does an
+     x86_64 Mac's pow and powf (measured); an arm64 Mac's is not measured and
+     need not be - the rule accepts either, and still requires +inf and
+     nothing else. pow is native in math.c, so this is graded on both hosts.
+     The other "may"s Annex F has do not reach this sweep: inexact and
+     undeserved underflow are not graded here (F.10 leaves both open), and
+     fma(inf, 0, NaN)'s optional invalid needs two edges at once, which the
+     three-argument sweep below never passes.
+
+   A host that breaks the standard anywhere else fails this sweep, and the
+   answer is a rule here with the clause that settles it - not a tolerance. */
+#define LEAN_FP_ILOGB0 (-2147483647 - 1)
+
+enum edge_value {
+    VALUE_HOST,        /* whatever the host's libm returned */
+    VALUE_EXACT,       /* rule.exact, the sign of a zero included */
+    VALUE_NAN,
+    VALUE_OTHER,       /* the argument that is not a NaN, exactly */
+    VALUE_MAGNITUDE,   /* |first|, with either sign */
+    VALUE_UNSPECIFIED, /* an integer result the standard does not fix */
+};
+
+struct edge_rule {
+    const char *clause; /* 0: the host's libm decides */
+    int raises;         /* exactly these ERROR_* flags, apart from: */
+    enum edge_value value;
+    double exact;
+    int may_raise;      /* flags the clause lets an implementation add */
+};
+
+/* "pow" is pow or powf - every format this sweep has a function in. */
+static int named(const char *name, const char *base) {
+    size_t n = strlen(base);
+    return strncmp(name, base, n) == 0 &&
+           (name[n] == '\0' || (name[n] == 'f' && name[n + 1] == '\0'));
+}
+
+static int integer_result(const char *name) {
+    return named(name, "lrint") || named(name, "llrint") ||
+           named(name, "lround") || named(name, "llround") ||
+           named(name, "ilogb");
+}
+
+static struct edge_rule edge_standard_says(const char *name, double first,
+                                           double second, int nan_argument) {
+    struct edge_rule rule = {0, 0, VALUE_HOST, 0.0, 0};
+    int ilogb = named(name, "ilogb");
+    int rounding = integer_result(name) && !ilogb;
+    if (nan_argument) {
+        if (rounding) {
+            return (struct edge_rule){"C11 F.10.6.5 and F.10.6.7",
+                                      ERROR_INVALID, VALUE_UNSPECIFIED, 0.0, 0};
+        }
+        if (ilogb) {
+            return (struct edge_rule){"C23 F.10.3.8", ERROR_INVALID,
+                                      VALUE_UNSPECIFIED, 0.0, 0};
+        }
+        if (named(name, "pow") && (second == 0.0 || first == 1.0)) {
+            return (struct edge_rule){"C11 F.10.4.4", 0, VALUE_EXACT, 1.0, 0};
+        }
+        if (named(name, "hypot") && (isinf(first) || isinf(second))) {
+            return (struct edge_rule){"C11 F.10.4.3", 0, VALUE_EXACT,
+                                      INFINITY, 0};
+        }
+        if ((named(name, "fmax") || named(name, "fmin")) &&
+            isnan(first) != isnan(second)) {
+            return (struct edge_rule){"C11 F.10.9.2", 0, VALUE_OTHER, 0.0, 0};
+        }
+        /* copysign is IEC 60559's copySign, a quiet bit operation; which
+           sign a NaN carries is not something the standard fixes. */
+        if (named(name, "copysign") && !isnan(first)) {
+            return (struct edge_rule){"C11 F.3", 0, VALUE_MAGNITUDE, 0.0, 0};
+        }
+        return (struct edge_rule){"C11 F.10, a NaN argument", 0, VALUE_NAN,
+                                  0.0, 0};
+    }
+    if (named(name, "fmod") && (isinf(first) || second == 0.0)) {
+        return (struct edge_rule){"C11 F.10.7.1", ERROR_INVALID, VALUE_NAN,
+                                  0.0, 0};
+    }
+    if (named(name, "lgamma") && first == 0.0) {
+        return (struct edge_rule){"C11 F.10.5.3", ERROR_DIVBYZERO, VALUE_EXACT,
+                                  INFINITY, 0};
+    }
+    if (named(name, "pow") && first == 0.0 && isinf(second) &&
+        signbit(second)) {
+        return (struct edge_rule){"C11 F.10.4.4", 0, VALUE_EXACT, INFINITY,
+                                  ERROR_DIVBYZERO};
+    }
+    if (named(name, "fdim") && isinf(first) && first == second) {
+        return (struct edge_rule){"C11 7.12.12.1", 0, VALUE_EXACT, 0.0, 0};
+    }
+    if (ilogb && first == 0.0) {
+        return (struct edge_rule){"C23 F.10.3.8", ERROR_INVALID, VALUE_EXACT,
+                                  (double)LEAN_FP_ILOGB0, 0};
+    }
+    if (ilogb && isinf(first)) {
+        return (struct edge_rule){"C23 F.10.3.8", ERROR_INVALID, VALUE_EXACT,
+                                  (double)INT_MAX, 0};
+    }
+    if (rounding && isinf(first)) {
+        return (struct edge_rule){"C11 F.10.6.5 and F.10.6.7", ERROR_INVALID,
+                                  VALUE_UNSPECIFIED, 0.0, 0};
+    }
+    return rule;
+}
+
+/* Every call either graded, or not this library's to grade on this host -
+   see tests/math/host_long_double.c. */
+static int edge_calls, edge_failures, edge_decided, edge_host_differs;
+static int edge_reached_host;
+struct name_set {
+    const char *names[256];
+    int count;
+};
+
+static void name_set_add(struct name_set *set, const char *name) {
+    for (int i = 0; i < set->count; i++) {
+        if (strcmp(set->names[i], name) == 0) {
+            return;
+        }
+    }
+    if (set->count < (int)(sizeof(set->names) / sizeof(set->names[0]))) {
+        set->names[set->count++] = name;
+    }
+}
+
+static int name_set_has(const struct name_set *set, const char *name) {
+    for (int i = 0; i < set->count; i++) {
+        if (strcmp(set->names[i], name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void name_set_print(const struct name_set *set) {
+    for (int i = 0; i < set->count; i++) {
+        printf("%s%s", i ? " " : "", set->names[i]);
+    }
+}
+
+/* Which functions met a NaN here, graded as this library's - and which met
+   one only through the host's long double libm, on a host where this
+   library's long double half cannot run. */
+static struct name_set edge_probed, edge_probed_elsewhere;
+
+/* tests/math/host_long_double.c calls this from every function it stands
+   in for, so that an answer which passed through the host's long double
+   libm is known to have. On an x86_64 host nothing calls it: this library's
+   own math_long_double.c is linked instead. */
+static unsigned long host_long_double_calls;
+static struct name_set host_long_double_names;
+void lean_test_host_long_double_reached(const char *name);
+void lean_test_host_long_double_reached(const char *name) {
+    host_long_double_calls++;
+    name_set_add(&host_long_double_names, name);
+}
+
+static const char *edge_show(double x, char *buffer, size_t size) {
+    if (isnan(x)) {
+        return "nan";
+    }
+    if (isinf(x)) {
+        return signbit(x) ? "-inf" : "+inf";
+    }
+    if (x == 0.0) {
+        return signbit(x) ? "-0" : "+0";
+    }
+    snprintf(buffer, size, "%g", x);
+    return buffer;
+}
+
+static int a_zero_pair(const char *name, double first, double second) {
+    return (named(name, "fmax") || named(name, "fmin")) &&
+           first == 0.0 && second == 0.0;
+}
+
+/* Whether a result is the one the rule names. A zero's sign counts unless
+   the rule says it does not. */
+static int value_is(const struct edge_rule *rule, double got, double first,
+                    double second, double tolerance) {
+    double want;
+    switch (rule->value) {
+    case VALUE_NAN:
+        return isnan(got);
+    case VALUE_UNSPECIFIED:
+        return 1;
+    case VALUE_MAGNITUDE:
+        return fabs(got) == fabs(first);
+    case VALUE_OTHER:
+        want = isnan(first) ? second : first;
+        return got == want && signbit(got) == signbit(want);
+    case VALUE_EXACT:
+        want = rule->exact;
+        break;
+    default:
+        return 0;
+    }
+    if (error_of(got, want) > tolerance) {
+        return 0;
+    }
+    return !(got == 0.0 && want == 0.0 && signbit(got) != signbit(want));
+}
+
+static const char *value_named(const struct edge_rule *rule, double first,
+                               double second, char *buffer, size_t size) {
+    switch (rule->value) {
+    case VALUE_NAN:
+        return "a NaN";
+    case VALUE_MAGNITUDE:
+        snprintf(buffer, size, "+-%g", fabs(first));
+        return buffer;
+    case VALUE_OTHER:
+        return edge_show(isnan(first) ? second : first, buffer, size);
+    default:
+        return edge_show(rule->exact, buffer, size);
+    }
+}
+
+static void edge_check(const char *name, double first, double second,
+                       int nan_argument, int reached_host, const char *label,
+                       double got, int got_raised, double want,
+                       int want_raised, double tolerance, int value_graded) {
+    edge_calls++;
+    /* This answer passed through the host's long double libm, which stood in
+       for this library's on a host that cannot run it - so it says nothing
+       about this library, at an edge the standard decides or anywhere else.
+       /bin/mathltest asks the same question of this library on the target. */
+    if (reached_host) {
+        edge_reached_host++;
+        if (nan_argument) {
+            name_set_add(&edge_probed_elsewhere, name);
+        }
+        return;
+    }
+    if (nan_argument) {
+        name_set_add(&edge_probed, name);
+    }
+    int mine = host_errors(got_raised);
+    int host = host_errors(want_raised);
+    struct edge_rule rule = edge_standard_says(name, first, second, nan_argument);
+    if (rule.clause) {
+        /* The standard is the oracle, so the host's answer is only counted -
+           it is never what this library is compared with. */
+        edge_decided++;
+        if ((host & ~rule.may_raise) != rule.raises ||
+            !value_is(&rule, want, first, second, tolerance)) {
+            edge_host_differs++;
+        }
+        if ((mine & ~rule.may_raise) != rule.raises) {
+            printf("FAIL %-22s raised %s, %s requires %s", label,
+                   flag_names(mine), rule.clause, flag_names(rule.raises));
+            if (rule.may_raise) {
+                printf(" (and permits %s)", flag_names(rule.may_raise));
+            }
+            printf("\n");
+            edge_failures++;
+        }
+        if (!value_is(&rule, got, first, second, tolerance)) {
+            char a[32], b[32];
+            printf("FAIL %-22s returned %s (%.17g), %s requires %s\n", label,
+                   edge_show(got, a, sizeof(a)), got, rule.clause,
+                   value_named(&rule, first, second, b, sizeof(b)));
+            edge_failures++;
+        }
+        return;
+    }
+    if (mine != host) {
+        printf("FAIL %-22s raised %s, the host's libm raised %s\n", label,
+               flag_names(mine), flag_names(host));
+        edge_failures++;
+    }
+    /* Which zero fmax(-0, +0) returns is the one sign Annex F leaves open,
+       and says so in a footnote to F.10.9.2. This library returns +0 from
+       fmax and -0 from fmin; the host returns its first argument. */
+    int zero_sign_open = a_zero_pair(name, first, second);
+    if (value_graded) {
+        int wrong = error_of(got, want) > tolerance;
+        if (!wrong && got == 0.0 && want == 0.0 && !zero_sign_open &&
+            signbit(got) != signbit(want)) {
+            wrong = 1;
+        }
+        if (wrong) {
+            char a[32], b[32];
+            printf("FAIL %-22s returned %s (%.17g), the host's %s (%.17g)\n",
+                   label, edge_show(got, a, sizeof(a)), got,
+                   edge_show(want, b, sizeof(b)), want);
+            edge_failures++;
+        }
+    }
+}
+/* Volatile in and out, for the two reasons the error table below gives at
+   length: a call on a constant folds and raises nothing, and a call whose
+   result is unused is deleted. */
+#define CAPTURE(result, raised, expression)                                   \
+    do {                                                                      \
+        feclearexcept(FE_ALL_EXCEPT);                                         \
+        result = (expression);                                                \
+        raised = fetestexcept(FE_ALL_EXCEPT);                                 \
+    } while (0)
+
+static const double EDGES[] = {NAN, 0.0, -0.0, INFINITY, -INFINITY};
+#define EDGE_COUNT ((int)(sizeof(EDGES) / sizeof(EDGES[0])))
+/* The edges and two ordinary values, so a two-argument function meets a
+   NaN beside a number as well as beside another edge. */
+static const double PARTNERS[] = {NAN, 0.0, -0.0, INFINITY, -INFINITY, 1.0, -2.5};
+#define PARTNER_COUNT ((int)(sizeof(PARTNERS) / sizeof(PARTNERS[0])))
+
+static void edge_sweep_one(const struct entry *e) {
+    volatile double a, b, c, got, want;
+    volatile long long got_integer, want_integer;
+    int got_raised, want_raised;
+    char label[96], x[32], y[32], z[32];
+
+    for (int i = 0; i < EDGE_COUNT; i++) {
+        a = EDGES[i];
+        snprintf(label, sizeof(label), "%s(%s)", e->name, edge_show(a, x, sizeof(x)));
+        int integer = 0;
+        unsigned long before = host_long_double_calls;
+        if (e->ours1) {
+            CAPTURE(got, got_raised, e->ours1(a));
+            CAPTURE(want, want_raised, e->theirs1(a));
+        } else if (e->oursf) {
+            CAPTURE(got, got_raised, (double)e->oursf((float)a));
+            CAPTURE(want, want_raised, (double)e->theirsf((float)a));
+        } else if (e->oursfi) {
+            snprintf(label, sizeof(label), "%s(%s, 3)", e->name, edge_show(a, x, sizeof(x)));
+            CAPTURE(got, got_raised, (double)e->oursfi((float)a, 3));
+            CAPTURE(want, want_raised, (double)e->theirsfi((float)a, 3));
+        } else if (e->oursl) {
+            integer = 1;
+            CAPTURE(got_integer, got_raised, e->oursl(a));
+            CAPTURE(want_integer, want_raised, e->theirsl(a));
+        } else if (e->ourslf) {
+            integer = 1;
+            CAPTURE(got_integer, got_raised, e->ourslf((float)a));
+            CAPTURE(want_integer, want_raised, e->theirslf((float)a));
+        } else if (e->oursll) {
+            integer = 1;
+            CAPTURE(got_integer, got_raised, e->oursll(a));
+            CAPTURE(want_integer, want_raised, e->theirsll(a));
+        } else if (e->oursllf) {
+            integer = 1;
+            CAPTURE(got_integer, got_raised, e->oursllf((float)a));
+            CAPTURE(want_integer, want_raised, e->theirsllf((float)a));
+        } else {
+            break;
+        }
+        if (integer) {
+            got = (double)got_integer;
+            want = (double)want_integer;
+        }
+        double tolerance = (e->ours1 || integer) ? 1e-12 : 1.2e-7;
+        edge_check(e->name, EDGES[i], 1.0, isnan(EDGES[i]),
+                   host_long_double_calls != before, label, got, got_raised,
+                   want, want_raised, tolerance, !integer || EDGES[i] == 0.0);
+    }
+
+    if (e->ours2 || e->oursF) {
+        for (int i = 0; i < PARTNER_COUNT; i++) {
+            for (int j = 0; j < PARTNER_COUNT; j++) {
+                if (i >= EDGE_COUNT && j >= EDGE_COUNT) {
+                    continue;
+                }
+                a = PARTNERS[i];
+                b = PARTNERS[j];
+                snprintf(label, sizeof(label), "%s(%s, %s)", e->name,
+                         edge_show(a, x, sizeof(x)), edge_show(b, y, sizeof(y)));
+                unsigned long before = host_long_double_calls;
+                if (e->ours2) {
+                    CAPTURE(got, got_raised, e->ours2(a, b));
+                    CAPTURE(want, want_raised, e->theirs2(a, b));
+                } else {
+                    CAPTURE(got, got_raised, (double)e->oursF((float)a, (float)b));
+                    CAPTURE(want, want_raised, (double)e->theirsF((float)a, (float)b));
+                }
+                edge_check(e->name, PARTNERS[i], PARTNERS[j],
+                           isnan(PARTNERS[i]) || isnan(PARTNERS[j]),
+                           host_long_double_calls != before, label, got,
+                           got_raised, want, want_raised,
+                           e->ours2 ? 1e-12 : 1.2e-7, 1);
+            }
+        }
+    }
+
+    int fused_float = strcmp(e->name, "fmaf") == 0;
+    if (e->ours3 || fused_float) {
+        /* One edge at a time with the other two ordinary: fma(0, inf, NaN)
+           may raise or not (F.10.10.1), and this grades what the standard
+           decides. */
+        for (int position = 0; position < 3; position++) {
+            for (int i = 0; i < EDGE_COUNT; i++) {
+                double arguments[3] = {1.5, -2.5, 0.75};
+                arguments[position] = EDGES[i];
+                a = arguments[0];
+                b = arguments[1];
+                c = arguments[2];
+                snprintf(label, sizeof(label), "%s(%s, %s, %s)", e->name,
+                         edge_show(a, x, sizeof(x)), edge_show(b, y, sizeof(y)),
+                         edge_show(c, z, sizeof(z)));
+                unsigned long before = host_long_double_calls;
+                if (e->ours3) {
+                    CAPTURE(got, got_raised, e->ours3(a, b, c));
+                    CAPTURE(want, want_raised, e->theirs3(a, b, c));
+                } else {
+                    CAPTURE(got, got_raised,
+                            (double)lean_fmaf_entry((float)a, (float)b, (float)c));
+                    CAPTURE(want, want_raised,
+                            (double)fmaf((float)a, (float)b, (float)c));
+                }
+                edge_check(e->name, arguments[0], arguments[1],
+                           isnan(EDGES[i]), host_long_double_calls != before,
+                           label, got, got_raised, want, want_raised,
+                           e->ours3 ? 1e-12 : 1.2e-7, 1);
+            }
+        }
+    }
+}
+#undef CAPTURE
+
+static int edge_sweep(char row_names[][64], int row_count) {
+    for (size_t i = 0; i < sizeof(TABLE) / sizeof(TABLE[0]); i++) {
+        edge_sweep_one(&TABLE[i]);
+    }
+    for (size_t i = 0; i < sizeof(UNSWEPT) / sizeof(UNSWEPT[0]); i++) {
+        edge_sweep_one(&UNSWEPT[i]);
+    }
+    /* Coverage: every function with a row in cases.tsv met a NaN above, or
+       this names the one that did not. nan and nanf take a string. A
+       function that met one only through the host's long double libm is
+       covered - on the target, by /bin/mathltest - and is named below. */
+    int unprobed = 0;
+    for (int i = 0; i < row_count; i++) {
+        if (strcmp(row_names[i], "nan") == 0 || strcmp(row_names[i], "nanf") == 0) {
+            continue;
+        }
+        if (!name_set_has(&edge_probed, row_names[i]) &&
+            !name_set_has(&edge_probed_elsewhere, row_names[i])) {
+            printf("FAIL %-22s has a row in cases.tsv and no NaN reached it - "
+                   "add it to TABLE or UNSWEPT in tests/math/main.c\n",
+                   row_names[i]);
+            unprobed++;
+        }
+    }
+    if (edge_failures == 0 && unprobed == 0) {
+        printf("ok   %-10s %d calls at a quiet NaN in every position, +-0 "
+               "and +-inf: %d graded by the clause of C11 or C23 that decides "
+               "them (the host's libm disagrees at %d), %d against the host's "
+               "libm, and all %d functions with a row met a NaN\n", "edges",
+               edge_calls, edge_decided, edge_host_differs,
+               edge_calls - edge_decided - edge_reached_host, row_count - 2);
+    }
+    if (edge_reached_host != 0) {
+        printf("note %-10s %d calls reached the host's long double libm in "
+               "place of this library's and were NOT graded here - "
+               "math_long_double.c is x87 code and was not linked into this "
+               "run. /bin/mathltest grades those on the target. Met a NaN "
+               "only that way: ", "edges", edge_reached_host);
+        name_set_print(&edge_probed_elsewhere);
+        printf("\n");
+    }
+    return edge_failures + unprobed;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: %s <cases.tsv>\n", argv[0]);
@@ -290,6 +883,8 @@ int main(int argc, char **argv) {
     }
 
     int failures = 0, graded = 0, skipped = 0;
+    static char row_names[256][64];
+    int row_count = 0;
 
     {
         static const struct { const char *name; double v; } SPECIALS[] = {
@@ -382,6 +977,9 @@ int main(int argc, char **argv) {
         snprintf(name, sizeof(name), "%s", line);
         if (sscanf(tab + 1, "%7s", kind) != 1) {
             continue;
+        }
+        if (row_count < (int)(sizeof(row_names) / sizeof(row_names[0]))) {
+            snprintf(row_names[row_count++], sizeof(row_names[0]), "%s", name);
         }
         if (kind[0] == '-') {
             skipped++;
@@ -569,7 +1167,7 @@ int main(int argc, char **argv) {
      fetestexcept(FE_ALL_EXCEPT))
 #define FLAG_CASE(label, ours, theirs)                                        \
     do {                                                                      \
-        int mine = lean_errors(RAISED(ours));                                 \
+        int mine = host_errors(RAISED(ours));                                 \
         int host = host_errors(RAISED(theirs));                               \
         flag_graded++;                                                        \
         if (mine != host) {                                                   \
@@ -593,7 +1191,7 @@ int main(int argc, char **argv) {
    be lax and some are. */
 #define FLAG_CASE_STANDARD_SAYS(label, ours, theirs, required, clause)        \
     do {                                                                      \
-        int mine = lean_errors(RAISED(ours));                                 \
+        int mine = host_errors(RAISED(ours));                                 \
         int host = host_errors(RAISED(theirs));                               \
         flag_graded++;                                                        \
         if (mine != (required)) {                                             \
@@ -664,6 +1262,8 @@ int main(int argc, char **argv) {
            "fenv", flag_graded - flag_lax, flag_lax, flag_failures);
     failures += flag_failures;
 
+    failures += edge_sweep(row_names, row_count);
+
     /* The two functions no sweep can grade, because what they return is
        not equal to itself. */
     if (!isnan(lean_nan("")) || !isnan(lean_nanf(""))) {
@@ -727,6 +1327,20 @@ int main(int argc, char **argv) {
         failures += constant_failures;
     }
 
+    /* The sweeps and the specials above cannot skip what the edge sweep
+       skips, and on a host where tests/math/host_long_double.c stands in
+       for this library's long double half they compared every function
+       built on it against the host's - the host's libm against itself. That
+       is said here rather than counted as grading. */
+    if (host_long_double_calls != 0) {
+        printf("note %-10s this run linked tests/math/host_long_double.c, not "
+               "math_long_double.c, and %lu calls passed through the host's ",
+               "long dbl", host_long_double_calls);
+        name_set_print(&host_long_double_names);
+        printf(" - the functions math.c builds on those were graded as the "
+               "host's here; /bin/mathltest grades this library's on the "
+               "target\n");
+    }
     printf("math-test: %d functions graded against the host's libm, "
            "%d not graded here, %d over their claimed tolerance\n",
            graded, skipped, failures);

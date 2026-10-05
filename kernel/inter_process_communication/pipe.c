@@ -230,6 +230,13 @@ pipe_t *pipe_named(const char *name) {
     return p;
 }
 
+/* Set once, under pipe_lock, before pipe_named hands the pipe to anybody,
+   and never cleared: pipe_recycle refuses a persistent pipe and the
+   named_pipes table keeps it, so no lock is needed to ask. */
+int pipe_is_persistent(const pipe_t *p) {
+    return p && p->persistent;
+}
+
 /* POSIX's PIPE_BUF promise, which this is the whole capacity of: a write
    that fits in an empty pipe goes in whole or waits, and a non-blocking one
    goes in whole or not at all. Copying byte by byte until the pipe filled

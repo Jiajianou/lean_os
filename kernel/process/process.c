@@ -305,8 +305,26 @@ static uint64_t build_address_space(const uint8_t *image, size_t image_size,
     return pml4_phys;
 }
 
+/* M225: a new process is runnable the moment its slot is filled, and on more
+   than one processor it may RUN at once - while the spawner is still filling
+   in its command line, its environment record and the capabilities its
+   manifest narrows it to. So for that stretch it ran with its creator's
+   capabilities (the kernel's: all of them), and a child quick enough to end
+   and be swept before the spawner got there had those writes land in a slot
+   that was by then somebody else's.
+
+   M225: a first version of this milestone made the child wait at the door
+   for the spawner, which closed the first and not the second - a waiting
+   child could still be ENDED by a signal, reaped, and its slot refilled
+   before the spawner wrote - and opened a third: a spawner killed in that stretch never opened the door,
+   and the child spun in the kernel for good. Everything the child is given
+   is now made ready first and handed to task_spawn_program, which writes it
+   into the slot before the slot is runnable; the spawner never touches the
+   child again. */
 static task_t *spawn_common(const char *name, const uint8_t *image, size_t image_size,
-                             const char *const *argv, const char *const *envp) {
+                             const char *const *argv, const char *const *envp,
+                             const char *env_packed, uint32_t env_length, uint32_t env_count,
+                             uint32_t caps) {
     if (!scheduler_has_free_task_slot()) {
         return (task_t *)0;
     }
@@ -326,12 +344,29 @@ static task_t *spawn_common(const char *name, const uint8_t *image, size_t image
     arguments->user_stack_top = USER_STACK_TOP;
     arguments->argument_pointer = USER_ARGUMENT_ADDRESS;
 
-    task_t *t = task_spawn_in(name, pml4_phys, user_task_launcher, arguments,
-                               USER_HEAP_START, USER_SHARED_MEMORY_BASE);
-    if (t) {
-        scheduler_set_cmdline(t, argv);
+    /* A record that cannot be allocated is left out, as it always was: the
+       program still runs, and /proc says less about it. */
+    task_spawn_setup_t setup = {0};
+    setup.caps = caps;
+    setup.cmdline = scheduler_pack_cmdline(argv, &setup.cmdline_length);
+    if (env_packed && env_length && env_count) {
+        setup.env = (char *)kmalloc(env_length);
+        if (setup.env) {
+            k_memcpy(setup.env, env_packed, env_length);
+            setup.env_length = env_length;
+            setup.env_count = env_count;
+        }
     }
+
+    task_t *t = task_spawn_program(name, pml4_phys, user_task_launcher, arguments,
+                                   USER_HEAP_START, USER_SHARED_MEMORY_BASE, &setup);
     if (!t) {
+        if (setup.cmdline) {
+            kfree(setup.cmdline);
+        }
+        if (setup.env) {
+            kfree(setup.env);
+        }
         kfree(arguments);
         process_destroy_address_space(pml4_phys);
         return (task_t *)0;
@@ -352,45 +387,58 @@ task_t *process_spawnve(const char *name, const uint8_t *image, size_t image_siz
 
 task_t *process_spawnve_capped(const char *name, const uint8_t *image, size_t image_size,
                                const char *const *argv, const char *const *envp, uint32_t caps) {
-    task_t *self = scheduler_vm_owner(scheduler_current());
     const char *inherited[USER_ENV_MAX_VARS + 1];
     const char *const *effective = envp;
     uint32_t inherited_length = 0;
     uint32_t inherited_count = 0;
 
-    if (!envp && self && self->env_block && self->env_count) {
-        uint32_t n = 0;
-        uint32_t off = 0;
-        while (off < self->env_length && n < USER_ENV_MAX_VARS) {
-            inherited[n++] = self->env_block + off;
-            while (off < self->env_length && self->env_block[off]) {
+    /* M225 (process-lifetimes): the environment inherited is the PROCESS's
+       record, which a thread reads off its leader - copied out under the
+       scheduler lock, because this used to point into the leader's block
+       itself while the leader's exit (or exec) could free it. */
+    char *own_env = (char *)0;
+    if (!envp) {
+        own_env = (char *)kmalloc(USER_ENV_MAX_BYTES);
+        uint32_t own_count = 0;
+        uint32_t own_length = own_env ? scheduler_copy_env(scheduler_current(), own_env,
+                                                           USER_ENV_MAX_BYTES, &own_count)
+                                      : 0;
+        if (own_length && own_count) {
+            uint32_t n = 0;
+            uint32_t off = 0;
+            while (off < own_length && n < USER_ENV_MAX_VARS) {
+                inherited[n++] = own_env + off;
+                while (off < own_length && own_env[off]) {
+                    off++;
+                }
                 off++;
             }
-            off++;
+            inherited[n] = (const char *)0;
+            effective = inherited;
         }
-        inherited[n] = (const char *)0;
-        effective = inherited;
     }
 
-    task_t *t = spawn_common(name, image, image_size, argv, effective);
-    if (t) {
-        char *packed = (char *)kmalloc(USER_ENV_MAX_BYTES);
-        if (packed) {
-            if (effective) {
-                for (int i = 0; effective[i] && inherited_count < USER_ENV_MAX_VARS; i++) {
-                    uint32_t length = (uint32_t)k_strlen(effective[i]) + 1;
-                    if (inherited_length + length > USER_ENV_MAX_BYTES) {
-                        break;
-                    }
-                    k_memcpy(packed + inherited_length, effective[i], length);
-                    inherited_length += length;
-                    inherited_count++;
-                }
+    /* Packed before the spawn rather than after it, so that everything the
+       new task is given is in its slot before the slot can run. */
+    char *packed = (char *)kmalloc(USER_ENV_MAX_BYTES);
+    if (packed && effective) {
+        for (int i = 0; effective[i] && inherited_count < USER_ENV_MAX_VARS; i++) {
+            uint32_t length = (uint32_t)k_strlen(effective[i]) + 1;
+            if (inherited_length + length > USER_ENV_MAX_BYTES) {
+                break;
             }
-            scheduler_set_env(t, packed, inherited_length, inherited_count);
-            kfree(packed);
+            k_memcpy(packed + inherited_length, effective[i], length);
+            inherited_length += length;
+            inherited_count++;
         }
-        t->caps &= caps;
+    }
+    task_t *t = spawn_common(name, image, image_size, argv, effective,
+                             packed, inherited_length, inherited_count, caps);
+    if (packed) {
+        kfree(packed);
+    }
+    if (own_env) {
+        kfree(own_env);
     }
     return t;
 }
@@ -409,6 +457,8 @@ task_t *process_spawn_thread(const char *name, uint64_t entry, uint64_t stack_to
     arguments->user_stack_top = stack_top;
     arguments->argument_pointer = arg;
 
+    /* What it runs is its process's program, which task_spawn_thread gives
+       it before it can run (M225 had it held at the door for this). */
     task_t *t = task_spawn_thread(name, self, user_task_launcher, arguments);
     if (!t) {
         kfree(arguments);

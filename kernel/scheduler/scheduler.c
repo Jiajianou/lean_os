@@ -35,6 +35,7 @@
 #include "file_system/virtual_file_system.h"
 #include "memory_management/file_mapping.h"
 #include "signal.h"
+#include "syscall.h"
 
 static void scheduler_deliver_pending_signal(void);
 
@@ -95,6 +96,8 @@ static volatile uint64_t deadline_timer_interrupts;
 static volatile uint64_t lost_deadline_arms;
 static uint64_t armed_deadline_ms[MAX_CPUS];
 static void fire_expired_alarms(uint64_t now_ms);
+static int raise_signal_locked(task_t *t, int sig);
+static void raise_child_signal(int parent_id, int child_pid, int32_t status);
 static void unblock_self(task_t *self);
 static void block_on(const void *chan, uint64_t space, uint64_t deadline_ms, spinlock_t *lock,
                      uint64_t *flags, int interruptible);
@@ -337,23 +340,15 @@ static void fork_child_trampoline(void) {
     fork_return_to_user((void *)(t->kernel_stack_top - sizeof(isr_regs_t)));
 }
 
+static int resume_stopped_locked(task_t *t);
+
 void scheduler_resume_stopped(task_t *t) {
     if (!t) {
         return;
     }
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
-    if (t->state == TASK_STOPPED) {
-        t->state = TASK_READY;
-        t->ready_since_ms = clock_monotonic_ms();
-        t->prio = PRIO_INTERACTIVE;
-        t->full_slices = 0;
-        t->wait_chan = (const void *)0;
-        t->wake_deadline_ms = 0;
-        t->stopped_sig = 0;
-        t->stop_reported = 0;
-        event_sequence++;
-    }
+    (void)resume_stopped_locked(t);
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
 }
@@ -442,7 +437,7 @@ void scheduler_tick_cpu(int cpu) {
         return;
     }
 
-    if (t->sleep_locks_held == 0) {
+    if (t->sleep_locks_held == 0 && !t->ending) {
         if (t->pending_signal != 0) {
             deliver_pending_signal_and_exit(t);
         }
@@ -533,6 +528,7 @@ void scheduler_init(void) {
     tasks[0].pgid = 0;
     tasks[0].sid = 0;
     tasks[0].caps = CAP_ALL;
+    tasks[0].kernel_task = 1;
     tasks[0].tgid = tasks[0].id;
     tasks[0].cwd[0] = '/';
     tasks[0].cwd[1] = '\0';
@@ -593,6 +589,7 @@ void scheduler_init_ap(int cpu_id) {
     t->exit_signal = 0;
     t->caps = CAP_ALL;
     t->is_idle = 1;
+    t->kernel_task = 1;
     t->tgid = t->id;
     t->cwd[0] = '/';
     t->cwd[1] = '\0';
@@ -610,6 +607,17 @@ void scheduler_init_ap(int cpu_id) {
 }
 
 static int thread_group_has_live_members(int group, const task_t *except);
+static int group_has_live_members_locked(int group, const task_t *except);
+
+/* What task_exit learns, under the lock, when the task ending is the last of
+   its process. */
+typedef struct {
+    int happened;
+    task_t *leader;
+    int pid;
+    int parent_id;
+    int32_t status;
+} process_end_t;
 
 /* Reset the slots of leaders whose groups have finished since they were
    last looked at - and, since M205, of threads nobody is ever going to join.
@@ -684,8 +692,28 @@ int scheduler_detach_thread(task_t *caller, int thread_id) {
     return 0;
 }
 
+/* M225 (process-lifetimes): who may give a process another thread. The new
+   thread takes a reference on the process's descriptor table, and
+   descriptor_table_reference panics on a table at zero - "a table at zero is
+   never revived" - which was true only because the one caller passed
+   scheduler_current(). Any other leader could be a process that is exiting
+   on another processor, whose last task has taken its table away (cleared
+   under this lock, released after it) and whose count is about to reach, or
+   has reached, zero. So the rule is now checked rather than relied on: the
+   CALLER must be running in that process and still hold the table - it is
+   the leader itself, or a thread of it - so the count is at least the
+   caller's own one for as long as the caller runs, which is longer than
+   this. Checked under scheduler_lock and before anything is counted. */
+static int may_add_a_thread_to_locked(const task_t *caller, const task_t *thread_of) {
+    return caller && thread_of && caller->descriptor_table &&
+           caller->tgid == thread_of->tgid &&
+           caller->descriptor_table == thread_of->descriptor_table &&
+           !caller->ending;
+}
+
 static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
-                                  uint64_t heap_start, uint64_t shared_memory_base, task_t *thread_of) {
+                                  uint64_t heap_start, uint64_t shared_memory_base, task_t *thread_of,
+                                  const task_spawn_setup_t *setup) {
     _Static_assert(TASK_STACK_SIZE % 4096 == 0, "a kernel stack must be a whole number of frames");
     scheduler_release_finished_tasks();
     uint8_t *stack_base = (uint8_t *)(uintptr_t)physical_memory_try_alloc_contiguous_anywhere(TASK_STACK_SIZE / 4096);
@@ -703,10 +731,44 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
             physical_memory_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
             return (task_t *)0;
         }
+        /* M225: and filled out here, before scheduler_lock, as task_fork's
+           has been since M204: a reference taken on a pipe end under
+           scheduler_lock is pipe_lock inside scheduler_lock, which a pipe
+           writer takes the other way round. The copy is made under the
+           caller's table lock, so a sibling thread closing one of these
+           descriptors at this moment either closes it before the copy (and
+           the child does not get it) or after the child's reference is
+           taken - never between.
+
+           A program the KERNEL starts (M224) gets the three standard
+           descriptors and nothing else. The boot self-tests open pipes on
+           the kernel task's own table, and every one left open - two before
+           that milestone, and a third that libctest's check then found -
+           went to every program spawned afterwards as a descriptor 3 nobody
+           had given it. Auditing each test found them one at a time; this
+           ends the class. A test that captures a program's output still
+           points 1 and 2 at its pipe first, which is inheritance this keeps;
+           and a kernel THREAD, which shares the kernel's address space,
+           takes the other branch and keeps the table it is a part of.
+           Close-on-exec descriptors stay behind too: a spawn replaces the
+           image, which is what the flag is about. */
+        task_t *spawner = scheduler_current();
+        const int from_kernel = spawner->pml4_phys == virtual_memory_kernel_pml4_phys() &&
+                                pml4_phys != virtual_memory_kernel_pml4_phys();
+        descriptor_table_copy(fresh, spawner->descriptor_table, 1,
+                              from_kernel ? 3 : MAX_FILE_DESCRIPTORS);
     }
 
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
+    task_t *caller = current_task[smp_current_cpu()];
+    if (thread_of && !may_add_a_thread_to_locked(caller, thread_of)) {
+        spin_unlock(&scheduler_lock);
+        irq_restore(flags);
+        physical_memory_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
+        kernel_log_puts("[sched] refused a thread for a process the caller is not running in\n");
+        return (task_t *)0;
+    }
     int slot = -1;
     for (int i = 0; i < task_count; i++) {
         if (tasks[i].state == TASK_FREE) {
@@ -725,7 +787,6 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
         slot = task_count++;
     }
     task_t *t = &tasks[slot];
-    task_t *caller = current_task[smp_current_cpu()];
     t->id = PID_MAKE(slot, t->generation);
     t->entry = entry;
     t->arg = arg;
@@ -736,6 +797,7 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->home_cpu = -1;
     t->kernel_activity = KERNEL_ACTIVITY_NONE;
     t->syscalls = 0;
+    t->descriptor_uses = (file_descriptor_use_t *)0;
     t->stamp_syscalls_seen = 0;
 
     if (thread_of) {
@@ -745,33 +807,8 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
         t->descriptor_table = thread_of->descriptor_table;
         descriptor_table_reference(t->descriptor_table);
     } else {
+        /* Filled out above, before the lock. */
         t->descriptor_table = fresh;
-        /* M224: a program the KERNEL starts gets the three standard
-           descriptors and nothing else. The boot self-tests open pipes on the
-           kernel task's own table, and every one left open - two before this
-           milestone, and a third that libctest's check then found - went to every
-           program spawned afterwards as a descriptor 3 nobody had given it.
-           Auditing each test found them one at a time; this ends the class.
-           A test that captures a program's output still points 1 and 2 at
-           its pipe first, which is inheritance this keeps; and a kernel
-           THREAD, which shares the kernel's address space, keeps the table
-           it is a part of. */
-        const int from_kernel = caller->pml4_phys == virtual_memory_kernel_pml4_phys() &&
-                                pml4_phys != virtual_memory_kernel_pml4_phys();
-        for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-            t->descriptor_table->slots[i] = caller->descriptor_table->slots[i];
-            /* Close-on-exec, and this IS the exec: a spawn replaces the
-               image, which is what the flag is about. A thread above takes
-               the other branch and keeps them. */
-            if (t->descriptor_table->slots[i].cloexec ||
-                (from_kernel && i > 2) ||
-                t->descriptor_table->slots[i].type == FILE_DESCRIPTOR_RESERVED) {
-                t->descriptor_table->slots[i].type = FILE_DESCRIPTOR_NONE;
-                t->descriptor_table->slots[i].cloexec = 0;
-                continue;
-            }
-            file_descriptor_retain(&t->descriptor_table->slots[i]);
-        }
     }
     /* M224: the parent is a PROCESS. It was the calling thread's own id, so a
        child spawned on one thread could not be waited for from another -
@@ -779,8 +816,39 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
        exactly how libuv works: the loop thread reaps what any thread spawned. */
     t->parent_id = caller->tgid;
     t->lineage_id = caller->tgid;
-    t->pgid = caller->pgid;
-    t->sid = caller->sid;
+    t->kernel_task = pml4_phys == virtual_memory_kernel_pml4_phys();
+    /* M225: a program the KERNEL starts leads a session and a process group
+       of its own, as init does on every Unix (1, 1, 1 in ps). It used to
+       inherit the kernel's "group" 0, which made every program on the
+       machine - compositor, shells, test runners - one group with the
+       kernel, its idle tasks, journal and tcp-timer: kill(0) from any of
+       them was kill(everything), and POSIX has no process group 0 for
+       getpgrp() to answer or for kill(0) to mean. Its own children inherit
+       its group as before, so `kill 0` from a shell the kernel started ends
+       that shell's own family and nothing else. A kernel thread stays in
+       group 0 with the kernel; nothing a user process sends reaches it.
+       Group leaders cannot setsid(): a program that wants a session of its
+       own forks first, which is what login_tty, libuv's detached spawn and
+       every daemon already do - and what they must do under a shell on
+       Linux, where every job is a group leader.
+
+       And a kernel thread is in the kernel's group whoever asked for it:
+       wifi-dhcp is started inside a system call a program made, and
+       inheriting that program's group put a kernel thread in a group a
+       user process could signal. A thread is in its own process's group. */
+    if (thread_of) {
+        t->pgid = thread_of->pgid;
+        t->sid = thread_of->sid;
+    } else if (t->kernel_task) {
+        t->pgid = 0;
+        t->sid = 0;
+    } else if (scheduler_task_is_kernel(caller)) {
+        t->pgid = t->id;
+        t->sid = t->id;
+    } else {
+        t->pgid = caller->pgid;
+        t->sid = caller->sid;
+    }
     t->pending_signal = 0;
     t->reaped = 0;
     t->exit_signal = 0;
@@ -826,9 +894,30 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->fs_base = 0;
     t->tgid = thread_of ? thread_of->tgid : t->id;
     t->is_thread = thread_of ? 1 : 0;
+    t->group_peak = 0;
+    t->spawned_id = 0;
+    t->spawned_caps = 0;
     t->detached = 0;
     t->exiting = 0;
+    t->ending = 0;
     t->caps = caller->caps;
+    /* M225: everything the spawner has to give a new process, given here,
+       before the slot is published. M225 had the child wait at the door
+       (user_launch_arguments_t::held) while the spawner wrote its command
+       line, environment and narrowed capabilities AFTER it was runnable,
+       and the door held only the child's user mode: the child could still
+       be ended by a signal while it waited, reaped and its slot refilled,
+       and the spawner's writes - capabilities included - then landed on the
+       newcomer; and a spawner killed in that stretch left the child spinning
+       at the door for good, since nobody else ever opened it. */
+    if (setup) {
+        t->caps &= setup->caps;
+        t->cmdline_block = setup->cmdline;
+        t->cmdline_length = setup->cmdline ? setup->cmdline_length : 0;
+        t->env_block = setup->env;
+        t->env_length = setup->env ? setup->env_length : 0;
+        t->env_count = setup->env ? setup->env_count : 0;
+    }
     t->prio = PRIO_INTERACTIVE;
     t->full_slices = 0;
     t->last_block_tick = pit_get_ticks();
@@ -840,6 +929,11 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
     t->shared_memory_next_vaddr = shared_memory_base;
     t->seen_exit_sequence = scheduler_exit_sequence();
     set_task_name(t, name);
+    if (thread_of) {
+        /* What a thread runs is its process's program - given here, before
+           it can run, rather than copied in by its creator afterwards. */
+        copy_task_name(t->program, thread_of->program);
+    }
 
     uint64_t *sp = (uint64_t *)t->kernel_stack_top;
     *(--sp) = (uint64_t)task_entry_trampoline;
@@ -854,29 +948,66 @@ static task_t *task_spawn_common(const char *name, uint64_t pml4_phys, void (*en
 
     {
         int live = 0;
+        int together = 0;
         for (int i = 0; i < task_count; i++) {
             if (tasks[i].state != TASK_FREE) {
                 live++;
+            }
+            if (tasks[i].state != TASK_FREE && tasks[i].state != TASK_TERMINATED &&
+                tasks[i].tgid == t->tgid) {
+                together++;
             }
         }
         if (live > peak_live_tasks) {
             peak_live_tasks = live;
         }
+        /* M225: how many of this process's tasks have been alive at once,
+           kept on its leader - counted here, under the lock, at the only
+           moment the number can grow. */
+        task_t *leader = &tasks[PID_SLOT(t->tgid)];
+        if (leader->tgid == t->tgid && (uint32_t)together > leader->group_peak) {
+            leader->group_peak = (uint32_t)together;
+        }
     }
+    /* M225: the spawner's record of what it made, written while the slot
+       cannot change - the child may run, end and be swept before the
+       spawner reads anything back out of the task_t this returns. */
+    caller->spawned_id = t->id;
+    caller->spawned_caps = t->caps;
 
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
     return t;
 }
 
+int scheduler_last_spawn(uint32_t *caps_out) {
+    task_t *self = scheduler_current();
+    if (!self) {
+        return 0;
+    }
+    if (caps_out) {
+        *caps_out = self->spawned_caps;
+    }
+    return self->spawned_id;
+}
+
 
 task_t *task_spawn(const char *name, void (*entry)(void *arg), void *arg) {
-    return task_spawn_common(name, virtual_memory_kernel_pml4_phys(), entry, arg, 0, 0, (task_t *)0);
+    return task_spawn_common(name, virtual_memory_kernel_pml4_phys(), entry, arg, 0, 0, (task_t *)0,
+                             (const task_spawn_setup_t *)0);
 }
 
 task_t *task_spawn_in(const char *name, uint64_t pml4_phys, void (*entry)(void *arg), void *arg,
                        uint64_t heap_start, uint64_t shared_memory_base) {
-    return task_spawn_common(name, pml4_phys, entry, arg, heap_start, shared_memory_base, (task_t *)0);
+    return task_spawn_common(name, pml4_phys, entry, arg, heap_start, shared_memory_base, (task_t *)0,
+                             (const task_spawn_setup_t *)0);
+}
+
+task_t *task_spawn_program(const char *name, uint64_t pml4_phys, void (*entry)(void *arg),
+                           void *arg, uint64_t heap_start, uint64_t shared_memory_base,
+                           const task_spawn_setup_t *setup) {
+    return task_spawn_common(name, pml4_phys, entry, arg, heap_start, shared_memory_base, (task_t *)0,
+                             setup);
 }
 
 static int current_on_some_cpu(const task_t *t) {
@@ -930,26 +1061,24 @@ static task_t *pick_next(task_t *from, int cpu) {
 }
 
 static void fire_expired_alarms(uint64_t now_ms) {
+    /* M225: raised where the deadline is found, under the same hold of the
+       lock. It looked the id up again afterwards and then raised through the
+       door that checks none, so a task that ended and was replaced between
+       the two took somebody else's SIGALRM. */
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
-    int to_signal[MAX_TASKS];
-    int n = 0;
+    int woken = 0;
     for (int i = 0; i < task_count; i++) {
         if (tasks[i].state != TASK_FREE && tasks[i].state != TASK_TERMINATED &&
-            tasks[i].alarm_deadline_ms != 0 &&
+            !tasks[i].is_idle && tasks[i].alarm_deadline_ms != 0 &&
             now_ms >= tasks[i].alarm_deadline_ms) {
             tasks[i].alarm_deadline_ms = 0;
-            to_signal[n++] = tasks[i].id;
+            woken += raise_signal_locked(&tasks[i], SIGALRM);
         }
     }
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
-    for (int i = 0; i < n; i++) {
-        task_t *t = scheduler_task_by_id(to_signal[i]);
-        if (t) {
-            scheduler_raise_signal(t, SIGALRM);
-        }
-    }
+    kick_idle_cpus(woken);
 }
 
 unsigned int scheduler_set_alarm(task_t *t, unsigned int seconds) {
@@ -1542,14 +1671,19 @@ void schedule(void) {
     current_task[cpu] = next;
 
     tss_set_rsp0(cpu, next->kernel_stack_top);
-    if (next->pml4_phys != loaded_pml4_phys[cpu]) {
+    /* M225: a task part way through its exit keeps NAMING its address space
+       (a leader's pml4_phys is how its surviving threads find theirs), but
+       it never runs on it again: the last thread out may already have
+       destroyed it (task_exit_with_code). */
+    uint64_t next_space = next->exiting ? virtual_memory_kernel_pml4_phys() : next->pml4_phys;
+    if (next_space != loaded_pml4_phys[cpu]) {
         /* Published BEFORE the load, and fenced: a core that changes this
            address space's page tables reads this array afterwards to decide
            whom to tell, so a core that is about to load it must already be
            visible here - otherwise it could fill its TLB from the old entries
            in the gap and never be asked to drop them. */
-        __atomic_store_n(&loaded_pml4_phys[cpu], next->pml4_phys, __ATOMIC_SEQ_CST);
-        virtual_memory_switch_address_space(next->pml4_phys);
+        __atomic_store_n(&loaded_pml4_phys[cpu], next_space, __ATOMIC_SEQ_CST);
+        virtual_memory_switch_address_space(next_space);
     }
 
     fpu_save(previous->fpu_state);
@@ -1701,7 +1835,7 @@ void scheduler_dump_cpus(void) {
 
 static void scheduler_deliver_pending_signal(void) {
     task_t *t = current_task_now();
-    if (t->pending_signal != 0 && t->sleep_locks_held == 0) {
+    if (t->pending_signal != 0 && t->sleep_locks_held == 0 && !t->ending) {
         deliver_pending_signal_and_exit(t);
     }
 }
@@ -1772,6 +1906,69 @@ int scheduler_recent_exit_status(int pid, int *status_out) {
     return found;
 }
 
+/* M225: how a process ended, whether or not its slot is still there. A child
+   of the kernel is released by the next spawn's sweep the moment it has
+   terminated (nobody_will_wait), and a self-test that spawns four writers
+   and then waits for them loses any writer that finishes before the fourth
+   spawn: its slot is gone, scheduler_task_by_id says nobody, and its exit
+   code went with it. The record of recent exits outlives the slot, so the
+   answer is still here.
+
+   The first version of this read the slot with no lock - so a sweep on
+   another processor could release it and a spawn refill it between the
+   generation check and the read, and the answer was the newcomer's - and it
+   answered in two encodings: the slot's whole exit_code, the record's low
+   eight bits. An exit(256) read 256 and then, once the sweep had run, 0.
+   Both now come from the wait status, the one encoding waitpid reports,
+   and the slot is looked at under the lock that releasing it takes. */
+int scheduler_exit_code_of_status(int status) {
+    return (status & 0x7F) ? 128 + (status & 0x7F) : (status >> 8) & 0xFF;
+}
+
+int scheduler_exit_status(int pid, int *status_out) {
+    if (pid <= 0) {
+        return -1;
+    }
+    int answer = -1;
+    int status = 0;
+    uint64_t flags = irq_save_disable();
+    spin_lock(&scheduler_lock);
+    int slot = PID_SLOT(pid);
+    if (slot < task_count) {
+        const task_t *t = &tasks[slot];
+        if (t->state != TASK_FREE && t->generation == PID_GEN(pid)) {
+            /* Ended as wait() says it: the whole process (M225). */
+            if (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != TASK_TERMINATED ||
+                (!t->is_thread && group_has_live_members_locked(t->tgid, t))) {
+                answer = 0;
+            } else {
+                status = scheduler_wait_status(t);
+                answer = 1;
+            }
+        }
+    }
+    spin_unlock(&scheduler_lock);
+    irq_restore(flags);
+    if (answer < 0 && scheduler_recent_exit_status(pid, &status)) {
+        /* Released - and so terminated, and remember_exit ran before the
+           slot was ever marked TERMINATED. */
+        answer = 1;
+    }
+    if (answer == 1 && status_out) {
+        *status_out = status;
+    }
+    return answer;
+}
+
+int scheduler_exit_code(int pid, int *code_out) {
+    int status = 0;
+    int answer = scheduler_exit_status(pid, &status);
+    if (answer == 1 && code_out) {
+        *code_out = scheduler_exit_code_of_status(status);
+    }
+    return answer;
+}
+
 /* M224: a signal that terminates terminates the PROCESS. Each thread here is
    a task, and this ended only the one the signal reached - so SIGTERM to a
    Node process ended its main thread and left the platform workers, the
@@ -1779,9 +1976,29 @@ int scheduler_recent_exit_status(int pid, int *status_out) {
    every descriptor the process had. A parent reading that child's stdout
    waited for an EOF that never came. exit() has always taken the group with
    it; death by a signal does the same now. */
+/* M225: from here on no signal reaches this task (task_t::ending). The ones
+   already pending are dropped with it: a fatal one has nothing left to end,
+   and a stop would park a task half way out. Called FIRST by every way out -
+   before the exit sends SIGKILL to the rest of the process, because the
+   first of them to die sends one straight back, and on another processor it
+   can arrive before this task has got any further. */
+void scheduler_begin_exit(task_t *t) {
+    if (!t) {
+        return;
+    }
+    uint64_t eflags = irq_save_disable();
+    spin_lock(&scheduler_lock);
+    t->ending = 1;
+    t->pending_signal = 0;
+    t->pending_stop = 0;
+    spin_unlock(&scheduler_lock);
+    irq_restore(eflags);
+}
+
 void task_exit_with_signal(int sig) {
     task_t *t = current_task_now();
     if (t) {
+        scheduler_begin_exit(t);
         t->exit_signal = sig;
         scheduler_kill_thread_group(t);
     }
@@ -1790,9 +2007,14 @@ void task_exit_with_signal(int sig) {
 
 void task_exit_with_code(int code) {
     task_t *t = current_task_now();
+    scheduler_begin_exit(t);
     shared_memory_free_by_owner(t->id);
+    /* M225 (fd-use-holds): a task can end inside a system call - a fatal
+       signal is acted on in a blocking wait or from the tick - and what that
+       call held is given back here, before the table: a reader killed while
+       blocked on a pipe must not keep the pipe's read end open for ever. */
+    file_descriptor_put_all(t);
     scheduler_release_file_descriptors(t);
-    scheduler_release_env(t);
 
     if (t->sid != 0 && t->sid == t->id) {
         tty_release_session(tty_console(), t->sid);
@@ -1808,7 +2030,20 @@ void task_exit_with_code(int code) {
         int others = 0;
         uint64_t eflags = irq_save_disable();
         spin_lock(&scheduler_lock);
+        /* M225: off the address space in the same breath as saying so. Two
+           threads of a process exiting at once each skip the other once it
+           is marked, so the second destroys the space - and the first, which
+           saw the second still live and so was not last, went on running
+           its exit with CR3 on a page table that had been freed and could be
+           handed to anybody, until its schedule() moved it off. exit() makes
+           that the common case: it SIGKILLs every sibling at once. A task
+           marked exiting is never on the space again: this core leaves it
+           here, under the lock the other exiters read the mark under, and a
+           switch back to an exiting task loads the kernel's (switch_to). */
         t->exiting = 1;
+        __atomic_store_n(&loaded_pml4_phys[smp_current_cpu()], virtual_memory_kernel_pml4_phys(),
+                         __ATOMIC_SEQ_CST);
+        virtual_memory_switch_address_space(virtual_memory_kernel_pml4_phys());
         for (int i = 0; i < task_count; i++) {
             task_t *o = &tasks[i];
             if (o == t || o->state == TASK_FREE || o->state == TASK_TERMINATED || o->exiting) {
@@ -1863,18 +2098,61 @@ void task_exit_with_code(int code) {
     if (t->state == TASK_BLOCKED) {
         blocked_count--;
     }
-    t->state = TASK_TERMINATED;
+    /* Release: whoever sees TERMINATED sees the exit code and signal above
+       (scheduler_exit_status reads them on the strength of this).
+
+       M225: and under the scheduler lock, because this is also where a
+       PROCESS ends - when the last of its tasks does - and two of its tasks
+       ending at once on two processors must agree which of them was last.
+       Each looks for live members of the group with the lock held, after
+       marking itself; the second to get here sees the first as terminated,
+       so exactly one finds the group empty. What the parent is told is
+       taken here too, while the leader's slot cannot be reaped and refilled
+       from under it: wait() answers the moment the group is empty, and the
+       slot is the waiter's to release from then on. */
+    process_end_t ended = {0};
+    {
+        uint64_t eflags = irq_save_disable();
+        spin_lock(&scheduler_lock);
+        __atomic_store_n(&t->state, TASK_TERMINATED, __ATOMIC_RELEASE);
+        task_t *leader = &tasks[PID_SLOT(t->tgid)];
+        if (leader->id == t->tgid && !leader->is_thread &&
+            leader->state == TASK_TERMINATED &&
+            !group_has_live_members_locked(t->tgid, (const task_t *)0)) {
+            ended.happened = 1;
+            ended.leader = leader;
+            ended.pid = leader->id;
+            ended.parent_id = leader->parent_id;
+            ended.status = leader->exit_signal ? (int32_t)(leader->exit_signal & 0x7F)
+                                               : (int32_t)(leader->exit_code & 0xFF);
+        }
+        spin_unlock(&scheduler_lock);
+        irq_restore(eflags);
+    }
     __atomic_add_fetch(&exit_sequence, 1, __ATOMIC_RELEASE);
     scheduler_wake_all((const void *)t);
     scheduler_wake_all(SCHEDULER_POLL_CHAN);
-    if (t->parent_id >= 0) {
-        task_t *parent = scheduler_task_by_id(t->parent_id);
-        if (parent && parent != t) {
-            parent->si_pid = (int32_t)t->id;
-            parent->si_status = t->exit_signal ? (int32_t)(t->exit_signal & 0x7F)
-                                               : (int32_t)(t->exit_code & 0xFF);
-            scheduler_raise_signal(parent, SIGCHLD);
-        }
+    if (ended.happened && ended.leader != t) {
+        /* The leader went first; whoever waits for the process waits on it. */
+        scheduler_wake_all((const void *)ended.leader);
+    }
+    /* M225: SIGCHLD says a child process has ENDED, which is what wait()
+       will then report - so it is sent when the process does, not when its
+       leader does. A leader that returned first while its threads ran on
+       (every Chromium child, M167's leaderexit) used to signal its parent
+       at once; wait() reported it at once too, so they agreed, but both
+       said "ended" about a process still running in its address space, and
+       a parent's wait() returned with the child's exit() still killing its
+       threads ([m205] on four processors). wait() now waits for the group
+       to be empty, and a SIGCHLD sent before that would be answered by a
+       WNOHANG that finds nothing to reap - libuv's way - and never again. */
+    if (ended.happened && ended.parent_id >= 0) {
+        raise_child_signal(ended.parent_id, ended.pid, ended.status);
+    } else if (t->is_thread && t->parent_id >= 0) {
+        /* A thread's parent is the process that made it, as it always was. */
+        raise_child_signal(t->parent_id, t->id,
+                           t->exit_signal ? (int32_t)(t->exit_signal & 0x7F)
+                                          : (int32_t)(t->exit_code & 0xFF));
     }
     schedule();
     panic("task_exit: terminated task resumed");
@@ -1977,24 +2255,41 @@ int scheduler_has_free_task_slot(void) {
    that inherited its page table, and its slot was then held for ever - which
    on a busy machine is a task table that fills up, and a boot that stops
    getting anywhere rather than crashing. */
-static int thread_group_has_live_members(int group, const task_t *except) {
-    int live = 0;
-    uint64_t flags = irq_save_disable();
-    spin_lock(&scheduler_lock);
+static int group_has_live_members_locked(int group, const task_t *except) {
     for (int i = 0; i < task_count; i++) {
         const task_t *o = &tasks[i];
         if (o == except || o->state == TASK_FREE || o->state == TASK_TERMINATED) {
             continue;
         }
         if (o->tgid == group) {
-            live = 1;
-            break;
+            return 1;
         }
     }
+    return 0;
+}
+
+static int thread_group_has_live_members(int group, const task_t *except) {
+    uint64_t flags = irq_save_disable();
+    spin_lock(&scheduler_lock);
+    int live = group_has_live_members_locked(group, except);
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
     return live;
 }
+
+/* M225: whether wait() may report this task's process as ended - its leader
+   has terminated AND so has every thread it had. POSIX's "the process has
+   terminated" is the whole process, and Linux holds a zombie leader back
+   from wait() until its thread group is empty for the same reason. A thread
+   (pthread_join's business, not wait's) has ended when it has. */
+int scheduler_process_has_ended(const task_t *t) {
+    if (!t || __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != TASK_TERMINATED) {
+        return 0;
+    }
+    return t->is_thread || !thread_group_has_live_members(t->tgid, t);
+}
+
+static file_descriptor_table_t *take_descriptor_table(task_t *t);
 
 void scheduler_reap_slot(task_t *t) {
     if (!t || t->state != TASK_TERMINATED) {
@@ -2057,20 +2352,27 @@ void scheduler_reap_slot(task_t *t) {
     /* The command line belongs to the address space, so it goes when the last
        member of the group does - not at task_exit, where a leader that
        outlives its own main thread would take it away from threads that are
-       still running and still have a /proc entry. */
+       still running and still have a /proc entry.
+
+       M225 (process-lifetimes): and so does the environment record, for the
+       same reason. Every reader of it asks the OWNER (scheduler_vm_owner) -
+       a thread has none of its own - and task_exit freed the leader's while
+       its threads ran on: a thread that spawned or exec'd after its main
+       thread had returned read a freed block, or found none and gave its
+       child an empty environment. */
     scheduler_release_cmdline(t);
+    scheduler_release_env(t);
 
     /* task_exit_with_code released this on the way out and it is normally
        null by now. A task that reached TERMINATED without going through
        that path still holds one, and since M146 the table is a heap
        allocation rather than an array inside the task - so leaving it here
-       is a leak rather than nothing. Releasing is idempotent; this is
-       before the lock because closing a descriptor can reach a pipe or a
-       socket, which is not work for a locked region. */
-    if (t->descriptor_table) {
-        descriptor_table_release(t->descriptor_table);
-        t->descriptor_table = (file_descriptor_table_t *)0;
-    }
+       is a leak rather than nothing. Releasing is idempotent; the pointer
+       is taken under the lock and the reference dropped outside it, because
+       closing a descriptor can reach a pipe or a socket, which is not work
+       for a locked region. Through the same door as an exit, so a table
+       whose last holder this was gives back its process's record locks. */
+    scheduler_release_file_descriptors(t);
     uint64_t flags;
     {
         uint64_t deadline = pit_get_ticks() + PIT_HZ;
@@ -2150,6 +2452,7 @@ void scheduler_reap_slot(task_t *t) {
     t->home_cpu = -1;
     t->kernel_activity = KERNEL_ACTIVITY_NONE;
     t->syscalls = 0;
+    t->descriptor_uses = (file_descriptor_use_t *)0;
     t->stamp_syscalls_seen = 0;
     t->generation++;
     t->state = TASK_FREE;
@@ -2201,7 +2504,10 @@ void scheduler_reap_slot(task_t *t) {
     t->is_thread = 0;
     t->detached = 0;
     t->exiting = 0;
+    t->ending = 0;
     t->tgid = 0;
+    t->kernel_task = 0;
+    t->group_peak = 0;
     t->cwd[0] = '/';
     t->cwd[1] = '\0';
     /* Already released above. The next task in this slot allocates its own. */
@@ -2230,24 +2536,15 @@ void scheduler_reap_slot(task_t *t) {
     }
 }
 
+static int wake_task_locked(task_t *t);
+
 void scheduler_wake_task(task_t *t) {
     if (!t) {
         return;
     }
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
-    event_sequence++;
-    int woken = 0;
-    if (t->state == TASK_BLOCKED) {
-        blocked_count--;
-        t->state = TASK_READY;
-        t->ready_since_ms = clock_monotonic_ms();
-        t->prio = PRIO_INTERACTIVE;
-        t->full_slices = 0;
-        t->wait_chan = (const void *)0;
-        t->wake_deadline_ms = 0;
-        woken = 1;
-    }
+    int woken = wake_task_locked(t);
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
     kick_idle_cpus(woken);
@@ -2360,6 +2657,16 @@ static uint64_t fill_policy(uint64_t page, int for_write, int for_exec,
     return flags;
 }
 
+#ifdef LEANOS_HOST_TEST
+/* M225: where a host test stands in for a writer on another core - between
+   two entries of a walk, which is the only place the re-check after an
+   unlocked walk has anything to catch (tests/fakes/fake_kernel_objects.c). */
+void fake_region_walk_step(void *task, uint32_t index);
+#define REGION_WALK_STEP(self, i) fake_region_walk_step((self), (i))
+#else
+#define REGION_WALK_STEP(self, i) ((void)0)
+#endif
+
 static const mmap_region_t *mmap_region_for(task_t *self, uint64_t page) {
     if (page < USER_MMAP_BASE || page >= USER_MMAP_LIMIT) {
         return 0;
@@ -2383,6 +2690,7 @@ static const mmap_region_t *mmap_region_for(task_t *self, uint64_t page) {
         if (page >= start && page < end) {
             return &table[i];
         }
+        REGION_WALK_STEP(self, i);
     }
     return 0;
 }
@@ -2413,13 +2721,55 @@ static const mmap_region_t *mmap_region_for(task_t *self, uint64_t page) {
    pointer so the pair cannot tear the dangerous way, and this returns a COPY
    so nothing is read twice. The hole left is an entry read while a writer is
    part way through shifting it, which is narrower than what was there before
-   and is what a seqlock would close without a reader ever blocking. */
-static int mmap_region_snapshot(task_t *self, uint64_t page, mmap_region_t *out) {
+   and is what a seqlock would close without a reader ever blocking.
+
+   M225: and that hole was open in more shapes than one entry being moved.
+   A split (mprotect, munmap of a middle) shrinks a region and only then
+   inserts its tail; an unmap shifts every entry above it DOWN while the
+   reader walks UP, so the reader can step over the one it wanted; a merge
+   moves a region's base before it adds to its length. In each, the unlocked
+   walk finds nothing for a page that is mapped, fill_policy refuses, and the
+   thread is killed for touching memory mmap had just given it - threadtest's
+   own TLS block, in two new threads at once, on four cores under TCG.
+
+   So the unlocked look is now the FIRST look. Writers bump mmap_sequence
+   when they start and when they finish (scheduler_regions_begin_change);
+   if it was odd before this look, or is different after it, a writer was in
+   the table while it was read, and the answer is asked again under the lock,
+   where it cannot be half of anything. A fault that meets no writer - all
+   but a handful - still takes no lock, which is what M181 measured. */
+static int mmap_region_snapshot_at(task_t *self, uint64_t page, mmap_region_t *out,
+                                   uint32_t *sequence_out) {
+    uint32_t before = __atomic_load_n(&self->mmap_sequence, __ATOMIC_ACQUIRE);
+    if ((before & 1u) == 0) {
+        mmap_region_t copy = {0};
+        const mmap_region_t *found = mmap_region_for(self, page);
+        if (found) {
+            copy = *found;
+        }
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&self->mmap_sequence, __ATOMIC_RELAXED) == before) {
+            if (found) {
+                *out = copy;
+            }
+            *sequence_out = before;
+            return found != 0;
+        }
+    }
+    uint64_t flags = spin_lock_irqsave(&self->mmap_lock);
     const mmap_region_t *found = mmap_region_for(self, page);
     if (found) {
         *out = *found;
     }
+    /* Even here: a writer holds this lock for as long as it is odd. */
+    *sequence_out = __atomic_load_n(&self->mmap_sequence, __ATOMIC_RELAXED);
+    spin_unlock_irqrestore(&self->mmap_lock, flags);
     return found != 0;
+}
+
+static int mmap_region_snapshot(task_t *self, uint64_t page, mmap_region_t *out) {
+    uint32_t ignored;
+    return mmap_region_snapshot_at(self, page, out, &ignored);
 }
 
 uint64_t scheduler_regions_lock(task_t *t) {
@@ -2427,6 +2777,19 @@ uint64_t scheduler_regions_lock(task_t *t) {
 }
 
 void scheduler_regions_unlock(task_t *t, uint64_t flags) {
+    spin_unlock_irqrestore(&t->mmap_lock, flags);
+}
+
+/* The two bumps are full barriers (a locked add on this machine), so no store
+   to the table can be seen before the first or after the second. */
+uint64_t scheduler_regions_begin_change(task_t *t) {
+    uint64_t flags = spin_lock_irqsave(&t->mmap_lock);
+    __atomic_add_fetch(&t->mmap_sequence, 1, __ATOMIC_SEQ_CST);
+    return flags;
+}
+
+void scheduler_regions_end_change(task_t *t, uint64_t flags) {
+    __atomic_add_fetch(&t->mmap_sequence, 1, __ATOMIC_SEQ_CST);
     spin_unlock_irqrestore(&t->mmap_lock, flags);
 }
 
@@ -2670,6 +3033,87 @@ int scheduler_release_shared_range(task_t *t, uint64_t start, uint64_t end) {
     return dropped;
 }
 
+/* What a page of a region is backed by, for telling whether a region found
+   later is still the one a page was filled from: the same memfd page, the
+   same page of the same shared file, the same page of a private file mapping
+   (its contents were read from there), or anonymous memory. */
+static int same_backing(const mmap_region_t *a, const mmap_region_t *b, uint64_t page) {
+    if (a->memfd_id != b->memfd_id || a->memfd_gen != b->memfd_gen ||
+        a->handle != b->handle || a->shared != b->shared) {
+        return 0;
+    }
+    if (a->memfd_id == 0 && a->handle < 0) {
+        return 1;
+    }
+    uint32_t ia = a->file_page + (uint32_t)((page - a->base) / PAGE_SIZE);
+    uint32_t ib = b->file_page + (uint32_t)((page - b->base) / PAGE_SIZE);
+    return ia == ib;
+}
+
+/* M225: the other half of the region table's seqlock, after the page is in.
+
+   The snapshot a fault maps from can be stale by the time it maps: nothing
+   holds the table still between the look and the map, on purpose (M181). A
+   writer that ran in that gap did its work on the pages that were present -
+   munmap released them, mprotect changed their permissions - and this one
+   was not present yet. So it went in afterwards, from a region the table no
+   longer had: a memfd frame mapped at an address with no region, which
+   nothing would ever unmap - the memfd frees it when it is closed while it
+   is still mapped here, or the teardown frees it as the address space's own
+   and the memfd frees it again (the M173 double free) - or a page writable
+   after mprotect(PROT_READ) had returned.
+
+   The sequence counter says whether that can have happened. Read again after
+   the page is in (fenced, against the writer's locked bump), unchanged means
+   no writer started before the page was visible - and one that starts later
+   finds it present and deals with it. Changed, the question is asked again
+   under the writers' lock, and the page is given what the writers would
+   have given it had it been present: taken back out if the region it was
+   filled from is gone or no longer this page's, its permissions made the
+   region's if only those changed. Only the frame this fault put there is
+   touched - anything else at the address got there by somebody else's
+   right - and the access is retried either way, so a page that is really
+   gone faults again and is refused by a snapshot that is not stale. */
+static void revalidate_filled_page(task_t *self, uint64_t page, const mmap_region_t *filled_from,
+                                   uint32_t sequence, uint64_t phys, uint64_t flags) {
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&self->mmap_sequence, __ATOMIC_RELAXED) == sequence) {
+        return;
+    }
+    uint64_t lock_flags = spin_lock_irqsave(&self->mmap_lock);
+    const mmap_region_t *now = mmap_region_for(self, page);
+    uint64_t entry = virtual_memory_lookup_frame(self->pml4_phys, page);
+    if (!(entry & 1u) || (entry & 0x000FFFFFFFFFF000ULL) != phys) {
+        spin_unlock_irqrestore(&self->mmap_lock, lock_flags);
+        return;
+    }
+    if (!now || !same_backing(now, filled_from, page)) {
+        uint64_t taken = virtual_memory_unmap_page_take(self->pml4_phys, page);
+        if (taken) {
+            virtual_memory_flush_other_cpus(self->pml4_phys);
+            if (filled_from->memfd_id) {
+                /* The memfd's own frame: the mapping held no reference. */
+            } else if (filled_from->handle >= 0 && filled_from->shared) {
+                file_mapping_put(filled_from->handle,
+                                 filled_from->file_page +
+                                     (uint32_t)((page - filled_from->base) / PAGE_SIZE));
+            } else {
+                physical_memory_free_frame(taken);
+            }
+        }
+    } else {
+        uint64_t want = fill_policy(page, 0, 0, now);
+        if (want == FILL_REFUSE) {
+            want = VIRTUAL_MEMORY_FLAG_USER;
+        }
+        if (want != flags) {
+            /* What sys_mprotect does to a page that is present. */
+            virtual_memory_protect_range_in(self->pml4_phys, page, page + PAGE_SIZE, want);
+        }
+    }
+    spin_unlock_irqrestore(&self->mmap_lock, lock_flags);
+}
+
 static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_exec) {
 
     /* Present already: a sibling thread faulted on the same page and filled
@@ -2685,7 +3129,8 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
 
     /* M180: one snapshot, used by the policy and by everything below it. */
     mmap_region_t snapshot;
-    const mmap_region_t *region = mmap_region_snapshot(self, page, &snapshot)
+    uint32_t sequence = 0;
+    const mmap_region_t *region = mmap_region_snapshot_at(self, page, &snapshot, &sequence)
                                       ? &snapshot
                                       : (const mmap_region_t *)0;
 
@@ -2705,9 +3150,11 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
         if (phys == 0) {
             return 0;
         }
-        return virtual_memory_try_map_page_if_absent(self->pml4_phys, page, phys, flags) >= 0
-                   ? 1
-                   : FILL_NO_MEMORY;
+        int installed = virtual_memory_try_map_page_if_absent(self->pml4_phys, page, phys, flags);
+        if (installed == 0) {
+            revalidate_filled_page(self, page, region, sequence, phys, flags);
+        }
+        return installed >= 0 ? 1 : FILL_NO_MEMORY;
     }
     if (region && region->handle >= 0 && region->shared) {
         uint32_t index = region->file_page +
@@ -2720,6 +3167,8 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
         int installed = virtual_memory_try_map_page_if_absent(self->pml4_phys, page, sphys, flags);
         if (installed != 0) {
             file_mapping_put(region->handle, index);
+        } else {
+            revalidate_filled_page(self, page, region, sequence, sphys, flags);
         }
         return installed < 0 ? FILL_NO_MEMORY : 1;
     }
@@ -2738,6 +3187,8 @@ static int fill_one_page_ex(task_t *self, uint64_t page, int for_write, int for_
     int installed = virtual_memory_try_map_page_if_absent(self->pml4_phys, page, phys, flags);
     if (installed != 0) {
         physical_memory_free_frame(phys);
+    } else if (region) {
+        revalidate_filled_page(self, page, region, sequence, phys, flags);
     }
     return installed < 0 ? FILL_NO_MEMORY : 1;
 }
@@ -2856,6 +3307,9 @@ void scheduler_prefault_range(uint64_t address, uint64_t length, int for_write) 
     }
 }
 
+static char *duplicate_record(task_t *t, int env, uint32_t *length_out, uint32_t *count_out,
+                              int *no_memory);
+
 task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     _Static_assert(TASK_STACK_SIZE % 4096 == 0, "a kernel stack must be a whole number of frames");
     uint8_t *stack_base = (uint8_t *)(uintptr_t)physical_memory_try_alloc_contiguous_anywhere(TASK_STACK_SIZE / 4096);
@@ -2912,14 +3366,52 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
        the machine stopped: every core that then needed either lock spun for
        good. A browser forks while the desktop's pipes fill; it took a
        profiler pausing the machine at awkward moments to make it happen on
-       purpose. The table is the caller's own, so it is the caller's to read. */
+       purpose.
+
+       M225: "the table is the caller's own, so it is the caller's to read"
+       was true of the table and not of its slots: the caller's sibling
+       threads share it, and one closing a descriptor while this copied it
+       could drop the object's last reference between the copy and the
+       child's reference - a reference taken on something already gone. The
+       copy is made under the table's lock now (descriptor_table_copy). */
     task_t *caller = scheduler_current();
-    for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-        fresh->slots[i] = caller->descriptor_table->slots[i];
-        if (fresh->slots[i].type == FILE_DESCRIPTOR_RESERVED) {
-            fresh->slots[i].type = FILE_DESCRIPTOR_NONE;
+    descriptor_table_copy(fresh, caller->descriptor_table, 0, MAX_FILE_DESCRIPTORS);
+
+    /* M225: the child's command line and environment records are copied
+       here too, before the lock and before the child exists. The command
+       line was copied with kmalloc under scheduler_lock (the promise the
+       region table above is careful not to ask of this allocator), and the
+       environment was set by sys_fork AFTER this returned - into a child
+       that could already have run on another processor, exec'd, failed,
+       _exit(127)'d, been reaped by a sibling thread's waitpid(-1) and had
+       its slot refilled. A copy that cannot be made fails the fork now,
+       rather than SIGKILLing a child that is already somebody's. */
+    char *cmdline_copy = (char *)0;
+    uint32_t cmdline_length = 0;
+    char *env_copy = (char *)0;
+    uint32_t env_length = 0;
+    uint32_t env_count = 0;
+    /* M225 (process-lifetimes): copied out under the lock, the way procfs
+       reads them, rather than read off `forking` with none - an exec on
+       another thread of this process replaces a record while this runs. A
+       command line that cannot be copied is left out, as it always was; an
+       environment that cannot be fails the fork. */
+    int no_memory = 0;
+    if (forking) {
+        int cmdline_no_memory = 0;
+        cmdline_copy = duplicate_record(forking, 0, &cmdline_length, (uint32_t *)0,
+                                        &cmdline_no_memory);
+        (void)cmdline_no_memory;
+        env_copy = duplicate_record(forking, 1, &env_length, &env_count, &no_memory);
+    }
+    if (no_memory) {
+        if (cmdline_copy) {
+            kfree(cmdline_copy);
         }
-        file_descriptor_retain(&fresh->slots[i]);
+        physical_memory_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
+        descriptor_table_release(fresh);
+        kfree(child_regions);
+        return (task_t *)0;
     }
 
     uint64_t flags = irq_save_disable();
@@ -2939,6 +3431,12 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
             physical_memory_free_contiguous((uint64_t)(uintptr_t)stack_base, TASK_STACK_SIZE / 4096);
             descriptor_table_release(fresh);
             kfree(child_regions);
+            if (cmdline_copy) {
+                kfree(cmdline_copy);
+            }
+            if (env_copy) {
+                kfree(env_copy);
+            }
             return NULL;
         }
         slot = task_count++;
@@ -2966,11 +3464,13 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     t->home_cpu = -1;
     t->kernel_activity = KERNEL_ACTIVITY_NONE;
     t->syscalls = 0;
+    t->descriptor_uses = (file_descriptor_use_t *)0;
     t->stamp_syscalls_seen = 0;
 
     t->descriptor_table = fresh;
     t->parent_id = parent->tgid;
     t->lineage_id = parent->tgid;
+    t->kernel_task = 0;
     t->pgid = parent->pgid;
     t->sid = parent->sid;
     t->pending_signal = 0;
@@ -2995,22 +3495,15 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
         t->cwd[0] = '/';
         t->cwd[1] = '\0';
     }
-    t->env_block = NULL;
-    t->cmdline_block = NULL;
-    t->cmdline_length = 0;
-    t->env_length = 0;
-    t->env_count = 0;
     /* A fork has the command line of what it forked from until it execs, and
        a child caught between the two is a real thing to see in a process
-       list: Chromium's launcher forks and then execs /proc/self/exe. */
-    if (space->cmdline_block && space->cmdline_length) {
-        char *copy = (char *)kmalloc(space->cmdline_length);
-        if (copy) {
-            k_memcpy(copy, space->cmdline_block, space->cmdline_length);
-            t->cmdline_block = copy;
-            t->cmdline_length = space->cmdline_length;
-        }
-    }
+       list: Chromium's launcher forks and then execs /proc/self/exe. Both
+       records were copied above, before the lock. */
+    t->cmdline_block = cmdline_copy;
+    t->cmdline_length = cmdline_length;
+    t->env_block = env_copy;
+    t->env_length = env_length;
+    t->env_count = env_count;
 
     for (int i = 0; i <= SIG_MAX; i++) {
         t->sig_handler[i] = parent->sig_handler[i];
@@ -3034,8 +3527,12 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
 
     t->tgid = t->id;
     t->is_thread = 0;
+    t->group_peak = 1;
+    t->spawned_id = 0;
+    t->spawned_caps = 0;
     t->detached = 0;
     t->exiting = 0;
+    t->ending = 0;
     t->caps = parent->caps;
 
     for (size_t i = 0; i < sizeof(t->fpu_state); i++) {
@@ -3066,14 +3563,39 @@ task_t *task_fork(uint64_t child_pml4, const isr_regs_t *regs) {
     *(--sp) = 0;
     t->rsp = (uint64_t)sp;
 
+    /* M225: what fork() returns, recorded on the forking thread while the
+       slot cannot change (scheduler_last_spawn) - sys_fork read child->id
+       after this returned, and by then the child may have been reaped and
+       the slot be another process's. */
+    parent->spawned_id = t->id;
+    parent->spawned_caps = t->caps;
+
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
     return t;
 }
 
 task_t *task_spawn_thread(const char *name, task_t *leader, void (*entry)(void *arg), void *arg) {
-    return task_spawn_common(name, leader->pml4_phys, entry, arg, 0, 0, leader);
+    if (!leader) {
+        return (task_t *)0;
+    }
+    return task_spawn_common(name, leader->pml4_phys, entry, arg, 0, 0, leader,
+                             (const task_spawn_setup_t *)0);
 }
+
+#ifdef LEANOS_HOST_TEST
+/* M225 (process-lifetimes): a host test asking something AS a task - a thread
+   is only made by a task running in its process (task_spawn_thread), and the
+   fakes have no other way to be running one. Puts `t` in `cpu`'s seat with
+   nothing else changed and returns who was there, for the test to put back
+   at once. Not built into the kernel. */
+task_t *scheduler_host_test_seat(int cpu, task_t *t);
+task_t *scheduler_host_test_seat(int cpu, task_t *t) {
+    task_t *was = current_task[cpu];
+    current_task[cpu] = t;
+    return was;
+}
+#endif
 
 int scheduler_count_sharing_address_space(uint64_t pml4_phys) {
     int n = 0;
@@ -3096,25 +3618,30 @@ void scheduler_kill_thread_group(task_t *t) {
     if (!t) {
         return;
     }
+    /* M225: found and signalled in one hold of the lock. The victims used to
+       be collected under it and signalled after it was dropped, through the
+       door that checks no id - so a detached thread that finished in between
+       (it is still in the list until it is TERMINATED), was swept by a spawn
+       on another processor and had its slot refilled handed this process's
+       SIGKILL to the newcomer: a kernel thread, or somebody else's program.
+       Every exit() and every fatal signal of a process with threads comes
+       through here, a browser's with a hundred and fifty of them. */
     int group = t->tgid;
-    task_t *victims[MAX_TASKS];
-    int n = 0;
+    int woken = 0;
     uint64_t flags = irq_save_disable();
     spin_lock(&scheduler_lock);
     for (int i = 0; i < task_count; i++) {
         task_t *o = &tasks[i];
-        if (o == t || o->state == TASK_FREE || o->state == TASK_TERMINATED) {
+        if (o == t || o->state == TASK_FREE || o->state == TASK_TERMINATED || o->is_idle) {
             continue;
         }
         if (o->tgid == group) {
-            victims[n++] = o;
+            woken += raise_signal_locked(o, SIGKILL);
         }
     }
     spin_unlock(&scheduler_lock);
     irq_restore(flags);
-    for (int i = 0; i < n; i++) {
-        scheduler_raise_signal(victims[i], SIGKILL);
-    }
+    kick_idle_cpus(woken);
 }
 
 /* POSIX asks two different questions about processor time: how much this
@@ -3157,74 +3684,431 @@ void scheduler_thread_group_ticks(task_t *t, uint64_t *user_ticks_out, uint64_t 
     }
 }
 
-void scheduler_raise_signal(task_t *t, int sig) {
-    if (!t || t->state == TASK_TERMINATED || t->state == TASK_FREE) {
-        return;
+/* The state changes scheduler_wake_task and scheduler_resume_stopped make,
+   for a caller that already holds scheduler_lock. */
+static int wake_task_locked(task_t *t) {
+    event_sequence++;
+    if (t->state != TASK_BLOCKED) {
+        return 0;
     }
-    if (sig <= 0 || sig > SIG_MAX) {
-        return;
-    }
+    blocked_count--;
+    t->state = TASK_READY;
+    t->ready_since_ms = clock_monotonic_ms();
+    t->prio = PRIO_INTERACTIVE;
+    t->full_slices = 0;
+    t->wait_chan = (const void *)0;
+    t->wake_deadline_ms = 0;
+    return 1;
+}
 
+static int resume_stopped_locked(task_t *t) {
+    if (t->state != TASK_STOPPED) {
+        return 0;
+    }
+    t->state = TASK_READY;
+    t->ready_since_ms = clock_monotonic_ms();
+    t->prio = PRIO_INTERACTIVE;
+    t->full_slices = 0;
+    t->wait_chan = (const void *)0;
+    t->wake_deadline_ms = 0;
+    t->stopped_sig = 0;
+    t->stop_reported = 0;
+    event_sequence++;
+    return 1;
+}
+
+/* What a signal does to a task that is certainly the one it was sent to,
+   under scheduler_lock. Returns how many tasks it made runnable. */
+static int raise_signal_locked(task_t *t, int sig) {
+    int woken = 0;
+    if (t->ending) {
+        return 0;
+    }
     if (sig == SIGCONT) {
         t->pending_stop = 0;
-        if (t->state == TASK_STOPPED) {
-            scheduler_resume_stopped(t);
-        }
+        woken += resume_stopped_locked(t);
     }
 
     if (!SIG_IS_CATCHABLE(sig)) {
         if (sig == SIGSTOP) {
             t->pending_stop = sig;
-            scheduler_wake_task(t);
-            return;
+            return woken + wake_task_locked(t);
         }
         t->pending_signal = sig;
-        if (t->state == TASK_STOPPED) {
-            scheduler_resume_stopped(t);
-        }
-        scheduler_wake_task(t);
-        return;
+        woken += resume_stopped_locked(t);
+        return woken + wake_task_locked(t);
     }
     uint64_t h = t->sig_handler[sig];
     if (h == SIG_IGN_ADDR) {
-        return;
+        return woken;
     }
     if (h == SIG_DFL_ADDR) {
         switch (SIG_DEFAULT_ACTION(sig)) {
         case SIG_DFL_IGNORE:
         case SIG_DFL_CONTINUE:
-            return;
+            return woken;
         case SIG_DFL_STOP:
             t->pending_stop = sig;
-            scheduler_wake_task(t);
-            return;
+            return woken + wake_task_locked(t);
         default:
             break;
         }
         t->pending_signal = sig;
-        if (t->state == TASK_STOPPED) {
-            scheduler_resume_stopped(t);
-        }
-        scheduler_wake_task(t);
-        return;
+        woken += resume_stopped_locked(t);
+        return woken + wake_task_locked(t);
     }
     t->sig_pending |= (1u << sig);
-    scheduler_wake_task(t);
+    return woken + wake_task_locked(t);
+}
+
+/* M225: the one door every signal goes through, and the check that the task
+   is still the one it was sent to is made on the far side of it - under the
+   scheduler lock, which is what a slot is filled under. kill(2) and the
+   terminal find their targets in the task table without that lock, so the
+   task they found can end, be swept and have its slot refilled - by a kernel
+   thread, or by somebody the caller may not signal - before they raise. Both
+   now hand over the id they checked (`expected_id`; 0 for a caller that holds
+   the task itself, such as a fault or a task signalling itself) and whether
+   the sender is the kernel, and a slot that is no longer that id, or is the
+   kernel's when the sender is not, is not signalled. Returns whether the
+   signal reached its task (an ignored signal has reached it). */
+/* Under scheduler_lock: a live task of process `group` to take a signal sent
+   to the process - one that is not on its way out and does not block it, if
+   there is one, as Linux chooses. */
+static task_t *live_member_for_signal_locked(int group, int sig) {
+    task_t *fallback = (task_t *)0;
+    for (int i = 0; i < task_count; i++) {
+        task_t *o = &tasks[i];
+        if (o->state == TASK_FREE || o->state == TASK_TERMINATED || o->is_idle ||
+            o->tgid != group) {
+            continue;
+        }
+        int blocked = sig > 0 && sig <= SIG_MAX && SIG_IS_CATCHABLE(sig) &&
+                      (o->sig_blocked & (1u << sig)) != 0;
+        if (!o->ending && !blocked) {
+            return o;
+        }
+        if (!fallback) {
+            fallback = o;
+        }
+    }
+    return fallback;
+}
+
+/* Under scheduler_lock: the task a signal sent to `t` lands on, or 0.
+
+   M225: an idle task is not a process and nothing may end it. It is the
+   only way out of pick_next for a task that has terminated (M178), so
+   a CPU whose idle tasks have all taken a fatal signal turns the next
+   exit on it into "task_exit: terminated task resumed". kill(0, SIGKILL)
+   from anything in process group 0 - which was everything the kernel
+   starts, and the kernel itself - reached all sixteen of them, and the
+   battery's M105 stage did exactly that by accident: it lost a writer to
+   the spawn sweep, read a pid of 0 out of a null task and killed its own
+   group with it. The idle tasks went one tick at a time, and the last of
+   them panicked.
+
+   M225: a pid names a PROCESS, and a process whose main thread has left
+   through pthread_exit is still running in its other threads - wait()
+   says so since M225 (scheduler_process_has_ended). kill(pid) refused it
+   as ESRCH all the same, so a parent saw a child it could neither signal
+   nor stop waiting for: the compositor's SIGTERM-then-SIGKILL to a client,
+   the Task Manager's End, Node's subprocess.kill. Linux delivers to the
+   thread group. So does this, when the sender named the leader by its id:
+   the signal goes to a live thread of the process. A sender holding the
+   task itself (expected_id 0) meant that task, and a thread's id is that
+   thread's. */
+static task_t *signal_target_locked(task_t *t, int expected_id, int sig, int from_kernel) {
+    if (t->state == TASK_FREE || t->is_idle) {
+        return (task_t *)0;
+    }
+    if (expected_id != 0 && t->id != expected_id) {
+        return (task_t *)0;
+    }
+    task_t *to = t;
+    if (t->state == TASK_TERMINATED) {
+        if (expected_id == 0 || t->is_thread || t->tgid != t->id) {
+            return (task_t *)0;
+        }
+        to = live_member_for_signal_locked(t->tgid, sig);
+        if (!to) {
+            return (task_t *)0;
+        }
+    }
+    if (!from_kernel && scheduler_task_is_kernel(to)) {
+        return (task_t *)0;
+    }
+    return to;
+}
+
+int scheduler_raise_signal_checked(task_t *t, int expected_id, int sig, int from_kernel) {
+    if (!t) {
+        return 0;
+    }
+    uint64_t flags = irq_save_disable();
+    spin_lock(&scheduler_lock);
+    task_t *to = signal_target_locked(t, expected_id, sig, from_kernel);
+    int woken = 0;
+    if (to && sig > 0 && sig <= SIG_MAX) {
+        woken = raise_signal_locked(to, sig);
+    }
+    spin_unlock(&scheduler_lock);
+    irq_restore(flags);
+    kick_idle_cpus(woken);
+    return to != 0;
+}
+
+/* M225: SIGCHLD and the two siginfo fields it carries, as one thing under
+   the lock. The fields were written before the raise took the lock, on a
+   parent looked up without it: two children of one parent ending at once on
+   two processors could leave one's pid beside the other's status, and a
+   parent slot refilled in between had a stranger's fields written - the
+   raise then refused the stranger, but only after. Written now to the task
+   the signal actually lands on, after the id is checked. */
+static void raise_child_signal(int parent_id, int child_pid, int32_t status) {
+    if (parent_id < 0) {
+        return;
+    }
+    uint64_t flags = irq_save_disable();
+    spin_lock(&scheduler_lock);
+    task_t *parent = scheduler_task_by_id(parent_id);
+    task_t *to = parent ? signal_target_locked(parent, parent_id, SIGCHLD, 1) : (task_t *)0;
+    int woken = 0;
+    if (to) {
+        to->si_pid = (int32_t)child_pid;
+        to->si_status = status;
+        woken = raise_signal_locked(to, SIGCHLD);
+    }
+    spin_unlock(&scheduler_lock);
+    irq_restore(flags);
+    kick_idle_cpus(woken);
+}
+
+void scheduler_raise_signal(task_t *t, int sig) {
+    (void)scheduler_raise_signal_checked(t, 0, sig, 1);
 }
 
 void scheduler_raise_signal_group(int pgid, int sig) {
-    if (pgid == 0) {
+    if (pgid <= 0) {
         return;
     }
     for (int i = 0; i < task_count; i++) {
         task_t *t = &tasks[i];
-        if (t->state == TASK_FREE || t->state == TASK_TERMINATED) {
+        int id = t->id;
+        if (t->state == TASK_FREE || t->state == TASK_TERMINATED ||
+            scheduler_task_is_kernel(t)) {
             continue;
         }
         if (t->pgid == pgid) {
-            scheduler_raise_signal(t, sig);
+            (void)scheduler_raise_signal_checked(t, id, sig, 0);
         }
     }
+}
+
+int scheduler_signal_orderly_stop(task_t *self, int sig) {
+    int reached = 0;
+    for (int i = 0; i < task_count; i++) {
+        task_t *t = &tasks[i];
+        int id = t->id;
+        if (t == self || t->state == TASK_FREE || t->state == TASK_TERMINATED ||
+            t->parent_id < 0) {
+            continue;
+        }
+        if (scheduler_raise_signal_checked(t, id, sig, 1)) {
+            reached++;
+        }
+    }
+    return reached;
+}
+
+int scheduler_task_is_kernel(const task_t *t) {
+    return t && (t->kernel_task || t->is_idle);
+}
+
+task_t *scheduler_task_for_pid_argument(int pid) {
+    return pid == 0 ? scheduler_current() : scheduler_task_by_id(pid);
+}
+
+/* setpgid(2), which was sys_setpgid's own body. M225 adds the kernel: a
+   kernel thread started inside a program's system call (wifi-dhcp) has that
+   program for its parent, so setpgid(its pid, mine) moved a kernel thread
+   into a group the program could signal; and a group whose "leader" is a
+   kernel task is not one a program can join. */
+int scheduler_set_process_group(task_t *self, int pid, int pgid) {
+    if (!self) {
+        return -1;
+    }
+    task_t *t = (pid == 0) ? self : scheduler_task_by_id(pid);
+    if (!t || t->state == TASK_TERMINATED || t->state == TASK_FREE) {
+        return -1;
+    }
+    if (t != self && t->parent_id != self->tgid) {
+        return -1;
+    }
+    if (scheduler_task_is_kernel(t) && !scheduler_task_is_kernel(self)) {
+        return -1;
+    }
+    if (pgid < 0) {
+        return -1;
+    }
+    if (pgid == 0) {
+        pgid = t->id;
+    }
+    if (pgid != t->id) {
+        task_t *leader = scheduler_task_by_id(pgid);
+        if (!leader || leader->sid != t->sid ||
+            (scheduler_task_is_kernel(leader) && !scheduler_task_is_kernel(t))) {
+            return -1;
+        }
+    }
+    t->pgid = pgid;
+    return 0;
+}
+
+/* M225: the most tasks of process `pid` that have been alive at the same
+   time - 1 for a process that never made a thread. -1 once the slot is not
+   that process's (released, or never was). [m79] used to SAMPLE this, every
+   25 ms, by counting the tasks on threadtest's page table: on a fast machine
+   threadtest's three tasks came and went between two samples, and the check
+   passed only because a process that has ended stands in the kernel's page
+   table, which every kernel thread shares - it counted those. */
+int scheduler_thread_group_peak(int pid) {
+    int peak = -1;
+    uint64_t flags = irq_save_disable();
+    spin_lock(&scheduler_lock);
+    int slot = PID_SLOT(pid);
+    if (pid > 0 && slot < task_count && tasks[slot].state != TASK_FREE &&
+        tasks[slot].generation == PID_GEN(pid) && tasks[slot].tgid == pid) {
+        peak = (int)tasks[slot].group_peak;
+    }
+    spin_unlock(&scheduler_lock);
+    irq_restore(flags);
+    return peak;
+}
+
+/* M225: SYS_wait(pid) - the kernel's own wait, which pthread_join and the
+   boot self-tests use - asks this first. Not the kernel's tasks unless the
+   kernel is asking: a process that waited on pid 0 waited on the kernel for
+   ever, and one that waited on journal's pid would have reaped it had it
+   ever ended. And not the caller itself, which cannot end while it waits. */
+int scheduler_may_wait_for(const task_t *self, const task_t *t) {
+    if (!self || !t || t == self) {
+        return 0;
+    }
+    return !scheduler_task_is_kernel(t) || scheduler_task_is_kernel(self);
+}
+
+/* M225: kill(2), which was sys_kill's own loop. It treated process group 0
+   as a real group, and group 0 was the kernel's: the boot task, every idle
+   task, journal, tcp-timer and every program the kernel had started. So
+   kill(0, SIGKILL) from any of those programs - or from the kernel itself,
+   as the battery's M105 stage did by reading a pid of 0 out of a released
+   task - reached all of them, and a shell holding CAP_KILL_ANY could end
+   the journal with `kill <its pid>`. scheduler_raise_signal_group always
+   refused group 0; this is the one rule for every way kill(2) names a
+   target, here rather than in the system call so the host tests can ask it:
+
+   - a kernel task is never reached by a caller that is not the kernel
+     (the kernel's own self-tests signal the kernel threads they start);
+   - group 0 is not a group, so kill(0) from a task in it and kill(-0)
+     reach nobody - and since programs the kernel starts lead their own
+     group, the only tasks still in it are the kernel's;
+   - kill(-1) is every process the caller may signal except its own and
+     the kernel's. It used to mean "process group 1", which is a real group
+     now that a program in slot 1 leads its own.
+
+   The task table is walked without the lock, as it always was, and every
+   check made here is made again where it counts: each target goes to
+   scheduler_raise_signal_checked with the id this walk read, which under
+   the scheduler lock refuses a slot that has since ended or changed hands
+   (an id is never reused - the generation is in it) and a kernel task when
+   the sender is not the kernel. */
+long scheduler_kill(task_t *self, long pid, int sig,
+                    int (*may_signal)(task_t *self, task_t *target)) {
+    if (sig < 0 || sig > SIG_MAX) {
+        return -OS_ERROR_INVALID;
+    }
+    if (!self) {
+        return -OS_ERROR_SEARCH;
+    }
+    const int from_kernel = scheduler_task_is_kernel(self);
+
+    if (pid > 0) {
+        if (pid > 0x7FFFFFFFL) {
+            return -OS_ERROR_SEARCH;
+        }
+        task_t *t = scheduler_task_by_id((int)pid);
+        /* M225: a process whose main thread has gone is still a process
+           while any thread of it runs - the signal goes to one of those
+           (signal_target_locked). An ended thread, or a process with
+           nothing left running, is ESRCH. */
+        if (!t || (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED &&
+                   scheduler_process_has_ended(t))) {
+            return -OS_ERROR_SEARCH;
+        }
+        if (scheduler_task_is_kernel(t) && !from_kernel) {
+            return -OS_ERROR_PERMISSION;
+        }
+        if (!may_signal(self, t)) {
+            return -OS_ERROR_PERMISSION;
+        }
+        /* Asked again where it cannot change: signal 0 included, because
+           "is it there" is the whole of what signal 0 asks. */
+        if (!scheduler_raise_signal_checked(t, (int)pid, sig, from_kernel)) {
+            return -OS_ERROR_SEARCH;
+        }
+        return 0;
+    }
+
+    const int everyone = (pid == -1);
+    int group = 0;
+    if (!everyone) {
+        if (pid < -0x7FFFFFFFL) {
+            return -OS_ERROR_SEARCH;
+        }
+        group = (pid == 0) ? self->pgid : (int)(-pid);
+        if (group <= 0) {
+            return -OS_ERROR_SEARCH;
+        }
+    }
+
+    int delivered = 0;
+    int refused = 0;
+    int total = task_count;
+    for (int i = 0; i < total; i++) {
+        task_t *m = &tasks[i];
+        /* The id first: whatever the checks below read, the raise refuses a
+           slot that is no longer this id (scheduler_raise_signal_checked). */
+        int id = m->id;
+        if (m->state == TASK_FREE || m->state == TASK_TERMINATED) {
+            continue;
+        }
+        if (everyone) {
+            if (scheduler_task_is_kernel(m) || m->tgid == self->tgid) {
+                continue;
+            }
+        } else {
+            if (m->pgid != group) {
+                continue;
+            }
+            if (scheduler_task_is_kernel(m) && !from_kernel) {
+                refused++;
+                continue;
+            }
+        }
+        if (!may_signal(self, m)) {
+            refused++;
+            continue;
+        }
+        if (!scheduler_raise_signal_checked(m, id, sig, from_kernel)) {
+            continue;
+        }
+        delivered++;
+    }
+    if (delivered > 0) {
+        return 0;
+    }
+    return refused ? -OS_ERROR_PERMISSION : -OS_ERROR_SEARCH;
 }
 
 int scheduler_signal_pending(void) {
@@ -3232,19 +4116,49 @@ int scheduler_signal_pending(void) {
     return (t->sig_pending & ~t->sig_blocked) != 0;
 }
 
+/* M225 (process-lifetimes): the two records are read by OTHER tasks - procfs
+   answers /proc/<pid>/cmdline for anybody, and a thread's spawn, exec and
+   fork read its leader's environment - while the owner's reap or exec frees
+   or replaces them. So a block is only ever taken off a task, or put on one,
+   under scheduler_lock, and freed after; and a reader copies it out under
+   the same lock (scheduler_copy_cmdline, scheduler_copy_env) instead of being
+   handed a pointer. scheduler_cmdline() used to return the owner's block
+   itself, with no lock, and a /proc read that raced the process's end read
+   what the reap had just freed. */
 void scheduler_release_cmdline(task_t *t) {
+    if (!t) {
+        return;
+    }
+    uint64_t flags = spin_lock_irqsave(&scheduler_lock);
     char *block = t->cmdline_block;
     t->cmdline_block = NULL;
     t->cmdline_length = 0;
+    spin_unlock_irqrestore(&scheduler_lock, flags);
     if (block) {
         kfree(block);
     }
 }
 
 void scheduler_set_cmdline(task_t *t, const char *const *argv) {
-    scheduler_release_cmdline(t);
-    if (!t || !argv || !argv[0]) {
+    if (!t) {
         return;
+    }
+    uint32_t length = 0;
+    char *block = scheduler_pack_cmdline(argv, &length);
+    uint64_t flags = spin_lock_irqsave(&scheduler_lock);
+    char *old = t->cmdline_block;
+    t->cmdline_block = block;
+    t->cmdline_length = block ? length : 0;
+    spin_unlock_irqrestore(&scheduler_lock, flags);
+    if (old) {
+        kfree(old);
+    }
+}
+
+char *scheduler_pack_cmdline(const char *const *argv, uint32_t *length_out) {
+    *length_out = 0;
+    if (!argv || !argv[0]) {
+        return (char *)0;
     }
     uint32_t needed = 0;
     for (int i = 0; argv[i]; i++) {
@@ -3255,11 +4169,11 @@ void scheduler_set_cmdline(task_t *t, const char *const *argv) {
         needed += length;
     }
     if (needed == 0) {
-        return;
+        return (char *)0;
     }
     char *block = (char *)kmalloc(needed);
     if (!block) {
-        return;
+        return (char *)0;
     }
     uint32_t at = 0;
     for (int i = 0; argv[i]; i++) {
@@ -3270,32 +4184,167 @@ void scheduler_set_cmdline(task_t *t, const char *const *argv) {
         k_memcpy(block + at, argv[i], length);
         at += length;
     }
-    t->cmdline_block = block;
-    t->cmdline_length = at;
+    *length_out = at;
+    return block;
 }
 
-/* Asked of the owner rather than of the task, because a thread has no
-   command line of its own and /proc/<tid>/cmdline is defined to answer with
-   the process's. */
-const char *scheduler_cmdline(task_t *t, uint32_t *length) {
-    task_t *owner = scheduler_vm_owner(t);
-    if (!owner || !owner->cmdline_block) {
-        if (length) {
-            *length = 0;
+/* Whose records a task's are: a thread has none of its own, and
+   /proc/<tid>/cmdline is defined to answer with the process's. Under the
+   lock, so the leader found is the leader still. */
+static task_t *record_owner_locked(task_t *t) {
+    if (!t || !t->is_thread) {
+        return t;
+    }
+    task_t *leader = scheduler_task_by_id(t->tgid);
+    return leader ? leader : t;
+}
+
+int scheduler_copy_cmdline(int pid, char *out, uint32_t capacity) {
+    int copied = -1;
+    uint64_t flags = spin_lock_irqsave(&scheduler_lock);
+    task_t *t = scheduler_task_by_id(pid);
+    if (t && out) {
+        const task_t *owner = record_owner_locked(t);
+        copied = 0;
+        if (owner->cmdline_block) {
+            uint32_t length = owner->cmdline_length;
+            if (length > capacity) {
+                length = capacity;
+            }
+            k_memcpy(out, owner->cmdline_block, length);
+            copied = (int)length;
+        } else {
+            /* Nothing recorded - a kernel task, or a record that could not
+               be allocated: the name, as one argument. */
+            uint32_t at = 0;
+            for (const char *c = t->name; *c && at + 1 < capacity; c++) {
+                out[at++] = *c;
+            }
+            if (at < capacity) {
+                out[at++] = '\0';
+            }
+            copied = (int)at;
         }
-        return (const char *)0;
     }
-    if (length) {
-        *length = owner->cmdline_length;
+    spin_unlock_irqrestore(&scheduler_lock, flags);
+    return copied;
+}
+
+uint32_t scheduler_copy_env(task_t *t, char *out, uint32_t capacity, uint32_t *count_out) {
+    uint32_t length = 0;
+    uint32_t count = 0;
+    uint64_t flags = spin_lock_irqsave(&scheduler_lock);
+    const task_t *owner = record_owner_locked(t);
+    if (owner && out && owner->env_block && owner->env_count &&
+        owner->env_length <= capacity) {
+        k_memcpy(out, owner->env_block, owner->env_length);
+        length = owner->env_length;
+        count = owner->env_count;
     }
-    return owner->cmdline_block;
+    spin_unlock_irqrestore(&scheduler_lock, flags);
+    if (count_out) {
+        *count_out = count;
+    }
+    return length;
+}
+
+/* How long t's process's command line (env 0) or environment (env 1)
+   record is right now, read under the lock. */
+static uint32_t record_length(task_t *t, int env) {
+    uint32_t length = 0;
+    uint64_t flags = spin_lock_irqsave(&scheduler_lock);
+    const task_t *owner = record_owner_locked(t);
+    if (owner) {
+        if (env) {
+            length = (owner->env_block && owner->env_count) ? owner->env_length : 0;
+        } else {
+            length = owner->cmdline_block ? owner->cmdline_length : 0;
+        }
+    }
+    spin_unlock_irqrestore(&scheduler_lock, flags);
+    return length;
+}
+
+/* A kmalloc'd copy of t's process's command line (env 0) or environment
+   (env 1), copied out under the lock - nothing is allocated under
+   scheduler_lock here. Null when there is none; *no_memory says when one
+   could not be made.
+
+   M225 (fd-use-holds): sized by the record, and allocated only when there
+   is one. It took a scratch block at the record's ceiling (4 KiB) first,
+   whatever the record was, and then a second block to trim into - so a fork
+   of a process with NO environment could fail with ENOMEM for a copy it was
+   never going to make. The length is read under the lock, the block
+   allocated outside it, and the copy made under it again; an exec on
+   another thread can replace the record in between, and a record that grew
+   past the block is simply measured again. */
+static char *duplicate_record(task_t *t, int env, uint32_t *length_out, uint32_t *count_out,
+                              int *no_memory) {
+    *length_out = 0;
+    if (count_out) {
+        *count_out = 0;
+    }
+    *no_memory = 0;
+    for (;;) {
+        uint32_t wanted = record_length(t, env);
+        if (wanted == 0) {
+            return (char *)0;
+        }
+        char *copy = (char *)kmalloc(wanted);
+        if (!copy) {
+            *no_memory = 1;
+            return (char *)0;
+        }
+        uint32_t length = 0;
+        uint32_t count = 0;
+        int grew = 0;
+        if (env) {
+            length = scheduler_copy_env(t, copy, wanted, &count);
+            grew = length == 0 && record_length(t, 1) > wanted;
+        } else {
+            uint64_t flags = spin_lock_irqsave(&scheduler_lock);
+            const task_t *owner = record_owner_locked(t);
+            if (owner && owner->cmdline_block) {
+                if (owner->cmdline_length <= wanted) {
+                    length = owner->cmdline_length;
+                    k_memcpy(copy, owner->cmdline_block, length);
+                } else {
+                    grew = 1;
+                }
+            }
+            spin_unlock_irqrestore(&scheduler_lock, flags);
+        }
+        if (length) {
+            *length_out = length;
+            if (count_out) {
+                *count_out = count;
+            }
+            return copy;
+        }
+        kfree(copy);
+        if (!grew) {
+            return (char *)0; /* it went while the block was being found */
+        }
+    }
+}
+
+/* M225 (fd-use-holds): what exec inherits when it is given no environment
+   of its own - the process's record, copied out under the lock. */
+char *scheduler_duplicate_env(task_t *t, uint32_t *length_out, uint32_t *count_out,
+                              int *no_memory) {
+    return duplicate_record(t, 1, length_out, count_out, no_memory);
 }
 
 void scheduler_release_env(task_t *t) {
+    if (!t) {
+        return;
+    }
+    uint64_t flags = spin_lock_irqsave(&scheduler_lock);
     char *block = t->env_block;
     t->env_block = NULL;
     t->env_length = 0;
     t->env_count = 0;
+    spin_unlock_irqrestore(&scheduler_lock, flags);
     if (block) {
         kfree(block);
     }
@@ -3313,10 +4362,15 @@ int scheduler_set_env(task_t *t, const char *block, uint32_t length, uint32_t co
     for (uint32_t i = 0; i < length; i++) {
         copy[i] = block[i];
     }
-    scheduler_release_env(t);
+    uint64_t flags = spin_lock_irqsave(&scheduler_lock);
+    char *old = t->env_block;
     t->env_block = copy;
     t->env_length = length;
     t->env_count = count;
+    spin_unlock_irqrestore(&scheduler_lock, flags);
+    if (old) {
+        kfree(old);
+    }
     return 0;
 }
 
@@ -3335,9 +4389,30 @@ file_descriptor_table_t *descriptor_table_new(void) {
     return table;
 }
 
+/* M225: the count is atomic, and it takes no lock, because its two sides
+   never shared one: a reference is taken under scheduler_lock (a thread
+   being made) and dropped outside it (every exit, and the reap), on as many
+   processors as the process has threads. It was `references++` and
+   `--references` - a load, an add and a store, with nothing to stop a second
+   processor's load landing between the first one's load and store. A lost
+   decrement leaks the table and every descriptor in it; a lost increment
+   leaves the count one short, so the table is closed and freed while a thread
+   still uses it and freed AGAIN when the last one lets go - which is what an
+   eight-processor hvf battery panicked on at [m79]'s thread churn:
+   "[heap] second kfree of ... from descriptor_table_release".
+
+   A reference is only ever taken by a task that already holds one (the
+   creating thread, for the thread it creates), so the count is at least one
+   while it is taken and a table at zero is never brought back. That is a
+   rule, not luck, so it is checked. */
 void descriptor_table_reference(file_descriptor_table_t *table) {
     if (table) {
-        table->references++;
+        /* Relaxed: the caller's own reference already keeps the table alive
+           and orders nothing new. */
+        int before = __atomic_fetch_add(&table->references, 1, __ATOMIC_RELAXED);
+        if (before <= 0) {
+            panic("descriptor_table_reference: a reference to a table nobody holds");
+        }
     }
 }
 
@@ -3345,8 +4420,15 @@ void descriptor_table_release(file_descriptor_table_t *table) {
     if (!table) {
         return;
     }
-    if (--table->references > 0) {
+    /* Release, so every write this task made to the slots is visible to
+       whoever closes them; acquire, so the one that reaches zero sees every
+       other task's writes before it closes and frees. */
+    int after = __atomic_sub_fetch(&table->references, 1, __ATOMIC_ACQ_REL);
+    if (after > 0) {
         return;
+    }
+    if (after < 0) {
+        panic("descriptor_table_release: released more often than it was referenced");
     }
     /* The last task pointing here is gone, so every descriptor in it closes
        now - once, which is the whole reason the count is here. */
@@ -3428,13 +4510,509 @@ void file_descriptor_retain(const file_descriptor_slot_t *slot) {
     }
 }
 
+/* M225: the slot protocol.
+
+   The object counts were locked (8084b9d audited every one); what was not
+   was the SLOT. sys_close looked at a slot's type, saw something open, and
+   called file_descriptor_release on it - and two threads of one process
+   closing the same descriptor at once both looked, both saw it open and both
+   released it, so one reference was dropped twice. A socket, a unix socket,
+   an eventfd, a timerfd, an epoll set or a memfd went to zero with a
+   descriptor still counted and was freed twice; a pipe end or an open file
+   clamps at zero, which hides the same thing: a reference another holder
+   still counts, gone. Every path that COPIED a slot and then took a reference
+   - fork's copy, spawn's inherited descriptors, dup, dup2, F_DUPFD,
+   /proc/self/fd reopen, SCM_RIGHTS - had the same window the other way
+   round: the copy is made, a sibling closes the original and drops the last
+   reference, and the copy's reference is taken on an object that is gone.
+
+   So the table has a lock, and these are the only places that take a
+   descriptor out of a slot or copy one with a reference of its own. Under
+   it: reading and writing slots, and taking a reference (the object's own
+   lock, briefly). Never under it: letting an object go, which can close a
+   TCP connection or wake a peer - a slot is DETACHED under the lock and the
+   caller releases what it detached after. It is never taken under
+   scheduler_lock (M204: a pipe writer holds pipe_lock while it takes
+   scheduler_lock, so a reference taken under scheduler_lock is the two in
+   opposite orders).
+
+   Claiming a free slot is still the M192 compare-and-swap from NONE to
+   RESERVED, with no lock: a claimer only ever touches a NONE slot, and the
+   paths here treat NONE and RESERVED alike as "not open" and write a NONE
+   slot only after claiming it the same way. */
+static uint64_t descriptor_table_lock(file_descriptor_table_t *table) {
+    return spin_lock_irqsave(&table->lock);
+}
+
+static void descriptor_table_unlock(file_descriptor_table_t *table, uint64_t flags) {
+    spin_unlock_irqrestore(&table->lock, flags);
+}
+
+static file_descriptor_type_t slot_type(const file_descriptor_slot_t *slot) {
+    return __atomic_load_n(&slot->type, __ATOMIC_ACQUIRE);
+}
+
+static int slot_is_live(const file_descriptor_slot_t *slot) {
+    file_descriptor_type_t type = slot_type(slot);
+    return type != FILE_DESCRIPTOR_NONE && type != FILE_DESCRIPTOR_RESERVED;
+}
+
+/* Writes everything but the type, then the type: a reader that sees the
+   type sees the object with it. Called with the lock held and the slot
+   claimed (RESERVED) by the caller. */
+static void slot_publish(file_descriptor_slot_t *into, const file_descriptor_slot_t *from) {
+    into->pipe = from->pipe;
+    into->cloexec = from->cloexec;
+    into->nonblock = from->nonblock;
+    into->writable = from->writable;
+    __atomic_store_n(&into->type, from->type, __ATOMIC_RELEASE);
+}
+
+/* The mirror image of slot_publish: the type goes FIRST, then the rest.
+   slot_publish's rule is that a reader that sees the type sees the object
+   with it, and a clear that emptied the object before the type broke it -
+   between the two stores a slot said "pipe" and named nothing, and a reader
+   that checks its copy by reading the type again (type, object, type) could
+   see the same live type twice around a null object. With the type first,
+   a reader that finds the object already gone finds the type gone too: the
+   release fence orders the type's store before every store after it. The
+   claim CAS that can follow the NONE is harmless here - a claimant fills
+   its slot only under this lock, which the caller still holds. */
+static void slot_clear(file_descriptor_slot_t *slot) {
+    __atomic_store_n(&slot->type, FILE_DESCRIPTOR_NONE, __ATOMIC_RELEASE);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(&slot->pipe, (struct pipe *)0, __ATOMIC_RELAXED);
+    slot->cloexec = 0;
+    slot->nonblock = 0;
+    slot->writable = 0;
+}
+
+static int slot_claim(file_descriptor_slot_t *slot) {
+    file_descriptor_type_t expected = FILE_DESCRIPTOR_NONE;
+    return slot_type(slot) == FILE_DESCRIPTOR_NONE &&
+           __atomic_compare_exchange_n(&slot->type, &expected, FILE_DESCRIPTOR_RESERVED, 0,
+                                       __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+}
+
+/* Numbering a descriptor is claiming it (M192): the lowest free slot at or
+   above `from`, taken from NONE to RESERVED so exactly one claimant wins
+   it. The claimant fills it with file_descriptor_install or gives it back. */
+int file_descriptor_claim(file_descriptor_table_t *table, int from) {
+    for (int i = from < 0 ? 0 : from; i < MAX_FILE_DESCRIPTORS; i++) {
+        if (slot_claim(&table->slots[i])) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void file_descriptor_unclaim(file_descriptor_table_t *table, int fd) {
+    if (fd < 0 || fd >= MAX_FILE_DESCRIPTORS) {
+        return;
+    }
+    file_descriptor_type_t expected = FILE_DESCRIPTOR_RESERVED;
+    __atomic_compare_exchange_n(&table->slots[fd].type, &expected, FILE_DESCRIPTOR_NONE, 0,
+                                __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+}
+
+/* The object's reference passes from the caller to the slot. */
+void file_descriptor_install(file_descriptor_table_t *table, int fd,
+                             const file_descriptor_slot_t *slot) {
+    uint64_t flags = descriptor_table_lock(table);
+    if (slot_type(&table->slots[fd]) != FILE_DESCRIPTOR_RESERVED) {
+        panic("file_descriptor_install: a slot nobody claimed");
+    }
+    slot_publish(&table->slots[fd], slot);
+    descriptor_table_unlock(table, flags);
+}
+
+/* A reference of the caller's own on what `fd` names, so the object outlives
+   a sibling closing the descriptor while the caller still uses it - or
+   passes it on (SCM_RIGHTS, /proc/self/fd). Given back with
+   file_descriptor_release(out). */
+int file_descriptor_hold(file_descriptor_table_t *table, int fd, file_descriptor_slot_t *out) {
+    out->type = FILE_DESCRIPTOR_NONE;
+    if (fd < 0 || fd >= MAX_FILE_DESCRIPTORS) {
+        return DESCRIPTOR_TABLE_BAD;
+    }
+    uint64_t flags = descriptor_table_lock(table);
+    if (!slot_is_live(&table->slots[fd])) {
+        descriptor_table_unlock(table, flags);
+        return DESCRIPTOR_TABLE_BAD;
+    }
+    *out = table->slots[fd];
+    file_descriptor_retain(out);
+    descriptor_table_unlock(table, flags);
+    return 0;
+}
+
+/* M225 (fd-use-holds): USING a descriptor - read, write, send, recv, ioctl,
+   fcntl, epoll, poll's readiness, the socket calls - is Linux's fdget/fdput.
+   Every one of those read the slot and used its object with no reference of
+   its own, so a sibling thread's close() in the middle of the call dropped
+   the object's last reference under it: a unix socket, socket, eventfd,
+   timerfd, epoll set or memfd was freed while the call still used it (a
+   blocked read woke into freed memory, or re-read the slot after the wait
+   and found nothing there), and a pipe end or an open file - whose counts
+   clamp at zero - lost a reference somebody else still counted.
+
+   Two ways, as Linux has (fdget's "light" path):
+   - The table is this task's alone (one reference: no other thread names
+     it). Nothing can close or replace a slot but this task, which is in this
+     call, so the slot is copied and nothing is counted. A table only gains a
+     name from a task that already names it (task_spawn_common), so it stays
+     this task's alone for the length of the call. This is every
+     single-threaded program, and it costs a load and a copy - inline, in
+     scheduler.h (file_descriptor_get), because a call and a frame were most
+     of what it cost under TCG.
+   - Shared: here. The copy and a reference of the call's own, taken under
+     the table's lock (as file_descriptor_hold does), and the use put on the
+     task's list so an exit in the middle of the call gives it back - except
+     for what needs no reference (use_takes_reference: the console, and a
+     named pipe, which is never freed and whose let-go wakes its watchers).
+
+   What a call sees when a sibling closes its descriptor part way through:
+   the call goes on with the object it started with, which stays alive until
+   the call lets go - Linux's answer for every case this machine has. A read
+   blocked on a pipe, a socket, an eventfd or a timerfd keeps waiting on that
+   object and returns what arrives on it (close() does not wake it, on Linux
+   either; shutdown() is how a program ends another thread's wait); the next
+   call that names the number is told it is not open. */
+/* Whether a use of what `slot` names needs a reference of its own. The
+   console's two kinds name no object. A named pipe (pipe_named, which every
+   window's event pipe and the compositor's request pipes are) is made once
+   and never freed or reused, so it cannot go away under a call - and it is
+   never counted down either: pipe_unref_* on one only wakes everybody
+   watching it, which is what a close of it is meant to do. Counting a USE of
+   one made every poll and epoll_wait in a threaded process wake ITSELF -
+   the scan's put matched the poller's own watch, set watch_fired, and
+   scheduler_watch_block returned at once - so an idle threaded client
+   watching its window's events (Chromium's UI thread) spun a core until its
+   timeout, or for ever; and each use added one to the pipe's reader or
+   writer count for good. */
+static int use_takes_reference(const file_descriptor_slot_t *slot) {
+    switch (slot->type) {
+    case FILE_DESCRIPTOR_STDIN:
+    case FILE_DESCRIPTOR_STDOUT:
+        return 0;
+    case FILE_DESCRIPTOR_PIPE_READ:
+    case FILE_DESCRIPTOR_PIPE_WRITE:
+        return !pipe_is_persistent(slot->pipe);
+    default:
+        return 1;
+    }
+}
+
+int file_descriptor_get_shared(task_t *t, int fd, file_descriptor_use_t *use) {
+    use->counted = 0;
+    use->slot.type = FILE_DESCRIPTOR_NONE;
+    file_descriptor_table_t *table = t ? t->descriptor_table : (file_descriptor_table_t *)0;
+    if (!table || fd < 0 || fd >= MAX_FILE_DESCRIPTORS) {
+        return DESCRIPTOR_TABLE_BAD;
+    }
+    /* file_descriptor_hold, but a use that needs no reference takes none. */
+    uint64_t flags = descriptor_table_lock(table);
+    if (!slot_is_live(&table->slots[fd])) {
+        descriptor_table_unlock(table, flags);
+        return DESCRIPTOR_TABLE_BAD;
+    }
+    use->slot = table->slots[fd];
+    int counted = use_takes_reference(&use->slot);
+    if (counted) {
+        file_descriptor_retain(&use->slot);
+    }
+    descriptor_table_unlock(table, flags);
+    if (counted) {
+        use->counted = 1;
+        use->next = t->descriptor_uses;
+        t->descriptor_uses = use;
+    }
+    return 0;
+}
+
+/* What kind of thing `fd` names right now, and nothing more: no object is
+   touched, so nothing has to be held. For a poller deciding which address
+   to be woken by (the console's input or the object's own), where a stale
+   answer costs one spurious or one missed-until-the-next-scan wake. */
+file_descriptor_type_t file_descriptor_peek_type(task_t *t, int fd) {
+    file_descriptor_table_t *table = t ? t->descriptor_table : (file_descriptor_table_t *)0;
+    if (!table || fd < 0 || fd >= MAX_FILE_DESCRIPTORS) {
+        return FILE_DESCRIPTOR_NONE;
+    }
+    return slot_type(&table->slots[fd]);
+}
+
+/* Taken off the list before it is let go of: an exit that strikes between
+   the two leaks the one reference (as a close() struck between detaching
+   and releasing does) rather than giving it back twice. */
+void file_descriptor_put(task_t *t, file_descriptor_use_t *use) {
+    if (!use->counted) {
+        return;
+    }
+    for (file_descriptor_use_t **at = &t->descriptor_uses; *at; at = &(*at)->next) {
+        if (*at == use) {
+            *at = use->next;
+            break;
+        }
+    }
+    use->counted = 0;
+    use->next = (file_descriptor_use_t *)0;
+    file_descriptor_release(&use->slot);
+}
+
+/* M225 (fd-use-holds): the rule above, checked where it can be - as a
+   system call returns to its program. A use left on the list there is a
+   record in a stack frame that has returned; the next get links in front of
+   it and an exit's put_all would release whatever that stack memory holds
+   by then. Said at once instead, while the task's kernel_activity still
+   names the call that left it. */
+void file_descriptor_uses_settled(task_t *t) {
+    if (t && t->descriptor_uses) {
+        panic("file_descriptor_uses_settled: a system call returned without putting a descriptor it got");
+    }
+}
+
+/* The exit's: every use the task's unfinished call still holds. Run by the
+   task itself, on its own stack, which is where the records are. */
+void file_descriptor_put_all(task_t *t) {
+    while (t->descriptor_uses) {
+        file_descriptor_use_t *use = t->descriptor_uses;
+        t->descriptor_uses = use->next;
+        use->counted = 0;
+        use->next = (file_descriptor_use_t *)0;
+        file_descriptor_release(&use->slot);
+    }
+}
+
+/* close(): the slot is emptied under the lock and what it held handed to the
+   caller to release - exactly one of any number of threads closing one
+   descriptor at once gets it, and the rest are told it was not open. */
+int file_descriptor_detach(file_descriptor_table_t *table, int fd, file_descriptor_slot_t *out) {
+    out->type = FILE_DESCRIPTOR_NONE;
+    if (fd < 0 || fd >= MAX_FILE_DESCRIPTORS) {
+        return DESCRIPTOR_TABLE_BAD;
+    }
+    uint64_t flags = descriptor_table_lock(table);
+    if (!slot_is_live(&table->slots[fd])) {
+        descriptor_table_unlock(table, flags);
+        return DESCRIPTOR_TABLE_BAD;
+    }
+    *out = table->slots[fd];
+    slot_clear(&table->slots[fd]);
+    descriptor_table_unlock(table, flags);
+    return 0;
+}
+
+/* dup2(): `newfd` becomes a second reference to what `oldfd` names, and what
+   `newfd` held before is handed back in `displaced` for the caller to
+   release after. A slot another thread is still filling in is not replaced
+   (Linux says EBUSY for the same window): its owner is about to install into
+   it, and one of the two objects would be lost. */
+int descriptor_table_duplicate(file_descriptor_table_t *table, int oldfd, int newfd,
+                               int cloexec, file_descriptor_slot_t *displaced) {
+    displaced->type = FILE_DESCRIPTOR_NONE;
+    if (oldfd < 0 || oldfd >= MAX_FILE_DESCRIPTORS || newfd < 0 ||
+        newfd >= MAX_FILE_DESCRIPTORS) {
+        return DESCRIPTOR_TABLE_BAD;
+    }
+    uint64_t flags = descriptor_table_lock(table);
+    if (!slot_is_live(&table->slots[oldfd])) {
+        descriptor_table_unlock(table, flags);
+        return DESCRIPTOR_TABLE_BAD;
+    }
+    if (newfd == oldfd) {
+        descriptor_table_unlock(table, flags);
+        return newfd;
+    }
+    file_descriptor_slot_t *into = &table->slots[newfd];
+    if (slot_is_live(into)) {
+        *displaced = *into;
+        /* A live slot changes only under this lock, so it is ours to
+           rewrite; RESERVED keeps a lock-free claimer off it meanwhile. */
+        __atomic_store_n(&into->type, FILE_DESCRIPTOR_RESERVED, __ATOMIC_RELEASE);
+    } else if (!slot_claim(into)) {
+        descriptor_table_unlock(table, flags);
+        return DESCRIPTOR_TABLE_BUSY;
+    }
+    file_descriptor_slot_t copy = table->slots[oldfd];
+    copy.cloexec = cloexec ? 1 : 0;
+    file_descriptor_retain(&copy);
+    slot_publish(into, &copy);
+    descriptor_table_unlock(table, flags);
+    return newfd;
+}
+
+/* dup() and F_DUPFD: the lowest free slot at or above `from`. */
+int descriptor_table_duplicate_lowest(file_descriptor_table_t *table, int oldfd, int from,
+                                      int cloexec) {
+    if (oldfd < 0 || oldfd >= MAX_FILE_DESCRIPTORS) {
+        return DESCRIPTOR_TABLE_BAD;
+    }
+    uint64_t flags = descriptor_table_lock(table);
+    if (!slot_is_live(&table->slots[oldfd])) {
+        descriptor_table_unlock(table, flags);
+        return DESCRIPTOR_TABLE_BAD;
+    }
+    int fd = file_descriptor_claim(table, from);
+    if (fd < 0) {
+        descriptor_table_unlock(table, flags);
+        return DESCRIPTOR_TABLE_FULL;
+    }
+    file_descriptor_slot_t copy = table->slots[oldfd];
+    copy.cloexec = cloexec ? 1 : 0;
+    file_descriptor_retain(&copy);
+    slot_publish(&table->slots[fd], &copy);
+    descriptor_table_unlock(table, flags);
+    return fd;
+}
+
+/* fork() and spawn: every open descriptor of `from` copied into `to` with a
+   reference of its own, under `from`'s lock so none of them can be closed
+   between the copy and the reference. `to` is nobody else's yet. A spawn is
+   an exec (`for_exec`), so close-on-exec descriptors stay behind, as does
+   everything from `keep_below` up. */
+void descriptor_table_copy(file_descriptor_table_t *to, file_descriptor_table_t *from,
+                           int for_exec, int keep_below) {
+    if (!from) {
+        return; /* `to` came from descriptor_table_new: empty already */
+    }
+    uint64_t flags = descriptor_table_lock(from);
+    for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
+        const file_descriptor_slot_t *source = &from->slots[i];
+        if (!slot_is_live(source) || i >= keep_below || (for_exec && source->cloexec)) {
+            to->slots[i].type = FILE_DESCRIPTOR_NONE;
+            to->slots[i].pipe = (struct pipe *)0;
+            to->slots[i].cloexec = 0;
+            to->slots[i].nonblock = 0;
+            to->slots[i].writable = 0;
+            continue;
+        }
+        to->slots[i] = *source;
+        file_descriptor_retain(&to->slots[i]);
+    }
+    descriptor_table_unlock(from, flags);
+}
+
+/* fcntl F_SETFD / F_SETFL: the descriptor's own flags, written under the
+   lock so a dup or a fork copying the slot at the same moment copies it
+   whole, and so a slot that has been closed meanwhile is not written to.
+   -1 leaves a flag as it is. */
+int file_descriptor_set_flags(file_descriptor_table_t *table, int fd, int cloexec,
+                              int nonblock) {
+    if (fd < 0 || fd >= MAX_FILE_DESCRIPTORS) {
+        return DESCRIPTOR_TABLE_BAD;
+    }
+    uint64_t flags = descriptor_table_lock(table);
+    if (!slot_is_live(&table->slots[fd])) {
+        descriptor_table_unlock(table, flags);
+        return DESCRIPTOR_TABLE_BAD;
+    }
+    if (cloexec >= 0) {
+        table->slots[fd].cloexec = cloexec ? 1 : 0;
+    }
+    if (nonblock >= 0) {
+        table->slots[fd].nonblock = nonblock ? 1 : 0;
+    }
+    descriptor_table_unlock(table, flags);
+    return 0;
+}
+
+/* exec(): the next close-on-exec descriptor at or above `from`, detached for
+   the caller to release. One at a time, so the lock is never held across a
+   release and never for more than one scan. */
+int descriptor_table_detach_cloexec(file_descriptor_table_t *table, int from,
+                                    file_descriptor_slot_t *out) {
+    out->type = FILE_DESCRIPTOR_NONE;
+    uint64_t flags = descriptor_table_lock(table);
+    for (int i = from < 0 ? 0 : from; i < MAX_FILE_DESCRIPTORS; i++) {
+        if (slot_is_live(&table->slots[i]) && table->slots[i].cloexec) {
+            *out = table->slots[i];
+            slot_clear(&table->slots[i]);
+            descriptor_table_unlock(table, flags);
+            return i;
+        }
+    }
+    descriptor_table_unlock(table, flags);
+    return DESCRIPTOR_TABLE_BAD;
+}
+
+/* M225: a task's table pointer is taken away under scheduler_lock, and the
+   reference it stood for is dropped after. Other code reads ANOTHER task's
+   table - /proc's task list counting open descriptors, the high-water mark -
+   and does it under scheduler_lock with the pointer checked: while the lock
+   is held a non-null pointer is a reference its task has not dropped yet, so
+   the table cannot be freed under the reader. Dropping first and clearing
+   after left a window in which the pointer named a freed table. */
+static file_descriptor_table_t *take_descriptor_table(task_t *t) {
+    uint64_t flags = spin_lock_irqsave(&scheduler_lock);
+    file_descriptor_table_t *table = t->descriptor_table;
+    t->descriptor_table = (file_descriptor_table_t *)0;
+    spin_unlock_irqrestore(&scheduler_lock, flags);
+    return table;
+}
+
+int scheduler_open_descriptor_count(task_t *t) {
+    if (!t) {
+        return 0;
+    }
+    int open = 0;
+    uint64_t flags = spin_lock_irqsave(&scheduler_lock);
+    const file_descriptor_table_t *table = t->descriptor_table;
+    for (int i = 0; table && i < MAX_FILE_DESCRIPTORS; i++) {
+        if (table->slots[i].type != FILE_DESCRIPTOR_NONE) {
+            open++;
+        }
+    }
+    spin_unlock_irqrestore(&scheduler_lock, flags);
+    return open;
+}
+
+/* M225 (process-lifetimes): record locks belong to the PROCESS. POSIX's
+   fcntl(F_SETLK) locks are owned by the process - any of its threads may
+   unlock one, a second thread is not in conflict with its own process's
+   lock, F_GETLK names the process - so they are keyed by what getpid()
+   answers, the thread-group id, and not by the task that asked. They were
+   keyed by the task: a thread's lock conflicted with its own process, was
+   reported with a tid, and went when that THREAD exited. */
+int scheduler_record_lock_owner(const task_t *t) {
+    return t ? t->tgid : 0;
+}
+
+/* Whether any task still names this table. A task's pointer is cleared under
+   scheduler_lock before its reference is dropped (take_descriptor_table),
+   and a new name is only ever added by a task that already has one
+   (may_add_a_thread_to_locked) - so once this is false it stays false. */
+static int descriptor_table_named_locked(const file_descriptor_table_t *table) {
+    for (int i = 0; i < task_count; i++) {
+        if (tasks[i].state != TASK_FREE && tasks[i].descriptor_table == table) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 void scheduler_release_file_descriptors(task_t *t) {
     /* One reference, not one pass over the slots: the descriptors close when
        the LAST task sharing this table is gone, and a thread exiting while
        its siblings run is not that. */
-    descriptor_table_release(t->descriptor_table);
-    t->descriptor_table = (file_descriptor_table_t *)0;
-    if (flock_release_pid(t->id) > 0) {
+    file_descriptor_table_t *table = take_descriptor_table(t);
+    if (!table) {
+        return;
+    }
+    /* And the process's record locks go when the process does, which is the
+       same moment: the table is the process's and only its tasks name it.
+       Every task looks AFTER clearing its own name, so of two leaving at
+       once at least the second sees nobody - the locks cannot be left
+       behind - and a release that both make is a release of locks nobody
+       can take any more, since every task of the process is on its way out
+       (a fork has its own table and its own pid). Released before this
+       task is TERMINATED, so a parent whose wait() says the process has
+       ended finds its locks gone. */
+    uint64_t flags = spin_lock_irqsave(&scheduler_lock);
+    int last = !descriptor_table_named_locked(table);
+    spin_unlock_irqrestore(&scheduler_lock, flags);
+    descriptor_table_release(table);
+    if (last && flock_release_pid(scheduler_record_lock_owner(t)) > 0) {
         scheduler_wake_all(FLOCK_CHAN);
     }
 }

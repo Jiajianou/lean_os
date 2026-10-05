@@ -232,6 +232,8 @@ typedef struct {
 
 #define OS_ERROR_SPIPE 29
 #define OS_ERROR_SEARCH 3
+/* dup2() onto a descriptor another thread has numbered and not yet filled. */
+#define OS_ERROR_BUSY 16
 
 #define SYS_socketpair 113
 #define SYS_bindun     114

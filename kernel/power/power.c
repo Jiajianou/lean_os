@@ -122,12 +122,27 @@ int power_orderly_stop(uint64_t grace_ticks) {
     task_t *self = scheduler_current();
     int total = scheduler_task_count();
 
-    for (int i = 0; i < total; i++) {
-        task_t *t = scheduler_task_by_slot(i);
-        if (!t || t == self || t->parent_id < 0 || t->state == TASK_TERMINATED) {
-            continue;
-        }
-        t->pending_signal = SIGTERM;
+    /* M225: no grace period is no SIGTERM. Sent anyway, it reached any task
+       running on another processor in the instant before the SIGKILL below
+       replaced it, and that task ended by SIGTERM - which [m47] grades as
+       the escalation not happening (exit codes 0x8F at QEMU_CPUS=4). It
+       passed more often than it should have because a task half way
+       through that exit used to be re-entered by the SIGKILL and end as
+       137 after all; a task that has begun to exit takes no more signals
+       now (scheduler_begin_exit), so the race shows as what it is.
+
+       M225: and SIGTERM is a SIGNAL, not a sentence. It was written straight
+       into pending_signal, which is the fatal path - the handler a program
+       installs to save its state on SIGTERM (Node's process.on('SIGTERM'),
+       CPython's signal.signal) never ran, and one that ignores SIGTERM died
+       of it anyway, so the escalation below had nothing to escalate. Nor was
+       a task blocked in a system call woken to take it, or the SIGKILL after
+       it: it slept through both and was still there when the volumes were
+       unmounted. Both go through the scheduler's raise now, which honours
+       the disposition, wakes the sleeper and refuses a task already on its
+       way out. */
+    if (grace_ticks > 0) {
+        (void)scheduler_signal_orderly_stop(self, SIGTERM);
     }
 
     uint64_t deadline = pit_get_ticks() + grace_ticks;
@@ -145,15 +160,7 @@ int power_orderly_stop(uint64_t grace_ticks) {
         schedule();
     }
 
-    int killed = 0;
-    for (int i = 0; i < total; i++) {
-        task_t *t = scheduler_task_by_slot(i);
-        if (!t || t == self || t->parent_id < 0 || t->state == TASK_TERMINATED) {
-            continue;
-        }
-        t->pending_signal = SIGKILL;
-        killed++;
-    }
+    int killed = scheduler_signal_orderly_stop(self, SIGKILL);
 
     uint64_t kill_deadline = pit_get_ticks() + 100;
     while (pit_get_ticks() < kill_deadline) {

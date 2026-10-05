@@ -16,7 +16,14 @@ void physical_memory_free_frame(uint64_t phys_address);
 
 uint64_t physical_memory_free_frame_count(void);
 
+/* The machine's memory: frames the firmware handed over as usable RAM. This
+   is what to report - sysinfo, _SC_PHYS_PAGES, an About page - and what to
+   size a cache by. */
 uint64_t physical_memory_total_frame_count(void);
+/* The address the frame tracking reaches: the end of the highest usable
+   region. It covers every hole below it (the PCI window under 4 GiB above
+   all), so it is larger than the memory, and it is the right answer only
+   to "is this physical address one the allocator could own". */
 uint64_t physical_memory_tracked_limit(void);
 
 uint64_t physical_memory_alloc_frame_above(uint64_t min_phys);

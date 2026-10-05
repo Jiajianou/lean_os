@@ -294,10 +294,10 @@ is one at x=1, one at x=2 and one between every pair of negative poles, and
 there the reflection and the Lanczos term cancel two values near 1.15 down to
 0.0017. Measured: 3.54e-15 away from them, 6.71e-13 at the worst, on an
 ABSOLUTE error of 1.1e-15. No formula avoids it - only more mantissa does -
-and the long double this code computes in is 80-bit on the target and 64-bit
-on this arm64 host, which is M142's limitation about that harness met a
-second time. `tests/math/cases.tsv` says 1e-12 with all of that written
-beside it.
+and the long double this code computes in is 80-bit on the target (and on
+an x86_64 Mac) but 64-bit on an arm64 Mac, which is M142's limitation about
+that harness met a second time, on the hosts where it applies.
+`tests/math/cases.tsv` says 1e-12 with all of that written beside it.
 
 **WebRTC is off, and NOT because it does not build.** 761 of its 762 targets
 and all 579 of XNNPACK's compiled for this target without a patch, which is
@@ -574,6 +574,37 @@ from outside the image via fw_cfg, not a `#ifdef` (see
 four, and `[m107]` names the one it got so the four passes are
 distinguishable in a log.
 
+**Both kinds of Mac are meant to build this and run every harness, and
+they are not the same machine underneath.** On an x86_64 Mac, QEMU can
+run the guest on the host's own CPU: put
+`-accel hvf -cpu host,xlevel=0x80000008` after a harness's ceiling
+(`tools/qemu-serial-test.sh 1500 -accel hvf -cpu host,xlevel=0x80000008`)
+and a battery that takes minutes under TCG takes a fraction of that. The
+`xlevel` is for QEMU, not the kernel: under hvf a bare `-cpu host`
+reports a highest extended CPUID leaf below 0x80000004, so `[inventory]`
+finds no brand string where the laptop has one. It
+is also a different CPU in the one place this project measures
+arithmetic: under hvf the guest's x87 is real silicon, and under TCG it
+is QEMU's softfloat, which rounds FYL2X correctly where Intel's does
+not - `log2l`'s row in `tests/math/long_double_cases.tsv` claimed half an
+ulp because softfloat was the only x87 that had ever answered it. A result
+that differs between the two is a fact about one of them, not noise. An
+arm64 Mac has no such option - its hvf runs arm64 guests - so TCG is the
+accelerator there, and TCG is what `tests/budgets.tsv` was measured
+under. Two harnesses pick hvf by themselves where they can:
+`tools/memory-size-test.sh`, because what it grades is a number and not
+a time, and `tools/nic-stream-test.sh`, because the freeze it exists to
+catch - QEMU on macOS stopping the guest to fork SLIRP's guestfwd command,
+about 4.3 s per GiB touched - only happens under hvf, and its budget row
+holds under either.
+
+`QEMU_CPUS` and `QEMU_MEM`, given per command, are how to boot a
+laptop-sized machine: `QEMU_CPUS=8 QEMU_MEM=16384 tools/qemu-serial-test.sh
+1500 -accel hvf -cpu host,xlevel=0x80000008` is the ThinkPad's shape. The harnesses'
+defaults stay what they are - one core and a few GiB are what the budgets
+and the battery's timings were measured on, and a default that followed
+the host would make two runs of one commit different machines.
+
 `LEANOS_QEMU_INPUT=usb tools/qemu-input-test.sh` runs the **whole** input
 suite on a machine with no PS/2 controller at all (`-machine
 pc,i8042=off`) and a USB keyboard and mouse on xHCI instead. Not one test
@@ -585,7 +616,7 @@ changes, because `kernel/drivers/xhci.c` delivers through the same
 Three tiers, each a superset of the one above:
 
 ```sh
-./tools/run-tests.sh --fast   # host unit tests, no QEMU, under a second
+./tools/run-tests.sh --fast   # host stages only, no QEMU, a few minutes
 ./tools/run-tests.sh          # + graded boot and the quick input subset
 ./tools/run-tests.sh --full   # + the whole input suite and slow host tests
 ```
@@ -633,8 +664,27 @@ value is a `__builtin_<name>l()` call folded at compile time at this
 target's 64-bit mantissa, and the test requires the generated object to
 reference no symbol at all, because a call left behind would be the
 library under test answering its own exam. There is no host oracle for
-this one: this Mac is arm64, where `long double` IS `double`. The
-comparison runs on the machine as `/bin/mathltest`),
+this one that works on both Macs: on an arm64 one `long double` IS
+`double`, and an oracle only an x86_64 one has would make the verdict
+depend on which Mac ran it. The comparison runs on the machine as
+`/bin/mathltest`),
+`tools/cross-arch-test.sh` (the host-compiled test code - make's
+unit-test binaries, make's host tools, and every compile the differential
+tests above make - built and LINKED for the other Mac architecture as
+well, arm64 on an Intel Mac and x86_64 on Apple Silicon, out of the
+Makefile's own source lists and the scripts' own command lines. The host
+tests had only ever been built on arm64 until an Intel Mac ran them, and
+what that found had been invisible from the other desk; this catches the
+part of such a difference that is a compile or a link. It runs nothing it
+builds, so a difference that only shows at run time - x86 inline assembly
+that only an x86 host compiles into a host test, which links cleanly and
+faults - is not its to see. It is in `--fast`),
+`tools/memory-size-test.sh` (the memory `[inventory]` reports, held to
+the `-m` QEMU was given at 4 GiB and 16 GiB: never more, and at most
+64 MiB less. Until it, the machine reported the span of its frame
+bitmap - the highest usable address - so a 16 GiB guest said 17408 MiB
+and the 16 GB ThinkPad was written down as 18. It is in the default
+tier),
 `tools/clang-test.sh` (M121: the clang port, graded in four ways — the
 preprocessor's macros, `clang -###` against every decision in
 `tools/clang-port/LeanOS.cpp`, a compile with nothing on the line, and

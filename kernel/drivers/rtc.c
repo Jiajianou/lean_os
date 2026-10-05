@@ -239,3 +239,30 @@ uint32_t rtc_now(void) {
     }
     return os_unix_time(&now);
 }
+
+/* The moment the CMOS clock's seconds register changes, as a TSC reading:
+   a clock with its own crystal that no interrupt is involved in, which is
+   what the boot battery's timekeeping check holds the TSC and the tick to.
+   Polled, with interrupts on between reads. The patience is a count of
+   reads rather than a time, because the time is what is being checked;
+   five million reads is seconds even on hardware where a port read costs a
+   microsecond - more than a second boundary needs. */
+int rtc_next_second_edge(uint64_t *tsc_at) {
+    if (!available) {
+        return 0;
+    }
+    uint8_t first = 0xFF;
+    for (uint32_t reads = 0; reads < 5000000u; reads++) {
+        uint64_t flags = spin_lock_irqsave(&rtc_lock);
+        uint8_t now = cmos_read(CMOS_SECONDS);
+        uint64_t tsc = tsc_read();
+        spin_unlock_irqrestore(&rtc_lock, flags);
+        if (first == 0xFF) {
+            first = now;
+        } else if (now != first) {
+            *tsc_at = tsc;
+            return 1;
+        }
+    }
+    return 0;
+}

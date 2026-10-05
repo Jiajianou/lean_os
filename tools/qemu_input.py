@@ -5,6 +5,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -203,6 +204,97 @@ def discard_snapshot(key=None):
             os.unlink(path)
         except OSError:
             pass
+
+# What is on an image, read on this side. A test that drives a payload only an
+# optional step installs - the browser, which `make browser-if-built` puts on
+# the image only where a Chromium checkout built it - is SKIPPED on an image
+# without it rather than failed, and that decision is taken from the image the
+# guest will boot, through tools/leanfs-fsck.py's reader (an implementation of
+# the format that is not the kernel's, with the journal laid over it the way a
+# mount would). Never from build/: a binary sitting in a build directory says
+# nothing about whether `make all` has since recreated the disk without it,
+# which is M113's whole story. build/ only decides what an absence MEANS - the
+# suite fails, rather than skips, a payload this host built and the image
+# lost (qemu_input_suite.payload_decisions).
+_LEANFS = None
+
+def _leanfs():
+    global _LEANFS
+    if _LEANFS is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "leanfs_fsck", os.path.join(REPO_ROOT, "tools", "leanfs-fsck.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _LEANFS = module
+    return _LEANFS
+
+class ImageFiles:
+
+    def __init__(self, image=None):
+        self.image = image or IMAGE
+        lf = _leanfs()
+        self._lf = lf
+        self._fs = lf.Fsck(self.image)
+        if not self._fs.read_super():
+            raise RuntimeError("%s has no leanfs this reader understands: %s"
+                               % (self.image, "; ".join(self._fs.problems)))
+        self._fs.read_inodes()
+
+    def _lookup(self, path, hops=8):
+        idx = self._lf.ROOT_INODE
+        at = []
+        parts = [c for c in path.split("/") if c]
+        while parts:
+            comp = parts.pop(0)
+            if comp == ".":
+                continue
+            if comp == "..":
+                at = at[:-1]
+                idx = self._lookup("/" + "/".join(at), hops)
+                if idx is None:
+                    return None
+                continue
+            if self._fs.inodes[idx]["type"] != self._lf.TYPE_DIR:
+                return None
+            hit = [i for n, i, _t in self._fs.dir_entries(idx) if n == comp]
+            if not hit or hit[0] >= len(self._fs.inodes):
+                return None
+            idx = hit[0]
+            if self._fs.inodes[idx]["type"] == self._lf.TYPE_LINK:
+                if hops == 0:
+                    return None
+                target = self._fs.read_file(idx).split(b"\0", 1)[0].decode(
+                    "utf-8", "replace")
+                rest = "/".join(parts)
+                base = target if target.startswith("/") else "/".join(["", *at, target])
+                idx = self._lookup(base + ("/" + rest if rest else ""), hops - 1)
+                return idx
+            at.append(comp)
+        return idx
+
+    def has_file(self, path):
+        """The kernel's own test for an optional program (read_optional_program
+        in kernel/kernel.c): a regular file, links followed, that is not
+        empty."""
+        idx = self._lookup(path)
+        if idx is None:
+            return False
+        ino = self._fs.inodes[idx]
+        return ino["type"] == self._lf.TYPE_FILE and ino["size"] > 0
+
+def payload_missing(requirement, image=None, files=None):
+    """None when every group of a requirement has at least one of its paths on
+    the image; otherwise a sentence naming what is not there. A requirement is
+    a list of groups, each a tuple of paths any one of which will do."""
+    files = files or ImageFiles(image)
+    absent = []
+    for group in requirement:
+        if not any(files.has_file(p) for p in group):
+            absent.append(" or ".join(group))
+    if not absent:
+        return None
+    return "%s not on %s" % (", ".join(absent), os.path.basename(files.image))
 
 def _clone(src, dst):
     for args in (["cp", "-c", src, dst], ["cp", "--reflink=auto", src, dst]):
@@ -642,3 +734,33 @@ def _qemu_keyname(ch):
     if ch.isupper():
         return "shift-" + ch.lower()
     return ch
+
+# `python3 tools/qemu_input.py has [--image IMAGE] PATH...` - for a shell
+# harness that has to make the same decision the suite does from the same
+# reader: 0 when every PATH is a non-empty program on the image, 1 when one is
+# not (and says which), 2 when the image cannot be read, which a caller must
+# not take for an absence.
+def _main(argv):
+    args = argv[1:]
+    if not args or args[0] != "has":
+        print("usage: qemu_input.py has [--image IMAGE] PATH...", file=sys.stderr)
+        return 2
+    args = args[1:]
+    image = None
+    if len(args) >= 2 and args[0] == "--image":
+        image, args = args[1], args[2:]
+    if not args:
+        print("usage: qemu_input.py has [--image IMAGE] PATH...", file=sys.stderr)
+        return 2
+    try:
+        files = ImageFiles(image)
+        absent = [p for p in args if not files.has_file(p)]
+    except (Exception, SystemExit) as exc:
+        print("qemu_input: cannot read %s: %s" % (image or IMAGE, exc), file=sys.stderr)
+        return 2
+    for p in absent:
+        print("%s: not on %s" % (p, files.image))
+    return 1 if absent else 0
+
+if __name__ == "__main__":
+    sys.exit(_main(sys.argv))

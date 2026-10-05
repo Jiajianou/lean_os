@@ -13,10 +13,11 @@
    loop. The searches and compares look at eight bytes a word. It is written
    with the compiler's vector types rather than SSE intrinsics so that the
    same source compiles for the host the differential test runs on
-   (tools/string-test.sh), which is arm64. None of it is rep movsb: under
-   the emulator the budgets are graded on, a string instruction is a loop of
-   single steps, and a speed-up only real hardware sees would be paid for in
-   every boot the harness times. */
+   (tools/string-test.sh), which is either kind of Mac - arm64 or x86_64 -
+   and tools/cross-arch-test.sh builds it for both. None of it is rep
+   movsb: under the emulator the budgets are graded on, a string
+   instruction is a loop of single steps, and a speed-up only real hardware
+   sees would be paid for in every boot the harness times. */
 
 typedef unsigned char vector16_t __attribute__((vector_size(16), aligned(1), may_alias));
 typedef uint64_t __attribute__((may_alias, aligned(1))) unaligned_u64_t;

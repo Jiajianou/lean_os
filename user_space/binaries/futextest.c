@@ -120,13 +120,20 @@ static pthread_rwlock_t rw = PTHREAD_RWLOCK_INITIALIZER;
 static volatile int readers_in;
 static volatile int writer_saw_reader;
 
+/* M225: the count is atomic because readers share the lock - that is what a
+   read lock is for. readers_in++ from four readers inside it at once on four
+   processors lost updates, the count drifted below zero, and the writer saw
+   a reader that was not there: "[m96] the fixture exited 0x00000008" at
+   QEMU_CPUS=4, on kernels with and without the scheduler fix alike. One
+   processor almost never preempted a reader between the load and the store,
+   which is why it passed for a hundred and thirty milestones. */
 static void *rw_reader(void *arg) {
     (void)arg;
     for (int i = 0; i < 50; i++) {
         pthread_rwlock_rdlock(&rw);
-        readers_in++;
+        __atomic_add_fetch(&readers_in, 1, __ATOMIC_SEQ_CST);
         spin_for(200);
-        readers_in--;
+        __atomic_sub_fetch(&readers_in, 1, __ATOMIC_SEQ_CST);
         pthread_rwlock_unlock(&rw);
     }
     return 0;
@@ -136,7 +143,7 @@ static void *rw_writer(void *arg) {
     (void)arg;
     for (int i = 0; i < 50; i++) {
         pthread_rwlock_wrlock(&rw);
-        if (readers_in != 0) {
+        if (__atomic_load_n(&readers_in, __ATOMIC_SEQ_CST) != 0) {
             writer_saw_reader = 1;
         }
         spin_for(200);

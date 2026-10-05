@@ -63,12 +63,20 @@ fi
 rm -f "$LINK"
 ln -s "$FORK" "$LINK"
 
+# The Mac this runs on, in Chromium's words: the host toolchain below and
+# Dawn's Go directory both follow it. arm64 -> clang_arm64 and mac-arm64,
+# x86_64 -> clang_x64 and mac-amd64. See tools/chromium-host.sh.
+HOST_WORDS=$("$ROOT/tools/chromium-host.sh") || exit 1
+read -r HOST_CPU HOST_GO_DIR <<< "$HOST_WORDS"
+
 # Tint, which is Dawn's shader compiler, generates part of its own source with
 # a Go program, and Dawn looks for the toolchain at a path inside its own
 # checkout rather than on PATH. The checkout ships linux-amd64, linux-arm64
 # and mac-arm64 directories with nothing in them, because gclient fetches the
 # real thing for a platform Dawn supports and this is a Mac host building for
-# an operating system Dawn has never heard of.
+# an operating system Dawn has never heard of. The host's own directory is
+# always made - mac-arm64 on Apple Silicon, mac-amd64 on an Intel Mac - and
+# the other is filled only if the checkout already has it.
 #
 # A symlink to the host's own Go is the whole fix, and it is here rather than
 # made by hand in the checkout because a hand-made file in a gitignored tree is
@@ -78,7 +86,7 @@ if [ -d "$SRC/third_party/dawn/tools/golang" ]; then
   if [ -n "$GOBIN" ]; then
     for arch in mac-arm64 mac-amd64; do
       if [ -d "$SRC/third_party/dawn/tools/golang/$arch" ] ||
-         [ "$arch" = "mac-arm64" ]; then
+         [ "$arch" = "$HOST_GO_DIR" ]; then
         mkdir -p "$SRC/third_party/dawn/tools/golang/$arch/bin"
         ln -sf "$GOBIN" "$SRC/third_party/dawn/tools/golang/$arch/bin/go"
       fi
@@ -273,7 +281,7 @@ cat > "$OUT/args.gn" <<ARGS
 target_os = "linux"
 target_cpu = "x64"
 custom_toolchain = "//lean_os/toolchain:x64"
-host_toolchain = "//build/toolchain/mac:clang_arm64"
+host_toolchain = "//build/toolchain/mac:clang_$HOST_CPU"
 lean_os_cc = "$CC"
 lean_os_cxx = "$CXX"
 lean_os_ar = "$AR"

@@ -5,7 +5,13 @@
 
 #define CHUNK (64u * 1024 * 1024)
 
-#define MAX_CHUNKS 128
+/* A ceiling, so a machine with far more memory than this expects stops
+   rather than running until the harness gives up. It was 128 - 8 GiB - when
+   a process had 128 mappings in all (M102) and no harness gave a guest more
+   than 4 GiB. Since M156 the region table grows to 65536, and the ThinkPad's
+   shape is 16 GiB: there [m102] reported "more memory than this test was
+   built to exhaust" and panicked the battery. 1024 chunks is 64 GiB. */
+#define MAX_CHUNKS 1024
 
 int main(void) {
     unsigned long touched_bytes = 0;

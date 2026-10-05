@@ -44,6 +44,34 @@ OVMF_VARS=build/ovmf/OVMF_VARS.fd
 [ -f "$OVMF_CODE" ] || ./tools/build-ovmf.sh || exit 1
 [ -f "$IMAGE" ] || { echo "browser-test: no image at $IMAGE - run make first" >&2; exit 1; }
 
+# Whether the browser is on this image, read off the image on this side by
+# the reader the interactive suite decides its skips with - so the machine's
+# "[m169] ... not on this image - skipped" can be checked against something
+# other than the machine. Until the kernel's switch read the program with a
+# reader that may answer "absent", that line was unreachable and an image
+# without a browser panicked instead; a skip is only a pass when the host
+# agrees there was nothing to run. 0 present, 1 absent, 2 unreadable.
+python3 tools/qemu_input.py has --image "$IMAGE" /bin/chromiumshell >/dev/null
+ON_IMAGE=$?
+# Absent is a skip only on a host that never built the browser. Where
+# content_shell has been built - the path tools/install-browser.sh installs
+# from - an image without it is M113's failure, not a valid image: a `make all`
+# recreated the disk after the browser went on, and the skip would hide that
+# the next person to touch the kernel gets a Browser icon that opens nothing.
+# Refused before booting, with what puts it back.
+SHELL_BIN="build/chromium/src/out/${LEANOS_CHROMIUM_OUT:-LeanOS}/content_shell"
+if [ "$ON_IMAGE" -eq 1 ] && [ -f "$SHELL_BIN" ]; then
+  echo "FAIL: this host has built the browser ($SHELL_BIN) and $IMAGE does not have"
+  echo "      /bin/chromiumshell - the image was recreated after it was installed"
+  echo "      (M113). make browser-if-built puts it back."
+  exit 1
+fi
+case "$ON_IMAGE" in
+  0) echo "[harness] /bin/chromiumshell is on $IMAGE" ;;
+  1) echo "[harness] /bin/chromiumshell is not on $IMAGE - expecting the machine to say it skipped" ;;
+  *) echo "[harness] could not read $IMAGE's filesystem here - trusting the machine's word on what it has" ;;
+esac
+
 OVMF_VARS_RUNTIME=build/ovmf/OVMF_VARS_browser.fd
 cp "$OVMF_VARS" "$OVMF_VARS_RUNTIME"
 : > "$LOG"
@@ -80,8 +108,24 @@ wait "$QEMU_PID" 2>/dev/null
 
 if grep -q "\[m169\] /bin/chromiumshell is not on this image" "$LOG"; then
   grep -E "^\[m169\]" "$LOG" | tail -2
+  if [ "$ON_IMAGE" -eq 0 ]; then
+    echo "FAIL: the machine says /bin/chromiumshell is not on this image, and it is - see $LOG"
+    exit 1
+  fi
+  if grep -q "KERNEL PANIC" "$LOG"; then
+    grep -E "KERNEL PANIC" "$LOG" | tail -2
+    echo "FAIL: the machine skipped the browser and then panicked - see $LOG"
+    exit 1
+  fi
   echo "SKIP: this image has no browser on it."
   exit 0
+fi
+if [ "$ON_IMAGE" -eq 1 ]; then
+  grep -E "KERNEL PANIC" "$LOG" | tail -2
+  echo "FAIL: this image has no /bin/chromiumshell and the machine did not say it"
+  echo "      skipped - a missing optional program has to be a skip, not a panic"
+  echo "      or a hang (see $LOG)"
+  exit 1
 fi
 
 grep -E "^\[m169\]" "$LOG" | tail -3

@@ -30,6 +30,7 @@
 #include "inter_process_communication/timerfd.h"
 #include "inter_process_communication/epoll.h"
 #include "inter_process_communication/memfd.h"
+#include "architecture/x86_64/memfd_region_tag.h"
 #include "os_poll.h"
 #include "drivers/block_device.h"
 #include "memory_management/file_mapping.h"
@@ -286,20 +287,45 @@ static uint64_t clock_now_ns(void) {
    loops or reports a partial count, so a chunk is all it ever needed. */
 #define UNIX_STAGING_CHUNK 4096
 
-static long sys_write(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4, uint64_t a5, uint64_t a6) {
-    (void)a4;
-    (void)a5;
-    (void)a6;
-    if (fd >= MAX_FILE_DESCRIPTORS || !user_range_ok(buffer, length, 0)) {
-        return -1;
+/* M225 (fd-use-holds): fdget and fdput. Every call that USES a descriptor
+   takes it here first - a copy of the slot, with a reference of the call's
+   own when another thread shares the table - and gives it back with
+   done_with_descriptor on every way out, so a sibling thread's close() in
+   the middle of the call cannot free the object under it. What a call does
+   with the object goes through the copy it returns, never through the slot
+   again: a slot re-read after a wait could name nothing, or something else.
+   See file_descriptor_get for what is counted and what a closed descriptor
+   means to a call already using it. Null when fd names nothing open. */
+static file_descriptor_slot_t *use_descriptor(uint64_t fd, file_descriptor_use_t *use) {
+    if (fd >= MAX_FILE_DESCRIPTORS ||
+        file_descriptor_get(scheduler_current(), (int)fd, use) != 0) {
+        return (file_descriptor_slot_t *)0;
     }
-    file_descriptor_slot_t *slot = &scheduler_current()->descriptor_table->slots[fd];
+    return &use->slot;
+}
+
+/* An uncounted use - a table nobody else names - has nothing to give back,
+   and does not pay for finding the current task a second time (an
+   interrupts-off section of its own) to learn that. */
+static void done_with_descriptor(file_descriptor_use_t *use) {
+    if (use->counted) {
+        file_descriptor_put(scheduler_current(), use);
+    }
+}
+
+static int copy_log_piece_from_user(char *to, const char *from, size_t length) {
+    return copy_from_user(to, (uint64_t)from, length);
+}
+
+static long write_to_descriptor(file_descriptor_slot_t *slot, uint64_t buffer, uint64_t length) {
     const char *s = (const char *)buffer;
     if (slot->type == FILE_DESCRIPTOR_STDOUT) {
-        for (uint64_t i = 0; i < length; i++) {
-            kernel_log_putc(s[i]);
-        }
-        return (long)length;
+        /* Staged, then a piece at a time under one hold of the log's lock.
+           It was kernel_log_putc per byte - a lock taken and dropped per
+           character - so on eight cores two programs' lines were spliced
+           into each other a character at a time, and a battery marker that
+           had been printed was never found. */
+        return kernel_log_write_from(s, (size_t)length, copy_log_piece_from_user);
     }
     if (slot->type == FILE_DESCRIPTOR_PIPE_WRITE) {
         return pipe_write(slot->pipe, s, (size_t)length, slot->nonblock);
@@ -409,14 +435,24 @@ static long sys_write(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4
     return -1;
 }
 
-static long sys_read(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4, uint64_t a5, uint64_t a6) {
+static long sys_write(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4;
     (void)a5;
     (void)a6;
-    if (fd >= MAX_FILE_DESCRIPTORS || !user_range_ok(buffer, length, 1)) {
+    if (fd >= MAX_FILE_DESCRIPTORS || !user_range_ok(buffer, length, 0)) {
         return -1;
     }
-    file_descriptor_slot_t *slot = &scheduler_current()->descriptor_table->slots[fd];
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
+        return -1;
+    }
+    long result = write_to_descriptor(slot, buffer, length);
+    done_with_descriptor(&use);
+    return result;
+}
+
+static long read_from_descriptor(file_descriptor_slot_t *slot, uint64_t buffer, uint64_t length) {
     char *destination = (char *)buffer;
     if (slot->type == FILE_DESCRIPTOR_STDIN) {
         uint64_t n = 0;
@@ -551,36 +587,60 @@ static long sys_read(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4,
     return -1;
 }
 
+static long sys_read(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    if (fd >= MAX_FILE_DESCRIPTORS || !user_range_ok(buffer, length, 1)) {
+        return -1;
+    }
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
+        return -1;
+    }
+    long result = read_from_descriptor(slot, buffer, length);
+    done_with_descriptor(&use);
+    return result;
+}
+
+/* On success the caller owns `use` and gives it back. */
 static long pfile_slot(uint64_t fd, uint64_t buffer, uint64_t length,
-                       int64_t offset, int write, file_descriptor_slot_t **out_slot) {
+                       int64_t offset, int write, file_descriptor_use_t *use) {
     if (fd >= MAX_FILE_DESCRIPTORS || !user_range_ok(buffer, length, write ? 0 : 1)) {
         return -1;
     }
     if (offset < 0) {
         return -1;
     }
-    file_descriptor_slot_t *slot = &scheduler_current()->descriptor_table->slots[fd];
-    if (slot->type != FILE_DESCRIPTOR_FILE) {
-        return slot->type == FILE_DESCRIPTOR_NONE ? -1 : -OS_ERROR_SPIPE;
-    }
-    if (slot->file->is_directory) {
+    file_descriptor_slot_t *slot = use_descriptor(fd, use);
+    if (!slot) {
         return -1;
     }
-    *out_slot = slot;
-    return 0;
+    long error = 0;
+    if (slot->type != FILE_DESCRIPTOR_FILE) {
+        error = -OS_ERROR_SPIPE;
+    } else if (slot->file->is_directory) {
+        error = -1;
+    }
+    if (error != 0) {
+        done_with_descriptor(use);
+    }
+    return error;
 }
 
 static long sys_pread(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t offset,
                       uint64_t a5, uint64_t a6) {
     (void)a5;
     (void)a6;
-    file_descriptor_slot_t *slot = NULL;
-    long error = pfile_slot(fd, buffer, length, (int64_t)offset, 0, &slot);
+    file_descriptor_use_t use;
+    long error = pfile_slot(fd, buffer, length, (int64_t)offset, 0, &use);
     if (error != 0) {
         return error;
     }
-    int64_t n = virtual_file_system_handle_read(slot->file->handle, (char *)buffer, (size_t)length,
-                                (uint32_t)offset);
+    int64_t n = virtual_file_system_handle_read(use.slot.file->handle, (char *)buffer,
+                                                (size_t)length, (uint32_t)offset);
+    done_with_descriptor(&use);
     return n < 0 ? -1 : (long)n;
 }
 
@@ -588,20 +648,22 @@ static long sys_pwrite(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t o
                        uint64_t a5, uint64_t a6) {
     (void)a5;
     (void)a6;
-    file_descriptor_slot_t *slot = NULL;
-    long error = pfile_slot(fd, buffer, length, (int64_t)offset, 1, &slot);
+    file_descriptor_use_t use;
+    long error = pfile_slot(fd, buffer, length, (int64_t)offset, 1, &use);
     if (error != 0) {
         return error;
     }
-    if (!slot->file->writable) {
-        return -1;
+    const open_file_t *of = use.slot.file;
+    long result = -1;
+    if (of->writable) {
+        int64_t n = virtual_file_system_handle_write(of->handle, (const char *)buffer,
+                                                     (size_t)length, (uint32_t)offset);
+        if (n >= 0 && !(of->synchronous && virtual_file_system_sync() != 0)) {
+            result = (long)n;
+        }
     }
-    int64_t n = virtual_file_system_handle_write(slot->file->handle, (const char *)buffer,
-                                 (size_t)length, (uint32_t)offset);
-    if (n >= 0 && slot->file->synchronous && virtual_file_system_sync() != 0) {
-        return -1;
-    }
-    return n < 0 ? -1 : (long)n;
+    done_with_descriptor(&use);
+    return result;
 }
 
 static long sys_exit(uint64_t code, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -610,6 +672,7 @@ static long sys_exit(uint64_t code, uint64_t a2, uint64_t a3, uint64_t a4, uint6
     (void)a4;
     (void)a5;
     (void)a6;
+    scheduler_begin_exit(scheduler_current());
     scheduler_kill_thread_group(scheduler_current());
     task_exit_with_code((int)code);
 }
@@ -701,10 +764,9 @@ static long sys_thread_create(uint64_t entry, uint64_t arg, uint64_t stack_top,
     }
     task_t *self = scheduler_current();
     task_t *t = process_spawn_thread(self->name, entry, entry_rsp, arg);
-    if (t) {
-        k_memcpy(t->program, self->program, sizeof(t->program));
-    }
-    return t ? (long)t->id : -1;
+    /* M225: the id from the spawn's own record - by now the thread may have
+       run, ended and been joined by a sibling, and its slot be another's. */
+    return t ? (long)scheduler_last_spawn((uint32_t *)0) : -1;
 }
 
 static long sys_thread_detach(uint64_t thread_id, uint64_t a2, uint64_t a3, uint64_t a4,
@@ -1029,10 +1091,11 @@ static long sys_spawn(uint64_t path_pointer, uint64_t argument_pointer, uint64_t
         }
         task_t *it = process_spawnve_capped(iname, iimage, (size_t)isize, shifted,
                                             envp, icaps);
+        long it_id = it ? (long)scheduler_last_spawn((uint32_t *)0) : 0;
         kfree(iimage);
         kfree(arg);
         kfree(envbuf);
-        return it ? (long)it->id : SPAWN_ERROR_NO_MEMORY;
+        return it ? it_id : SPAWN_ERROR_NO_MEMORY;
     }
 
     if (!elf_validate(image, (size_t)size)) {
@@ -1056,13 +1119,16 @@ static long sys_spawn(uint64_t path_pointer, uint64_t argument_pointer, uint64_t
     }
     task_t *t = process_spawnve_capped(name, image, (size_t)size, argv, envp,
                                        caps_for_spawn_path(path));
+    /* M225: from the spawn's record, not the task - a sibling thread's
+       wait(-1) may already have reaped a child that ended at once. */
+    long id = t ? (long)scheduler_last_spawn((uint32_t *)0) : 0;
     kfree(image);
     kfree(arg);
     kfree(envbuf);
     if (!t) {
         return SPAWN_ERROR_NO_MEMORY;
     }
-    return t->id;
+    return id;
 }
 
 static long sys_wait(uint64_t pid_argument, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -1084,7 +1150,7 @@ static long sys_wait(uint64_t pid_argument, uint64_t a2, uint64_t a3, uint64_t a
                     continue;
                 }
                 any_children = 1;
-                if (t->state == TASK_TERMINATED) {
+                if (scheduler_process_has_ended(t)) {
                     t->reaped = 1;
                     int pid = t->id;
                     scheduler_reap_slot(t);
@@ -1099,15 +1165,18 @@ static long sys_wait(uint64_t pid_argument, uint64_t a2, uint64_t a3, uint64_t a
     }
 
     task_t *t = scheduler_task_by_id((int)pid_argument);
-    if (!t) {
+    /* M225: not the kernel's tasks unless the kernel asks, and not itself. */
+    if (!scheduler_may_wait_for(self, t)) {
         return -1;
     }
     /* M206: the slot can be reaped from under this wait - by the sweep a
        spawn runs - and given to a new task, whose id is not this one. Waiting
        on the slot would then wait on the newcomer and reap it. */
-    while (t->state != TASK_TERMINATED && t->id == (int)pid_argument) {
+    /* M225: until the PROCESS has ended - its leader and every thread it
+       had (scheduler_process_has_ended) - not just the task named. */
+    while (!scheduler_process_has_ended(t) && t->id == (int)pid_argument) {
         uint64_t seq = scheduler_event_sequence();
-        if (t->state == TASK_TERMINATED || t->id != (int)pid_argument) {
+        if (scheduler_process_has_ended(t) || t->id != (int)pid_argument) {
             break;
         }
         scheduler_block_on_sequence((const void *)t, clock_monotonic_ms() + 200, seq);
@@ -1285,51 +1354,13 @@ static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint6
     (void)a6;
     /* M224: three refusals, told apart. They were all -1, and kill(2)'s
        caller asks which: ESRCH is how anything - Node's process.kill, a
-       shell's `kill %1` - learns a process is gone rather than protected. */
+       shell's `kill %1` - learns a process is gone rather than protected.
+       M225: who a pid names is scheduler_kill's to decide - a kernel task
+       is nobody's target but the kernel's, and process group 0 is nobody. */
     if ((long)sig < 0 || sig > SIG_MAX) {
         return -OS_ERROR_INVALID;
     }
-
-    if ((long)pid <= 0) {
-        task_t *self_g = scheduler_current();
-        int target_pgid = ((long)pid == 0) ? self_g->pgid : (int)(-(long)pid);
-        int delivered = 0;
-        int refused = 0;
-        int total = scheduler_task_count();
-        for (int i = 0; i < total; i++) {
-            task_t *m = scheduler_task_by_slot(i);
-            if (!m || m->pgid != target_pgid || m->state == TASK_TERMINATED ||
-                m->state == TASK_FREE) {
-                continue;
-            }
-            if (!may_signal(self_g, m)) {
-                refused++;
-                continue;
-            }
-            delivered++;
-            if (sig != 0) {
-                scheduler_raise_signal(m, (int)sig);
-            }
-        }
-        if (delivered > 0) {
-            return 0;
-        }
-        return refused ? -OS_ERROR_PERMISSION : -OS_ERROR_SEARCH;
-    }
-
-    task_t *t = scheduler_task_by_id((int)pid);
-    if (!t || t->state == TASK_TERMINATED) {
-        return -OS_ERROR_SEARCH;
-    }
-    task_t *self = scheduler_current();
-    if (!may_signal(self, t)) {
-        return -OS_ERROR_PERMISSION;
-    }
-    if (sig == 0) {
-        return 0;
-    }
-    scheduler_raise_signal(t, (int)sig);
-    return 0;
+    return scheduler_kill(scheduler_current(), (long)pid, (int)sig, may_signal);
 }
 
 /* Numbering a descriptor is claiming it. The lowest free slot used to be
@@ -1342,25 +1373,32 @@ static long sys_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4, uint6
    tracker stopped the browser with "Crashing due to FD ownership violation"
    before it drew a pixel. The claim is a compare-and-swap from NONE to
    RESERVED, so exactly one claimant wins each slot, and the caller either
-   fills it or gives it back. */
+   fills it (install_file_descriptor) or gives it back. M225: the claim and
+   the rest of the slot protocol live with the table in scheduler.c, where a
+   host test can run them on several threads at once. */
 static int claim_file_descriptor(task_t *t, int from) {
-    for (int i = from; i < MAX_FILE_DESCRIPTORS; i++) {
-        file_descriptor_type_t *type = &t->descriptor_table->slots[i].type;
-        file_descriptor_type_t expected = FILE_DESCRIPTOR_NONE;
-        if (*type == FILE_DESCRIPTOR_NONE &&
-            __atomic_compare_exchange_n(type, &expected, FILE_DESCRIPTOR_RESERVED, 0,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
-            return i;
-        }
-    }
-    return -1;
+    return file_descriptor_claim(t->descriptor_table, from);
 }
 
 static void unclaim_file_descriptor(task_t *t, int fd) {
-    if (fd >= 0 && t->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_RESERVED) {
-        __atomic_store_n(&t->descriptor_table->slots[fd].type, FILE_DESCRIPTOR_NONE,
-                         __ATOMIC_RELEASE);
-    }
+    file_descriptor_unclaim(t->descriptor_table, fd);
+}
+
+/* M225: a claimed slot is filled in one step under the table's lock, so a
+   sibling copying or closing it sees either nothing or the whole of it -
+   never a type whose object is not written yet. The reference the caller
+   holds on `object` passes to the slot. */
+static void install_file_descriptor(task_t *t, int fd, file_descriptor_type_t type,
+                                    void *object, int cloexec, int nonblock,
+                                    int writable) {
+    file_descriptor_slot_t slot;
+    k_memset(&slot, 0, sizeof(slot));
+    slot.type = type;
+    slot.pipe = (struct pipe *)object;
+    slot.cloexec = cloexec ? 1 : 0;
+    slot.nonblock = nonblock ? 1 : 0;
+    slot.writable = writable ? 1 : 0;
+    file_descriptor_install(t->descriptor_table, fd, &slot);
 }
 
 static long sys_pipe(uint64_t file_descriptors_out_pointer, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -1387,12 +1425,8 @@ static long sys_pipe(uint64_t file_descriptors_out_pointer, uint64_t a2, uint64_
         unclaim_file_descriptor(self, write_file_descriptor);
         return -1;
     }
-    self->descriptor_table->slots[read_file_descriptor].type = FILE_DESCRIPTOR_PIPE_READ;
-    self->descriptor_table->slots[read_file_descriptor].cloexec = 0;
-    self->descriptor_table->slots[read_file_descriptor].pipe = p;
-    self->descriptor_table->slots[write_file_descriptor].type = FILE_DESCRIPTOR_PIPE_WRITE;
-    self->descriptor_table->slots[write_file_descriptor].cloexec = 0;
-    self->descriptor_table->slots[write_file_descriptor].pipe = p;
+    install_file_descriptor(self, read_file_descriptor, FILE_DESCRIPTOR_PIPE_READ, p, 0, 0, 0);
+    install_file_descriptor(self, write_file_descriptor, FILE_DESCRIPTOR_PIPE_WRITE, p, 0, 0, 0);
 
     out[0] = read_file_descriptor;
     out[1] = write_file_descriptor;
@@ -1442,10 +1476,14 @@ static long sys_fsync(uint64_t fd, uint64_t a2, uint64_t a3,
     (void)a4;
     (void)a5;
     (void)a6;
-    if (fd >= MAX_FILE_DESCRIPTORS) {
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
         return -1;
     }
-    if (scheduler_current()->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_FILE) {
+    int is_file = slot->type == FILE_DESCRIPTOR_FILE;
+    done_with_descriptor(&use);
+    if (!is_file) {
         return -1;
     }
     /* M194: with a journal a write lands in memory and the disk's answer
@@ -1587,28 +1625,25 @@ static long sys_fdpath(uint64_t fd, uint64_t out_pointer, uint64_t out_length,
     (void)a4;
     (void)a5;
     (void)a6;
-    if (fd >= MAX_FILE_DESCRIPTORS) {
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
         return -1;
     }
-    task_t *self = scheduler_current();
-    if (self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_FILE || !self->descriptor_table->slots[fd].file) {
-        return -1;
+    long result = -1;
+    const char *p = (slot->type == FILE_DESCRIPTOR_FILE && slot->file) ? slot->file->path
+                                                                       : (const char *)0;
+    if (p && p[0] == '/') {
+        uint64_t n = 0;
+        while (p[n]) {
+            n++;
+        }
+        if (out_length >= n + 1 && copy_to_user(out_pointer, p, n + 1) == 0) {
+            result = (long)n;
+        }
     }
-    const char *p = self->descriptor_table->slots[fd].file->path;
-    if (p[0] != '/') {
-        return -1;
-    }
-    uint64_t n = 0;
-    while (p[n]) {
-        n++;
-    }
-    if (out_length < n + 1) {
-        return -1;
-    }
-    if (copy_to_user(out_pointer, p, n + 1) != 0) {
-        return -1;
-    }
-    return (long)n;
+    done_with_descriptor(&use);
+    return result;
 }
 
 /* Resource limits. The whole reason these are system calls rather than a
@@ -1787,35 +1822,31 @@ static long sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a3, uint64_t a4
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *self = scheduler_current();
-    if (fd < MAX_FILE_DESCRIPTORS && self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_MEMFD) {
-        if (!self->descriptor_table->slots[fd].writable) {
-            return -1;
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
+        return -1;
+    }
+    long result = -1;
+    if (slot->type == FILE_DESCRIPTOR_MEMFD) {
+        if (slot->writable) {
+            result = memfd_truncate(slot->memfd, length);
         }
-        return memfd_truncate(self->descriptor_table->slots[fd].memfd, length);
+    } else if (slot->type == FILE_DESCRIPTOR_FILE && has_cap(CAP_FS_WRITE)) {
+        open_file_t *of = slot->file;
+        if (of && of->writable && length <= (uint64_t)LEANFS_MAX_FILE_SIZE) {
+            result = virtual_file_system_handle_truncate_to(of->handle, (uint32_t)length);
+        }
     }
-    if (!has_cap(CAP_FS_WRITE)) {
-        return -1;
-    }
-    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_FILE) {
-        return -1;
-    }
-    open_file_t *of = self->descriptor_table->slots[fd].file;
-    if (!of || !of->writable) {
-        return -1;
-    }
-    if (length > (uint64_t)LEANFS_MAX_FILE_SIZE) {
-        return -1;
-    }
-    return virtual_file_system_handle_truncate_to(of->handle, (uint32_t)length);
+    done_with_descriptor(&use);
+    return result;
 }
 
-static tty_t *tty_for_file_descriptor(task_t *self, uint64_t fd, int *pty_number) {
+/* The terminal a held descriptor reaches, if any: the console, or the pty
+   behind an open file - which the caller holds for the length of the call,
+   so the handle that names the pty stays open while it is used. */
+static tty_t *tty_for_file_descriptor(const file_descriptor_slot_t *slot, int *pty_number) {
     *pty_number = -1;
-    if (fd >= MAX_FILE_DESCRIPTORS) {
-        return NULL;
-    }
-    file_descriptor_slot_t *slot = &self->descriptor_table->slots[fd];
     if (slot->type == FILE_DESCRIPTOR_STDIN || slot->type == FILE_DESCRIPTOR_STDOUT) {
         return tty_console();
     }
@@ -1825,21 +1856,12 @@ static tty_t *tty_for_file_descriptor(task_t *self, uint64_t fd, int *pty_number
     return NULL;
 }
 
-static long sys_ioctl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
-                      uint64_t a5, uint64_t a6) {
-    (void)a4;
-    (void)a5;
-    (void)a6;
-    task_t *self = scheduler_current();
-
+static long ioctl_on(task_t *self, const file_descriptor_slot_t *slot, uint64_t command,
+                     uint64_t arg) {
     /* FIONREAD is not a terminal question - it is asked of pipes and sockets
        far more often - so it is answered before the tty lookup rather than
        inside it. The number is the one poll already has to know. */
     if (command == FIONREAD) {
-        if (fd >= MAX_FILE_DESCRIPTORS) {
-            return -1;
-        }
-        file_descriptor_slot_t *slot = &self->descriptor_table->slots[fd];
         int bytes = -1;
         switch (slot->type) {
         case FILE_DESCRIPTOR_PIPE_READ:
@@ -1873,7 +1895,7 @@ static long sys_ioctl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
     }
 
     int pty_number = -1;
-    tty_t *t = tty_for_file_descriptor(self, fd, &pty_number);
+    tty_t *t = tty_for_file_descriptor(slot, &pty_number);
     if (!t) {
         return -1;
     }
@@ -1967,34 +1989,29 @@ static long sys_ioctl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
     }
 }
 
+static long sys_ioctl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
+                      uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
+        return -1;
+    }
+    long result = ioctl_on(scheduler_current(), slot, command, arg);
+    done_with_descriptor(&use);
+    return result;
+}
+
 static long sys_setpgid(uint64_t pid_argument, uint64_t pgid_argument, uint64_t a3,
                         uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3;
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *self = scheduler_current();
-    int pid = (int)pid_argument;
-    int pgid = (int)pgid_argument;
-
-    task_t *t = (pid == 0) ? self : scheduler_task_by_id(pid);
-    if (!t || t->state == TASK_TERMINATED || t->state == TASK_FREE) {
-        return -1;
-    }
-    if (t != self && t->parent_id != self->tgid) {
-        return -1;
-    }
-    if (pgid == 0) {
-        pgid = t->id;
-    }
-    if (pgid != t->id) {
-        task_t *leader = scheduler_task_by_id(pgid);
-        if (!leader || leader->sid != t->sid) {
-            return -1;
-        }
-    }
-    t->pgid = pgid;
-    return 0;
+    return scheduler_set_process_group(scheduler_current(), (int)pid_argument,
+                                       (int)pgid_argument);
 }
 
 static long sys_setsid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
@@ -2021,7 +2038,7 @@ static long sys_getsid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4,
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *t = (pid == 0) ? scheduler_current() : scheduler_task_by_id((int)pid);
+    task_t *t = scheduler_task_for_pid_argument((int)pid);
     if (!t) {
         return -1;
     }
@@ -2034,7 +2051,12 @@ static long sys_getpgid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4, uin
     (void)a4;
     (void)a5;
     (void)a6;
-    task_t *t = scheduler_task_by_id((int)pid);
+    /* M225: getpgid(0) is the caller's group, as getsid(0) already was. It
+       was the KERNEL task's - pid 0 is a real id here - and getpgrp() is
+       getpgid(0), so every program on the machine was told it was in group
+       0; that was true only while programs the kernel started shared the
+       kernel's group. */
+    task_t *t = scheduler_task_for_pid_argument((int)pid);
     if (!t) {
         return -1;
     }
@@ -2251,12 +2273,8 @@ static long sys_pipe_open(uint64_t name_pointer, uint64_t file_descriptors_out_p
         unclaim_file_descriptor(self, write_file_descriptor);
         return -1;
     }
-    self->descriptor_table->slots[read_file_descriptor].type = FILE_DESCRIPTOR_PIPE_READ;
-    self->descriptor_table->slots[read_file_descriptor].cloexec = 0;
-    self->descriptor_table->slots[read_file_descriptor].pipe = p;
-    self->descriptor_table->slots[write_file_descriptor].type = FILE_DESCRIPTOR_PIPE_WRITE;
-    self->descriptor_table->slots[write_file_descriptor].cloexec = 0;
-    self->descriptor_table->slots[write_file_descriptor].pipe = p;
+    install_file_descriptor(self, read_file_descriptor, FILE_DESCRIPTOR_PIPE_READ, p, 0, 0, 0);
+    install_file_descriptor(self, write_file_descriptor, FILE_DESCRIPTOR_PIPE_WRITE, p, 0, 0, 0);
 
     out[0] = read_file_descriptor;
     out[1] = write_file_descriptor;
@@ -2286,14 +2304,14 @@ static long sys_pipe_poll(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, ui
     (void)a4;
     (void)a5;
     (void)a6;
-    if (fd >= MAX_FILE_DESCRIPTORS) {
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
         return -1;
     }
-    file_descriptor_slot_t *slot = &scheduler_current()->descriptor_table->slots[fd];
-    if (slot->type != FILE_DESCRIPTOR_PIPE_READ) {
-        return -1;
-    }
-    return (long)pipe_buffered(slot->pipe);
+    long result = slot->type == FILE_DESCRIPTOR_PIPE_READ ? (long)pipe_buffered(slot->pipe) : -1;
+    done_with_descriptor(&use);
+    return result;
 }
 
 static long sys_uptime_ms(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -2324,12 +2342,15 @@ static uint32_t slot_inode(const file_descriptor_slot_t *slot) {
     return st.inode;
 }
 
+/* POSIX's close rule, kept on purpose: closing ANY descriptor for a file
+   releases every record lock the PROCESS holds on it - whichever thread
+   took them and whichever descriptor they were taken through. */
 static void drop_record_locks(task_t *self, const file_descriptor_slot_t *slot) {
     if (slot->type != FILE_DESCRIPTOR_FILE || flock_count() == 0) {
         return;
     }
     uint32_t ino = slot_inode(slot);
-    if (ino && flock_release_file(ino, self->id) > 0) {
+    if (ino && flock_release_file(ino, scheduler_record_lock_owner(self)) > 0) {
         scheduler_wake_all(FLOCK_CHAN);
     }
 }
@@ -2343,15 +2364,6 @@ static long sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4, u
         return -1;
     }
     task_t *self = scheduler_current();
-    if (self->descriptor_table->slots[oldfd].type == FILE_DESCRIPTOR_NONE) {
-        return -1;
-    }
-    if (newfd == oldfd) {
-        return (long)newfd;
-    }
-    drop_record_locks(self, &self->descriptor_table->slots[newfd]);
-    file_descriptor_release(&self->descriptor_table->slots[newfd]);
-    self->descriptor_table->slots[newfd] = self->descriptor_table->slots[oldfd];
     /* "The FD_CLOEXEC flag associated with the new file descriptor shall be
        cleared" - POSIX, dup2(). Copying the whole slot carried it across
        instead, and the only way to see that is to dup2 a close-on-exec
@@ -2362,9 +2374,30 @@ static long sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4, u
        close-on-exec in the browser and dup2'd to a fixed number in the fork -
        so every child died in the same place, three rungs away from the cause.
        F_DUPFD is built on this call and inherits the fix; F_DUPFD_CLOEXEC
-       sets the flag again afterwards, which is why it was never wrong. */
-    self->descriptor_table->slots[newfd].cloexec = 0;
-    file_descriptor_retain(&self->descriptor_table->slots[newfd]);
+       sets the flag again afterwards, which is why it was never wrong.
+
+       M225: the copy, its reference and the replacement of what newfd held
+       are one step under the table's lock (descriptor_table_duplicate), and
+       what newfd held is let go of after it - a sibling closing oldfd at the
+       same moment can no longer drop the last reference between the copy
+       and the reference taken for it. */
+    file_descriptor_slot_t displaced;
+    int got = descriptor_table_duplicate(self->descriptor_table, (int)oldfd, (int)newfd, 0,
+                                         &displaced);
+    if (got == DESCRIPTOR_TABLE_BUSY) {
+        /* M225 (fd-use-holds): newfd is a number another thread has
+           claimed and not yet filled - between open()'s numbering and its
+           install. Linux answers EBUSY for exactly that window (dup2(2)),
+           and a bare -1 here left the C library to guess, which it did by
+           asking fstat and saying EBADF about a descriptor that was a moment
+           from being open. */
+        return -OS_ERROR_BUSY;
+    }
+    if (got < 0) {
+        return -1;
+    }
+    drop_record_locks(self, &displaced);
+    file_descriptor_release(&displaced);
     return (long)newfd;
 }
 
@@ -2378,11 +2411,20 @@ static long sys_close(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64
         return -1;
     }
     task_t *self = scheduler_current();
-    if (self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_NONE) {
+    /* M225: taken out of the slot under the table's lock, then let go of.
+       Two threads closing one descriptor at once both found it open and
+       both released it - one reference dropped twice, which freed a socket,
+       an eventfd or a memfd while another descriptor still counted on it.
+       Now one of them detaches it and the other is told it was not open;
+       and a slot another thread has claimed and not yet filled is not open
+       either (it used to be "closed", and its owner then filled a slot that
+       somebody else had been handed the same number for). */
+    file_descriptor_slot_t closing;
+    if (file_descriptor_detach(self->descriptor_table, (int)fd, &closing) != 0) {
         return -1;
     }
-    drop_record_locks(self, &self->descriptor_table->slots[fd]);
-    file_descriptor_release(&self->descriptor_table->slots[fd]);
+    drop_record_locks(self, &closing);
+    file_descriptor_release(&closing);
     return 0;
 }
 
@@ -2447,10 +2489,11 @@ static long sys_wait_nb(uint64_t pid_argument, uint64_t a2, uint64_t a3, uint64_
     (void)a5;
     (void)a6;
     task_t *t = scheduler_task_by_id((int)pid_argument);
-    if (!t) {
+    /* M225: SYS_wait's rule - see scheduler_may_wait_for. */
+    if (!scheduler_may_wait_for(scheduler_current(), t)) {
         return -1;
     }
-    if (t->state != TASK_TERMINATED) {
+    if (!scheduler_process_has_ended(t)) {
         return -2;
     }
     t->reaped = 1;
@@ -2516,15 +2559,18 @@ static long sys_pipe_reset(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, u
     (void)a4;
     (void)a5;
     (void)a6;
-    if (fd >= MAX_FILE_DESCRIPTORS) {
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
         return -1;
     }
-    file_descriptor_slot_t *slot = &scheduler_current()->descriptor_table->slots[fd];
-    if (slot->type != FILE_DESCRIPTOR_PIPE_READ && slot->type != FILE_DESCRIPTOR_PIPE_WRITE) {
-        return -1;
+    long result = -1;
+    if (slot->type == FILE_DESCRIPTOR_PIPE_READ || slot->type == FILE_DESCRIPTOR_PIPE_WRITE) {
+        pipe_reset(slot->pipe);
+        result = 0;
     }
-    pipe_reset(slot->pipe);
-    return 0;
+    done_with_descriptor(&use);
+    return result;
 }
 
 static long sys_keyboard_modifiers(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -2566,13 +2612,11 @@ static long sys_taskinfo(uint64_t buffer, uint64_t max_entries, uint64_t a3, uin
                  : (t->state == TASK_BLOCKED)    ? TASK_INFO_BLOCKED
                                                  : TASK_INFO_READY;
         e->exit_code = t->exit_code;
-        int file_descriptors = 0;
-        for (int f = 0; f < MAX_FILE_DESCRIPTORS; f++) {
-            if (t->descriptor_table->slots[f].type != FILE_DESCRIPTOR_NONE) {
-                file_descriptors++;
-            }
-        }
-        e->open_file_descriptors = file_descriptors;
+        /* M225: under the scheduler lock, and a task that has already let
+           its table go (every zombie) has none. This read a null table's
+           slots for a zombie, and the table of a task whose exit was freeing
+           it on another processor. */
+        e->open_file_descriptors = scheduler_open_descriptor_count(t);
         e->shared_memory_segments = shared_memory_count_by_owner(t->id);
         int n = 0;
         for (; t->name[n] && n < TASK_INFO_NAME_MAX - 1; n++) {
@@ -2721,43 +2765,52 @@ static long sys_open(uint64_t path_pointer, uint64_t flags, uint64_t a3, uint64_
     int source_fd = -1;
     if (process_file_descriptor_path(path, &source_fd)) {
         task_t *opener = scheduler_current();
-        file_descriptor_slot_t *source =
-            &opener->descriptor_table->slots[source_fd];
-        if (source->type == FILE_DESCRIPTOR_NONE ||
-            (flags & (OPEN_CREATE | OPEN_EXCL | OPEN_TRUNCATE))) {
+        if (flags & (OPEN_CREATE | OPEN_EXCL | OPEN_TRUNCATE)) {
             return -1;
         }
-        if (source->type == FILE_DESCRIPTOR_FILE) {
+        /* M225: a reference of this call's own on what the descriptor names,
+           taken under the table's lock. It was read straight out of the slot
+           and retained afterwards, so a sibling thread closing that
+           descriptor in between left the new one holding an object whose
+           last reference was already gone (or, for a file, a path read out
+           of an open file that had just been recycled). The held reference
+           becomes the new descriptor's, or is given back. */
+        file_descriptor_slot_t source;
+        if (file_descriptor_hold(opener->descriptor_table, source_fd, &source) != 0) {
+            return -1;
+        }
+        if (source.type == FILE_DESCRIPTOR_FILE) {
             /* A file on the disk has a name of its own, and reopening it
                through procfs gives a new file description with its own
                offset rather than a second reference to this one - which is
                what Linux does and what a program reading the same file twice
                expects. So this becomes an ordinary open of that path. */
-            if (!source->file || (writable && !source->file->writable)) {
+            if (!source.file || (writable && !source.file->writable)) {
+                file_descriptor_release(&source);
                 return -1;
             }
-            k_memcpy(path, source->file->path, OPEN_FILE_PATH_MAX);
+            k_memcpy(path, source.file->path, OPEN_FILE_PATH_MAX);
             path[OPEN_FILE_PATH_MAX - 1] = '\0';
+            file_descriptor_release(&source);
         } else {
             /* Everything else - a memfd, a pipe end, a socket - has no name
                but this one, so the new descriptor refers to the same object.
                Its access is what was asked for, bounded by what the
                descriptor being reopened holds. */
-            if (writable && source->type == FILE_DESCRIPTOR_MEMFD &&
-                !source->writable) {
+            if (writable && source.type == FILE_DESCRIPTOR_MEMFD && !source.writable) {
+                file_descriptor_release(&source);
                 return -1;
             }
             int fd = alloc_file_descriptor(opener);
             if (fd < 0) {
+                file_descriptor_release(&source);
                 return -1;
             }
-            opener->descriptor_table->slots[fd] = *source;
-            file_descriptor_retain(&opener->descriptor_table->slots[fd]);
-            opener->descriptor_table->slots[fd].cloexec =
-                (flags & OPEN_CLOEXEC) ? 1 : 0;
-            if (source->type == FILE_DESCRIPTOR_MEMFD) {
-                opener->descriptor_table->slots[fd].writable = writable ? 1 : 0;
+            source.cloexec = (flags & OPEN_CLOEXEC) ? 1 : 0;
+            if (source.type == FILE_DESCRIPTOR_MEMFD) {
+                source.writable = writable ? 1 : 0;
             }
+            file_descriptor_install(opener->descriptor_table, fd, &source);
             return fd;
         }
     }
@@ -2808,9 +2861,8 @@ static long sys_open(uint64_t path_pointer, uint64_t flags, uint64_t a3, uint64_
        of it writes through too. M223: Node maps WASI's sync flags to it, and a
        constant the kernel ignored would promise durability nothing provided. */
     of->synchronous = (flags & OPEN_SYNC) ? 1 : 0;
-    self->descriptor_table->slots[fd].type = FILE_DESCRIPTOR_FILE;
-    self->descriptor_table->slots[fd].cloexec = (flags & OPEN_CLOEXEC) ? 1 : 0;
-    self->descriptor_table->slots[fd].file = of;
+    install_file_descriptor(self, fd, FILE_DESCRIPTOR_FILE, of,
+                            (flags & OPEN_CLOEXEC) ? 1 : 0, 0, 0);
     return fd;
 }
 
@@ -2818,26 +2870,27 @@ static long sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence, uint64_t a4
     (void)a4;
     (void)a5;
     (void)a6;
-    if (fd >= MAX_FILE_DESCRIPTORS) {
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
         return -1;
     }
-    file_descriptor_slot_t *slot = &scheduler_current()->descriptor_table->slots[fd];
-    if (slot->type != FILE_DESCRIPTOR_FILE) {
-        return -1;
+    long result = -1;
+    if (slot->type == FILE_DESCRIPTOR_FILE && whence <= SEEK_END) {
+        int64_t base = 0;
+        if (whence == SEEK_CUR) {
+            base = (int64_t)slot->file->offset;
+        } else if (whence == SEEK_END) {
+            base = (int64_t)virtual_file_system_handle_size(slot->file->handle);
+        }
+        int64_t target = base + (int64_t)(int32_t)offset;
+        if (target >= 0 && target <= (int64_t)LEANFS_MAX_FILE_SIZE) {
+            slot->file->offset = (uint32_t)target;
+            result = (long)target;
+        }
     }
-    int64_t base;
-    switch (whence) {
-    case SEEK_SET: base = 0; break;
-    case SEEK_CUR: base = (int64_t)slot->file->offset; break;
-    case SEEK_END: base = (int64_t)virtual_file_system_handle_size(slot->file->handle); break;
-    default: return -1;
-    }
-    int64_t target = base + (int64_t)(int32_t)offset;
-    if (target < 0 || target > (int64_t)LEANFS_MAX_FILE_SIZE) {
-        return -1;
-    }
-    slot->file->offset = (uint32_t)target;
-    return (long)target;
+    done_with_descriptor(&use);
+    return result;
 }
 
 static long sys_stat(uint64_t path_pointer, uint64_t out_pointer, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -2873,10 +2926,7 @@ static int mmap_mergeable(const mmap_region_t *r, uint32_t prot, int handle,
 }
 
 static void region_tag_reference(uint32_t memfd_id, uint16_t memfd_gen) {
-    if (!memfd_id) {
-        return;
-    }
-    memfd_region_reference(memfd_by_tag(memfd_id - 1, memfd_gen));
+    memfd_region_tag_reference(memfd_id, memfd_gen);
 }
 
 static int mmap_slot_cmp_insert(task_t *t, uint64_t base, uint32_t pages, uint32_t prot,
@@ -3033,38 +3083,42 @@ static long sys_mmap(uint64_t address, uint64_t length, uint64_t prot, uint64_t 
         if ((offset & (PAGE_SIZE - 1)) != 0) {
             return -1;
         }
-        task_t *current = scheduler_current();
-        if (current->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_MEMFD) {
-            struct memfd *m = current->descriptor_table->slots[fd].memfd;
-            if (!shared) {
-                return -1;
-            }
+        /* M225: held while it is looked at and its region reference is taken
+           - a sibling thread closing the descriptor at this moment could
+           otherwise drop the memfd's last reference first, and the region
+           would be counted on a memfd that was gone. (fd-use-holds: and the
+           open file's handle is read off a held one too.) */
+        file_descriptor_use_t use;
+        file_descriptor_slot_t *held = use_descriptor((uint64_t)fd, &use);
+        if (!held) {
+            return -1;
+        }
+        if (held->type == FILE_DESCRIPTOR_MEMFD) {
+            struct memfd *m = held->memfd;
             uint64_t size = memfd_size(m);
             uint64_t want_end = offset + (uint64_t)length;
-            if (size == 0 || want_end < offset || want_end > size) {
-                return -1;
-            }
-            if ((prot & PROT_WRITE) &&
-                (!memfd_may_write(m) ||
-                 !current->descriptor_table->slots[fd].writable)) {
+            if (!shared || size == 0 || want_end < offset || want_end > size ||
+                ((prot & PROT_WRITE) && (!memfd_may_write(m) || !held->writable))) {
+                done_with_descriptor(&use);
                 return -1;
             }
             memfd_region_reference(m);
             memfd_id = memfd_slot(m) + 1;
             memfd_gen = memfd_generation(m);
+            done_with_descriptor(&use);
             file_page = (uint32_t)(offset / PAGE_SIZE);
             goto have_backing;
         }
-        if (current->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_FILE || !current->descriptor_table->slots[fd].file) {
+        int refused = held->type != FILE_DESCRIPTOR_FILE || !held->file ||
+                      (shared && (prot & PROT_WRITE) &&
+                       (!held->file->writable || !has_cap(CAP_FS_WRITE)));
+        if (!refused) {
+            handle = held->file->handle;
+        }
+        done_with_descriptor(&use);
+        if (refused) {
             return -1;
         }
-        if (shared && (prot & PROT_WRITE) && !current->descriptor_table->slots[fd].file->writable) {
-            return -1;
-        }
-        if (shared && (prot & PROT_WRITE) && !has_cap(CAP_FS_WRITE)) {
-            return -1;
-        }
-        handle = current->descriptor_table->slots[fd].file->handle;
         file_page = (uint32_t)(offset / PAGE_SIZE);
     } else {
         /* The descriptor is not looked at for an anonymous mapping - Linux's
@@ -3080,17 +3134,16 @@ static long sys_mmap(uint64_t address, uint64_t length, uint64_t prot, uint64_t 
             return -1;
         }
     }
-have_backing:
-    if (prot & ~(uint64_t)(PROT_READ | PROT_WRITE | PROT_EXEC)) {
-        return -1;
-    }
+have_backing:;
+    /* M225: from here a memfd mapping holds a region reference (memfd_id is
+       its tag), and every refusal gives it back - these three returned
+       without, and the memfd outlived its last descriptor. */
     uint64_t pages = (length + PAGE_SIZE - 1) / PAGE_SIZE;
-    if (pages == 0 || pages > (USER_MMAP_LIMIT - USER_MMAP_BASE) / PAGE_SIZE) {
-        return -1;
-    }
-
     task_t *self = scheduler_vm_owner(scheduler_current());
-    if (self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
+    if ((prot & ~(uint64_t)(PROT_READ | PROT_WRITE | PROT_EXEC)) ||
+        pages == 0 || pages > (USER_MMAP_LIMIT - USER_MMAP_BASE) / PAGE_SIZE ||
+        self->pml4_phys == virtual_memory_kernel_pml4_phys()) {
+        memfd_region_tag_unref(memfd_id, memfd_gen);
         return -1;
     }
 
@@ -3099,10 +3152,9 @@ have_backing:
        machine that stops. The memfd reference is dropped after the lock is
        given back - it is not table work, and the rule for this lock is that
        as little as possible happens underneath it. */
-    uint64_t region_flags = scheduler_regions_lock(self);
+    uint64_t region_flags = scheduler_regions_begin_change(self);
     uint64_t base = 0;
     int failed = 0;
-    int insert_failed = 0;
 
     if (flags & MAP_FIXED) {
         if ((address & (PAGE_SIZE - 1)) != 0) {
@@ -3133,14 +3185,17 @@ have_backing:
         mmap_slot_cmp_insert(self, base, (uint32_t)pages, (uint32_t)prot,
                              handle, file_page, shared, 1, memfd_id, memfd_gen) != 0) {
         failed = 1;
-        insert_failed = 1;
     }
-    scheduler_regions_unlock(self, region_flags);
+    scheduler_regions_end_change(self, region_flags);
 
     if (failed) {
-        if (insert_failed && memfd_id) {
-            memfd_region_unref(memfd_by_tag((uint8_t)(memfd_id - 1), memfd_gen));
-        }
+        /* M225: the region reference taken above goes back on EVERY way
+           out, by the whole tag. Only a failed insert gave it back, and
+           with the slot narrowed to 8 bits - past 256 memfds that was
+           another memfd's reference or nobody's - while a MAP_FIXED that was
+           refused, or an address space with no gap left, kept it for good:
+           the memfd and every page of it outlived its last descriptor. */
+        memfd_region_tag_unref(memfd_id, memfd_gen);
         return -1;
     }
 
@@ -3232,9 +3287,9 @@ static long sys_munmap(uint64_t address, uint64_t length, uint64_t a3, uint64_t 
         return -1;
     }
     task_t *self = scheduler_vm_owner(scheduler_current());
-    uint64_t region_flags = scheduler_regions_lock(self);
+    uint64_t region_flags = scheduler_regions_begin_change(self);
     long result = munmap_locked(self, address, end);
-    scheduler_regions_unlock(self, region_flags);
+    scheduler_regions_end_change(self, region_flags);
     return result;
 }
 
@@ -3322,9 +3377,10 @@ static int mmap_split_for(task_t *t, uint64_t address, uint64_t end) {
         if (mmap_slot_cmp_insert(t, cut, (uint32_t)((rend - cut) / PAGE_SIZE), prot,
                                  handle, fp, shared, 0, mid, mgen) != 0) {
             t->mmaps[i].pages = (uint32_t)((rend - rstart) / PAGE_SIZE);
-            if (mid) {
-                memfd_region_unref(memfd_by_tag((uint8_t)(mid - 1), mgen));
-            }
+            /* M225: the whole tag (memfd_region_tag.h): this took the
+               slot to 8 bits, which past 256 memfds was another memfd's
+               reference given back, or nobody's. */
+            memfd_region_tag_unref(mid, mgen);
             return -1;
         }
         i = -1;
@@ -3390,7 +3446,7 @@ static long sys_mprotect(uint64_t address, uint64_t length, uint64_t prot, uint6
            holding still, and the split in the middle MOVES the entries the
            third one then looks for. in_mmap and in_image cannot both be true,
            so the update that used to sit outside this branch belongs in it. */
-        uint64_t region_flags = scheduler_regions_lock(self);
+        uint64_t region_flags = scheduler_regions_begin_change(self);
         uint64_t covered = 0;
         for (uint32_t i = 0; i < self->mmap_capacity; i++) {
             if (self->mmaps[i].pages == 0) {
@@ -3420,7 +3476,7 @@ static long sys_mprotect(uint64_t address, uint64_t length, uint64_t prot, uint6
                 }
             }
         }
-        scheduler_regions_unlock(self, region_flags);
+        scheduler_regions_end_change(self, region_flags);
         if (refused) {
             return -1;
         }
@@ -3568,18 +3624,21 @@ static long sys_fstat(uint64_t fd, uint64_t out_pointer, uint64_t a3, uint64_t a
     (void)a4;
     (void)a5;
     (void)a6;
-    if (fd >= MAX_FILE_DESCRIPTORS) {
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
         return -1;
     }
-    file_descriptor_slot_t *slot = &scheduler_current()->descriptor_table->slots[fd];
     os_stat_t out;
     k_memset(&out, 0, sizeof(out));
+    int known = 1;
 
     switch (slot->type) {
     case FILE_DESCRIPTOR_FILE: {
         leanfs_stat_t st;
         if (virtual_file_system_handle_stat(slot->file->handle, &st) != 0) {
-            return -1;
+            known = 0;
+            break;
         }
         out.size = st.size;
         out.mtime = st.mtime;
@@ -3611,6 +3670,11 @@ static long sys_fstat(uint64_t fd, uint64_t out_pointer, uint64_t a3, uint64_t a
         out.kind = OS_STAT_CHR;
         break;
     default:
+        known = 0;
+        break;
+    }
+    done_with_descriptor(&use);
+    if (!known) {
         return -1;
     }
     return copy_to_user(out_pointer, &out, sizeof(out)) == 0 ? 0 : -1;
@@ -3660,12 +3724,18 @@ static long sys_dropcaps(uint64_t keep, uint64_t a2, uint64_t a3, uint64_t a4, u
     return (long)self->caps;
 }
 
-static struct socket *socket_for_file_descriptor(uint64_t fd) {
-    task_t *self = scheduler_current();
-    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_SOCKET) {
+/* M225 (fd-use-holds): the socket `fd` names, held in `use` for the caller
+   to give back - or null, holding nothing, when it names anything else. */
+static struct socket *socket_for_file_descriptor(uint64_t fd, file_descriptor_use_t *use) {
+    file_descriptor_slot_t *slot = use_descriptor(fd, use);
+    if (!slot) {
         return (struct socket *)0;
     }
-    return self->descriptor_table->slots[fd].sock;
+    if (slot->type != FILE_DESCRIPTOR_SOCKET) {
+        done_with_descriptor(use);
+        return (struct socket *)0;
+    }
+    return slot->sock;
 }
 
 static long install_socket_file_descriptor(struct socket *s) {
@@ -3675,9 +3745,7 @@ static long install_socket_file_descriptor(struct socket *s) {
         socket_unref(s);
         return -OS_ERROR_MFILE;
     }
-    self->descriptor_table->slots[fd].type = FILE_DESCRIPTOR_SOCKET;
-    self->descriptor_table->slots[fd].cloexec = 0;
-    self->descriptor_table->slots[fd].sock = s;
+    install_file_descriptor(self, fd, FILE_DESCRIPTOR_SOCKET, s, 0, 0, 0);
     return fd;
 }
 
@@ -3688,19 +3756,21 @@ static long install_unix_file_descriptor(struct unix_socket *u) {
         unix_socket_unref(u);
         return -OS_ERROR_MFILE;
     }
-    self->descriptor_table->slots[fd].type = FILE_DESCRIPTOR_UNIX;
-    self->descriptor_table->slots[fd].cloexec = 0;
-    self->descriptor_table->slots[fd].nonblock = 0;
-    self->descriptor_table->slots[fd].un = u;
+    install_file_descriptor(self, fd, FILE_DESCRIPTOR_UNIX, u, 0, 0, 0);
     return fd;
 }
 
-static struct unix_socket *unix_for_file_descriptor(uint64_t fd) {
-    task_t *self = scheduler_current();
-    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_UNIX) {
+/* The same for a unix socket. */
+static struct unix_socket *unix_for_file_descriptor(uint64_t fd, file_descriptor_use_t *use) {
+    file_descriptor_slot_t *slot = use_descriptor(fd, use);
+    if (!slot) {
         return (struct unix_socket *)0;
     }
-    return self->descriptor_table->slots[fd].un;
+    if (slot->type != FILE_DESCRIPTOR_UNIX) {
+        done_with_descriptor(use);
+        return (struct unix_socket *)0;
+    }
+    return slot->un;
 }
 
 static long sys_socket(uint64_t type, uint64_t domain, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -3743,13 +3813,13 @@ static long sys_unix_peer_credentials(uint64_t file_descriptor, uint64_t out_poi
     if (!user_range_ok(out_pointer, sizeof(os_ucred_t), 1)) {
         return -1;
     }
-    task_t *self = scheduler_current();
-    int fd = (int)file_descriptor;
-    if (fd < 0 || fd >= MAX_FILE_DESCRIPTORS ||
-        self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_UNIX) {
+    file_descriptor_use_t use;
+    struct unix_socket *u = unix_for_file_descriptor(file_descriptor, &use);
+    if (!u) {
         return -1;
     }
-    int pid = unix_socket_peer_pid(self->descriptor_table->slots[fd].un);
+    int pid = unix_socket_peer_pid(u);
+    done_with_descriptor(&use);
     if (pid < 0) {
         return -1;
     }
@@ -3774,33 +3844,22 @@ static long sys_socketpair(uint64_t type, uint64_t file_descriptors_pointer, uin
         return -1;
     }
     task_t *self = scheduler_current();
+    /* M225: both numbers are claimed and handed to the caller before either
+       slot is filled, so a failure gives back two claims - which nobody else
+       can touch - rather than closing two live descriptors by number, which
+       a sibling thread could already have closed or replaced. */
     int fa = alloc_file_descriptor(self);
-    if (fa >= 0) {
-        self->descriptor_table->slots[fa].type = FILE_DESCRIPTOR_UNIX;
-        self->descriptor_table->slots[fa].cloexec = 0;
-        self->descriptor_table->slots[fa].nonblock = 0;
-        self->descriptor_table->slots[fa].un = a;
-    }
-    int framebuffer = fa >= 0 ? alloc_file_descriptor(self) : -1;
-    if (framebuffer < 0) {
-        if (fa >= 0) {
-            file_descriptor_release(&self->descriptor_table->slots[fa]);
-        } else {
-            unix_socket_unref(a);
-        }
+    int fb = fa >= 0 ? alloc_file_descriptor(self) : -1;
+    int out[2] = {fa, fb};
+    if (fb < 0 || copy_to_user(file_descriptors_pointer, out, sizeof(out)) != 0) {
+        unclaim_file_descriptor(self, fa);
+        unclaim_file_descriptor(self, fb);
+        unix_socket_unref(a);
         unix_socket_unref(b);
         return -1;
     }
-    self->descriptor_table->slots[framebuffer].type = FILE_DESCRIPTOR_UNIX;
-    self->descriptor_table->slots[framebuffer].cloexec = 0;
-    self->descriptor_table->slots[framebuffer].nonblock = 0;
-    self->descriptor_table->slots[framebuffer].un = b;
-    int out[2] = {fa, framebuffer};
-    if (copy_to_user(file_descriptors_pointer, out, sizeof(out)) != 0) {
-        file_descriptor_release(&self->descriptor_table->slots[fa]);
-        file_descriptor_release(&self->descriptor_table->slots[framebuffer]);
-        return -1;
-    }
+    install_file_descriptor(self, fa, FILE_DESCRIPTOR_UNIX, a, 0, 0, 0);
+    install_file_descriptor(self, fb, FILE_DESCRIPTOR_UNIX, b, 0, 0, 0);
     return 0;
 }
 
@@ -3817,8 +3876,14 @@ static long sys_bindun(uint64_t fd, uint64_t name_pointer, uint64_t length, uint
     if (copy_un_name(name, name_pointer, length) != 0) {
         return -1;
     }
-    struct unix_socket *u = unix_for_file_descriptor(fd);
-    return u ? unix_socket_bind(u, name, (int)length) : -1;
+    file_descriptor_use_t use;
+    struct unix_socket *u = unix_for_file_descriptor(fd, &use);
+    if (!u) {
+        return -1;
+    }
+    long result = unix_socket_bind(u, name, (int)length);
+    done_with_descriptor(&use);
+    return result;
 }
 
 static long sys_connectun(uint64_t fd, uint64_t name_pointer, uint64_t length, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -3827,67 +3892,102 @@ static long sys_connectun(uint64_t fd, uint64_t name_pointer, uint64_t length, u
     if (copy_un_name(name, name_pointer, length) != 0) {
         return -1;
     }
-    struct unix_socket *u = unix_for_file_descriptor(fd);
-    return u ? unix_socket_connect(u, name, (int)length) : -1;
+    file_descriptor_use_t use;
+    struct unix_socket *u = unix_for_file_descriptor(fd, &use);
+    if (!u) {
+        return -1;
+    }
+    long result = unix_socket_connect(u, name, (int)length);
+    done_with_descriptor(&use);
+    return result;
 }
 
 #define UNIX_MESSAGE_STAGING UNIX_STAGING_CHUNK
 
+static void done_with_descriptors(file_descriptor_use_t *uses, int count) {
+    for (int i = count - 1; i >= 0; i--) {
+        done_with_descriptor(&uses[i]);
+    }
+}
+
+/* M225: every descriptor a message carries is HELD - a reference of this
+   call's own, taken under the table's lock - from the moment it is read out
+   of the table until the call returns. It was a plain copy of the slot that
+   unix_socket_send then retained, so a sibling thread closing one of them in
+   between dropped the last reference first and the message carried, and
+   later installed in the receiver, an object that was already gone. The
+   channel itself is held the same way, for the same reason. A reserved slot
+   (being filled in by another thread) is not something that can be sent: it
+   went out as one, and arrived as a slot nobody would ever fill.
+   (fd-use-holds: through use_descriptor, so an exit in the middle of a
+   blocked send gives the references back, and O_NONBLOCK is read off the
+   held channel rather than off a slot a sibling may have closed.) */
 static long sys_sendmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)flags; (void)a4; (void)a5; (void)a6;
-    task_t *self = scheduler_current();
     os_message_t message;
     if (copy_from_user(&message, message_pointer, sizeof(message)) != 0) {
-        return -1;
-    }
-    struct unix_socket *u = unix_for_file_descriptor(fd);
-    if (!u) {
         return -1;
     }
     if (message.nfds > UNIX_MAX_FILE_DESCRIPTORS) {
         return -1;
     }
+    file_descriptor_use_t channel_use;
+    struct unix_socket *u = unix_for_file_descriptor(fd, &channel_use);
+    if (!u) {
+        return -1;
+    }
+    int nonblock = channel_use.slot.nonblock;
     uint32_t length = message.length;
     if (length > UNIX_MESSAGE_STAGING) {
         if (unix_socket_type(u) == UNIX_SOCKET_SEQPACKET) {
+            done_with_descriptor(&channel_use);
             return -1;
         }
         length = UNIX_MESSAGE_STAGING;
     }
+    file_descriptor_use_t uses[UNIX_MAX_FILE_DESCRIPTORS];
     file_descriptor_slot_t slots[UNIX_MAX_FILE_DESCRIPTORS];
     int nfds = (int)message.nfds;
+    int held = 0;
+    long result = -1;
     if (nfds > 0) {
         int nums[UNIX_MAX_FILE_DESCRIPTORS];
         if (copy_from_user(nums, message.file_descriptors, (size_t)nfds * sizeof(int)) != 0) {
-            return -1;
+            goto out;
         }
-        for (int i = 0; i < nfds; i++) {
-            if (nums[i] < 0 || nums[i] >= MAX_FILE_DESCRIPTORS ||
-                self->descriptor_table->slots[nums[i]].type == FILE_DESCRIPTOR_NONE) {
-                return -1;
+        for (; held < nfds; held++) {
+            if (nums[held] < 0 || !use_descriptor((uint64_t)nums[held], &uses[held])) {
+                goto out;
             }
-            slots[i] = self->descriptor_table->slots[nums[i]];
+            slots[held] = uses[held].slot;
         }
     }
     uint8_t staging[UNIX_MESSAGE_STAGING];
     if (length && copy_from_user(staging, message.data, (size_t)length) != 0) {
-        return -1;
+        goto out;
     }
     for (;;) {
         scheduler_watch_begin();
         scheduler_watch_add((const void *)u);
         long n = unix_socket_send(u, staging, length, slots, nfds);
         if (n != 0 || (length == 0 && nfds == 0)) {
-            return n;
+            result = n;
+            goto out;
         }
-        if (self->descriptor_table->slots[fd].nonblock) {
-            return -OS_ERROR_AGAIN;
+        if (nonblock) {
+            result = -OS_ERROR_AGAIN;
+            goto out;
         }
         if (scheduler_signal_pending()) {
-            return -OS_ERROR_INTR;
+            result = -OS_ERROR_INTR;
+            goto out;
         }
         scheduler_watch_block(0);
     }
+out:
+    done_with_descriptors(uses, held);
+    done_with_descriptor(&channel_use);
+    return result;
 }
 
 static long sys_recvmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -3897,19 +3997,22 @@ static long sys_recvmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, u
     if (copy_from_user(&message, message_pointer, sizeof(message)) != 0) {
         return -1;
     }
-    struct unix_socket *u = unix_for_file_descriptor(fd);
-    if (!u) {
-        return -1;
-    }
     if (message.nfds > UNIX_MAX_FILE_DESCRIPTORS) {
         return -1;
     }
     if (message.length && !user_range_ok(message.data, message.length, 1)) {
         return -1;
     }
+    file_descriptor_use_t channel_use;
+    struct unix_socket *u = unix_for_file_descriptor(fd, &channel_use);
+    if (!u) {
+        return -1;
+    }
+    int nonblock = channel_use.slot.nonblock;
     uint32_t want = message.length > UNIX_MESSAGE_STAGING ? UNIX_MESSAGE_STAGING : message.length;
     uint8_t staging[UNIX_MESSAGE_STAGING];
     file_descriptor_slot_t slots[UNIX_MAX_FILE_DESCRIPTORS];
+    long result;
     for (;;) {
         scheduler_watch_begin();
         scheduler_watch_add((const void *)u);
@@ -3920,10 +4023,16 @@ static long sys_recvmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, u
             message.nfds = 0;
             message.flags = 0;
             copy_to_user(message_pointer, &message, sizeof(message));
-            return 0;
+            result = 0;
+            break;
         }
         if (n > 0 || nfds > 0) {
+            /* M225: numbered (claimed) first, copied out, and only then
+               installed - so a failed copy gives back claims nobody else can
+               touch, rather than closing by number descriptors a sibling
+               thread could already have closed or replaced. */
             int nums[UNIX_MAX_FILE_DESCRIPTORS];
+            file_descriptor_slot_t *kept[UNIX_MAX_FILE_DESCRIPTORS];
             int installed = 0;
             for (int i = 0; i < nfds; i++) {
                 int nfd = alloc_file_descriptor(self);
@@ -3932,9 +4041,7 @@ static long sys_recvmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, u
                     rflags |= OS_MESSAGE_CTRUNC;
                     continue;
                 }
-                self->descriptor_table->slots[nfd] = slots[i];
-                self->descriptor_table->slots[nfd].cloexec = 0;
-                self->descriptor_table->slots[nfd].nonblock = 0;
+                kept[installed] = &slots[i];
                 nums[installed++] = nfd;
             }
             message.nfds = (uint32_t)installed;
@@ -3944,22 +4051,31 @@ static long sys_recvmsg(uint64_t fd, uint64_t message_pointer, uint64_t flags, u
                  copy_to_user(message.file_descriptors, nums, (size_t)installed * sizeof(int)) == 0) &&
                 (n == 0 || copy_to_user(message.data, staging, (size_t)n) == 0) &&
                 copy_to_user(message_pointer, &message, sizeof(message)) == 0;
-            if (!copied) {
-                for (int i = 0; i < installed; i++) {
-                    file_descriptor_release(&self->descriptor_table->slots[nums[i]]);
+            for (int i = 0; i < installed; i++) {
+                if (copied) {
+                    kept[i]->cloexec = 0;
+                    kept[i]->nonblock = 0;
+                    file_descriptor_install(self->descriptor_table, nums[i], kept[i]);
+                } else {
+                    unclaim_file_descriptor(self, nums[i]);
+                    file_descriptor_release(kept[i]);
                 }
-                return -1;
             }
-            return n;
+            result = copied ? n : -1;
+            break;
         }
-        if (self->descriptor_table->slots[fd].nonblock) {
-            return -OS_ERROR_AGAIN;
+        if (nonblock) {
+            result = -OS_ERROR_AGAIN;
+            break;
         }
         if (scheduler_signal_pending()) {
-            return -OS_ERROR_INTR;
+            result = -OS_ERROR_INTR;
+            break;
         }
         scheduler_watch_block(0);
     }
+    done_with_descriptor(&channel_use);
+    return result;
 }
 
 static long sys_memfd_create(uint64_t name_pointer, uint64_t flags, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -3988,73 +4104,94 @@ static long sys_memfd_create(uint64_t name_pointer, uint64_t flags, uint64_t a3,
         memfd_unref(m);
         return -1;
     }
-    self->descriptor_table->slots[fd].type = FILE_DESCRIPTOR_MEMFD;
-    self->descriptor_table->slots[fd].memfd = m;
-    self->descriptor_table->slots[fd].cloexec = (flags & OS_MFD_CLOEXEC) ? 1 : 0;
-    self->descriptor_table->slots[fd].nonblock = 0;
-    self->descriptor_table->slots[fd].writable = 1;
+    install_file_descriptor(self, fd, FILE_DESCRIPTOR_MEMFD, m,
+                            (flags & OS_MFD_CLOEXEC) ? 1 : 0, 0, 1);
     return fd;
 }
 
 static long sys_memfd_seal(uint64_t fd, uint64_t add, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3; (void)a4; (void)a5; (void)a6;
-    task_t *self = scheduler_current();
-    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_MEMFD) {
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
         return -1;
     }
-    struct memfd *m = self->descriptor_table->slots[fd].memfd;
-    if (add != 0 && memfd_add_seals(m, (uint32_t)add) != 0) {
-        return -1;
+    long result = -1;
+    if (slot->type == FILE_DESCRIPTOR_MEMFD &&
+        (add == 0 || memfd_add_seals(slot->memfd, (uint32_t)add) == 0)) {
+        result = (long)memfd_get_seals(slot->memfd);
     }
-    return (long)memfd_get_seals(m);
+    done_with_descriptor(&use);
+    return result;
 }
 
 static long sys_sockshut(uint64_t fd, uint64_t how, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a3; (void)a4; (void)a5; (void)a6;
-    struct unix_socket *u = unix_for_file_descriptor(fd);
-    if (u) {
-        return unix_socket_shutdown(u, (int)how);
-    }
-    /* M223: and a TCP connection, which until now had no shutdown at all -
-       so a half-close sent no FIN and the peer waited for an end-of-file
-       that never came. Node's socket.end() is exactly that call. */
-    struct socket *s = socket_for_file_descriptor(fd);
-    if (!s || how > 2) {
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
         return -1;
     }
-    return socket_shutdown(s, (int)how);
+    long result = -1;
+    if (slot->type == FILE_DESCRIPTOR_UNIX) {
+        result = unix_socket_shutdown(slot->un, (int)how);
+    } else if (slot->type == FILE_DESCRIPTOR_SOCKET && how <= 2) {
+        /* M223: and a TCP connection, which until now had no shutdown at
+           all - so a half-close sent no FIN and the peer waited for an
+           end-of-file that never came. Node's socket.end() is exactly that
+           call. */
+        result = socket_shutdown(slot->sock, (int)how);
+    }
+    done_with_descriptor(&use);
+    return result;
 }
 
 static long sys_listen(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-    struct unix_socket *u = unix_for_file_descriptor(fd);
-    if (u) {
-        return unix_socket_listen(u);
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
+        return -1;
     }
-    struct socket *s = socket_for_file_descriptor(fd);
-    return s ? socket_listen(s) : -1;
+    long result = -1;
+    if (slot->type == FILE_DESCRIPTOR_UNIX) {
+        result = unix_socket_listen(slot->un);
+    } else if (slot->type == FILE_DESCRIPTOR_SOCKET) {
+        result = socket_listen(slot->sock);
+    }
+    done_with_descriptor(&use);
+    return result;
 }
 
 static long sys_connect(uint64_t fd, uint64_t ip, uint64_t port, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4; (void)a5; (void)a6;
-    struct socket *s = socket_for_file_descriptor(fd);
-    if (!s || port == 0 || port > 0xFFFF) {
+    if (port == 0 || port > 0xFFFF) {
         return -1;
     }
-    return socket_connect(s, (uint32_t)ip, (uint16_t)port);
+    file_descriptor_use_t use;
+    struct socket *s = socket_for_file_descriptor(fd, &use);
+    if (!s) {
+        return -1;
+    }
+    long result = socket_connect(s, (uint32_t)ip, (uint16_t)port);
+    done_with_descriptor(&use);
+    return result;
 }
 
 static long sys_connstat(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-    struct socket *s = socket_for_file_descriptor(fd);
-    struct tcpcb *tcb = s ? socket_tcb(s) : (struct tcpcb *)0;
-    if (!tcb) {
+    file_descriptor_use_t use;
+    struct socket *s = socket_for_file_descriptor(fd, &use);
+    if (!s) {
         return -1;
     }
-    if (!tcp_connect_settled(tcb)) {
-        return 0;
+    struct tcpcb *tcb = socket_tcb(s);
+    long result = -1;
+    if (tcb) {
+        result = !tcp_connect_settled(tcb) ? 0 : tcp_state(tcb) == TCP_ESTABLISHED ? 1 : -1;
     }
-    return tcp_state(tcb) == TCP_ESTABLISHED ? 1 : -1;
+    done_with_descriptor(&use);
+    return result;
 }
 
 /* Which address a socket is on. getsockname(2) used to answer this out of
@@ -4067,40 +4204,47 @@ static long sys_sockname(uint64_t fd, uint64_t out_pointer, uint64_t peer,
     (void)a4; (void)a5; (void)a6;
     os_sockaddr_t out;
     k_memset(&out, 0, sizeof(out));
-    struct unix_socket *u = unix_for_file_descriptor(fd);
-    if (u) {
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
+        return -1;
+    }
+    long result = 0;
+    if (slot->type == FILE_DESCRIPTOR_UNIX) {
         /* A Unix-domain socket has a path rather than an address, and this
            call has nowhere to put one. Zeros, which is what binding one to
            nothing reports on every other system. */
-        return copy_to_user(out_pointer, &out, sizeof(out)) == 0 ? 0 : -1;
-    }
-    struct socket *s = socket_for_file_descriptor(fd);
-    if (!s) {
-        return -1;
-    }
-    if (peer) {
+    } else if (slot->type != FILE_DESCRIPTOR_SOCKET) {
+        result = -1;
+    } else if (peer) {
         /* M223: getpeername(2), which answered ENOTCONN for every socket.
            The peer is the TCP connection's remote end, and a socket without
            one - unconnected, listening, or a datagram socket - is the
            ENOTCONN case it always claimed. */
-        struct tcpcb *tcb = socket_tcb(s);
+        struct tcpcb *tcb = socket_tcb(slot->sock);
         if (!tcb || tcp_remote_port(tcb) == 0 || tcp_state(tcb) == TCP_LISTEN) {
-            return -2;
+            result = -2;
+        } else {
+            out.ip = tcp_remote_ip(tcb);
+            out.port = tcp_remote_port(tcb);
         }
-        out.ip = tcp_remote_ip(tcb);
-        out.port = tcp_remote_port(tcb);
-        return copy_to_user(out_pointer, &out, sizeof(out)) == 0 ? 0 : -1;
+    } else {
+        out.ip = socket_local_ip(slot->sock);
+        out.port = socket_local_port(slot->sock);
     }
-    out.ip = socket_local_ip(s);
-    out.port = socket_local_port(s);
+    done_with_descriptor(&use);
+    if (result != 0) {
+        return result;
+    }
     return copy_to_user(out_pointer, &out, sizeof(out)) == 0 ? 0 : -1;
 }
 
-static long sys_accept(uint64_t fd, uint64_t from_pointer, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
-    (void)a3; (void)a4; (void)a5; (void)a6;
-    struct unix_socket *ulistener = unix_for_file_descriptor(fd);
-    if (ulistener) {
-        struct unix_socket *uconn = unix_socket_accept(ulistener);
+/* The listener is held for the whole wait, as Linux holds it: a sibling's
+   close() does not wake an accept() blocked on the socket, and the
+   connection it then takes is installed as ever. */
+static long accept_on(const file_descriptor_slot_t *slot, uint64_t from_pointer) {
+    if (slot->type == FILE_DESCRIPTOR_UNIX) {
+        struct unix_socket *uconn = unix_socket_accept(slot->un);
         if (!uconn) {
             return -1;
         }
@@ -4113,11 +4257,10 @@ static long sys_accept(uint64_t fd, uint64_t from_pointer, uint64_t a3, uint64_t
         }
         return install_unix_file_descriptor(uconn);
     }
-    struct socket *listener = socket_for_file_descriptor(fd);
-    if (!listener) {
+    if (slot->type != FILE_DESCRIPTOR_SOCKET) {
         return -1;
     }
-    struct socket *conn = socket_accept(listener);
+    struct socket *conn = socket_accept(slot->sock);
     if (!conn) {
         return -1;
     }
@@ -4132,6 +4275,18 @@ static long sys_accept(uint64_t fd, uint64_t from_pointer, uint64_t a3, uint64_t
     return install_socket_file_descriptor(conn);
 }
 
+static long sys_accept(uint64_t fd, uint64_t from_pointer, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
+        return -1;
+    }
+    long result = accept_on(slot, from_pointer);
+    done_with_descriptor(&use);
+    return result;
+}
+
 /* The staging buffer is on the stack and the call is under the network lock,
    for the same two reasons everywhere else in this file: a static one is
    shared by every task that is in this call at once, and tcp_send walks the
@@ -4139,42 +4294,53 @@ static long sys_accept(uint64_t fd, uint64_t from_pointer, uint64_t a3, uint64_t
    both right; these two had neither. */
 static long sys_send(uint64_t fd, uint64_t buffer, uint64_t length, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4; (void)a5; (void)a6;
-    struct socket *s = socket_for_file_descriptor(fd);
-    struct tcpcb *tcb = s ? socket_tcb(s) : (struct tcpcb *)0;
-    if (!tcb || length > TCP_MAX_MSS) {
-        if (!tcb) {
-            return -1;
-        }
-        length = TCP_MAX_MSS;
-    }
-    uint8_t staging[TCP_MAX_MSS];
-    if (length && copy_from_user(staging, buffer, (size_t)length) != 0) {
+    file_descriptor_use_t use;
+    struct socket *s = socket_for_file_descriptor(fd, &use);
+    if (!s) {
         return -1;
     }
-    net_lock_acquire();
-    int n = tcp_send(tcb, staging, (uint16_t)length);
-    net_lock_release();
-    return n;
+    struct tcpcb *tcb = socket_tcb(s);
+    long result = -1;
+    if (tcb) {
+        if (length > TCP_MAX_MSS) {
+            length = TCP_MAX_MSS;
+        }
+        uint8_t staging[TCP_MAX_MSS];
+        if (!length || copy_from_user(staging, buffer, (size_t)length) == 0) {
+            net_lock_acquire();
+            result = tcp_send(tcb, staging, (uint16_t)length);
+            net_lock_release();
+        }
+    }
+    done_with_descriptor(&use);
+    return result;
 }
 
 static long sys_receive(uint64_t fd, uint64_t buffer, uint64_t max, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a4; (void)a5; (void)a6;
-    struct socket *s = socket_for_file_descriptor(fd);
-    struct tcpcb *tcb = s ? socket_tcb(s) : (struct tcpcb *)0;
-    if (!tcb) {
+    file_descriptor_use_t use;
+    struct socket *s = socket_for_file_descriptor(fd, &use);
+    if (!s) {
         return -1;
     }
-    if (max > TCP_MAX_MSS) {
-        max = TCP_MAX_MSS;
+    struct tcpcb *tcb = socket_tcb(s);
+    long result = -1;
+    if (tcb) {
+        if (max > TCP_MAX_MSS) {
+            max = TCP_MAX_MSS;
+        }
+        uint8_t staging[TCP_MAX_MSS];
+        net_lock_acquire();
+        int n = tcp_receive(tcb, staging, (uint16_t)max);
+        net_lock_release();
+        if (n <= 0) {
+            result = n;
+        } else {
+            result = copy_to_user(buffer, staging, (size_t)n) == 0 ? n : -1;
+        }
     }
-    uint8_t staging[TCP_MAX_MSS];
-    net_lock_acquire();
-    int n = tcp_receive(tcb, staging, (uint16_t)max);
-    net_lock_release();
-    if (n <= 0) {
-        return n;
-    }
-    return copy_to_user(buffer, staging, (size_t)n) == 0 ? n : -1;
+    done_with_descriptor(&use);
+    return result;
 }
 
 /* recv(2) with MSG_PEEK, which is not a convenience and is not something a
@@ -4193,19 +4359,8 @@ static long sys_receive(uint64_t fd, uint64_t buffer, uint64_t max, uint64_t a4,
 
    `dontwait` is MSG_DONTWAIT rather than the descriptor's own O_NONBLOCK,
    because recv(2) takes both and a caller may pass either. */
-static long sys_peek(uint64_t fd, uint64_t buffer, uint64_t max, uint64_t dontwait,
-                     uint64_t a5, uint64_t a6) {
-    (void)a5;
-    (void)a6;
-    task_t *self = scheduler_current();
-    if (!self || fd >= MAX_FILE_DESCRIPTORS) {
-        return -1;
-    }
-    if (max && !user_range_ok(buffer, max, 1)) {
-        return -1;
-    }
-    file_descriptor_slot_t *slot = &self->descriptor_table->slots[fd];
-    int nonblock = slot->nonblock || dontwait;
+static long peek_at(const file_descriptor_slot_t *slot, uint64_t buffer, uint64_t max,
+                    int nonblock) {
     /* recv(2) with a length of zero answers zero rather than waiting for a
        byte it has nowhere to put. */
     if (max == 0) {
@@ -4273,37 +4428,71 @@ static long sys_peek(uint64_t fd, uint64_t buffer, uint64_t max, uint64_t dontwa
     return -1;
 }
 
-static long sys_bind(uint64_t fd, uint64_t port, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
-    (void)a3; (void)a4; (void)a5; (void)a6;
-    struct socket *s = socket_for_file_descriptor(fd);
-    if (!s || port > 0xFFFF) {
+static long sys_peek(uint64_t fd, uint64_t buffer, uint64_t max, uint64_t dontwait,
+                     uint64_t a5, uint64_t a6) {
+    (void)a5;
+    (void)a6;
+    if (max && !user_range_ok(buffer, max, 1)) {
         return -1;
     }
-    return socket_bind(s, (uint16_t)port);
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
+        return -1;
+    }
+    long result = peek_at(slot, buffer, max, slot->nonblock || dontwait);
+    done_with_descriptor(&use);
+    return result;
+}
+
+static long sys_bind(uint64_t fd, uint64_t port, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    if (port > 0xFFFF) {
+        return -1;
+    }
+    file_descriptor_use_t use;
+    struct socket *s = socket_for_file_descriptor(fd, &use);
+    if (!s) {
+        return -1;
+    }
+    long result = socket_bind(s, (uint16_t)port);
+    done_with_descriptor(&use);
+    return result;
 }
 
 static long sys_sendto(uint64_t fd, uint64_t ip, uint64_t port, uint64_t buffer, uint64_t length, uint64_t a6) {
     (void)a6;
-    struct socket *s = socket_for_file_descriptor(fd);
-    if (!s || port > 0xFFFF || length > UDP_MAX_PAYLOAD) {
+    if (port > 0xFFFF || length > UDP_MAX_PAYLOAD) {
+        return -1;
+    }
+    file_descriptor_use_t use;
+    struct socket *s = socket_for_file_descriptor(fd, &use);
+    if (!s) {
         return -1;
     }
     static uint8_t staging[UDP_MAX_PAYLOAD];
-    if (length && copy_from_user(staging, buffer, (size_t)length) != 0) {
-        return -1;
+    long result = -1;
+    if (!length || copy_from_user(staging, buffer, (size_t)length) == 0) {
+        result = socket_sendto(s, (uint32_t)ip, (uint16_t)port, staging, (uint16_t)length);
     }
-    return socket_sendto(s, (uint32_t)ip, (uint16_t)port, staging, (uint16_t)length);
+    done_with_descriptor(&use);
+    return result;
 }
 
 static long sys_recvfrom(uint64_t fd, uint64_t buffer, uint64_t max, uint64_t from_pointer, uint64_t a5, uint64_t a6) {
     (void)a5; (void)a6;
-    struct socket *s = socket_for_file_descriptor(fd);
-    if (!s || max > SOCKET_MAX_DATAGRAM) {
+    if (max > SOCKET_MAX_DATAGRAM) {
+        return -1;
+    }
+    file_descriptor_use_t use;
+    struct socket *s = socket_for_file_descriptor(fd, &use);
+    if (!s) {
         return -1;
     }
     static uint8_t staging[SOCKET_MAX_DATAGRAM];
     os_sockaddr_t from = {0, 0, 0};
     int n = socket_recvfrom(s, staging, (uint16_t)max, &from.ip, &from.port);
+    done_with_descriptor(&use);
     if (n < 0) {
         return -1;
     }
@@ -4318,8 +4507,14 @@ static long sys_recvfrom(uint64_t fd, uint64_t buffer, uint64_t max, uint64_t fr
 
 static long sys_sockpoll(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-    struct socket *s = socket_for_file_descriptor(fd);
-    return s ? socket_pending(s) : -1;
+    file_descriptor_use_t use;
+    struct socket *s = socket_for_file_descriptor(fd, &use);
+    if (!s) {
+        return -1;
+    }
+    long result = socket_pending(s);
+    done_with_descriptor(&use);
+    return result;
 }
 
 static long sys_netconf(uint64_t out_pointer, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -4551,11 +4746,9 @@ static long sys_display(uint64_t operation, uint64_t a, uint64_t b, uint64_t a4,
     return result;
 }
 
-static int file_descriptor_is_ready(task_t *self, int fd) {
-    if (fd < 0 || fd >= MAX_FILE_DESCRIPTORS) {
-        return 0;
-    }
-    file_descriptor_slot_t *slot = &self->descriptor_table->slots[fd];
+/* Readiness of a HELD descriptor (M225, fd-use-holds): it read the slot and
+   asked its object, which a sibling's close could free between the two. */
+static int file_descriptor_is_ready(const file_descriptor_slot_t *slot) {
     switch (slot->type) {
     case FILE_DESCRIPTOR_STDIN:
         return keyboard_peek() ? 1 : 0;
@@ -4578,19 +4771,30 @@ static int file_descriptor_is_ready(task_t *self, int fd) {
     }
 }
 
-static uint32_t file_descriptor_epoll_mask_for(task_t *self, int fd, const void *object) {
-    if (fd < 0 || fd >= MAX_FILE_DESCRIPTORS) {
+static uint32_t epoll_mask_of(const file_descriptor_slot_t *slot);
+
+/* An epoll watch's events, asked of the descriptor it names - held for the
+   question, so the object compared against the watch's is the one asked. */
+static uint32_t file_descriptor_epoll_mask_for(int fd, const void *object) {
+    if (fd < 0) {
         return EPOLL_STALE;
     }
-    file_descriptor_slot_t *slot = &self->descriptor_table->slots[fd];
-    if (slot->type == FILE_DESCRIPTOR_NONE) {
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor((uint64_t)fd, &use);
+    if (!slot) {
         return EPOLL_STALE;
     }
-    if (object && slot->pipe != (struct pipe *)object) {
-        return EPOLL_STALE;
+    uint32_t m = EPOLL_STALE;
+    if (!object || slot->pipe == (struct pipe *)object) {
+        m = epoll_mask_of(slot);
     }
+    done_with_descriptor(&use);
+    return m;
+}
+
+static uint32_t epoll_mask_of(const file_descriptor_slot_t *slot) {
     uint32_t m = 0;
-    if (file_descriptor_is_ready(self, fd)) {
+    if (file_descriptor_is_ready(slot)) {
         m |= EPOLLIN;
     }
     switch (slot->type) {
@@ -4655,7 +4859,8 @@ static uint32_t file_descriptor_epoll_mask_for(task_t *self, int fd, const void 
 }
 
 static uint32_t epoll_mask_callback(void *context, int fd, const void *object) {
-    return file_descriptor_epoll_mask_for((task_t *)context, fd, object);
+    (void)context;
+    return file_descriptor_epoll_mask_for(fd, object);
 }
 
 static long install_file_descriptor_of(file_descriptor_type_t type, void *object, uint64_t flags) {
@@ -4670,10 +4875,9 @@ static long install_file_descriptor_of(file_descriptor_type_t type, void *object
         }
         return -1;
     }
-    self->descriptor_table->slots[fd].type = type;
-    self->descriptor_table->slots[fd].event = (struct eventfd *)object;
-    self->descriptor_table->slots[fd].cloexec = (flags & OS_FILE_DESCRIPTOR_CLOEXEC) ? 1 : 0;
-    self->descriptor_table->slots[fd].nonblock = (flags & OS_FILE_DESCRIPTOR_NONBLOCK) ? 1 : 0;
+    install_file_descriptor(self, fd, type, object,
+                            (flags & OS_FILE_DESCRIPTOR_CLOEXEC) ? 1 : 0,
+                            (flags & OS_FILE_DESCRIPTOR_NONBLOCK) ? 1 : 0, 0);
     return fd;
 }
 
@@ -4717,18 +4921,24 @@ static long sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_pointe
     if (copy_from_user(&want, new_pointer, sizeof(want)) != 0) {
         return -1;
     }
-    task_t *self = scheduler_current();
-    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_TIMER) {
-        return -1;
-    }
     if (flags & ~(uint64_t)OS_TFD_ABSTIME) {
         return -1;
     }
-    struct timerfd *t = self->descriptor_table->slots[fd].timer;
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
+        return -1;
+    }
+    int set = -1;
     int absolute = (flags & OS_TFD_ABSTIME) != 0;
     os_itimer_t had = {0, 0};
-    if (timerfd_settime(t, timer_clock_ns(t, absolute), absolute, want.value_ns,
-                        want.interval_ns, &had.value_ns, &had.interval_ns) != 0) {
+    if (slot->type == FILE_DESCRIPTOR_TIMER) {
+        struct timerfd *t = slot->timer;
+        set = timerfd_settime(t, timer_clock_ns(t, absolute), absolute, want.value_ns,
+                              want.interval_ns, &had.value_ns, &had.interval_ns);
+    }
+    done_with_descriptor(&use);
+    if (set != 0) {
         return -1;
     }
     if (old_pointer && copy_to_user(old_pointer, &had, sizeof(had)) != 0) {
@@ -4742,12 +4952,20 @@ static long sys_timerfd_gettime(uint64_t fd, uint64_t out_pointer, uint64_t a3, 
     if (!user_range_ok(out_pointer, sizeof(os_itimer_t), 1)) {
         return -1;
     }
-    task_t *self = scheduler_current();
-    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_TIMER) {
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
         return -1;
     }
+    int is_timer = slot->type == FILE_DESCRIPTOR_TIMER;
     os_itimer_t out = {0, 0};
-    timerfd_gettime(self->descriptor_table->slots[fd].timer, clock_now_ns(), &out.value_ns, &out.interval_ns);
+    if (is_timer) {
+        timerfd_gettime(slot->timer, clock_now_ns(), &out.value_ns, &out.interval_ns);
+    }
+    done_with_descriptor(&use);
+    if (!is_timer) {
+        return -1;
+    }
     return copy_to_user(out_pointer, &out, sizeof(out)) == 0 ? 0 : -1;
 }
 
@@ -4762,42 +4980,43 @@ static long sys_epoll_create(uint64_t flags, uint64_t a2, uint64_t a3, uint64_t 
 
 static long sys_epoll_control(uint64_t epfd, uint64_t op, uint64_t fd, uint64_t ev_pointer, uint64_t a5, uint64_t a6) {
     (void)a5; (void)a6;
-    task_t *self = scheduler_current();
     os_epoll_event_t ev = {0, 0, 0};
     if (op != EPOLL_CTL_DEL && copy_from_user(&ev, ev_pointer, sizeof(ev)) != 0) {
         return -1;
     }
-    if (epfd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[epfd].type != FILE_DESCRIPTOR_EPOLL) {
+    /* Both held: the set, and the descriptor whose object is written into
+       it - a watch registered for an object a sibling had just closed and
+       freed would compare equal to whatever the allocator put there next. */
+    file_descriptor_use_t set_use;
+    file_descriptor_slot_t *set = use_descriptor(epfd, &set_use);
+    if (!set) {
         return -1;
     }
-    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_NONE) {
-        return -1;
+    file_descriptor_use_t watched_use;
+    file_descriptor_slot_t *watched = use_descriptor(fd, &watched_use);
+    long result = -1;
+    if (set->type == FILE_DESCRIPTOR_EPOLL && watched && watched->type != FILE_DESCRIPTOR_EPOLL) {
+        struct epoll *ep = set->epoll;
+        result = epoll_control_set(ep, (int)op, (int)fd, (const void *)watched->pipe, ev.events,
+                                   ev.data);
+        if (result == 0) {
+            scheduler_wake_object(ep);
+        }
     }
-    if (self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_EPOLL) {
-        return -1;
+    if (watched) {
+        done_with_descriptor(&watched_use);
     }
-    const void *object = (const void *)self->descriptor_table->slots[fd].pipe;
-    struct epoll *ep = self->descriptor_table->slots[epfd].epoll;
-    long result = epoll_control_set(ep, (int)op, (int)fd, object, ev.events, ev.data);
-    if (result == 0) {
-        scheduler_wake_object(ep);
-    }
+    done_with_descriptor(&set_use);
     return result;
 }
 
-static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxevents, uint64_t timeout_ms, uint64_t a5, uint64_t a6) {
-    (void)a5; (void)a6;
-    task_t *self = scheduler_current();
-    if (maxevents == 0 || maxevents > EPOLL_MAX_WATCH) {
-        return -1;
-    }
-    if (!user_range_ok(out_pointer, maxevents * sizeof(os_epoll_event_t), 1)) {
-        return -1;
-    }
-    if (epfd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[epfd].type != FILE_DESCRIPTOR_EPOLL) {
-        return -1;
-    }
-    struct epoll *ep = self->descriptor_table->slots[epfd].epoll;
+/* The set is held for the whole wait, as Linux holds it: a sibling's close
+   of the epoll descriptor does not end a wait already on it. Each watched
+   descriptor is held only while it is asked (epoll_mask_callback, and the
+   timer deadlines below) - what is registered with the scheduler is an
+   address to be woken by, never dereferenced. */
+static long epoll_wait_on(struct epoll *ep, uint64_t out_pointer, uint64_t maxevents,
+                          uint64_t timeout_ms) {
     long timeout = (long)timeout_ms;
     uint64_t now = clock_monotonic_ms();
     uint64_t deadline = (timeout < 0) ? 0 : clock_deadline_ms((uint64_t)timeout);
@@ -4809,15 +5028,14 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxeven
         scheduler_watch_add(ep);
         int watched = epoll_objects(ep, watched_fds, watched_objects, EPOLL_MAX_WATCH);
         for (int i = 0; i < watched; i++) {
-            int fd = watched_fds[i];
-            if (fd >= 0 && fd < MAX_FILE_DESCRIPTORS &&
-                self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_STDIN) {
+            if (file_descriptor_peek_type(scheduler_current(), watched_fds[i]) ==
+                FILE_DESCRIPTOR_STDIN) {
                 scheduler_watch_add(SCHEDULER_INPUT_OBJECT);
             } else {
                 scheduler_watch_add(watched_objects[i]);
             }
         }
-        int n = epoll_scan(ep, epoll_mask_callback, self, evs, (int)maxevents);
+        int n = epoll_scan(ep, epoll_mask_callback, (void *)0, evs, (int)maxevents);
         if (n > 0) {
             scheduler_watch_end();
             if (copy_to_user(out_pointer, evs, (size_t)n * sizeof(epoll_ev_t)) != 0) {
@@ -4841,12 +5059,20 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxeven
         uint64_t park_until = deadline;
         for (int i = 0; i < watched; i++) {
             int fd = watched_fds[i];
-            if (fd < 0 || fd >= MAX_FILE_DESCRIPTORS ||
-                self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_TIMER ||
-                (const void *)self->descriptor_table->slots[fd].timer != watched_objects[i]) {
+            if (fd < 0 || file_descriptor_peek_type(scheduler_current(), fd) != FILE_DESCRIPTOR_TIMER) {
                 continue;
             }
-            long ms = timerfd_next_ms(self->descriptor_table->slots[fd].timer, clock_now_ns());
+            file_descriptor_use_t use;
+            file_descriptor_slot_t *slot = use_descriptor((uint64_t)fd, &use);
+            if (!slot) {
+                continue;
+            }
+            long ms = -1;
+            if (slot->type == FILE_DESCRIPTOR_TIMER &&
+                (const void *)slot->timer == watched_objects[i]) {
+                ms = timerfd_next_ms(slot->timer, clock_now_ns());
+            }
+            done_with_descriptor(&use);
             if (ms < 0) {
                 continue;
             }
@@ -4857,6 +5083,26 @@ static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxeven
         }
         scheduler_watch_block(park_until);
     }
+}
+
+static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxevents, uint64_t timeout_ms, uint64_t a5, uint64_t a6) {
+    (void)a5; (void)a6;
+    if (maxevents == 0 || maxevents > EPOLL_MAX_WATCH) {
+        return -1;
+    }
+    if (!user_range_ok(out_pointer, maxevents * sizeof(os_epoll_event_t), 1)) {
+        return -1;
+    }
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(epfd, &use);
+    if (!slot) {
+        return -1;
+    }
+    long result = slot->type == FILE_DESCRIPTOR_EPOLL
+                      ? epoll_wait_on(slot->epoll, out_pointer, maxevents, timeout_ms)
+                      : -1;
+    done_with_descriptor(&use);
+    return result;
 }
 
 /* M203: why each waitfds returned, for the stick log - see
@@ -4894,24 +5140,29 @@ static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint6
 
     for (;;) {
         scheduler_watch_begin();
-        for (uint64_t i = 0; i < count; i++) {
-            int fd = file_descriptors[i];
-            if (fd >= 0 && fd < MAX_FILE_DESCRIPTORS) {
-                if (self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_STDIN) {
-                    scheduler_watch_add(SCHEDULER_INPUT_OBJECT);
-                } else {
-                    scheduler_watch_add((const void *)self->descriptor_table->slots[fd].pipe);
-                }
-            }
-        }
         /* The pointer is not a descriptor, and its one reader ends this wait
            on movement below - so it watches input whatever it passed. */
         int reads_pointer = pointer_wakes(self);
         if (reads_pointer) {
             scheduler_watch_add(SCHEDULER_INPUT_OBJECT);
         }
+        /* M225 (fd-use-holds): each descriptor held while it is watched and
+           asked - its object is asked whether it is ready, and a sibling's
+           close could free it between reading the slot and asking. Watched
+           before asked, so a wake between the two is not lost. */
         for (uint64_t i = 0; i < count; i++) {
-            if (file_descriptor_is_ready(self, file_descriptors[i])) {
+            int fd = file_descriptors[i];
+            file_descriptor_use_t use;
+            file_descriptor_slot_t *slot = fd >= 0 ? use_descriptor((uint64_t)fd, &use)
+                                                   : (file_descriptor_slot_t *)0;
+            if (!slot) {
+                continue;
+            }
+            scheduler_watch_add(slot->type == FILE_DESCRIPTOR_STDIN ? SCHEDULER_INPUT_OBJECT
+                                                                    : (const void *)slot->pipe);
+            int ready = file_descriptor_is_ready(slot);
+            done_with_descriptor(&use);
+            if (ready) {
                 scheduler_watch_end();
                 WAITFDS_RETURN(WAITFDS_RETURN_READY, (long)i);
             }
@@ -5249,42 +5500,103 @@ static long sys_fork(isr_regs_t *regs) {
         return -1;
     }
 
-    if (vm_owner->env_block && vm_owner->env_length && vm_owner->env_count) {
-        if (scheduler_set_env(child, vm_owner->env_block, vm_owner->env_length,
-                              vm_owner->env_count) != 0) {
-            scheduler_raise_signal(child, SIGKILL);
-            return -1;
-        }
-    }
-
-    return (long)child->id;
+    /* M225: the child is runnable from the moment task_fork let go of the
+       lock, so nothing is read out of it or written into it from here: it
+       may already have run, ended, been reaped by a sibling's waitpid(-1)
+       and had its slot handed to somebody else. Its environment record was
+       given to it inside task_fork, and its id is the one task_fork wrote
+       down on this thread while the slot could not change. */
+    return (long)scheduler_last_spawn((uint32_t *)0);
 }
 
-static long sys_fcntl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
-                      uint64_t a5, uint64_t a6) {
-    (void)a4;
-    (void)a5;
-    (void)a6;
-    task_t *self = scheduler_current();
-    if (fd >= MAX_FILE_DESCRIPTORS || self->descriptor_table->slots[fd].type == FILE_DESCRIPTOR_NONE) {
+/* fcntl's record locks on a HELD open file. F_SETLKW can wait a long time,
+   and while it waits a sibling thread may close the descriptor - which, by
+   POSIX's close rule, gives back every lock the process has on the file. A
+   lock this call is granted after that would belong to a file the process
+   no longer has open, and nothing would ever give it back; Linux checks for
+   exactly this race once the lock is granted and undoes it
+   (fcntl_setlk's "close/fcntl race"), and so does this. */
+static long record_lock_on(task_t *self, uint64_t fd, const file_descriptor_slot_t *slot,
+                           uint64_t command, uint64_t arg) {
+    os_flock_t request;
+    if (slot->type != FILE_DESCRIPTOR_FILE ||
+        copy_from_user(&request, arg, sizeof(request)) != 0) {
         return -1;
     }
+    uint32_t ino = slot_inode(slot);
+    if (ino == 0) {
+        return -1;
+    }
+    int64_t start = request.start;
+    int64_t length = request.length;
+    if (request.whence == 1) {
+        start += (int64_t)slot->file->offset;
+    } else if (request.whence == 2) {
+        start += (int64_t)virtual_file_system_handle_size(slot->file->handle);
+    } else if (request.whence != 0) {
+        return -1;
+    }
+    if (length < 0) {
+        start += length;
+        length = -length;
+    }
+    if (start < 0 || (request.type != OS_FLOCK_RD && request.type != OS_FLOCK_WR &&
+                      request.type != OS_FLOCK_UNLCK)) {
+        return -1;
+    }
+    int owner = scheduler_record_lock_owner(self);
+    if (command == F_GETLK_COMMAND) {
+        os_flock_t ans;
+        flock_test(ino, owner, request.type, (uint64_t)start, (uint64_t)length, &ans);
+        return copy_to_user(arg, &ans, sizeof(ans)) == 0 ? 0 : -1;
+    }
+    for (;;) {
+        uint64_t seq = scheduler_event_sequence();
+        int r = flock_set(ino, owner, request.type, (uint64_t)start, (uint64_t)length);
+        if (r == 0) {
+            if (request.type == OS_FLOCK_UNLCK) {
+                scheduler_wake_all(FLOCK_CHAN);
+                return 0;
+            }
+            file_descriptor_use_t again;
+            file_descriptor_slot_t *now = use_descriptor(fd, &again);
+            int still_open = now && now->type == FILE_DESCRIPTOR_FILE && now->file == slot->file;
+            if (now) {
+                done_with_descriptor(&again);
+            }
+            if (!still_open) {
+                flock_set(ino, owner, OS_FLOCK_UNLCK, (uint64_t)start, (uint64_t)length);
+                scheduler_wake_all(FLOCK_CHAN);
+            }
+            return 0;
+        }
+        if (r != FLOCK_CONFLICT || command == F_SETLK_COMMAND) {
+            return r;
+        }
+        scheduler_block_on_sequence(FLOCK_CHAN, 0, seq);
+    }
+}
+
+static long fcntl_on(task_t *self, uint64_t fd, const file_descriptor_slot_t *slot,
+                     uint64_t command, uint64_t arg) {
     switch (command) {
     case F_GETFD_COMMAND:
-        return self->descriptor_table->slots[fd].cloexec ? FILE_DESCRIPTOR_CLOEXEC_BIT : 0;
+        return slot->cloexec ? FILE_DESCRIPTOR_CLOEXEC_BIT : 0;
     case F_SETFD_COMMAND:
-        self->descriptor_table->slots[fd].cloexec = (arg & FILE_DESCRIPTOR_CLOEXEC_BIT) ? 1 : 0;
-        return 0;
+        return file_descriptor_set_flags(self->descriptor_table, (int)fd,
+                                         (arg & FILE_DESCRIPTOR_CLOEXEC_BIT) ? 1 : 0, -1) == 0
+                   ? 0
+                   : -1;
     case F_GETFL_COMMAND: {
         long access;
-        switch (self->descriptor_table->slots[fd].type) {
+        switch (slot->type) {
         case FILE_DESCRIPTOR_STDIN:      access = OPEN_READ; break;
         case FILE_DESCRIPTOR_STDOUT:     access = OPEN_WRITE; break;
         case FILE_DESCRIPTOR_PIPE_READ:  access = OPEN_READ; break;
         case FILE_DESCRIPTOR_PIPE_WRITE: access = OPEN_WRITE; break;
         case FILE_DESCRIPTOR_FILE:
-            access = OPEN_READ | (self->descriptor_table->slots[fd].file->writable ? OPEN_WRITE : 0) |
-                     (self->descriptor_table->slots[fd].file->synchronous ? OPEN_SYNC : 0);
+            access = OPEN_READ | (slot->file->writable ? OPEN_WRITE : 0) |
+                     (slot->file->synchronous ? OPEN_SYNC : 0);
             break;
         case FILE_DESCRIPTOR_SOCKET:     access = OPEN_READ | OPEN_WRITE; break;
         case FILE_DESCRIPTOR_UNIX:       access = OPEN_READ | OPEN_WRITE; break;
@@ -5292,82 +5604,57 @@ static long sys_fcntl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
         case FILE_DESCRIPTOR_TIMER:      access = OPEN_READ; break;
         case FILE_DESCRIPTOR_EPOLL:      access = OPEN_READ; break;
         case FILE_DESCRIPTOR_MEMFD:
-            access = OPEN_READ |
-                     (self->descriptor_table->slots[fd].writable ? OPEN_WRITE : 0);
+            access = OPEN_READ | (slot->writable ? OPEN_WRITE : 0);
             break;
         default:            return -1;
         }
-        return access | (self->descriptor_table->slots[fd].nonblock ? OS_NONBLOCK_BIT : 0);
+        return access | (slot->nonblock ? OS_NONBLOCK_BIT : 0);
     }
     case F_SETFL_COMMAND:
-        self->descriptor_table->slots[fd].nonblock = (arg & OS_NONBLOCK_BIT) ? 1 : 0;
-        return 0;
+        return file_descriptor_set_flags(self->descriptor_table, (int)fd, -1,
+                                         (arg & OS_NONBLOCK_BIT) ? 1 : 0) == 0
+                   ? 0
+                   : -1;
     case F_DUPFD_COMMAND:
     case F_DUPFD_CLOEXEC_COMMAND: {
         if (arg >= MAX_FILE_DESCRIPTORS) {
             return -1;
         }
-        int i = claim_file_descriptor(self, (int)arg);
-        if (i < 0) {
-            return -1;
-        }
-        self->descriptor_table->slots[i] = self->descriptor_table->slots[fd];
-        self->descriptor_table->slots[i].cloexec = command == F_DUPFD_CLOEXEC_COMMAND ? 1 : 0;
-        file_descriptor_retain(&self->descriptor_table->slots[i]);
-        return (long)i;
+        /* M225: claimed, copied and referenced under the table's lock, so
+           a sibling closing `fd` at this moment cannot drop the object's
+           last reference between the copy and the new descriptor's. */
+        int i = descriptor_table_duplicate_lowest(self->descriptor_table, (int)fd, (int)arg,
+                                                  command == F_DUPFD_CLOEXEC_COMMAND);
+        return i < 0 ? -1 : (long)i;
     }
     case F_GETLK_COMMAND:
     case F_SETLK_COMMAND:
-    case F_SETLKW_COMMAND: {
-        os_flock_t request;
-        if (self->descriptor_table->slots[fd].type != FILE_DESCRIPTOR_FILE ||
-            copy_from_user(&request, arg, sizeof(request)) != 0) {
-            return -1;
-        }
-        uint32_t ino = slot_inode(&self->descriptor_table->slots[fd]);
-        if (ino == 0) {
-            return -1;
-        }
-        int64_t start = request.start;
-        int64_t length = request.length;
-        if (request.whence == 1) {
-            start += (int64_t)self->descriptor_table->slots[fd].file->offset;
-        } else if (request.whence == 2) {
-            start += (int64_t)virtual_file_system_handle_size(self->descriptor_table->slots[fd].file->handle);
-        } else if (request.whence != 0) {
-            return -1;
-        }
-        if (length < 0) {
-            start += length;
-            length = -length;
-        }
-        if (start < 0 || (request.type != OS_FLOCK_RD && request.type != OS_FLOCK_WR &&
-                          request.type != OS_FLOCK_UNLCK)) {
-            return -1;
-        }
-        if (command == F_GETLK_COMMAND) {
-            os_flock_t ans;
-            flock_test(ino, self->id, request.type, (uint64_t)start, (uint64_t)length, &ans);
-            return copy_to_user(arg, &ans, sizeof(ans)) == 0 ? 0 : -1;
-        }
-        for (;;) {
-            uint64_t seq = scheduler_event_sequence();
-            int r = flock_set(ino, self->id, request.type, (uint64_t)start, (uint64_t)length);
-            if (r == 0) {
-                if (request.type == OS_FLOCK_UNLCK) {
-                    scheduler_wake_all(FLOCK_CHAN);
-                }
-                return 0;
-            }
-            if (r != FLOCK_CONFLICT || command == F_SETLK_COMMAND) {
-                return r;
-            }
-            scheduler_block_on_sequence(FLOCK_CHAN, 0, seq);
-        }
-    }
+    case F_SETLKW_COMMAND:
+        return record_lock_on(self, fd, slot, command, arg);
     default:
         return -1;
     }
+}
+
+/* M225 (fd-use-holds): held for the whole call, as Linux's fcntl holds its
+   file - and "not open" means not live: a slot another thread has numbered
+   and not yet filled was open to F_GETFD (it answered 0) and to the record
+   lock commands. F_SETFD and F_SETFL on such a slot were already refused by
+   file_descriptor_set_flags; all three are EBADF on Linux, which is what
+   the C library makes of this -1. */
+static long sys_fcntl(uint64_t fd, uint64_t command, uint64_t arg, uint64_t a4,
+                      uint64_t a5, uint64_t a6) {
+    (void)a4;
+    (void)a5;
+    (void)a6;
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
+        return -1;
+    }
+    long result = fcntl_on(scheduler_current(), fd, slot, command, arg);
+    done_with_descriptor(&use);
+    return result;
 }
 
 static int wait_status_of(const task_t *t) {
@@ -5411,7 +5698,7 @@ static long sys_waitpid(uint64_t pid_argument, uint64_t status_pointer, uint64_t
             }
             any_children = 1;
             only = t;
-            if (t->state == TASK_TERMINATED) {
+            if (scheduler_process_has_ended(t)) {
                 int pid = t->id;
                 int status = wait_status_of(t);
                 t->reaped = 1;
@@ -5440,7 +5727,7 @@ static long sys_waitpid(uint64_t pid_argument, uint64_t status_pointer, uint64_t
                     continue;
                 }
                 any_children = 1;
-                if (t->state == TASK_TERMINATED) {
+                if (scheduler_process_has_ended(t)) {
                     int pid = t->id;
                     int status = wait_status_of(t);
                     t->reaped = 1;
@@ -5544,21 +5831,39 @@ static long sys_execve(isr_regs_t *regs) {
         return -1;
     }
 
+    /* M225 (fd-use-holds): the environment inherited is the PROCESS's
+       record, COPIED out under the scheduler lock (scheduler_duplicate_env)
+       as fork and spawn copy it. This pointed into the owner's block with no
+       lock - which an exec on the leader replaces, and the last member's
+       reap frees. A copy that cannot be made fails the exec rather than
+       starting the new program with no environment; a process that has none
+       allocates nothing. */
     const char *inherited[USER_ENV_MAX_VARS + 1];
     const char *const *effective = v.envp;
-    task_t *owner = scheduler_vm_owner(self);
-    if (!effective && owner && owner->env_block && owner->env_count) {
-        uint32_t n = 0;
-        uint32_t off = 0;
-        while (off < owner->env_length && n < USER_ENV_MAX_VARS) {
-            inherited[n++] = owner->env_block + off;
-            while (off < owner->env_length && owner->env_block[off]) {
+    char *own_env = (char *)0;
+    if (!effective) {
+        uint32_t own_length = 0;
+        uint32_t own_count = 0;
+        int no_memory = 0;
+        own_env = scheduler_duplicate_env(scheduler_vm_owner(self), &own_length, &own_count,
+                                          &no_memory);
+        if (no_memory) {
+            free_vectors(&v);
+            return -1;
+        }
+        if (own_env && own_count) {
+            uint32_t n = 0;
+            uint32_t off = 0;
+            while (off < own_length && n < USER_ENV_MAX_VARS) {
+                inherited[n++] = own_env + off;
+                while (off < own_length && own_env[off]) {
+                    off++;
+                }
                 off++;
             }
-            off++;
+            inherited[n] = (const char *)0;
+            effective = inherited;
         }
-        inherited[n] = (const char *)0;
-        effective = inherited;
     }
 
     uint64_t entry = 0;
@@ -5568,6 +5873,7 @@ static long sys_execve(isr_regs_t *regs) {
     if (not_cached) {
         uint8_t *image = (uint8_t *)kmalloc(st.size ? st.size : 1);
         if (!image) {
+            kfree(own_env);
             free_vectors(&v);
             return -1;
         }
@@ -5575,12 +5881,15 @@ static long sys_execve(isr_regs_t *regs) {
         if (size < 2 || (image[0] == '#' && image[1] == '!') ||
             !elf_validate(image, (size_t)size)) {
             kfree(image);
+            kfree(own_env);
             free_vectors(&v);
             return -1;
         }
         new_pml4 = process_build_address_space(image, (size_t)size, v.argv, effective, &entry);
         kfree(image);
     }
+    /* The new program's stack has its own copy by now. */
+    kfree(own_env);
     if (new_pml4 == 0) {
         free_vectors(&v);
         return -1;
@@ -5622,11 +5931,16 @@ static long sys_execve(isr_regs_t *regs) {
     scheduler_regions_release(self);
     self->fs_base = 0;
 
-    for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
-        if (self->descriptor_table->slots[i].cloexec) {
-            drop_record_locks(self, &self->descriptor_table->slots[i]);
-            file_descriptor_release(&self->descriptor_table->slots[i]);
-            self->descriptor_table->slots[i].type = FILE_DESCRIPTOR_NONE;
+    /* M225: each detached under the table's lock and let go of after it,
+       as close() does - a sibling thread may be closing or duplicating the
+       same descriptor right now. */
+    {
+        file_descriptor_slot_t closing;
+        int at = 0;
+        while ((at = descriptor_table_detach_cloexec(self->descriptor_table, at, &closing)) >= 0) {
+            drop_record_locks(self, &closing);
+            file_descriptor_release(&closing);
+            at++;
         }
     }
 
@@ -6188,6 +6502,13 @@ void syscall_handler(isr_regs_t *regs) {
     self->syscalls++;
 
     syscall_dispatch(regs);
+
+    /* M225 (fd-use-holds): every descriptor a call got, it put. The
+       outermost call only - one made inside another (none is, today) returns
+       with its caller's uses still rightly on the list. A load and a branch. */
+    if (outer == KERNEL_ACTIVITY_NONE && self->descriptor_uses) {
+        file_descriptor_uses_settled(self);
+    }
 
     self->kernel_activity = outer;
 

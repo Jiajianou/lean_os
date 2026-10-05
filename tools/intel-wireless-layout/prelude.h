@@ -25,7 +25,7 @@ typedef int bool;
 #define IEEE80211_MAX_SSID_LEN 32
 #define __force
 #define offsetofend(TYPE, MEMBER) (offsetof(TYPE, MEMBER) + sizeof(((TYPE *)0)->MEMBER))
-#define DECLARE_FLEX_ARRAY(T, name) T name[]
+#define DECLARE_FLEX_ARRAY(T, name) struct { struct { } __empty_##name; T name[]; }
 #define __counted_by(x)
 typedef uint64_t dma_addr_t;
 /* rs.h carries inline rate converters; the layout check never calls them,

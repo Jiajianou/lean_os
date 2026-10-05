@@ -93,8 +93,11 @@ enum {
 };
 
 static uint32_t buffer_cap_for(int kind) {
+    /* cmdline is large too: a command line is recorded up to
+       TASK_CMDLINE_MAX (4096), and the small buffer cut anything past 511
+       bytes of it short. */
     return (kind == P_PROFILE || kind == P_SYSCALLS || kind == P_INTERRUPTS ||
-            kind == P_CPUINFO)
+            kind == P_CPUINFO || kind == P_CMDLINE)
                ? PROCESS_BUFFER_LARGE
                : PROCESS_BUFFER_SMALL;
 }
@@ -274,19 +277,14 @@ static void generate(process_file_t *f, int kind, int pid) {
            argument and of nothing after it, and the reason every process a
            browser starts looked identical here: the only thing that tells a
            renderer from a network service is --type=, which is in argv. */
-        task_t *t = scheduler_task_by_id(pid);
-        uint32_t length = 0;
-        const char *block = t ? scheduler_cmdline(t, &length) : (const char *)0;
-        if (block) {
-            for (uint32_t i = 0; i < length && at < cap; i++) {
-                f->buffer[at++] = block[i];
-            }
-        } else if (t) {
-            at = put_string(f->buffer, at, cap, t->name);
-            if (at < cap) {
-                f->buffer[at++] = '\0';
-            }
-        }
+        /* M225 (process-lifetimes): copied under the scheduler lock rather
+           than read through a pointer to the owner's record - the process
+           ending on another processor freed that record at its reap, and
+           this read it afterwards. One byte is kept back for the NUL
+           generate() puts after every file; the loop here used to fill to
+           `cap` and that NUL went one past the buffer. */
+        int copied = scheduler_copy_cmdline(pid, f->buffer, cap - 1);
+        at = copied > 0 ? (uint32_t)copied : 0;
         break;
     }
     case P_EXE: {

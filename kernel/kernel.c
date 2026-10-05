@@ -27,6 +27,7 @@
 #include "drivers/pc_speaker.h"
 #include "drivers/pit.h"
 #include "drivers/rtc.h"
+#include "drivers/tick_clock.h"
 #include "drivers/xhci.h"
 #include "file_system/leanfs.h"
 #include "file_system/leanfs_format.h"
@@ -219,10 +220,25 @@ static long do_syscall4(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, uin
     return (long)ret;
 }
 
-static uint8_t *read_program(const char *path, size_t *out_size) {
+/* Two readers, because "not on this disk" means two different things here.
+
+   A program this kernel seeded a moment ago - everything in
+   embedded_programs, and the links made to them - being missing is a broken
+   filesystem, and read_program panics on it, naming the path. A payload that
+   one of the image's own optional steps installs (make browser, node-test.sh)
+   being missing is a valid image, and read_optional_program says so by
+   returning NULL. Each caller has to choose.
+
+   They used to be one function that panicked on both. The browser switch
+   (M169) and the node switch (M223) checked its result for NULL and printed a
+   skip that could never be reached, so a harness on a machine with no
+   Chromium checkout met a KERNEL PANIC where it should have met "skipped".
+   A file that is present but cannot be read, or cannot be held, is not an
+   absence, and both readers panic on it. */
+static uint8_t *read_optional_program(const char *path, size_t *out_size) {
     leanfs_stat_t st;
     if (virtual_file_system_stat(path, &st) != 0 || st.is_directory || st.size == 0) {
-        panic("read_program: a program this kernel just seeded is missing or empty");
+        return 0;
     }
     uint8_t *image = (uint8_t *)kmalloc(st.size);
     if (!image) {
@@ -235,25 +251,181 @@ static uint8_t *read_program(const char *path, size_t *out_size) {
     return image;
 }
 
+static uint8_t *read_program(const char *path, size_t *out_size) {
+    uint8_t *image = read_optional_program(path, out_size);
+    if (!image) {
+        panic_with_detail("read_program: a program this kernel just seeded is missing or empty",
+                          path);
+    }
+    return image;
+}
+
+/* M225: a self-test holds the children it starts by their IDS, read the
+   moment they are spawned - never by their task_t. A child of the kernel is
+   released by the sweep any spawn runs, on any processor, as soon as it has
+   terminated (nobody_will_wait), and its slot is the next spawn's: a task_t
+   kept past that point is somebody else's, or nobody's. Reading the exit
+   code out of it read a stranger's or a zero; reaping it killed whatever the
+   slot held now; and a null one - M105 losing a writer that way - had an
+   "id" of 0, so kill(0, SIGKILL) took process group 0, which was the kernel,
+   every idle task and everything it had ever started, and the battery
+   panicked "task_exit: terminated task resumed".
+
+   An id carries its slot's generation, so it names that one process for
+   ever: scheduler_task_by_id refuses it once the slot has moved on, the
+   system calls below answer "no such process", and scheduler_exit_code
+   still says how it ended. 0 is "no child" - it is the kernel's own id and
+   no spawn returns it - and every helper here refuses it.
+
+   And the id is not read out of the task_t at all, because by the time the
+   spawn has returned that may already be too late: a child that runs on
+   another processor, ends and is swept before this line has given its slot
+   to a stranger. The spawn records the id on the SPAWNER, under the lock
+   the slot is filled under (scheduler_last_spawn), and that is what this
+   reads - so it takes the spawn's result only to say whether there was one,
+   and must be called on it at once, before this task spawns anything else. */
+static int selftest_pid(const task_t *t) {
+    return t ? scheduler_last_spawn((uint32_t *)0) : 0;
+}
+
+static void selftest_reap(int pid) {
+    if (pid <= 0) {
+        return;
+    }
+    do_syscall(SYS_kill, (uint64_t)pid, SIGKILL, 0);
+    do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
+}
+
+/* How a child ended, as waitpid would say it - its exit status, or 128 plus
+   the signal that ended it - from what SYS_wait or SYS_wait_nb returned for
+   it. Those return the slot's exit code when they reap it, and for a process
+   that is the same answer in its low eight bits (128 plus a signal is below
+   256). They return -1 for a child the sweep released first, and an exit(-1)
+   reads -1 too: either way the record of exits says which. -1 if nothing
+   remembers the child. */
+static long selftest_ended_as(int pid, long reaped) {
+    if (reaped != -1) {
+        return reaped & 0xFF;
+    }
+    int code = -1;
+    if (scheduler_exit_code(pid, &code) != 1) {
+        return -1;
+    }
+    return code;
+}
+
+/* Wait for the child to end, reap it if nobody has, and say how it ended. */
+static long selftest_wait(int pid) {
+    if (pid <= 0) {
+        return -1;
+    }
+    return selftest_ended_as(pid, do_syscall(SYS_wait, (uint64_t)pid, 0, 0));
+}
+
+/* 1 while the child has not ended. */
+static int selftest_running(int pid) {
+    return pid > 0 && scheduler_exit_code(pid, (int *)0) == 0;
+}
+
+/* SYS_wait_nb's question asked of an id: -2 while the child runs; once it has
+   ended, reap it if nobody has and say how it ended, as selftest_wait does. */
+static long selftest_poll_exit(int pid) {
+    if (pid <= 0) {
+        return -1;
+    }
+    long reaped = do_syscall(SYS_wait_nb, (uint64_t)pid, 0, 0);
+    if (reaped == -2) {
+        return -2;
+    }
+    return selftest_ended_as(pid, reaped);
+}
+
+/* A pid in decimal, for a child's command line. */
+static void selftest_format_pid(int pid, char out[12]) {
+    uint32_t v = (uint32_t)pid;
+    char reversed[12];
+    int n = 0;
+    do {
+        reversed[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v && n < 11);
+    int m = 0;
+    while (n) {
+        out[m++] = reversed[--n];
+    }
+    out[m] = '\0';
+}
+
+/* A child's scheduler state, or -1 once its slot is gone. */
+static int selftest_state(int pid) {
+    task_t *t = pid > 0 ? scheduler_task_by_id(pid) : (task_t *)0;
+    return t ? (int)t->state : -1;
+}
+
+/* A child's capabilities, 0 once it is gone. */
+static uint32_t selftest_caps(int pid) {
+    task_t *t = pid > 0 ? scheduler_task_by_id(pid) : (task_t *)0;
+    return t ? t->caps : 0;
+}
+
+/* The processor time a child has used so far, 0 once it is gone. */
+static uint64_t selftest_cpu_ticks(int pid) {
+    task_t *t = pid > 0 ? scheduler_task_by_id(pid) : (task_t *)0;
+    return t ? t->user_ticks + t->sys_ticks : 0;
+}
+
+/* The exit code of a child that has ended, without reaping it; -1 if it has
+   not ended or nothing knows. */
+static int selftest_exit_code(int pid) {
+    int code = -1;
+    if (scheduler_exit_code(pid, &code) != 1) {
+        return -1;
+    }
+    return code;
+}
+
+/* A task found by walking the table, reaped only if it has ended. Its id is
+   read once, and whether it has ended is asked of the id - so a slot the
+   sweep releases and a spawn refills between the two is left alone. */
+static void selftest_reap_if_ended(const task_t *o) {
+    if (!o) {
+        return;
+    }
+    int pid = o->id;
+    if (scheduler_exit_code(pid, (int *)0) == 1) {
+        selftest_reap(pid);
+    }
+}
+
 /* M223. Run a program from /bin with its standard output and error on a pipe,
    copy what it printed into the log a line at a time, and return its exit
    status - or -1 if it is still running when the deadline passes. Each
-   self-test that runs a ported program used to carry its own copy of this. */
+   self-test that runs a ported program used to carry its own copy of this.
+
+   What it runs is a payload an optional step installed, not one this kernel
+   seeded, so it reads through read_optional_program: its caller has already
+   decided the program is there (a non-empty regular file), and one that is
+   not by now is said as what it is rather than as a broken seed. Read before
+   the pipe takes over standard output, so that panic reaches the log. */
 static long run_captured_program(const char *name, const char *const *argv,
                                  long seconds) {
     char path[64];
     k_strlcpy(path, PATH_BIN_DIRECTORY, sizeof(path));
     size_t used = k_strlen(path);
     k_strlcpy(path + used, name, sizeof(path) - used);
+    size_t bytes = 0;
+    uint8_t *image = read_optional_program(path, &bytes);
+    if (!image) {
+        panic_with_detail("run_captured_program: the program its caller found is "
+                          "missing or empty", path);
+    }
     int fds[2];
     if (do_syscall(SYS_pipe, (uint64_t)fds, 0, 0) != 0) {
         panic("run_captured_program: could not make a pipe for the report");
     }
     do_syscall(SYS_dup2, (uint64_t)fds[1], 1, 0);
     do_syscall(SYS_dup2, (uint64_t)fds[1], 2, 0);
-    size_t bytes = 0;
-    uint8_t *image = read_program(path, &bytes);
-    task_t *child = process_spawnv(name, image, bytes, argv);
+    int child = selftest_pid(process_spawnv(name, image, bytes, argv));
     kfree(image);
 
     static char out[16384];
@@ -271,7 +443,7 @@ static long run_captured_program(const char *name, const char *const *argv,
             }
             continue;
         }
-        long done = child ? do_syscall(SYS_wait_nb, (uint64_t)child->id, 0, 0) : -1;
+        long done = child ? selftest_poll_exit(child) : -1;
         if (done != -2) {
             rc = done;
             long n;
@@ -314,7 +486,325 @@ static long run_captured_program(const char *name, const char *const *argv,
     return rc;
 }
 
+/* The [logwrite] self-test's line, which user_space/binaries/forktest.c
+   (loglines) writes and this reads back: change both or neither. */
+#define LOGWRITE_WRITERS_MAX 8
+#define LOGWRITE_LINES 120
+#define LOGWRITE_LINES_TEXT "120"
+#define LOGWRITE_PAYLOAD 48
+#define LOGWRITE_LINE_BYTES (18 + 1 + 6 + 3 + 1 + LOGWRITE_PAYLOAD + 1)
+
+static int logwrite_format(char *out, int writer, int line) {
+    static const char head[] = "[logwrite] writer ";
+    int n = 0;
+    for (int i = 0; head[i]; i++) {
+        out[n++] = head[i];
+    }
+    out[n++] = (char)('0' + writer % 10);
+    static const char mid[] = " line ";
+    for (int i = 0; mid[i]; i++) {
+        out[n++] = mid[i];
+    }
+    out[n++] = (char)('0' + (line / 100) % 10);
+    out[n++] = (char)('0' + (line / 10) % 10);
+    out[n++] = (char)('0' + line % 10);
+    out[n++] = ' ';
+    for (int j = 0; j < LOGWRITE_PAYLOAD; j++) {
+        out[n++] = (char)('a' + (writer * 7 + line * 3 + j) % 26);
+    }
+    out[n++] = '\n';
+    return n;
+}
+
+/* The [logwrite] verdict and its diagnoses are built here and handed to the
+   log in ONE kernel_log_write, so no other processor's output - a bare
+   kernel_log_puts included - can land inside them. */
+typedef struct {
+    char text[320];
+    int n;
+} logwrite_line_t;
+
+static void logwrite_add(logwrite_line_t *line, const char *s) {
+    while (*s && line->n < (int)sizeof(line->text) - 2) {
+        line->text[line->n++] = *s++;
+    }
+}
+
+static void logwrite_add_dec(logwrite_line_t *line, uint64_t value) {
+    char digits[20];
+    int count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10u);
+        value /= 10u;
+    } while (value && count < (int)sizeof(digits));
+    while (count > 0 && line->n < (int)sizeof(line->text) - 2) {
+        line->text[line->n++] = digits[--count];
+    }
+}
+
+static void logwrite_send(logwrite_line_t *line) {
+    line->text[line->n++] = '\n';
+    kernel_log_write(line->text, (size_t)line->n);
+    line->n = 0;
+}
+
+/* Several programs writing whole lines through write() at once, one per core
+   this machine has (two on one core, eight at most), and every line read back
+   out of the log. Until M225 sys_write took the log's lock per CHARACTER,
+   and the battery at the ThinkPad's shape - eight cores - failed on a marker
+   that had been printed: its '[' was spliced into another program's line.
+   One core cannot show that, so tools/smp-test.sh (four cores) and
+   tools/fork-smp-test.sh grade this line too.
+
+   M225: what it claims is exactly what it grades. A write() of (writer,
+   line) is 78 bytes that say which write they are; the claim is that those
+   78 bytes are in the log contiguous, and exactly once. So the grader looks
+   for each of them as a run of bytes ANYWHERE in what was logged meanwhile,
+   and does not care what is around it: the desktop's programs and kernel
+   lines built from several kernel_log_* calls run at the same time, and a
+   kernel line split at a call boundary with one of these between its halves
+   is that line's business, not this write's. The grader before this one
+   required every one of them to start a log line and counted any line with
+   a piece of one in it as torn, which a correct log can fail.
+
+   And the interrupts-off windows the log opened while they wrote: since M225
+   the devices are fed from the ring KERNEL_LOG_DRAIN_BATCH characters at a
+   time, and no section may have handed them more - the structural claim,
+   which a busy host cannot make false. The longest section in microseconds
+   is measured and printed beside it, for the record rather than graded: a
+   vCPU the host descheduled inside one is counted too. */
+static void boot_selftest_logwrite(void) {
+    int writers = smp_cpu_count > 1 ? smp_cpu_count : 2;
+    if (writers > LOGWRITE_WRITERS_MAX) {
+        writers = LOGWRITE_WRITERS_MAX;
+    }
+    size_t lw_bytes = 0;
+    uint8_t *lw_img = read_optional_program(PATH_BIN_DIRECTORY "forktest", &lw_bytes);
+    if (!lw_img) {
+        panic("logwrite self-test: /bin/forktest is not on this disk");
+    }
+    char writers_text[2] = {(char)('0' + writers), 0};
+    const char *lw_argv[] = {PATH_BIN_DIRECTORY "forktest", "loglines", writers_text,
+                             LOGWRITE_LINES_TEXT, 0};
+    kernel_log_irq_off_t windows;
+    kernel_log_irq_off_stats(&windows, 1);
+    kernel_log_irq_off_t before = windows;
+    uint64_t from = kernel_log_written_total();
+    int lw = selftest_pid(process_spawnv("forktest", lw_img, lw_bytes, lw_argv));
+    long lw_rc = lw ? selftest_wait(lw) : -1;
+    kfree(lw_img);
+    uint64_t to = kernel_log_written_total();
+    kernel_log_irq_off_stats(&windows, 0);
+
+    size_t span = (size_t)(to - from);
+    char *text = (char *)kmalloc(span + 1);
+    if (!text) {
+        panic("logwrite self-test: no memory to read the log back into");
+    }
+    static uint16_t seen[LOGWRITE_WRITERS_MAX][LOGWRITE_LINES];
+    k_memset(seen, 0, sizeof(seen));
+    uint64_t next = 0;
+    size_t got = kernel_log_read(from, text, span, &next);
+    int overran = got != span || next != to;
+
+    /* Every place one of these writes begins - its first 18 bytes are a
+       head nothing else on this machine prints - and whether all 78 of it
+       follow there. A head with anything else after it is a piece of a
+       write that was torn: counted and the first one shown, as a diagnosis.
+       What fails the test is a write that is not there whole exactly once. */
+    static const char head[] = "[logwrite] writer ";
+    const size_t head_bytes = sizeof(head) - 1;
+    int pieces = 0;
+    char first_piece[100];
+    first_piece[0] = '\0';
+    for (size_t at = 0; at + head_bytes <= got;) {
+        if (k_memcmp(text + at, head, head_bytes) != 0) {
+            at++;
+            continue;
+        }
+        const char *line = text + at;
+        int whole = 0;
+        if (at + LOGWRITE_LINE_BYTES <= got && line[18] >= '0' && line[18] <= '9' &&
+            line[25] >= '0' && line[25] <= '9' && line[26] >= '0' && line[26] <= '9' &&
+            line[27] >= '0' && line[27] <= '9') {
+            int w = line[18] - '0';
+            int l = (line[25] - '0') * 100 + (line[26] - '0') * 10 + (line[27] - '0');
+            char expected[LOGWRITE_LINE_BYTES];
+            if (w < writers && l < LOGWRITE_LINES &&
+                logwrite_format(expected, w, l) == LOGWRITE_LINE_BYTES &&
+                k_memcmp(expected, line, LOGWRITE_LINE_BYTES) == 0) {
+                whole = 1;
+                if (seen[w][l] < 0xFFFFu) {
+                    seen[w][l]++;
+                }
+            }
+        }
+        if (whole) {
+            at += LOGWRITE_LINE_BYTES;
+            continue;
+        }
+        if (!pieces) {
+            size_t keep = got - at < sizeof(first_piece) - 1 ? got - at : sizeof(first_piece) - 1;
+            for (size_t i = 0; i < keep; i++) {
+                char c = line[i];
+                first_piece[i] = (c >= ' ' && c <= '~') ? c : '.';
+            }
+            first_piece[keep] = '\0';
+        }
+        pieces++;
+        at += head_bytes;
+    }
+    kfree(text);
+
+    int wanted = writers * LOGWRITE_LINES;
+    int once = 0;
+    int missing = 0;
+    int repeated = 0;
+    for (int w = 0; w < writers; w++) {
+        for (int l = 0; l < LOGWRITE_LINES; l++) {
+            if (seen[w][l] == 1) {
+                once++;
+            } else if (seen[w][l] == 0) {
+                missing++;
+            } else {
+                repeated++;
+            }
+        }
+    }
+
+    logwrite_line_t out;
+    out.n = 0;
+    logwrite_add(&out, "[logwrite] interrupts off in the log while they wrote: ");
+    logwrite_add_dec(&out, windows.windows);
+    logwrite_add(&out, " sections, the longest ");
+    logwrite_add_dec(&out, tsc_to_us(windows.max_cycles));
+    logwrite_add(&out, " us and ");
+    logwrite_add_dec(&out, tsc_to_us(windows.total_cycles));
+    logwrite_add(&out, " us in all; at most ");
+    logwrite_add_dec(&out, windows.max_device_chars);
+    logwrite_add(&out, " characters to the serial port and console in one (ceiling ");
+    logwrite_add_dec(&out, KERNEL_LOG_DRAIN_BATCH);
+    logwrite_add(&out, ")");
+    if (windows.device_dropped != before.device_dropped) {
+        logwrite_add(&out, "; ");
+        logwrite_add_dec(&out, windows.device_dropped - before.device_dropped);
+        logwrite_add(&out, " characters never reached them");
+    }
+    logwrite_send(&out);
+    /* What a character costs each device, which is what a batch costs: the
+       console's glyph on the framebuffer is all a machine with no COM port
+       pays (the ThinkPad - serial_init finds no scratch register there and
+       the port is skipped), and the port's I/O is most of what a VM pays.
+       The serial port's is what it cost while they wrote; the console's
+       runs from boot, because by now the desktop's self-tests have usually
+       taken the screen and the console has stopped drawing. */
+    uint64_t serial_chars = windows.serial_chars - before.serial_chars;
+    uint64_t serial_cycles = windows.serial_cycles - before.serial_cycles;
+    logwrite_add(&out, "[logwrite] per character: serial port ");
+    if (serial_chars) {
+        logwrite_add_dec(&out, tsc_to_us(serial_cycles * 1000u) / serial_chars);
+        logwrite_add(&out, " ns over ");
+        logwrite_add_dec(&out, serial_chars);
+    } else {
+        logwrite_add(&out, "nothing sent (no port)");
+    }
+    logwrite_add(&out, "; console since boot ");
+    if (windows.console_chars) {
+        logwrite_add_dec(&out, tsc_to_us(windows.console_cycles * 1000u) / windows.console_chars);
+        logwrite_add(&out, " ns over ");
+        logwrite_add_dec(&out, windows.console_chars);
+        logwrite_add(&out, windows.console_on ? ", still drawing" : ", no longer drawing");
+    } else {
+        logwrite_add(&out, "never drew");
+    }
+    logwrite_send(&out);
+    /* M225 (log-crash-path): the console's share of the boot, which is
+       where the ThinkPad - no COM port - spends its interrupts-off time in
+       the log. A scroll used to repaint the whole screen inside one
+       section; now it is repainted a piece per section, and the most cells
+       any section painted since boot is the structural claim graded here
+       (KERNEL_LOG_SECTION_CELLS). The microseconds are printed, not
+       graded, for the reason the longest section above is not. */
+    logwrite_add(&out, "[logwrite] the console since boot: at most ");
+    logwrite_add_dec(&out, windows.boot_max_console_cells);
+    logwrite_add(&out, " cells painted in one section (ceiling ");
+    logwrite_add_dec(&out, KERNEL_LOG_SECTION_CELLS);
+    logwrite_add(&out, "); the longest section that painted ");
+    logwrite_add_dec(&out, tsc_to_us(windows.boot_max_console_cycles));
+    logwrite_add(&out, " us, the longest of all ");
+    logwrite_add_dec(&out, tsc_to_us(windows.boot_max_cycles));
+    logwrite_add(&out, " us; ");
+    logwrite_add_dec(&out, windows.boot_repaint_sections);
+    logwrite_add(&out, " repaint sections, the longest ");
+    logwrite_add_dec(&out, tsc_to_us(windows.boot_max_repaint_cycles));
+    logwrite_add(&out, " us, all of them ");
+    logwrite_add_dec(&out, tsc_to_us(windows.boot_repaint_cycles));
+    logwrite_add(&out, " us");
+    /* A screen of more cells than the console keeps a grid for scrolls the
+       old way - the framebuffer copied up inside the character, every cell
+       of it in one section - and the ceiling is not a claim made there: it
+       is said, not graded, rather than failing every self-test boot on a
+       5K panel. (The grid is static: the kernel's bss has to end below 8
+       MiB, and the ThinkPad's 72,000 cells and QEMU's largest mode's 69,120
+       fit in its 98,304.) */
+    int screen_graded = console_has_grid() || windows.console_chars == 0;
+    if (!screen_graded) {
+        logwrite_add(&out, " - no grid at this resolution, so a scroll copies the screen in one section; not graded");
+    }
+    logwrite_send(&out);
+
+    int too_long = windows.max_device_chars > KERNEL_LOG_DRAIN_BATCH;
+    int too_much_screen =
+        screen_graded && windows.boot_max_console_cells > KERNEL_LOG_SECTION_CELLS;
+    if (lw_rc != 0 || overran || missing || repeated || too_long || too_much_screen) {
+        logwrite_add(&out, "[logwrite] forktest loglines exited ");
+        logwrite_add_dec(&out, (uint64_t)(lw_rc < 0 ? 99 : lw_rc));
+        logwrite_add(&out, "; ");
+        logwrite_add_dec(&out, (uint64_t)once);
+        logwrite_add(&out, " of ");
+        logwrite_add_dec(&out, (uint64_t)wanted);
+        logwrite_add(&out, " writes in the log whole and once, ");
+        logwrite_add_dec(&out, (uint64_t)missing);
+        logwrite_add(&out, " not there whole, ");
+        logwrite_add_dec(&out, (uint64_t)repeated);
+        logwrite_add(&out, " there more than once, ");
+        logwrite_add_dec(&out, (uint64_t)pieces);
+        logwrite_add(&out, " torn pieces");
+        if (overran) {
+            logwrite_add(&out, ", and the ring overran before it was read");
+        }
+        logwrite_send(&out);
+        if (pieces) {
+            logwrite_add(&out, "[logwrite] the first torn piece: ");
+            logwrite_add(&out, first_piece);
+            logwrite_send(&out);
+        }
+        if (too_long) {
+            panic("logwrite self-test: the log handed the devices more than a batch with interrupts off");
+        }
+        if (too_much_screen) {
+            panic("logwrite self-test: the console painted more than a section's cells with interrupts off");
+        }
+        panic("logwrite self-test: one write() to the console did not land in the log in one piece");
+    }
+    logwrite_add(&out, "[logwrite] one write() is one piece of the log: ");
+    logwrite_add_dec(&out, (uint64_t)writers);
+    logwrite_add(&out, " programs each wrote ");
+    logwrite_add_dec(&out, LOGWRITE_LINES);
+    logwrite_add(&out, " lines through write() at the same moment on ");
+    logwrite_add_dec(&out, (uint64_t)(smp_cpu_count > 0 ? smp_cpu_count : 1));
+    logwrite_add(&out, " core(s), and all ");
+    logwrite_add_dec(&out, (uint64_t)wanted);
+    logwrite_add(&out, " are in the log whole and once - self-test passed.\n");
+    logwrite_send(&out);
+}
+
+/* One message (kernel_log_begin), because the budgets are read off these
+   lines and they are seven calls each: a program's write() on another
+   processor - which takes the same lock now - cannot land between two of
+   them. A bare kernel_log_puts on another processor still could. */
 static void kernel_log_perf(const char *name, uint64_t value, const char *unit) {
+    uint64_t message = kernel_log_begin();
     kernel_log_puts("[perf] ");
     kernel_log_puts(name);
     kernel_log_putc(' ');
@@ -322,6 +812,7 @@ static void kernel_log_perf(const char *name, uint64_t value, const char *unit) 
     kernel_log_putc(' ');
     kernel_log_puts(unit);
     kernel_log_putc('\n');
+    kernel_log_end(message);
 }
 
 #define LVGL_DISTINCT_BUCKETS 512
@@ -658,10 +1149,6 @@ static void browser_shot_print(const char *path) {
     kernel_log_puts(" bytes\n");
 }
 
-static void selftest_reap(task_t *t) {
-    do_syscall(SYS_kill, (uint64_t)t->id, SIGKILL, 0);
-    do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
-}
 
 #define SELFTEST_POLL_MS 10
 
@@ -1084,9 +1571,19 @@ static void m199_spinner_task(void *arg) {
    Browser five seconds after the desktop appeared, found the prefetch not
    yet started, and watched a black window while the stick was read. A
    click that arrives while the prefetch is reading joins that read rather
-   than starting its own, so starting early costs the click nothing. */
+   than starting its own, so starting early costs the click nothing.
+
+   The line is 7 GiB of RAM, and it is meant to let in every machine sold as
+   8 GB. It was written as 8 GiB when physical_memory_total_frame_count()
+   was the frame span, holes included, and an 8 GiB QEMU guest's span is
+   9 GiB. Now that it is the RAM, an 8 GB machine reports a little under
+   8 GiB - the firmware keeps 6 MiB of a QEMU guest, and a laptop's firmware
+   and built-in GPU can keep a few hundred MiB - and an 8 GiB line would
+   have shut out exactly the machine the paragraph above lets in. An eighth
+   of 7 GiB is 896 MiB of cache, which still holds the browser with room
+   left. */
 #define PREFETCH_DELAY_MS 1000u
-#define PREFETCH_MINIMUM_FRAMES (8ull * 1024 * 1024 * 1024 / 4096)
+#define PREFETCH_MINIMUM_FRAMES (7ull * 1024 * 1024 * 1024 / 4096)
 
 static void prefetch_task(void *arg) {
     (void)arg;
@@ -1226,16 +1723,16 @@ static void boot_selftests_desktop(void) {
         uint8_t *demo_image = read_program("/bin/wm_demo", &demo_size_bytes);
         int64_t demo_size = (int64_t)demo_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
-        task_t *demo_task = process_spawn("wm_demo", demo_image, (size_t)demo_size, "");
+        int demo_task = selftest_pid(process_spawn("wm_demo", demo_image, (size_t)demo_size, ""));
         kfree(demo_image);
 
         long demo_status = 1;
         uint64_t demo_t0 = pit_get_ticks();
         for (int spin = 0; spin < 300 && demo_status == 1; spin++) {
             pit_sleep_ms(10);
-            demo_status = do_syscall(SYS_task_alive, (uint64_t)demo_task->id, 0, 0);
+            demo_status = do_syscall(SYS_task_alive, (uint64_t)demo_task, 0, 0);
         }
         kernel_log_puts("[wm_demo] connect+draw+exit took ");
         kernel_log_put_dec((uint32_t)((pit_get_ticks() - demo_t0) * (1000 / PIT_HZ)));
@@ -1313,15 +1810,15 @@ static void boot_selftests_desktop(void) {
         uint8_t *paint_image = read_program("/bin/gui_paint", &paint_size_bytes);
         int64_t paint_size = (int64_t)paint_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
+        int clock_task = selftest_pid(process_spawn("gui_clock", clock_image, (size_t)clock_size, ""));
         kfree(clock_image);
         pit_sleep_ms(500);
 
-        task_t *paint_task = process_spawn("gui_paint", paint_image, (size_t)paint_size, "");
+        int paint_task = selftest_pid(process_spawn("gui_paint", paint_image, (size_t)paint_size, ""));
         kfree(paint_image);
         pit_sleep_ms(1000);
 
@@ -1381,15 +1878,15 @@ static void boot_selftests_desktop(void) {
         uint8_t *clock_image = read_program("/bin/gui_clock", &clock_size_bytes);
         int64_t clock_size = (int64_t)clock_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        task_t *shell_task = process_spawn("desktop_shell", shell_image, (size_t)shell_size, "");
+        int shell_task = selftest_pid(process_spawn("desktop_shell", shell_image, (size_t)shell_size, ""));
         kfree(shell_image);
         pit_sleep_ms(500);
 
-        task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
+        int clock_task = selftest_pid(process_spawn("gui_clock", clock_image, (size_t)clock_size, ""));
         kfree(clock_image);
         pit_sleep_ms(1000);
 
@@ -1438,11 +1935,11 @@ static void boot_selftests_desktop(void) {
         uint8_t *clock_image = read_program("/bin/gui_clock", &clock_size_bytes);
         int64_t clock_size = (int64_t)clock_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
+        int clock_task = selftest_pid(process_spawn("gui_clock", clock_image, (size_t)clock_size, ""));
         kfree(clock_image);
         pit_sleep_ms(500);
 
@@ -1481,7 +1978,7 @@ static void boot_selftests_desktop(void) {
         do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t after_close = selftest_pixel_settled((uint32_t)home_x, (uint32_t)home_y,
                                                        desktop_bg, "the closed window's slot to be reclaimed");
-        long clock_exit = do_syscall(SYS_wait, (uint64_t)clock_task->id, 0, 0);
+        long clock_exit = selftest_wait(clock_task);
 
         selftest_reap(comp_task);
         console_init();
@@ -1621,7 +2118,7 @@ static void boot_selftests_desktop(void) {
         size_t comp_size_bytes = 0;
         uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
         int64_t comp_size = (int64_t)comp_size_bytes;
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
@@ -1662,11 +2159,11 @@ static void boot_selftests_desktop(void) {
         uint8_t *editor_image = read_program("/bin/text_editor", &editor_size_bytes);
         int64_t editor_size = (int64_t)editor_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        task_t *editor_task = process_spawn("text_editor", editor_image, (size_t)editor_size, "");
+        int editor_task = selftest_pid(process_spawn("text_editor", editor_image, (size_t)editor_size, ""));
         kfree(editor_image);
         pit_sleep_ms(500);
 
@@ -1687,7 +2184,7 @@ static void boot_selftests_desktop(void) {
         do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         uint32_t after_close = selftest_pixel_settled((uint32_t)probe_x, (uint32_t)probe_y,
                                                        desktop_bg, "the editor's window to go away");
-        long editor_exit = do_syscall(SYS_wait, (uint64_t)editor_task->id, 0, 0);
+        long editor_exit = selftest_wait(editor_task);
 
         selftest_reap(comp_task);
         console_init();
@@ -1730,11 +2227,11 @@ static void boot_selftests_desktop(void) {
         uint8_t *clock_image = read_program("/bin/gui_clock", &clock_size_bytes);
         int64_t clock_size = (int64_t)clock_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
+        int clock_task = selftest_pid(process_spawn("gui_clock", clock_image, (size_t)clock_size, ""));
         kfree(clock_image);
         pit_sleep_ms(500);
 
@@ -2088,7 +2585,6 @@ static void smp_bench_body(void *arg) {
 }
 
 static uint64_t smp_bench_round(int k) {
-    task_t *w[SMP_BENCH_MAX];
     int ids[SMP_BENCH_MAX];
     if (k < 1) {
         k = 1;
@@ -2099,11 +2595,10 @@ static uint64_t smp_bench_round(int k) {
     __atomic_store_n(&smp_bench_done, 0u, __ATOMIC_SEQ_CST);
     uint64_t t0 = tsc_read();
     for (int i = 0; i < k; i++) {
-        w[i] = task_spawn("smpbench", smp_bench_body, (void *)0);
-        if (!w[i]) {
+        ids[i] = selftest_pid(task_spawn("smpbench", smp_bench_body, (void *)0));
+        if (!ids[i]) {
             panic("M106 self-test: could not spawn a benchmark worker");
         }
-        ids[i] = w[i]->id;
     }
     uint64_t deadline = pit_get_ticks() + 6000;
     while (__atomic_load_n(&smp_bench_done, __ATOMIC_SEQ_CST) < (uint32_t)k) {
@@ -2114,16 +2609,14 @@ static uint64_t smp_bench_round(int k) {
     }
     uint64_t t1 = tsc_read();
     for (int i = 0; i < k; i++) {
-        task_t *t = scheduler_task_by_id(ids[i]);
         uint64_t rd = pit_get_ticks() + 1000;
-        while (t && t->state != TASK_TERMINATED) {
+        while (selftest_running(ids[i])) {
             if (pit_get_ticks() > rd) {
                 panic("M106 self-test: a finished benchmark worker never terminated");
             }
             pit_sleep_ms(1);
-            t = scheduler_task_by_id(ids[i]);
         }
-        scheduler_reap_slot(t);
+        selftest_wait(ids[i]);
     }
     return tsc_to_us(t1 - t0);
 }
@@ -2313,16 +2806,16 @@ static void selftest_profile(void) {
 
     {
         size_t image_bytes = 0;
-        uint8_t *image = read_program("/bin/proftest", &image_bytes);
+        uint8_t *image = read_optional_program("/bin/proftest", &image_bytes);
         if (!image) {
             panic("m101: /bin/proftest is not on the disk");
         }
-        task_t *t = process_spawn("proftest", image, image_bytes, "");
+        int t = selftest_pid(process_spawn("proftest", image, image_bytes, ""));
         kfree(image);
         if (!t) {
             panic("m101: /bin/proftest would not spawn");
         }
-        long code = do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
+        long code = selftest_wait(t);
         if (code != 0) {
             kernel_log_puts("[m101] proftest reported 0x");
             kernel_log_put_hex32((uint32_t)code);
@@ -2347,17 +2840,17 @@ static void selftest_profile(void) {
         profile_stop();
 
         size_t image_bytes = 0;
-        uint8_t *image = read_program("/bin/profile", &image_bytes);
+        uint8_t *image = read_optional_program("/bin/profile", &image_bytes);
         if (!image) {
             panic("m101: /bin/profile is not on the disk");
         }
         static const char *const profile_argv[] = {"profile", "report", "5", (const char *)0};
-        task_t *t = process_spawnv("profile", image, image_bytes, profile_argv);
+        int t = selftest_pid(process_spawnv("profile", image, image_bytes, profile_argv));
         kfree(image);
         if (!t) {
             panic("m101: /bin/profile would not spawn");
         }
-        long code = do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
+        long code = selftest_wait(t);
         if (code != 0) {
             panic("m101: /bin/profile could not produce a report");
         }
@@ -2371,7 +2864,7 @@ static void selftest_oom(void) {
     uint64_t before = physical_memory_free_frame_count();
 
     size_t image_bytes = 0;
-    uint8_t *image = read_program("/bin/oomtest", &image_bytes);
+    uint8_t *image = read_optional_program("/bin/oomtest", &image_bytes);
     if (!image) {
         panic("m102: /bin/oomtest is not on the disk");
     }
@@ -2380,7 +2873,7 @@ static void selftest_oom(void) {
     int refused_rounds = 0;
 
     for (int round = 0; round < 2; round++) {
-        task_t *t = process_spawn("oomtest", image, image_bytes, "");
+        int t = selftest_pid(process_spawn("oomtest", image, image_bytes, ""));
         if (!t) {
             kernel_log_puts("[m102] round ");
             kernel_log_put_dec((uint32_t)round);
@@ -2388,7 +2881,7 @@ static void selftest_oom(void) {
                       "half of this milestone working.\n");
             continue;
         }
-        long code = do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
+        long code = selftest_wait(t);
 
         if (code == 128 + SIGKILL) {
             killed_rounds++;
@@ -2438,7 +2931,81 @@ static void selftest_oom(void) {
               "this one.\n\n");
 }
 
+/* M116's stream from the host, as a function because two places run it: the
+   battery, at its turn, and opt/leanos/nicstreamonly, which runs it first
+   and powers the machine off (tools/nic-stream-test.sh). What it measures
+   is spawn to exit of /bin/netrecv against QEMU's guestfwd, so a stall
+   anywhere between the two ends - this kernel's or the host's - is in the
+   number. */
+static void selftest_nic_stream(void) {
+    char want[16];
+    k_memset(want, 0, sizeof(want));
+    int wn = fwcfg_read_file("opt/leanos/nicstream", want, sizeof(want) - 1);
+    if (wn <= 0 || !net_have_nic()) {
+        kernel_log_puts("[m116] no host stream on this boot - the NIC's receive "
+                   "path is untested (tools/qemu-serial-test.sh provides one)\n\n");
+    } else {
+        uint32_t checksum_before = tcp_checksum_failures();
+        size_t number_bytes = 0;
+        uint8_t *number_img = read_optional_program(PATH_BIN_DIRECTORY "netrecv", &number_bytes);
+        if (!number_img) {
+            panic("M116 self-test: /bin/netrecv is not on this disk");
+        }
+        const char *number_argv[] = {PATH_BIN_DIRECTORY "netrecv", "10.0.2.100", "7777", want, 0};
+        uint64_t t0 = tsc_read();
+        int nr = selftest_pid(process_spawnv("netrecv", number_img, number_bytes, number_argv));
+        kfree(number_img);
+        long rc = nr ? selftest_wait(nr) : -1;
+        uint64_t ms = tsc_to_us(tsc_read() - t0) / 1000;
+        uint32_t corrupt = tcp_checksum_failures() - checksum_before;
+        kernel_log_perf("nic_stream_recv_ms", ms, "ms");
+        if (rc != 0) {
+            kernel_log_puts("[m116] netrecv did not receive the host's stream intact "
+                       "(its own line above says how)\n");
+            panic("M116 self-test: a stream from the host did not arrive byte for byte");
+        }
+        if (corrupt != 0) {
+            kernel_log_puts("[m116] the stream arrived, but ");
+            kernel_log_put_dec(corrupt);
+            kernel_log_puts(" segment(s) on the way failed TCP's checksum - the NIC "
+                       "is handing the stack corrupt frames and retransmission "
+                       "is hiding it\n");
+            panic("M116 self-test: corrupt segments on the receive path");
+        }
+        kernel_log_puts("[m116] a stream from the host: ");
+        kernel_log_puts(want);
+        kernel_log_puts(" bytes through SLIRP, the RTL8139's ring and TCP, every one "
+                   "of them right and no segment failing its checksum, in ");
+        kernel_log_put_dec((uint32_t)ms);
+        kernel_log_puts(" ms - self-test passed.\n\n");
+    }
+}
+
 static void boot_selftests_system(void) {
+    {
+        /* The stream from the host on its own, first, and the machine off:
+           tools/nic-stream-test.sh boots this once per memory size on the
+           accelerator the host has. The battery reaches [m116] minutes in
+           and only ever at one size, under TCG - and the stall this exists
+           for was four seconds per GiB of guest RAM, under hvf only.
+
+           [m102] first, as in the battery: it takes every frame to
+           exhaustion and gives them back, so the guest has touched all of
+           its memory - which a machine that has been up for a while has.
+           The stall was in proportion to the RAM the guest had touched,
+           not the RAM it was given: first thing after boot, with that
+           work skipped, the same hvf guest measured 412 ms at 4 GiB and
+           439 ms at 16 GiB without the fix and said nothing at all. */
+        char only[4];
+        k_memset(only, 0, sizeof(only));
+        if (fwcfg_read_file("opt/leanos/nicstreamonly", only, sizeof(only) - 1) == 1 &&
+            only[0] == '1') {
+            selftest_oom();
+            selftest_nic_stream();
+            kernel_log_puts("[nicstream] done\n");
+            power_shutdown(POWER_OFF);
+        }
+    }
     {
         /* M223. One script through /bin/node, its output in the log, and the
            machine off - the battery reaches Node minutes in, and what is
@@ -2475,8 +3042,20 @@ static void boot_selftests_system(void) {
                it got. The deadline is generous on purpose - Node's own test
                suite runs through this switch and takes hours under TCG. */
             size_t node_bytes = 0;
-            uint8_t *node_image = read_program(PATH_BIN_DIRECTORY "node", &node_bytes);
-            task_t *node_task = process_spawnv("node", node_image, node_bytes, node_argv);
+            uint8_t *node_image = read_optional_program(PATH_BIN_DIRECTORY "node", &node_bytes);
+            if (!node_image) {
+                /* node-test.sh installs it, and only when it was built - an
+                   image without Node is a valid image, and the switch asking
+                   for one is answered with that rather than a panic. No
+                   "[node] exit" line, so tools/node-boot.sh still fails: it
+                   was asked to run a script and nothing ran it. */
+                kernel_log_puts("[node] /bin/node is not on this image - skipped. "
+                           "tools/build-chromium.sh builds it out of Electron's "
+                           "configuration and tools/node-test.sh installs it.\n");
+                kernel_log_puts("[node] done\n");
+                power_shutdown(POWER_OFF);
+            }
+            int node_task = selftest_pid(process_spawnv("node", node_image, node_bytes, node_argv));
             kfree(node_image);
             long node_rc = -1;
             long node_deadline = (long)pit_get_ticks() + 6L * 3600 * PIT_HZ;
@@ -2486,7 +3065,7 @@ static void boot_selftests_system(void) {
                thing being looked for and a quiet machine says nothing. */
             long node_report_at = (long)pit_get_ticks() + 60L * PIT_HZ;
             while (node_task && (long)pit_get_ticks() < node_deadline) {
-                long done = do_syscall(SYS_wait_nb, (uint64_t)node_task->id, 0, 0);
+                long done = selftest_poll_exit(node_task);
                 if (done != -2) {
                     node_rc = done;
                     break;
@@ -2511,7 +3090,7 @@ static void boot_selftests_system(void) {
            processes are gone their references to the kept frames are too. */
         static const char *const m198_argv[] = {PATH_TEMPORARY_DIRECTORY "m198-hello", 0};
         size_t hello_bytes = 0;
-        uint8_t *hello = read_program(PATH_BIN_DIRECTORY "hello", &hello_bytes);
+        uint8_t *hello = read_optional_program(PATH_BIN_DIRECTORY "hello", &hello_bytes);
         if (!hello || virtual_file_system_write(PATH_TEMPORARY_DIRECTORY "m198-hello", hello,
                                                 hello_bytes) != 0) {
             panic("M198 self-test: could not copy /bin/hello to " PATH_TEMPORARY_DIRECTORY);
@@ -2585,9 +3164,9 @@ static void boot_selftests_system(void) {
     }
     {
         static volatile int smp_seen_cpu[MAX_CPUS];
-        task_t *probe_tasks[4];
+        int probe_tasks[4];
         for (int i = 0; i < 4; i++) {
-            probe_tasks[i] = task_spawn("smp-probe", smp_probe_task, (void *)smp_seen_cpu);
+            probe_tasks[i] = selftest_pid(task_spawn("smp-probe", smp_probe_task, (void *)smp_seen_cpu));
         }
         pit_sleep_ms(2000);
 
@@ -2607,7 +3186,7 @@ static void boot_selftests_system(void) {
         }
 
         for (int i = 0; i < 4; i++) {
-            do_syscall(SYS_wait, (uint64_t)probe_tasks[i]->id, 0, 0);
+            selftest_wait(probe_tasks[i]);
         }
         kernel_log_puts("[smp] self-test passed.\n\n");
     }
@@ -2668,21 +3247,21 @@ static void boot_selftests_system(void) {
         hang_statistics_t before, after;
         scheduler_hang_statistics(&before);
         scheduler_hang_set_thresholds(2u, 5u, 1000u);
-        task_t *holder = task_spawn("m199-holder", m199_holder_task, (void *)0);
-        task_t *waiter = task_spawn("m199-waiter", m199_waiter_task, (void *)0);
+        int holder = selftest_pid(task_spawn("m199-holder", m199_holder_task, (void *)0));
+        int waiter = selftest_pid(task_spawn("m199-waiter", m199_waiter_task, (void *)0));
         if (!holder || !waiter) {
             panic("M199 self-test: could not start the lock holder and its waiter");
         }
-        do_syscall(SYS_wait, (uint64_t)holder->id, 0, 0);
-        do_syscall(SYS_wait, (uint64_t)waiter->id, 0, 0);
+        selftest_wait(holder);
+        selftest_wait(waiter);
         int spun_on_an_ap = 0;
         if (smp_cpu_count > 1) {
-            task_t *spinner = task_spawn("m199-spinner", m199_spinner_task, (void *)0);
+            int spinner = selftest_pid(task_spawn("m199-spinner", m199_spinner_task, (void *)0));
             if (!spinner) {
                 panic("M199 self-test: could not start the spinner");
             }
             pit_sleep_ms(4500);
-            do_syscall(SYS_wait, (uint64_t)spinner->id, 0, 0);
+            selftest_wait(spinner);
             spun_on_an_ap = m199_spinner_cpu > 0;
         }
         scheduler_hang_statistics(&after);
@@ -2734,8 +3313,8 @@ static void boot_selftests_system(void) {
             image_cache_statistics(&before);
             m201_loaded_at_ms = 0;
             m201_loader_started = 0;
-            task_t *first = task_spawn("m201-loader", m201_loader_task, (void *)big_path);
-            task_t *second = task_spawn("m201-loader", m201_loader_task, (void *)big_path);
+            int first = selftest_pid(task_spawn("m201-loader", m201_loader_task, (void *)big_path));
+            int second = selftest_pid(task_spawn("m201-loader", m201_loader_task, (void *)big_path));
             if (!first || !second) {
                 panic("M201 self-test: could not start the loaders");
             }
@@ -2749,8 +3328,8 @@ static void boot_selftests_system(void) {
             if (small) {
                 image_cache_release(small);
             }
-            do_syscall(SYS_wait, (uint64_t)first->id, 0, 0);
-            do_syscall(SYS_wait, (uint64_t)second->id, 0, 0);
+            selftest_wait(first);
+            selftest_wait(second);
             image_cache_statistics(&after);
             uint64_t loaded = m201_loaded_at_ms;
             kernel_log_puts("[m201] /bin/hello answered in ");
@@ -2999,7 +3578,7 @@ static void boot_selftests_system(void) {
                         theirs_failed++;
                         continue;
                     }
-                    long code = do_syscall(SYS_wait, (uint64_t)gp, 0, 0);
+                    long code = selftest_wait((int)gp);
                     if (code != 0) {
                         kernel_log_puts("[m97] ");
                         kernel_log_puts(prog);
@@ -3021,6 +3600,9 @@ static void boot_selftests_system(void) {
                                "stringstreams, tuples and complex arithmetic - "
                                "compiled with no edits of any kind and every one of "
                                "them exiting 0 on this machine.\n");
+                } else {
+                    kernel_log_puts("[m97] GCC's own libstdc++ tests are not on this image - "
+                               "that half is skipped.\n");
                 }
             }
 
@@ -3033,6 +3615,8 @@ static void boot_selftests_system(void) {
                        "after it by __cxa_atexit - self-test passed.\n\n");
         }
     }
+
+    boot_selftest_logwrite();
 
     {
         int cpus = smp_cpu_count > 0 ? smp_cpu_count : 1;
@@ -3137,15 +3721,15 @@ static void boot_selftests_system(void) {
         uint8_t *clock_image = read_program("/bin/gui_clock", &clock_size_bytes);
         int64_t clock_size = (int64_t)clock_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        task_t *shell_task = process_spawn("desktop_shell", shell_image, (size_t)shell_size, "");
+        int shell_task = selftest_pid(process_spawn("desktop_shell", shell_image, (size_t)shell_size, ""));
         kfree(shell_image);
         pit_sleep_ms(500);
 
-        task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
+        int clock_task = selftest_pid(process_spawn("gui_clock", clock_image, (size_t)clock_size, ""));
         kfree(clock_image);
         pit_sleep_ms(1000);
 
@@ -3233,13 +3817,13 @@ static void boot_selftests_system(void) {
         uint8_t *editor_image = read_program("/bin/text_editor", &editor_size_bytes);
         int64_t editor_size = (int64_t)editor_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
-        task_t *shell_task = process_spawn("desktop_shell", shell_image, (size_t)shell_size, "");
+        int shell_task = selftest_pid(process_spawn("desktop_shell", shell_image, (size_t)shell_size, ""));
         kfree(shell_image);
         pit_sleep_ms(400);
-        task_t *editor_task = process_spawn("text_editor", editor_image, (size_t)editor_size, "");
+        int editor_task = selftest_pid(process_spawn("text_editor", editor_image, (size_t)editor_size, ""));
         kfree(editor_image);
         pit_sleep_ms(700);
 
@@ -3328,13 +3912,13 @@ static void boot_selftests_system(void) {
         uint8_t *shell_image = read_program("/bin/desktop_shell", &shell_size_bytes);
         int64_t shell_size = (int64_t)shell_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
-        task_t *icons_task = process_spawn("desktop_icons", icons_image, (size_t)icons_size, "");
+        int icons_task = selftest_pid(process_spawn("desktop_icons", icons_image, (size_t)icons_size, ""));
         kfree(icons_image);
         pit_sleep_ms(500);
-        task_t *shell_task = process_spawn("desktop_shell", shell_image, (size_t)shell_size, "");
+        int shell_task = selftest_pid(process_spawn("desktop_shell", shell_image, (size_t)shell_size, ""));
         kfree(shell_image);
         pit_sleep_ms(700);
 
@@ -3422,12 +4006,12 @@ static void boot_selftests_system(void) {
         uint8_t *stub_image = read_program("/bin/wm_stubborn", &stub_size_bytes);
         int64_t stub_size = (int64_t)stub_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
         uint64_t frames_before_victim = physical_memory_free_frame_count();
-        task_t *victim = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
+        int victim = selftest_pid(process_spawn("wm_stubborn", stub_image, (size_t)stub_size, ""));
         uint32_t victim_pixel = selftest_pixel_settled(200, 150, 0x00B03040u,
                                                         "the stubborn client's window to be drawn");
         uint64_t frames_with_victim = physical_memory_free_frame_count();
@@ -3436,10 +4020,10 @@ static void boot_selftests_system(void) {
         long info_count = do_syscall(SYS_taskinfo, (uint64_t)infos, MAX_TASKS, 0);
         int found_comp = 0, found_victim = 0, victim_shared_memory = -1;
         for (long i = 0; i < info_count; i++) {
-            if (infos[i].pid == comp_task->id && k_strcmp(infos[i].name, "compositor") == 0) {
+            if (infos[i].pid == comp_task && k_strcmp(infos[i].name, "compositor") == 0) {
                 found_comp = 1;
             }
-            if (infos[i].pid == victim->id && k_strcmp(infos[i].name, "wm_stubborn") == 0) {
+            if (infos[i].pid == victim && k_strcmp(infos[i].name, "wm_stubborn") == 0) {
                 found_victim = 1;
                 victim_shared_memory = infos[i].shared_memory_segments;
             }
@@ -3457,21 +4041,21 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         pit_sleep_ms(600);
         uint32_t after_close_pixel = framebuffer_get_pixel(200, 150);
-        long alive_after_close = do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
+        long alive_after_close = do_syscall(SYS_task_alive, (uint64_t)victim, 0, 0);
 
         request.action = WINDOW_MANAGER_ACTION_KILL;
         do_syscall(SYS_write, (uint64_t)action_file_descriptors[1], (uint64_t)&request, sizeof(request));
         long alive_after_kill = 1;
         for (int spin = 0; spin < 200 && alive_after_kill == 1; spin++) {
             pit_sleep_ms(10);
-            alive_after_kill = do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
+            alive_after_kill = do_syscall(SYS_task_alive, (uint64_t)victim, 0, 0);
         }
         uint32_t after_kill_pixel = selftest_pixel_settled(200, 150, 0x001A1A2Eu,
                                                             "the killed client's window to be taken down");
-        do_syscall(SYS_wait, (uint64_t)victim->id, 0, 0);
+        selftest_wait(victim);
         uint64_t frames_after_kill = physical_memory_free_frame_count();
 
-        task_t *victim2 = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
+        int victim2 = selftest_pid(process_spawn("wm_stubborn", stub_image, (size_t)stub_size, ""));
         kfree(stub_image);
         uint32_t reused_slot_pixel = selftest_pixel_settled(200, 150, 0x00B03040u,
                                                              "a second client to draw through the reclaimed slot");
@@ -3558,10 +4142,10 @@ static void boot_selftests_system(void) {
         uint8_t *stub_image = read_program("/bin/wm_stubborn", &stub_size_bytes);
         int64_t stub_size = (int64_t)stub_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
-        task_t *clock_task = process_spawn("gui_clock", clock_image, (size_t)clock_size, "");
+        int clock_task = selftest_pid(process_spawn("gui_clock", clock_image, (size_t)clock_size, ""));
         kfree(clock_image);
         uint32_t focused_corner = selftest_pixel_settled(238, 80, 0x00272E3Cu,
                                                           "the focused window's titlebar to be drawn");
@@ -3572,7 +4156,7 @@ static void boot_selftests_system(void) {
         int focused_bright = 0, focused_dim = 0;
         selftest_title_counts(1, &focused_bright, &focused_dim);
 
-        task_t *stub_task = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
+        int stub_task = selftest_pid(process_spawn("wm_stubborn", stub_image, (size_t)stub_size, ""));
         kfree(stub_image);
         uint32_t unfocused_corner = selftest_pixel_settled(238, 80, 0x001F2531u,
                                                             "the clock's window to be repainted unfocused");
@@ -3658,10 +4242,10 @@ static void boot_selftests_system(void) {
         uint8_t *icons_image = read_program("/bin/desktop_icons", &icons_size_bytes);
         int64_t icons_size = (int64_t)icons_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         selftest_wait_for_pixel(500, 400, 0x00203040u, 5000,
                                  "the compositor to paint the saved background");
-        task_t *icons_task = process_spawn("desktop_icons", icons_image, (size_t)icons_size, "");
+        int icons_task = selftest_pid(process_spawn("desktop_icons", icons_image, (size_t)icons_size, ""));
         uint32_t saved_pixel = selftest_pixel_settled(600, 400, 0x00203040u,
                                                        "the desktop to come up with the saved settings");
         selftest_reap(icons_task);
@@ -3672,10 +4256,10 @@ static void boot_selftests_system(void) {
             panic("M47 self-test: could not overwrite settings.conf with a corrupted one");
         }
 
-        comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
-        icons_task = process_spawn("desktop_icons", icons_image, (size_t)icons_size, "");
+        icons_task = selftest_pid(process_spawn("desktop_icons", icons_image, (size_t)icons_size, ""));
         kfree(icons_image);
         uint32_t fallback_pixel = selftest_pixel_settled(600, 400, 0x001B1B31u,
                                                           "the desktop to fall back to the compiled-in defaults");
@@ -3684,15 +4268,27 @@ static void boot_selftests_system(void) {
         console_init();
         kernel_log_use_console();
 
-        task_t *v1 = task_spawn("shutdown-victim", spinner_task, NULL);
-        task_t *v2 = task_spawn("shutdown-victim", spinner_task, NULL);
+        int v1 = selftest_pid(task_spawn("shutdown-victim", spinner_task, NULL));
+        int v2 = selftest_pid(task_spawn("shutdown-victim", spinner_task, NULL));
         int killed_no_grace = power_orderly_stop(0);
-        int codes_no_grace = (v1->exit_code == 128 + SIGKILL) && (v2->exit_code == 128 + SIGKILL);
+        int codes_no_grace = (selftest_exit_code(v1) == 128 + SIGKILL) && (selftest_exit_code(v2) == 128 + SIGKILL);
 
-        task_t *v3 = task_spawn("shutdown-victim", spinner_task, NULL);
-        task_t *v4 = task_spawn("shutdown-victim", spinner_task, NULL);
+        int v3 = selftest_pid(task_spawn("shutdown-victim", spinner_task, NULL));
+        int v4 = selftest_pid(task_spawn("shutdown-victim", spinner_task, NULL));
+        /* M225: and one that ignores SIGTERM, which is what the escalation is
+           for. The SIGTERM used to be written into the fatal path whatever
+           the task had asked for, so this one died of it like the others and
+           the SIGKILL leg was never reached by anything; with no grace period
+           (above) there is no SIGTERM at all, so nothing graded it. The
+           spinner never ends by itself, so its task_t stays its own. */
+        int v5 = selftest_pid(task_spawn("shutdown-stubborn", spinner_task, NULL));
+        task_t *stubborn = scheduler_task_by_id(v5);
+        if (stubborn) {
+            stubborn->sig_handler[SIGTERM] = SIG_IGN_ADDR;
+        }
         int killed_with_grace = power_orderly_stop(100);
-        int codes_with_grace = (v3->exit_code == 128 + SIGTERM) && (v4->exit_code == 128 + SIGTERM);
+        int codes_with_grace = (selftest_exit_code(v3) == 128 + SIGTERM) && (selftest_exit_code(v4) == 128 + SIGTERM);
+        int escalated = killed_with_grace == 1 && selftest_exit_code(v5) == 128 + SIGKILL;
 
         int all_ok = 1;
         if (saved_pixel != 0x00203040u) {
@@ -3708,22 +4304,26 @@ static void boot_selftests_system(void) {
             all_ok = 0;
         }
         if (killed_no_grace != 2 || !codes_no_grace) {
-            kernel_log_puts("[m47] with no grace period, the orderly stop did not escalate to SIGKILL (0x");
+            kernel_log_puts("[m47] with no grace period, the orderly stop did not end its tasks with SIGKILL (0x");
             kernel_log_put_hex32((uint32_t)killed_no_grace);
             kernel_log_puts(" killed, exit codes 0x");
-            kernel_log_put_hex32((uint32_t)v1->exit_code);
+            kernel_log_put_hex32((uint32_t)selftest_exit_code(v1));
             kernel_log_puts("/0x");
-            kernel_log_put_hex32((uint32_t)v2->exit_code);
+            kernel_log_put_hex32((uint32_t)selftest_exit_code(v2));
             kernel_log_puts(")\n");
             all_ok = 0;
         }
-        if (killed_with_grace != 0 || !codes_with_grace) {
-            kernel_log_puts("[m47] with a real grace period, tasks did not stop on SIGTERM alone (0x");
+        if (!codes_with_grace || !escalated) {
+            kernel_log_puts("[m47] with a real grace period, the two tasks that take SIGTERM did not "
+                            "stop on it alone and/or the one that ignores it was not escalated to "
+                            "SIGKILL (0x");
             kernel_log_put_hex32((uint32_t)killed_with_grace);
             kernel_log_puts(" needed SIGKILL, exit codes 0x");
-            kernel_log_put_hex32((uint32_t)v3->exit_code);
+            kernel_log_put_hex32((uint32_t)selftest_exit_code(v3));
             kernel_log_puts("/0x");
-            kernel_log_put_hex32((uint32_t)v4->exit_code);
+            kernel_log_put_hex32((uint32_t)selftest_exit_code(v4));
+            kernel_log_puts("/0x");
+            kernel_log_put_hex32((uint32_t)selftest_exit_code(v5));
             kernel_log_puts(")\n");
             all_ok = 0;
         }
@@ -3750,7 +4350,7 @@ static void boot_selftests_system(void) {
         long rc_text = do_syscall(SYS_spawn, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m33test"), 0, 0);
         long rc_trunc = do_syscall(SYS_spawn, (uint64_t)(PATH_TEMPORARY_DIRECTORY "m48trunc"), 0, 0);
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
@@ -3880,7 +4480,7 @@ static void boot_selftests_system(void) {
         size_t comp_size_bytes = 0;
         uint8_t *comp_image = read_program("/bin/compositor", &comp_size_bytes);
         int64_t comp_size = (int64_t)comp_size_bytes;
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
@@ -3963,15 +4563,15 @@ static void boot_selftests_system(void) {
         uint8_t *stub_image = read_program("/bin/wm_stubborn", &stub_size_bytes);
         int64_t stub_size = (int64_t)stub_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
         uint64_t storm_frames_before = physical_memory_free_frame_count();
-        int storm_shared_memory_before = shared_memory_count_by_owner(comp_task->id);
+        int storm_shared_memory_before = shared_memory_count_by_owner(comp_task);
         int storm_ok = 1;
         for (int round = 0; round < 16 && storm_ok; round++) {
-            task_t *victim = process_spawn("wm_stubborn", stub_image, (size_t)stub_size, "");
+            int victim = selftest_pid(process_spawn("wm_stubborn", stub_image, (size_t)stub_size, ""));
             if (!victim) {
                 kernel_log_puts("[m50] kill storm: spawn failed on round 0x");
                 kernel_log_put_hex32((uint32_t)round);
@@ -3986,14 +4586,10 @@ static void boot_selftests_system(void) {
         kfree(stub_image);
 
         uint64_t storm_frames_after = physical_memory_free_frame_count();
-        int storm_shared_memory_after = shared_memory_count_by_owner(comp_task->id);
+        int storm_shared_memory_after = shared_memory_count_by_owner(comp_task);
 
-        int comp_file_descriptors = 0;
-        for (int f = 0; f < MAX_FILE_DESCRIPTORS; f++) {
-            if (comp_task->descriptor_table->slots[f].type != FILE_DESCRIPTOR_NONE) {
-                comp_file_descriptors++;
-            }
-        }
+        int comp_file_descriptors =
+            scheduler_open_descriptor_count(scheduler_task_by_id(comp_task));
         kernel_log_puts("[m50] compositor after the storm: 0x");
         kernel_log_put_hex32((uint32_t)comp_file_descriptors);
         kernel_log_puts(" of 0x");
@@ -4005,8 +4601,8 @@ static void boot_selftests_system(void) {
         size_t last_size_bytes = 0;
         uint8_t *last_image = read_program("/bin/wm_stubborn", &last_size_bytes);
         int64_t last_size = (int64_t)last_size_bytes;
-        task_t *last_task = last_size == 0 ? (task_t *)0
-                                          : process_spawn("wm_stubborn", last_image, (size_t)last_size, "");
+        int last_task = last_size == 0 ? 0
+                                       : selftest_pid(process_spawn("wm_stubborn", last_image, (size_t)last_size, ""));
         kfree(last_image);
         pit_sleep_ms(700);
         uint32_t survivor_pixel = framebuffer_get_pixel(200, 150);
@@ -4263,13 +4859,13 @@ static void boot_selftests_system(void) {
         uint8_t *z_image = read_program("/bin/wm_zorder", &z_size_bytes);
         int64_t z_size = (int64_t)z_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        task_t *a_task = process_spawn("wm_zorder", z_image, (size_t)z_size, "zA 00A02020");
+        int a_task = selftest_pid(process_spawn("wm_zorder", z_image, (size_t)z_size, "zA 00A02020"));
         pit_sleep_ms(500);
-        task_t *b_task = process_spawn("wm_zorder", z_image, (size_t)z_size, "zB 002060C0");
+        int b_task = selftest_pid(process_spawn("wm_zorder", z_image, (size_t)z_size, "zB 002060C0"));
         kfree(z_image);
         pit_sleep_ms(500);
 
@@ -4381,10 +4977,10 @@ static void boot_selftests_system(void) {
         size_t clock_size_bytes = 0;
         uint8_t *clock_image = read_program("/bin/gui_clock", &clock_size_bytes);
 
-        task_t *comp_task = process_spawn("compositor", comp_image, comp_size_bytes, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, comp_size_bytes, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
-        task_t *z_task = process_spawn("wm_zorder", z_image, z_size_bytes, "zP 00A02020");
+        int z_task = selftest_pid(process_spawn("wm_zorder", z_image, z_size_bytes, "zP 00A02020"));
         kfree(z_image);
         pit_sleep_ms(600);
 
@@ -4422,25 +5018,27 @@ static void boot_selftests_system(void) {
             pit_sleep_ms(150);
         }
 
-        task_t *clocks[3];
+        int clocks[3];
         for (int i = 0; i < 3; i++) {
-            clocks[i] = process_spawn("gui_clock", clock_image, clock_size_bytes, "");
+            clocks[i] = selftest_pid(process_spawn("gui_clock", clock_image, clock_size_bytes, ""));
             pit_sleep_ms(300);
         }
         kfree(clock_image);
         pit_sleep_ms(700);
-        task_t *desktop[5] = { comp_task, z_task, clocks[0], clocks[1], clocks[2] };
-        uint64_t used0 = 0, used1 = 0;
+        int desktop[5] = { comp_task, z_task, clocks[0], clocks[1], clocks[2] };
+        uint64_t used_before[5];
+        uint64_t used = 0;
         for (int i = 0; i < 5; i++) {
-            used0 += desktop[i]->user_ticks + desktop[i]->sys_ticks;
+            used_before[i] = selftest_cpu_ticks(desktop[i]);
         }
         uint64_t window0 = pit_get_ticks();
         pit_sleep_ms(2000);
         uint64_t window_ticks = pit_get_ticks() - window0;
         for (int i = 0; i < 5; i++) {
-            used1 += desktop[i]->user_ticks + desktop[i]->sys_ticks;
+            uint64_t after = selftest_cpu_ticks(desktop[i]);
+            used += after > used_before[i] ? after - used_before[i] : 0;
         }
-        uint64_t busy_pct = window_ticks ? (100 * (used1 - used0)) / window_ticks : 100;
+        uint64_t busy_pct = window_ticks ? (100 * used) / window_ticks : 100;
 
         for (int i = 0; i < 3; i++) {
             selftest_reap(clocks[i]);
@@ -4472,25 +5070,25 @@ static void boot_selftests_system(void) {
         uint8_t *fault_image = read_program("/bin/wm_faulter", &fault_size_bytes);
         int64_t fault_size = (int64_t)fault_size_bytes;
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
         uint64_t frames_before = physical_memory_free_frame_count();
-        task_t *victim = process_spawn("wm_faulter", fault_image, (size_t)fault_size, "");
+        int victim = selftest_pid(process_spawn("wm_faulter", fault_image, (size_t)fault_size, ""));
         kfree(fault_image);
         uint32_t painted = selftest_pixel_settled(150, 150, 0x0020C0A0u,
                                                    "the faulter's window to be drawn");
-        int alive_before_fault = (int)do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
+        int alive_before_fault = (int)do_syscall(SYS_task_alive, (uint64_t)victim, 0, 0);
         uint64_t frames_with_victim = physical_memory_free_frame_count();
 
         pit_sleep_ms(1400);
 
         uint32_t after_fault = selftest_pixel_settled(150, 150, 0x001A1A2Eu,
                                                        "the faulted client's window to be taken down");
-        int alive_after_fault = (int)do_syscall(SYS_task_alive, (uint64_t)victim->id, 0, 0);
-        long victim_exit = do_syscall(SYS_wait, (uint64_t)victim->id, 0, 0);
-        long victim_end = do_syscall(SYS_task_end_status, (uint64_t)victim->id, 0, 0);
+        int alive_after_fault = (int)do_syscall(SYS_task_alive, (uint64_t)victim, 0, 0);
+        long victim_exit = selftest_wait(victim);
+        long victim_end = do_syscall(SYS_task_end_status, (uint64_t)victim, 0, 0);
         uint64_t frames_after = physical_memory_free_frame_count();
 
         long seg = do_syscall(SYS_shared_memory_create, 4096, 0, 0);
@@ -4567,9 +5165,9 @@ static void boot_selftests_system(void) {
         size_t bad_size_bytes = 0;
         uint8_t *bad_image = read_program("/bin/badptr", &bad_size_bytes);
         int64_t bad_size = (int64_t)bad_size_bytes;
-        task_t *bad_task = process_spawn("badptr", bad_image, (size_t)bad_size, "");
+        int bad_task = selftest_pid(process_spawn("badptr", bad_image, (size_t)bad_size, ""));
         kfree(bad_image);
-        long bad_exit = do_syscall(SYS_wait, (uint64_t)bad_task->id, 0, 0);
+        long bad_exit = selftest_wait(bad_task);
         if (bad_exit != 0) {
             kernel_log_puts("[m52] the garbage-argument matrix accepted 0x");
             kernel_log_put_hex32((uint32_t)bad_exit);
@@ -4665,7 +5263,7 @@ static void boot_selftests_system(void) {
                 continue;
             }
             size_t rb_bytes = 0;
-            uint8_t *rb_image = read_program(PATH_BIN_DIRECTORY "fswriter", &rb_bytes);
+            uint8_t *rb_image = read_optional_program(PATH_BIN_DIRECTORY "fswriter", &rb_bytes);
             if (!rb_image) {
                 panic("readbench: /bin/fswriter is not on this disk");
             }
@@ -4674,9 +5272,9 @@ static void boot_selftests_system(void) {
             kernel_log_puts("[readbench] ");
             kernel_log_puts(RB_PATHS[p]);
             kernel_log_putc('\n');
-            task_t *rbt = process_spawnv("fswriter", rb_image, rb_bytes, rb_argv);
+            int rbt = selftest_pid(process_spawnv("fswriter", rb_image, rb_bytes, rb_argv));
             if (rbt) {
-                do_syscall(SYS_wait, (uint64_t)rbt->id, 0, 0);
+                selftest_wait(rbt);
             }
             kfree(rb_image);
         }
@@ -4706,8 +5304,11 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_dup2, (uint64_t)br_pipe[1], 2, 0);
 
         size_t br_bytes = 0;
-        uint8_t *br_image = read_program(PATH_BIN_DIRECTORY "chromiumshell",
-                                         &br_bytes);
+        /* Optional: make browser-if-built installs it only when a Chromium
+           checkout built it, and tools/browser-test.sh reports this line as
+           a SKIP. It was read_program until now, which panicked first. */
+        uint8_t *br_image = read_optional_program(PATH_BIN_DIRECTORY "chromiumshell",
+                                                  &br_bytes);
         if (!br_image) {
             kernel_log_puts("[m169] /bin/chromiumshell is not on this image - "
                        "skipped. tools/build-chromium.sh "
@@ -4805,8 +5406,8 @@ static void boot_selftests_system(void) {
         br_argv[br_argc] = 0;
         profile_reset();
         profile_start();
-        task_t *brt = process_spawnv("chromiumshell", br_image, br_bytes,
-                                     br_argv);
+        int brt = selftest_pid(process_spawnv("chromiumshell", br_image, br_bytes,
+                                     br_argv));
         kfree(br_image);
 
         /* M210: from the heap rather than .bss. The kernel image has to end
@@ -4837,7 +5438,7 @@ static void boot_selftests_system(void) {
                 }
                 continue;
             }
-            if (brt && do_syscall(SYS_wait_nb, (uint64_t)brt->id, 0, 0) != -2) {
+            if (brt && selftest_poll_exit(brt) != -2) {
                 break;
             }
             /* Stop when the picture is there and has stopped growing, not
@@ -4913,7 +5514,7 @@ static void boot_selftests_system(void) {
                     continue;
                 }
                 if (o->state == TASK_TERMINATED) {
-                    selftest_reap(o);
+                    selftest_reap_if_ended(o);
                     continue;
                 }
                 if (k_strcmp(o->name, "chromiumshell") != 0) {
@@ -5024,46 +5625,108 @@ static void boot_selftests_system(void) {
            battery boots one core and a shootdown between cores is not a thing
            one core can be wrong about - so this is the only place the
            interesting half of M165's fork work is actually graded. */
-        kernel_log_puts("[forksmp] cores: 0x");
-        kernel_log_put_hex32((uint32_t)smp_cpu_count);
-        kernel_log_puts("\n");
+        /* M225 (log-crash-path): every [forksmp] line is built whole and
+           handed to the log in ONE kernel_log_write - one hold of the ring's
+           lock, so nothing any other processor writes, a bare
+           kernel_log_puts included, can land inside it - and
+           tools/fork-smp-test.sh grades each as an exact line. They were
+           four or five calls each, and the grader matched their pieces in
+           order, which a "[forksmp] exitstorm exited 1" followed by any
+           text with a 0 in it would satisfy. */
+        logwrite_line_t forksmp_line;
+        forksmp_line.n = 0;
+        logwrite_add(&forksmp_line, "[forksmp] cores: 0x");
+        for (int shift = 28; shift >= 0; shift -= 4) {
+            char digit[2] = {"0123456789ABCDEF"[((uint32_t)smp_cpu_count >> shift) & 0xFu], 0};
+            logwrite_add(&forksmp_line, digit);
+        }
+        logwrite_send(&forksmp_line);
 
         int forksmp_ok = 1;
+        /* M225: exitstorm - every thread of a process leaving at once while
+           the next ones are made, so its shared descriptor table's count is
+           taken and dropped on every core together; recordlocks - fcntl
+           write locks between processes whose waiters all retry at once. */
         static const char *const forksmp_modes[] = {"futex", "threads", "threadfork",
-                                                     "descriptors"};
-        for (unsigned m = 0; m < 4; m++) {
+                                                     "descriptors", "exitstorm",
+                                                     "recordlocks"};
+        for (unsigned m = 0; m < sizeof(forksmp_modes) / sizeof(forksmp_modes[0]); m++) {
             size_t fs_bytes = 0;
-            uint8_t *fs_img = read_program(PATH_BIN_DIRECTORY "forktest", &fs_bytes);
+            uint8_t *fs_img = read_optional_program(PATH_BIN_DIRECTORY "forktest", &fs_bytes);
             if (!fs_img) {
                 panic("forksmp: /bin/forktest is not on this disk");
             }
             const char *fs_argv[] = {PATH_BIN_DIRECTORY "forktest",
                                      forksmp_modes[m], 0};
-            task_t *fs = process_spawnv("forktest", fs_img, fs_bytes, fs_argv);
-            long fs_rc = fs ? do_syscall(SYS_wait, (uint64_t)fs->id, 0, 0) : -1;
+            int fs = selftest_pid(process_spawnv("forktest", fs_img, fs_bytes, fs_argv));
+            long fs_rc = fs ? selftest_wait(fs) : -1;
             kfree(fs_img);
-            kernel_log_puts("[forksmp] ");
-            kernel_log_puts(forksmp_modes[m]);
-            kernel_log_puts(" exited ");
-            kernel_log_put_dec((uint32_t)(fs_rc < 0 ? 99 : fs_rc));
-            kernel_log_puts("\n");
+            logwrite_add(&forksmp_line, "[forksmp] ");
+            logwrite_add(&forksmp_line, forksmp_modes[m]);
+            logwrite_add(&forksmp_line, " exited ");
+            logwrite_add_dec(&forksmp_line, (uint32_t)(fs_rc < 0 ? 99 : fs_rc));
+            logwrite_send(&forksmp_line);
             if (fs_rc != 0) {
                 forksmp_ok = 0;
             }
             for (int i = 0; i < scheduler_task_count(); i++) {
                 task_t *stale = scheduler_task_by_slot(i);
                 if (stale && stale->state == TASK_TERMINATED) {
-                    selftest_reap(stale);
+                    selftest_reap_if_ended(stale);
                 }
+            }
+        }
+        /* And the region table under four threads at once, which is the other
+           thing one core cannot be wrong about: a page fault reads that table
+           without its lock while a sibling's mmap, mprotect or munmap rewrites
+           it (threadtest.c, region_table_under_threads). [m79] runs the same
+           check in the battery, which usually boots one core. */
+        {
+            size_t rt_bytes = 0;
+            uint8_t *rt_img = read_optional_program(PATH_BIN_DIRECTORY "threadtest", &rt_bytes);
+            if (!rt_img) {
+                panic("forksmp: /bin/threadtest is not on this disk");
+            }
+            const char *rt_argv[] = {PATH_BIN_DIRECTORY "threadtest", "regions", "4000", 0};
+            int rt = selftest_pid(process_spawnv("threadtest", rt_img, rt_bytes, rt_argv));
+            long rt_rc = rt ? selftest_wait(rt) : -1;
+            kfree(rt_img);
+            logwrite_add(&forksmp_line, "[forksmp] regions exited ");
+            logwrite_add_dec(&forksmp_line, (uint32_t)(rt_rc < 0 ? 99 : rt_rc));
+            logwrite_send(&forksmp_line);
+            if (rt_rc != 0) {
+                forksmp_finished = 1;
+                panic("forksmp: a page fault lost its region while sibling threads changed the region table");
+            }
+        }
+        /* M225: kill(pid) of a process whose main thread has left, on every
+           core - the signal goes to a thread of it that may be running on
+           another processor at that moment ([m79] has the same, on one). */
+        {
+            size_t ll_bytes = 0;
+            uint8_t *ll_img = read_optional_program(PATH_BIN_DIRECTORY "threadtest", &ll_bytes);
+            if (!ll_img) {
+                panic("forksmp: /bin/threadtest is not on this disk");
+            }
+            const char *ll_argv[] = {PATH_BIN_DIRECTORY "threadtest", "leaderless", 0};
+            int ll = selftest_pid(process_spawnv("threadtest", ll_img, ll_bytes, ll_argv));
+            long ll_rc = ll ? selftest_wait(ll) : -1;
+            kfree(ll_img);
+            logwrite_add(&forksmp_line, "[forksmp] leaderless exited ");
+            logwrite_add_dec(&forksmp_line, (uint32_t)(ll_rc < 0 ? 99 : ll_rc));
+            logwrite_send(&forksmp_line);
+            if (ll_rc != 0) {
+                forksmp_ok = 0;
             }
         }
         forksmp_finished = 1;
         if (!forksmp_ok) {
             panic("forksmp: fork out of a process with sibling threads is wrong on this machine");
         }
-        kernel_log_puts("[forksmp] fork out of a process with three sibling "
-                   "threads still writing, on every core this machine has - "
-                   "self-test passed.\n");
+        logwrite_add(&forksmp_line, "[forksmp] fork out of a process with three sibling "
+                                    "threads still writing, on every core this machine has - "
+                                    "self-test passed.");
+        logwrite_send(&forksmp_line);
         power_shutdown(POWER_OFF);
     }
 
@@ -5084,12 +5747,12 @@ static void boot_selftests_system(void) {
         int stale_pid = -1;
 
         for (int i = 0; i < ROUNDS; i++) {
-            task_t *t = process_spawn("hello", hello_image, (size_t)hello_size, "");
+            int t = selftest_pid(process_spawn("hello", hello_image, (size_t)hello_size, ""));
             if (!t) {
                 spawn_failures++;
                 break;
             }
-            int pid = t->id;
+            int pid = t;
             do_syscall(SYS_wait, (uint64_t)pid, 0, 0);
             if (stale_pid < 0) {
                 stale_pid = pid;
@@ -5161,16 +5824,16 @@ static void boot_selftests_system(void) {
         uint8_t *z_image = read_program(PATH_BIN_DIRECTORY "wm_zorder", &z_size_bytes);
         int64_t z_size = (int64_t)z_size_bytes;
 
-        task_t *comp1 = process_spawn("compositor", comp_image, (size_t)comp_size, "");
-        task_t *a_task = process_spawn("wm_zorder", z_image, (size_t)z_size, "zA 00A02020");
-        task_t *b_task = process_spawn("wm_zorder", z_image, (size_t)z_size, "zB 002060C0");
+        int comp1 = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
+        int a_task = selftest_pid(process_spawn("wm_zorder", z_image, (size_t)z_size, "zA 00A02020"));
+        int b_task = selftest_pid(process_spawn("wm_zorder", z_image, (size_t)z_size, "zB 002060C0"));
 
         uint32_t a_before = 0, b_before = 0;
         int up = selftest_two_windows(0x00A02020u, 0x002060C0u, 5000, &a_before, &b_before,
                                       "both clients' windows to appear");
         if (!up) {
             const char *who[3] = {"compositor", "client A", "client B"};
-            task_t *w[3] = {comp1, a_task, b_task};
+            int w[3] = {comp1, a_task, b_task};
             for (int i = 0; i < 3; i++) {
                 kernel_log_puts("[m55] ");
                 kernel_log_puts(who[i]);
@@ -5178,12 +5841,12 @@ static void boot_selftests_system(void) {
                     kernel_log_puts(" was never spawned\n");
                     continue;
                 }
-                task_t *live = scheduler_task_by_id(w[i]->id);
+                task_t *live = scheduler_task_by_id(w[i]);
                 kernel_log_puts(live ? " state=" : " is gone from the table\n");
                 if (live) {
                     kernel_log_put_dec((uint32_t)live->state);
                     kernel_log_puts(" exit=");
-                    kernel_log_put_dec((uint32_t)live->exit_code);
+                    kernel_log_put_dec((uint32_t)selftest_exit_code(w[i]));
                     kernel_log_putc('\n');
                 }
             }
@@ -5207,13 +5870,13 @@ static void boot_selftests_system(void) {
             panic("M55 session-resilience self-test: the clients never got their windows up");
         }
 
-        do_syscall(SYS_kill, (uint64_t)comp1->id, SIGKILL, 0);
-        do_syscall(SYS_wait, (uint64_t)comp1->id, 0, 0);
+        do_syscall(SYS_kill, (uint64_t)comp1, SIGKILL, 0);
+        selftest_wait(comp1);
 
-        int a_alive_after_crash = (int)do_syscall(SYS_task_alive, (uint64_t)a_task->id, 0, 0);
-        int b_alive_after_crash = (int)do_syscall(SYS_task_alive, (uint64_t)b_task->id, 0, 0);
+        int a_alive_after_crash = (int)do_syscall(SYS_task_alive, (uint64_t)a_task, 0, 0);
+        int b_alive_after_crash = (int)do_syscall(SYS_task_alive, (uint64_t)b_task, 0, 0);
 
-        task_t *comp2 = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp2 = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         kfree(z_image);
         uint32_t a_after = 0, b_after = 0;
@@ -5350,10 +6013,10 @@ static void boot_selftests_system(void) {
 
         virtual_file_system_unlink(PATH_TEMPORARY_DIRECTORY "m56undo");
 
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         selftest_wait_for_compositor();
-        task_t *ed_task = process_spawn("text_editor", ed_image, (size_t)ed_size,
-                                         PATH_TEMPORARY_DIRECTORY "m56undo");
+        int ed_task = selftest_pid(process_spawn("text_editor", ed_image, (size_t)ed_size,
+                                         PATH_TEMPORARY_DIRECTORY "m56undo"));
         kfree(ed_image);
         pit_sleep_ms(800);
 
@@ -5379,7 +6042,7 @@ static void boot_selftests_system(void) {
         selftest_reap(ed_task);
         pit_sleep_ms(200);
 
-        task_t *term_task = process_spawn("gui_terminal", term_image, (size_t)term_size, "");
+        int term_task = selftest_pid(process_spawn("gui_terminal", term_image, (size_t)term_size, ""));
         kfree(term_image);
         pit_sleep_ms(900);
 
@@ -5466,10 +6129,10 @@ static void boot_selftests_system(void) {
         size_t shell_size_bytes = 0;
         uint8_t *shell_image = read_program("/bin/desktop_shell", &shell_size_bytes);
         int64_t shell_size = (int64_t)shell_size_bytes;
-        task_t *comp_task = process_spawn("compositor", comp_image, (size_t)comp_size, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, (size_t)comp_size, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
-        task_t *shell_task = process_spawn("desktop_shell", shell_image, (size_t)shell_size, "");
+        int shell_task = selftest_pid(process_spawn("desktop_shell", shell_image, (size_t)shell_size, ""));
         kfree(shell_image);
         pit_sleep_ms(700);
 
@@ -5792,12 +6455,12 @@ static void boot_selftests_system(void) {
             size_t cp_bytes = 0;
             uint8_t *cp_image = read_program(PATH_BIN_DIRECTORY "cp", &cp_bytes);
             const char *cp_argv[] = { PATH_BIN_DIRECTORY "cp", PATH_TEMPORARY_DIRECTORY "m60src", PATH_TEMPORARY_DIRECTORY "m60dst", 0 };
-            task_t *cp_task = process_spawnv("cp", cp_image, cp_bytes, cp_argv);
+            int cp_task = selftest_pid(process_spawnv("cp", cp_image, cp_bytes, cp_argv));
             kfree(cp_image);
             if (!cp_task) {
                 kernel_log_puts("[m60] could not spawn cp\n");
                 all_ok = 0;
-            } else if (do_syscall(SYS_wait, (uint64_t)cp_task->id, 0, 0) != 0) {
+            } else if (selftest_wait(cp_task) != 0) {
                 kernel_log_puts("[m60] cp exited nonzero - it did not get two arguments\n");
                 all_ok = 0;
             } else {
@@ -5821,10 +6484,10 @@ static void boot_selftests_system(void) {
             virtual_file_system_unlink(PATH_TEMPORARY_DIRECTORY "m60pipe");
             virtual_file_system_unlink(PATH_TEMPORARY_DIRECTORY "m60tab");
 
-            task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
+            int comp_task = selftest_pid(process_spawn("compositor", comp_image, comp_bytes, ""));
             kfree(comp_image);
             selftest_wait_for_compositor();
-            task_t *term_task = process_spawn("gui_terminal", term_image, term_bytes, "");
+            int term_task = selftest_pid(process_spawn("gui_terminal", term_image, term_bytes, ""));
             kfree(term_image);
             pit_sleep_ms(900);
 
@@ -5888,10 +6551,10 @@ static void boot_selftests_system(void) {
 
             virtual_file_system_unlink(PATH_TEMPORARY_DIRECTORY "m60para");
 
-            task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
+            int comp_task = selftest_pid(process_spawn("compositor", comp_image, comp_bytes, ""));
             kfree(comp_image);
             selftest_wait_for_compositor();
-            task_t *ed_task = process_spawn("text_editor", ed_image, ed_bytes, PATH_TEMPORARY_DIRECTORY "m60para");
+            int ed_task = selftest_pid(process_spawn("text_editor", ed_image, ed_bytes, PATH_TEMPORARY_DIRECTORY "m60para"));
             kfree(ed_image);
             pit_sleep_ms(900);
 
@@ -5968,9 +6631,9 @@ static void boot_selftests_system(void) {
         size_t clock_bytes = 0;
         uint8_t *clock_image = read_program(PATH_BIN_DIRECTORY "gui_clock", &clock_bytes);
 
-        task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, comp_bytes, ""));
         selftest_wait_for_compositor();
-        task_t *clock_task = process_spawn("gui_clock", clock_image, clock_bytes, "");
+        int clock_task = selftest_pid(process_spawn("gui_clock", clock_image, clock_bytes, ""));
         pit_sleep_ms(800);
 
         const uint32_t probe_x = 150;
@@ -6131,9 +6794,9 @@ static void boot_selftests_system(void) {
         {
             size_t claim_bytes = 0;
             uint8_t *claim_image = read_program(PATH_BIN_DIRECTORY "audiograb", &claim_bytes);
-            task_t *grabber = process_spawn("audiograb", claim_image, claim_bytes, "");
+            int grabber = selftest_pid(process_spawn("audiograb", claim_image, claim_bytes, ""));
             kfree(claim_image);
-            long rc = do_syscall(SYS_wait, (uint64_t)grabber->id, 0, 0);
+            long rc = selftest_wait(grabber);
             if (rc != 0) {
                 kernel_log_puts("[m62] another process was able to take the speaker, or to beep without owning it: 0x");
                 kernel_log_put_hex32((uint32_t)rc);
@@ -6165,9 +6828,9 @@ static void boot_selftests_system(void) {
         {
             size_t bytes = 0;
             uint8_t *image = read_program(PATH_BIN_DIRECTORY "libctest", &bytes);
-            task_t *t = process_spawn("libctest", image, bytes, "");
+            int t = selftest_pid(process_spawn("libctest", image, bytes, ""));
             kfree(image);
-            long rc = do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
+            long rc = selftest_wait(t);
             if (rc != 0) {
                 kernel_log_puts("[m63] the libc/SSE self-test program failed\n");
                 all_ok = 0;
@@ -6185,7 +6848,7 @@ static void boot_selftests_system(void) {
             uint8_t *image = read_program(PATH_BIN_DIRECTORY "whetstone", &bytes);
             const char *argv[] = { PATH_BIN_DIRECTORY "whetstone", "8000", 0 };
             long wall_before = do_syscall(SYS_time, 0, 0, 0);
-            task_t *t = process_spawnv("whetstone", image, bytes, argv);
+            int t = selftest_pid(process_spawnv("whetstone", image, bytes, argv));
             kfree(image);
 
             static char out[2048];
@@ -6200,7 +6863,7 @@ static void boot_selftests_system(void) {
                     if (n > 0) {
                         got += (size_t)n;
                     }
-                } else if (do_syscall(SYS_wait_nb, (uint64_t)t->id, 0, 0) != -2) {
+                } else if (do_syscall(SYS_wait_nb, (uint64_t)t, 0, 0) != -2) {
                     long n;
                     while ((n = do_syscall(SYS_pipe_poll, (uint64_t)out_file_descriptors[0], 0, 0)) > 0 &&
                            got < sizeof(out) - 1) {
@@ -6274,10 +6937,10 @@ static void boot_selftests_system(void) {
         size_t icons_bytes = 0;
         uint8_t *icons_image = read_program(PATH_BIN_DIRECTORY "desktop_icons", &icons_bytes);
 
-        task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, comp_bytes, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
-        task_t *icons_task = process_spawn("desktop_icons", icons_image, icons_bytes, "");
+        int icons_task = selftest_pid(process_spawn("desktop_icons", icons_image, icons_bytes, ""));
         pit_sleep_ms(1200);
 
         static const uint32_t MAGENTA = 0x00FF00FFu;
@@ -6325,7 +6988,7 @@ static void boot_selftests_system(void) {
         uint32_t after_magenta = 0;
         if (wrote) {
             selftest_reap(icons_task);
-            icons_task = process_spawn("desktop_icons", icons_image, icons_bytes, "");
+            icons_task = selftest_pid(process_spawn("desktop_icons", icons_image, icons_bytes, ""));
             pit_sleep_ms(1200);
             for (uint32_t y = 32; y < 80; y += 2) {
                 for (uint32_t x = 32; x < 80; x += 2) {
@@ -6371,10 +7034,10 @@ static void boot_selftests_system(void) {
         size_t clock_bytes = 0;
         uint8_t *clock_image = read_program(PATH_BIN_DIRECTORY "gui_clock", &clock_bytes);
 
-        task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, comp_bytes, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
-        task_t *clock_task = process_spawn("gui_clock", clock_image, clock_bytes, "");
+        int clock_task = selftest_pid(process_spawn("gui_clock", clock_image, clock_bytes, ""));
         kfree(clock_image);
         pit_sleep_ms(900);
 
@@ -6442,9 +7105,9 @@ static void boot_selftests_system(void) {
 
             size_t bytes = 0;
             uint8_t *image = read_program(PATH_BIN_DIRECTORY "nettest", &bytes);
-            task_t *t = process_spawn("nettest", image, bytes, "");
+            int t = selftest_pid(process_spawn("nettest", image, bytes, ""));
             kfree(image);
-            if (do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) != 0) {
+            if (selftest_wait(t) != 0) {
                 kernel_log_puts("[m64] the socket self-test program reported a failure\n");
                 all_ok = 0;
             }
@@ -6456,11 +7119,11 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_dup2, (uint64_t)out_file_descriptors[1], 1, 0);
 
             image = read_program(PATH_BIN_DIRECTORY "nettime", &bytes);
-            task_t *nt = process_spawn("nettime", image, bytes, "");
+            int nt = selftest_pid(process_spawn("nettime", image, bytes, ""));
             kfree(image);
 
             uint64_t started = pit_get_ticks();
-            long nettime_rc = do_syscall(SYS_wait, (uint64_t)nt->id, 0, 0);
+            long nettime_rc = selftest_wait(nt);
             uint64_t elapsed_ms = (pit_get_ticks() - started) * 1000 / PIT_HZ;
 
             static char nettime_out[256];
@@ -6511,10 +7174,16 @@ static void boot_selftests_system(void) {
 
         size_t bytes = 0;
         uint8_t *image = read_program(PATH_BIN_DIRECTORY "hello", &bytes);
-        task_t *plain = process_spawn("hello", image, bytes, "");
+        task_t *plain_task = process_spawn("hello", image, bytes, "");
+        /* Read from the spawn's own record, not from the task: hello exits
+           at once, and a slot released by the sweep is not hello's any more. */
+        int plain = selftest_pid(plain_task);
+        uint32_t plain_caps = 0;
+        if (plain) {
+            (void)scheduler_last_spawn(&plain_caps);
+        }
         kfree(image);
-        uint32_t plain_caps = plain->caps;
-        do_syscall(SYS_wait, (uint64_t)plain->id, 0, 0);
+        selftest_wait(plain);
 
         if (plain_caps != CAP_APP_DEFAULT) {
             kernel_log_puts("[m65] a program with no manifest entry did not get the default "
@@ -6527,45 +7196,47 @@ static void boot_selftests_system(void) {
         }
 
         image = read_program(PATH_BIN_DIRECTORY "compositor", &bytes);
-        task_t *comp = process_spawn("compositor", image, bytes, "");
+        int comp = selftest_pid(process_spawn("compositor", image, bytes, ""));
         kfree(image);
-        if (comp->caps != CAP_ALL) {
+        task_t *comp_now = scheduler_task_by_id(comp);
+        if (!comp_now || comp_now->caps != CAP_ALL) {
             kernel_log_puts("[m65] the compositor did not get the capabilities it owns the screen with\n");
             all_ok = 0;
         }
-        selftest_reap(comp);
-        console_init();
-        kernel_log_use_console();
 
-        task_t *victim = task_spawn("cap-victim", spinner_task, NULL);
-        char victim_pid[12];
-        {
-            int v = victim->id, n = 0;
-            char temporary[12];
-            do {
-                temporary[n++] = (char)('0' + (v % 10));
-                v /= 10;
-            } while (v);
-            int m = 0;
-            while (n) {
-                victim_pid[m++] = temporary[--n];
-            }
-            victim_pid[m] = '\0';
-        }
+        /* M225: two victims, because there are two rules. The compositor is a
+           process captest did not start, so refusing it is the CAP_KILL_ANY
+           gate; cap-victim is a kernel thread, which no user process may
+           signal at all. The kernel thread alone used to prove the first -
+           and since M225 its refusal comes from the second, which would have
+           left the capability gate ungraded on the machine. */
+        int victim = selftest_pid(task_spawn("cap-victim", spinner_task, NULL));
+        char comp_pid_text[12];
+        char victim_pid_text[12];
+        selftest_format_pid(comp, comp_pid_text);
+        selftest_format_pid(victim, victim_pid_text);
+        const char *ct_argv[] = {"captest", comp_pid_text, victim_pid_text, (const char *)0};
 
         image = read_program(PATH_BIN_DIRECTORY "captest", &bytes);
-        task_t *ct = process_spawn("captest", image, bytes, victim_pid);
+        int ct = selftest_pid(process_spawnv("captest", image, bytes, ct_argv));
         kfree(image);
-        if (do_syscall(SYS_wait, (uint64_t)ct->id, 0, 0) != 0) {
+        if (selftest_wait(ct) != 0) {
             kernel_log_puts("[m65] the capability self-test program reported a failure\n");
             all_ok = 0;
         }
 
-        if (victim->state == TASK_TERMINATED) {
+        if (!selftest_running(comp)) {
+            kernel_log_puts("[m65] the compositor did not survive an unprivileged process asking to kill it\n");
+            all_ok = 0;
+        }
+        if (!selftest_running(victim)) {
             kernel_log_puts("[m65] the victim task did not survive an unprivileged process asking to kill it\n");
             all_ok = 0;
         }
         selftest_reap(victim);
+        selftest_reap(comp);
+        console_init();
+        kernel_log_use_console();
 
         if (!all_ok) {
             panic("M65 capability self-test: the permission model does not hold");
@@ -6584,9 +7255,9 @@ static void boot_selftests_system(void) {
 
         size_t bytes = 0;
         uint8_t *image = read_program(PATH_BIN_DIRECTORY "tcptest", &bytes);
-        task_t *t = process_spawn("tcptest", image, bytes, "");
+        int t = selftest_pid(process_spawn("tcptest", image, bytes, ""));
         kfree(image);
-        if (do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) != 0) {
+        if (selftest_wait(t) != 0) {
             kernel_log_puts("[m66] the TCP self-test program reported a failure\n");
             all_ok = 0;
         }
@@ -6616,13 +7287,13 @@ static void boot_selftests_system(void) {
         int frames_before = (int)physical_memory_free_frame_count();
 
         static const int RACERS = 4;
-        task_t *racers[4];
+        int racers[4];
         int spawned = 0;
 
         size_t rbytes = 0;
         uint8_t *rimage = read_program(PATH_BIN_DIRECTORY "racetest", &rbytes);
         for (int i = 0; i < RACERS; i++) {
-            racers[i] = process_spawn("racetest", rimage, rbytes, "");
+            racers[i] = selftest_pid(process_spawn("racetest", rimage, rbytes, ""));
             if (racers[i]) {
                 spawned++;
             }
@@ -6637,7 +7308,7 @@ static void boot_selftests_system(void) {
             if (!racers[i]) {
                 continue;
             }
-            if (do_syscall(SYS_wait, (uint64_t)racers[i]->id, 0, 0) != 0) {
+            if (selftest_wait(racers[i]) != 0) {
                 kernel_log_puts("[m67] a racer reported corrupted state - a lock M67 added is "
                            "missing, wrong, or not covering what it claims to\n");
                 all_ok = 0;
@@ -6665,7 +7336,7 @@ static void boot_selftests_system(void) {
     {
         size_t comp_bytes = 0;
         uint8_t *comp_img = read_program(PATH_BIN_DIRECTORY "compositor", &comp_bytes);
-        task_t *comp = process_spawn("compositor", comp_img, comp_bytes, "");
+        int comp = selftest_pid(process_spawn("compositor", comp_img, comp_bytes, ""));
         kfree(comp_img);
 
         if (!selftest_wait_for_pixel(500, 400, 0x001A1A2Eu, 5000,
@@ -6684,10 +7355,10 @@ static void boot_selftests_system(void) {
         }
 
         int cpus = 1;
-        task_t *load[4];
+        int load[4];
         int nload = 0;
         for (int i = 0; i < cpus; i++) {
-            load[nload] = task_spawn("m69-load", spinner_task, NULL);
+            load[nload] = selftest_pid(task_spawn("m69-load", spinner_task, NULL));
             if (load[nload]) {
                 nload++;
             }
@@ -7032,14 +7703,14 @@ static void boot_selftests_system(void) {
         uint64_t idle_before = scheduler_idle_ticks(0);
         uint64_t total_before = scheduler_total_ticks(0);
 
-        task_t *sleeper = task_spawn("m68-sleeper", m68_sleeper_task, (void *)(uint64_t)idle_file_descriptors[0]);
+        int sleeper = selftest_pid(task_spawn("m68-sleeper", m68_sleeper_task, (void *)(uint64_t)idle_file_descriptors[0]));
         if (!sleeper) {
             panic("M68 self-test: could not spawn the sleeper");
         }
 
         pit_sleep_ms(400);
 
-        if (sleeper->state != TASK_BLOCKED) {
+        if (selftest_state(sleeper) != TASK_BLOCKED) {
             kernel_log_puts("[m68] a task waiting in SYS_waitfds is not TASK_BLOCKED - it is "
                        "still in the run queue, which is the state this milestone exists to "
                        "remove\n");
@@ -7052,12 +7723,12 @@ static void boot_selftests_system(void) {
         static const char poke[] = "x";
         do_syscall(SYS_write, (uint64_t)idle_file_descriptors[1], (uint64_t)poke, 1);
         pit_sleep_ms(100);
-        if (sleeper->state == TASK_BLOCKED) {
+        if (selftest_state(sleeper) == TASK_BLOCKED) {
             kernel_log_puts("[m68] a blocked task was not woken by a write to the pipe it was "
                        "waiting on\n");
             all_ok = 0;
         }
-        do_syscall(SYS_kill, (uint64_t)sleeper->id, SIGKILL, 0);
+        do_syscall(SYS_kill, (uint64_t)sleeper, SIGKILL, 0);
         selftest_reap(sleeper);
         do_syscall(SYS_close, (uint64_t)idle_file_descriptors[0], 0, 0);
         do_syscall(SYS_close, (uint64_t)idle_file_descriptors[1], 0, 0);
@@ -7741,7 +8412,7 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_unlink, (uint64_t)result, 0, 0);
 
             size_t img_bytes = 0;
-            uint8_t *img = read_program("/bin/dyntest", &img_bytes);
+            uint8_t *img = read_optional_program("/bin/dyntest", &img_bytes);
             if (!img) {
                 kernel_log_puts("[m95] could not read /bin/dyntest back\n");
                 all_ok = 0;
@@ -7754,11 +8425,11 @@ static void boot_selftests_system(void) {
                 const char *shargv[] = {"/bin/dyntest", "share", 0};
 
                 uint64_t before = physical_memory_free_frame_count();
-                task_t *a = process_spawnv("dyntest", img, img_bytes, shargv);
+                int a = selftest_pid(process_spawnv("dyntest", img, img_bytes, shargv));
                 pit_sleep_ms(600);
                 uint64_t after_one = physical_memory_free_frame_count();
                 int shared_one = file_mapping_in_use();
-                task_t *b = process_spawnv("dyntest", img, img_bytes, shargv);
+                int b = selftest_pid(process_spawnv("dyntest", img, img_bytes, shargv));
                 pit_sleep_ms(600);
                 uint64_t after_two = physical_memory_free_frame_count();
                 int shared_two = file_mapping_in_use();
@@ -7779,10 +8450,10 @@ static void boot_selftests_system(void) {
                 kernel_log_puts(" pages\n");
 
                 if (a) {
-                    scheduler_raise_signal(a, SIGKILL);
+                    do_syscall(SYS_kill, (uint64_t)a, SIGKILL, 0);
                 }
                 if (b) {
-                    scheduler_raise_signal(b, SIGKILL);
+                    do_syscall(SYS_kill, (uint64_t)b, SIGKILL, 0);
                 }
                 pit_sleep_ms(300);
                 selftest_reap(a);
@@ -8593,9 +9264,9 @@ static void boot_selftests_system(void) {
         size_t ns_bytes = 0;
         uint8_t *ns_img = read_program(PATH_BIN_DIRECTORY "nslookup", &ns_bytes);
         const char *ns_argv[] = {PATH_BIN_DIRECTORY "nslookup", "-s", 0};
-        task_t *ns = process_spawnv("nslookup", ns_img, ns_bytes, ns_argv);
+        int ns = selftest_pid(process_spawnv("nslookup", ns_img, ns_bytes, ns_argv));
         kfree(ns_img);
-        if (!ns || do_syscall(SYS_wait, (uint64_t)ns->id, 0, 0) != 0) {
+        if (!ns || selftest_wait(ns) != 0) {
             kernel_log_puts("[m73] the DNS parser self-test reported a failure\n");
             all_ok = 0;
         }
@@ -8603,7 +9274,7 @@ static void boot_selftests_system(void) {
         size_t hd_bytes = 0;
         uint8_t *hd_img = read_program(PATH_BIN_DIRECTORY "httpd", &hd_bytes);
         const char *hd_argv[] = {PATH_BIN_DIRECTORY "httpd", "8081", 0};
-        task_t *hd = process_spawnv("httpd", hd_img, hd_bytes, hd_argv);
+        int hd = selftest_pid(process_spawnv("httpd", hd_img, hd_bytes, hd_argv));
         kfree(hd_img);
         pit_sleep_ms(300);
 
@@ -8612,9 +9283,9 @@ static void boot_selftests_system(void) {
         uint8_t *ft_img = read_program(PATH_BIN_DIRECTORY "fetch", &ft_bytes);
         const char *ft_argv[] = {PATH_BIN_DIRECTORY "fetch",
                                   "http://127.0.0.1:8081/hello", FETCHED, 0};
-        task_t *ft = process_spawnv("fetch", ft_img, ft_bytes, ft_argv);
+        int ft = selftest_pid(process_spawnv("fetch", ft_img, ft_bytes, ft_argv));
         kfree(ft_img);
-        if (!ft || do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) != 0) {
+        if (!ft || selftest_wait(ft) != 0) {
             kernel_log_puts("[m73] fetch could not retrieve over loopback\n");
             all_ok = 0;
         }
@@ -8672,7 +9343,7 @@ static void boot_selftests_system(void) {
         uint8_t *comp_img = read_program(PATH_BIN_DIRECTORY "compositor", &comp_bytes);
         const char *comp_argv[] = {PATH_BIN_DIRECTORY "compositor", 0};
         const char *comp_envp[] = {"LEANOS_SESSION=1", 0};
-        task_t *comp = process_spawnve("compositor", comp_img, comp_bytes, comp_argv, comp_envp);
+        int comp = selftest_pid(process_spawnve("compositor", comp_img, comp_bytes, comp_argv, comp_envp));
         kfree(comp_img);
         if (!comp) {
             panic("M74 self-test: could not spawn a compositor");
@@ -8688,7 +9359,7 @@ static void boot_selftests_system(void) {
 
         size_t z_bytes = 0;
         uint8_t *z_img = read_program(PATH_BIN_DIRECTORY "wm_zorder", &z_bytes);
-        task_t *second = process_spawn("wm_zorder", z_img, z_bytes, "s2 00C08040");
+        int second = selftest_pid(process_spawn("wm_zorder", z_img, z_bytes, "s2 00C08040"));
         kfree(z_img);
         pit_sleep_ms(3000);
 
@@ -8710,17 +9381,17 @@ static void boot_selftests_system(void) {
         }
 
         if (second) {
-            do_syscall(SYS_kill, (uint64_t)second->id, SIGKILL, 0);
+            do_syscall(SYS_kill, (uint64_t)second, SIGKILL, 0);
             selftest_reap(second);
         }
-        do_syscall(SYS_kill, (uint64_t)comp->id, SIGKILL, 0);
+        do_syscall(SYS_kill, (uint64_t)comp, SIGKILL, 0);
         selftest_reap(comp);
         for (int i = 0; i < scheduler_task_count(); i++) {
             task_t *o = scheduler_task_by_slot(i);
+            int pid = o ? o->id : 0;
             if (o && o->state != TASK_FREE && o->state != TASK_TERMINATED &&
                 k_strcmp(o->name, "gui_clock") == 0) {
-                do_syscall(SYS_kill, (uint64_t)o->id, SIGKILL, 0);
-                selftest_reap(o);
+                selftest_reap(pid);
             }
         }
         if (saved_session_length >= 0) {
@@ -8755,7 +9426,7 @@ static void boot_selftests_system(void) {
         scheduler_set_env(scheduler_current(), SELF_ENV, sizeof(SELF_ENV) - 1, 3);
 
         size_t et_bytes = 0;
-        uint8_t *et_img = read_program(PATH_BIN_DIRECTORY "envtest", &et_bytes);
+        uint8_t *et_img = read_optional_program(PATH_BIN_DIRECTORY "envtest", &et_bytes);
         if (!et_img) {
             panic("M75 self-test: /bin/envtest is not on this disk");
         }
@@ -8766,8 +9437,8 @@ static void boot_selftests_system(void) {
         {
             const char *argv[] = {PATH_BIN_DIRECTORY "envtest", 0};
             const char *envp[] = {"M75_OUT=alpha", "M75_BODY=first", 0};
-            task_t *t = process_spawnve("envtest", et_img, et_bytes, argv, envp);
-            long rc = t ? do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) : -1;
+            int t = selftest_pid(process_spawnve("envtest", et_img, et_bytes, argv, envp));
+            long rc = t ? selftest_wait(t) : -1;
             if (rc != 0) {
                 kernel_log_puts("[m75] the first child exited ");
                 kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
@@ -8797,8 +9468,8 @@ static void boot_selftests_system(void) {
         {
             const char *argv[] = {PATH_BIN_DIRECTORY "envtest", 0};
             const char *envp[] = {"M75_OUT=beta", "M75_BODY=second", 0};
-            task_t *t = process_spawnve("envtest", et_img, et_bytes, argv, envp);
-            long rc = t ? do_syscall(SYS_wait, (uint64_t)t->id, 0, 0) : -1;
+            int t = selftest_pid(process_spawnve("envtest", et_img, et_bytes, argv, envp));
+            long rc = t ? selftest_wait(t) : -1;
             if (rc != 0) {
                 kernel_log_puts("[m75] the second child exited ");
                 kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
@@ -8915,16 +9586,16 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_unlink, (uint64_t)ALIVE, 0, 0);
 
         size_t st_bytes = 0;
-        uint8_t *st_img = read_program(PATH_BIN_DIRECTORY "sigtest", &st_bytes);
+        uint8_t *st_img = read_optional_program(PATH_BIN_DIRECTORY "sigtest", &st_bytes);
         if (!st_img) {
             panic("M76 self-test: /bin/sigtest is not on this disk");
         }
         const char *st_argv[] = {PATH_BIN_DIRECTORY "sigtest", 0};
-        task_t *st = process_spawnv("sigtest", st_img, st_bytes, st_argv);
+        int st = selftest_pid(process_spawnv("sigtest", st_img, st_bytes, st_argv));
         if (!st) {
             panic("M76 self-test: could not spawn sigtest");
         }
-        int st_pid = st->id;
+        int st_pid = st;
 
         int ready = 0;
         for (int i = 0; i < 300 && !ready; i++) {
@@ -8932,14 +9603,14 @@ static void boot_selftests_system(void) {
                 ready = 1;
                 break;
             }
-            if (st->state == TASK_TERMINATED) {
+            if (!selftest_running(st)) {
                 break;
             }
             pit_sleep_ms(50);
         }
         if (!ready) {
             kernel_log_puts("[m76] sigtest never reached its ready point - it exited ");
-            kernel_log_put_dec((uint32_t)st->exit_code);
+            kernel_log_put_dec((uint32_t)selftest_exit_code(st));
             kernel_log_puts(" (see user_space/binaries/sigtest.c for what each code means)\n");
             all_ok = 0;
         }
@@ -8960,7 +9631,7 @@ static void boot_selftests_system(void) {
             if (!handled) {
                 kernel_log_puts("[m76] the SIGINT handler never ran, or the process did not "
                            "survive it - sigtest is ");
-                kernel_log_puts(st->state == TASK_TERMINATED ? "terminated" : "still running");
+                kernel_log_puts(selftest_running(st) ? "still running" : "terminated");
                 kernel_log_putc('\n');
                 all_ok = 0;
             }
@@ -8992,7 +9663,7 @@ static void boot_selftests_system(void) {
             }
 
             do_syscall(SYS_kill, (uint64_t)st_pid, SIGUSR1, 0);
-            long code = do_syscall(SYS_wait, (uint64_t)st_pid, 0, 0);
+            long code = selftest_wait(st_pid);
             if (code != 0) {
                 kernel_log_puts("[m76] sigtest exited ");
                 kernel_log_put_dec((uint32_t)code);
@@ -9006,14 +9677,14 @@ static void boot_selftests_system(void) {
             size_t h_bytes = 0;
             uint8_t *h_img = read_program(PATH_BIN_DIRECTORY "sh", &h_bytes);
             const char *h_argv[] = {PATH_BIN_DIRECTORY "sh", 0};
-            task_t *h = process_spawnv("sh", h_img, h_bytes, h_argv);
+            int h = selftest_pid(process_spawnv("sh", h_img, h_bytes, h_argv));
             kfree(h_img);
             if (!h) {
                 panic("M76 self-test: could not spawn the default-action fixture");
             }
             pit_sleep_ms(300);
-            do_syscall(SYS_kill, (uint64_t)h->id, SIGINT, 0);
-            long code = do_syscall(SYS_wait, (uint64_t)h->id, 0, 0);
+            do_syscall(SYS_kill, (uint64_t)h, SIGINT, 0);
+            long code = selftest_wait(h);
             if (code != 128 + SIGINT) {
                 kernel_log_puts("[m76] a process with no SIGINT handler exited ");
                 kernel_log_put_dec((uint32_t)code);
@@ -9041,13 +9712,13 @@ static void boot_selftests_system(void) {
 
     {
         size_t ft_bytes = 0;
-        uint8_t *ft_img = read_program(PATH_BIN_DIRECTORY "faulttest", &ft_bytes);
+        uint8_t *ft_img = read_optional_program(PATH_BIN_DIRECTORY "faulttest", &ft_bytes);
         if (!ft_img) {
             panic("M99 self-test: /bin/faulttest is not on this disk");
         }
         const char *ft_argv[] = {PATH_BIN_DIRECTORY "faulttest", 0};
-        task_t *ft = process_spawnv("faulttest", ft_img, ft_bytes, ft_argv);
-        long ft_rc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
+        int ft = selftest_pid(process_spawnv("faulttest", ft_img, ft_bytes, ft_argv));
+        long ft_rc = ft ? selftest_wait(ft) : -1;
         kfree(ft_img);
         if (ft_rc != 0) {
             kernel_log_puts("[m99fault] faulttest exited ");
@@ -9094,7 +9765,7 @@ static void boot_selftests_system(void) {
         }
 
         size_t tw_bytes = 0;
-        uint8_t *tw_img = read_program(PATH_BIN_DIRECTORY "treewalk", &tw_bytes);
+        uint8_t *tw_img = read_optional_program(PATH_BIN_DIRECTORY "treewalk", &tw_bytes);
         if (!tw_img) {
             panic("M77 self-test: /bin/treewalk is not on this disk");
         }
@@ -9106,8 +9777,8 @@ static void boot_selftests_system(void) {
         }
         do_syscall(SYS_dup2, (uint64_t)outfd, 1, 0);
         const char *tw_argv[] = {PATH_BIN_DIRECTORY "treewalk", ROOT, 0};
-        task_t *tw = process_spawnv("treewalk", tw_img, tw_bytes, tw_argv);
-        long rc = tw ? do_syscall(SYS_wait, (uint64_t)tw->id, 0, 0) : -1;
+        int tw = selftest_pid(process_spawnv("treewalk", tw_img, tw_bytes, tw_argv));
+        long rc = tw ? selftest_wait(tw) : -1;
         do_syscall(SYS_dup2, (uint64_t)saved, 1, 0);
         do_syscall(SYS_close, (uint64_t)saved, 0, 0);
         do_syscall(SYS_close, (uint64_t)outfd, 0, 0);
@@ -9219,9 +9890,9 @@ static void boot_selftests_system(void) {
     {
         size_t sct_size_bytes = 0;
         uint8_t *sct_image = read_program("/bin/syscalltest", &sct_size_bytes);
-        task_t *sct_task = process_spawn("syscalltest", sct_image, sct_size_bytes, "");
+        int sct_task = selftest_pid(process_spawn("syscalltest", sct_image, sct_size_bytes, ""));
         kfree(sct_image);
-        long sct_status = do_syscall(SYS_wait, (uint64_t)sct_task->id, 0, 0);
+        long sct_status = selftest_wait(sct_task);
         if (sct_status != 0) {
             panic("[q5] a syscall accepted an argument it should have refused - see the syscalltest lines above");
         }
@@ -9235,7 +9906,7 @@ static void boot_selftests_system(void) {
     {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
         size_t ex_bytes = 0;
-        uint8_t *ex_img = read_program(PATH_BIN_DIRECTORY "exhausttest", &ex_bytes);
+        uint8_t *ex_img = read_optional_program(PATH_BIN_DIRECTORY "exhausttest", &ex_bytes);
         if (!ex_img) {
             panic("Q9 self-test: /bin/exhausttest is not on this disk");
         }
@@ -9259,8 +9930,8 @@ static void boot_selftests_system(void) {
                 kernel_log_puts(" frames\n");
             }
             const char *ex_argv[] = {PATH_BIN_DIRECTORY "exhausttest", 0};
-            task_t *ex = process_spawnv("exhausttest", ex_img, ex_bytes, ex_argv);
-            long rc = ex ? do_syscall(SYS_wait, (uint64_t)ex->id, 0, 0) : -1;
+            int ex = selftest_pid(process_spawnv("exhausttest", ex_img, ex_bytes, ex_argv));
+            long rc = ex ? selftest_wait(ex) : -1;
             if (rc != 0) {
                 kernel_log_puts("[q9] exhausttest round ");
                 kernel_log_put_dec((uint32_t)round);
@@ -9318,9 +9989,9 @@ static void boot_selftests_system(void) {
             if (sp_img) {
                 const char *sp_argv[] = {PATH_BIN_DIRECTORY "hello", 0};
                 for (int i = 0; i < 200; i++) {
-                    task_t *t = process_spawnv("hello", sp_img, sp_bytes, sp_argv);
+                    int t = selftest_pid(process_spawnv("hello", sp_img, sp_bytes, sp_argv));
                     if (t) {
-                        do_syscall(SYS_wait, (uint64_t)t->id, 0, 0);
+                        selftest_wait(t);
                     }
                 }
                 kfree(sp_img);
@@ -9383,13 +10054,13 @@ static void boot_selftests_system(void) {
                       "Run tools/build-packages.sh and `make packages`.\n\n");
         } else {
             size_t pk_bytes = 0;
-            uint8_t *pk_img = read_program(PATH_BIN_DIRECTORY "pkgtest", &pk_bytes);
+            uint8_t *pk_img = read_optional_program(PATH_BIN_DIRECTORY "pkgtest", &pk_bytes);
             if (!pk_img) {
                 panic("M111 self-test: /bin/pkgtest is not on this disk");
             }
             const char *pk_argv[] = {PATH_BIN_DIRECTORY "pkgtest", 0};
-            task_t *pk = process_spawnv("pkgtest", pk_img, pk_bytes, pk_argv);
-            long rc = pk ? do_syscall(SYS_wait, (uint64_t)pk->id, 0, 0) : -1;
+            int pk = selftest_pid(process_spawnv("pkgtest", pk_img, pk_bytes, pk_argv));
+            long rc = pk ? selftest_wait(pk) : -1;
             kfree(pk_img);
             if (rc != 0) {
                 kernel_log_puts("[m111] pkgtest exited ");
@@ -9428,13 +10099,13 @@ static void boot_selftests_system(void) {
     {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
         size_t dt_bytes = 0;
-        uint8_t *dt_img = read_program(PATH_BIN_DIRECTORY "dirtest", &dt_bytes);
+        uint8_t *dt_img = read_optional_program(PATH_BIN_DIRECTORY "dirtest", &dt_bytes);
         if (!dt_img) {
             panic("M112 self-test: /bin/dirtest is not on this disk");
         }
         const char *dt_argv[] = {PATH_BIN_DIRECTORY "dirtest", 0};
-        task_t *dt = process_spawnv("dirtest", dt_img, dt_bytes, dt_argv);
-        long rc = dt ? do_syscall(SYS_wait, (uint64_t)dt->id, 0, 0) : -1;
+        int dt = selftest_pid(process_spawnv("dirtest", dt_img, dt_bytes, dt_argv));
+        long rc = dt ? selftest_wait(dt) : -1;
         kfree(dt_img);
         if (rc != 0) {
             kernel_log_puts("[m112] dirtest exited ");
@@ -9460,13 +10131,13 @@ static void boot_selftests_system(void) {
     {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
         size_t bt_bytes = 0;
-        uint8_t *bt_img = read_program(PATH_BIN_DIRECTORY "browsertest", &bt_bytes);
+        uint8_t *bt_img = read_optional_program(PATH_BIN_DIRECTORY "browsertest", &bt_bytes);
         if (!bt_img) {
             panic("M100 self-test: /bin/browsertest is not on this disk");
         }
         const char *bt_argv[] = {PATH_BIN_DIRECTORY "browsertest", 0};
-        task_t *bt = process_spawnv("browsertest", bt_img, bt_bytes, bt_argv);
-        long rc = bt ? do_syscall(SYS_wait, (uint64_t)bt->id, 0, 0) : -1;
+        int bt = selftest_pid(process_spawnv("browsertest", bt_img, bt_bytes, bt_argv));
+        long rc = bt ? selftest_wait(bt) : -1;
         kfree(bt_img);
         if (rc != 0) {
             kernel_log_puts("[m100h] browsertest exited ");
@@ -9491,16 +10162,16 @@ static void boot_selftests_system(void) {
         size_t comp_bytes = 0;
         uint8_t *comp_image = read_program(PATH_BIN_DIRECTORY "compositor", &comp_bytes);
         size_t demo_bytes = 0;
-        uint8_t *demo_image = read_program(PATH_BIN_DIRECTORY "lvgl_demo", &demo_bytes);
+        uint8_t *demo_image = read_optional_program(PATH_BIN_DIRECTORY "lvgl_demo", &demo_bytes);
         if (!comp_image || !demo_image) {
             panic("M125 self-test: /bin/lvgl_demo is not on this disk");
         }
 
-        task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, comp_bytes, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        task_t *demo_task = process_spawn("lvgl_demo", demo_image, demo_bytes, "");
+        int demo_task = selftest_pid(process_spawn("lvgl_demo", demo_image, demo_bytes, ""));
         kfree(demo_image);
         pit_sleep_ms(3000);
 
@@ -9603,28 +10274,28 @@ static void boot_selftests_system(void) {
         size_t comp_bytes = 0;
         uint8_t *comp_image = read_program(PATH_BIN_DIRECTORY "compositor", &comp_bytes);
         size_t settings_bytes = 0;
-        uint8_t *settings_image = read_program(PATH_BIN_DIRECTORY "settings", &settings_bytes);
+        uint8_t *settings_image = read_optional_program(PATH_BIN_DIRECTORY "settings", &settings_bytes);
         size_t tasks_bytes = 0;
-        uint8_t *tasks_image = read_program(PATH_BIN_DIRECTORY "task_manager", &tasks_bytes);
+        uint8_t *tasks_image = read_optional_program(PATH_BIN_DIRECTORY "task_manager", &tasks_bytes);
         size_t files_bytes = 0;
-        uint8_t *files_image = read_program(PATH_BIN_DIRECTORY "file_manager", &files_bytes);
+        uint8_t *files_image = read_optional_program(PATH_BIN_DIRECTORY "file_manager", &files_bytes);
         if (!comp_image || !settings_image || !tasks_image || !files_image) {
             panic("M127 self-test: a desktop application could not be read through its link");
         }
 
-        task_t *comp_task = process_spawn("compositor", comp_image, comp_bytes, "");
+        int comp_task = selftest_pid(process_spawn("compositor", comp_image, comp_bytes, ""));
         kfree(comp_image);
         selftest_wait_for_compositor();
 
-        task_t *settings_task = process_spawn("settings", settings_image, settings_bytes, "");
+        int settings_task = selftest_pid(process_spawn("settings", settings_image, settings_bytes, ""));
         kfree(settings_image);
-        task_t *tasks_task = process_spawn("task_manager", tasks_image, tasks_bytes, "");
+        int tasks_task = selftest_pid(process_spawn("task_manager", tasks_image, tasks_bytes, ""));
         kfree(tasks_image);
-        task_t *files_task = process_spawn("file_manager", files_image, files_bytes, "");
+        int files_task = selftest_pid(process_spawn("file_manager", files_image, files_bytes, ""));
         kfree(files_image);
-        uint32_t settings_caps = settings_task ? settings_task->caps : 0;
-        uint32_t tasks_caps = tasks_task ? tasks_task->caps : 0;
-        uint32_t files_caps = files_task ? files_task->caps : 0;
+        uint32_t settings_caps = selftest_caps(settings_task);
+        uint32_t tasks_caps = selftest_caps(tasks_task);
+        uint32_t files_caps = selftest_caps(files_task);
         pit_sleep_ms(4000);
 
         uint32_t width = framebuffer_width();
@@ -9661,9 +10332,9 @@ static void boot_selftests_system(void) {
         size_t picture_bytes = 0;
         uint8_t *picture_image = read_program(PATH_BIN_DIRECTORY "settings", &picture_bytes);
         const char *picture_argv[] = {"wallpapertest", 0};
-        task_t *picture_task =
-            picture_image ? process_spawnv("wallpapertest", picture_image, picture_bytes, picture_argv) : 0;
-        long picture_rc = picture_task ? do_syscall(SYS_wait, (uint64_t)picture_task->id, 0, 0) : -1;
+        int picture_task =
+            picture_image ? selftest_pid(process_spawnv("wallpapertest", picture_image, picture_bytes, picture_argv)) : 0;
+        long picture_rc = selftest_wait(picture_task);
         kfree(picture_image);
 
         selftest_reap(files_task);
@@ -9734,13 +10405,13 @@ static void boot_selftests_system(void) {
         uint32_t started_ms = (uint32_t)(pit_get_ticks() * (1000 / PIT_HZ));
         int un_before = unix_socket_in_use();
         size_t ut_bytes = 0;
-        uint8_t *ut_img = read_program(PATH_BIN_DIRECTORY "unixtest", &ut_bytes);
+        uint8_t *ut_img = read_optional_program(PATH_BIN_DIRECTORY "unixtest", &ut_bytes);
         if (!ut_img) {
             panic("M118 self-test: /bin/unixtest is not on this disk");
         }
         const char *ut_argv[] = {PATH_BIN_DIRECTORY "unixtest", 0};
-        task_t *ut = process_spawnv("unixtest", ut_img, ut_bytes, ut_argv);
-        long rc = ut ? do_syscall(SYS_wait, (uint64_t)ut->id, 0, 0) : -1;
+        int ut = selftest_pid(process_spawnv("unixtest", ut_img, ut_bytes, ut_argv));
+        long rc = ut ? selftest_wait(ut) : -1;
         kfree(ut_img);
         if (rc != 0) {
             kernel_log_puts("[m118] unixtest exited ");
@@ -9782,13 +10453,13 @@ static void boot_selftests_system(void) {
         int tf_before = timerfd_in_use();
         int ep_before = epoll_in_use();
         size_t et_bytes = 0;
-        uint8_t *et_img = read_program(PATH_BIN_DIRECTORY "epolltest", &et_bytes);
+        uint8_t *et_img = read_optional_program(PATH_BIN_DIRECTORY "epolltest", &et_bytes);
         if (!et_img) {
             panic("M119 self-test: /bin/epolltest is not on this disk");
         }
         const char *et_argv[] = {PATH_BIN_DIRECTORY "epolltest", 0};
-        task_t *et = process_spawnv("epolltest", et_img, et_bytes, et_argv);
-        long rc = et ? do_syscall(SYS_wait, (uint64_t)et->id, 0, 0) : -1;
+        int et = selftest_pid(process_spawnv("epolltest", et_img, et_bytes, et_argv));
+        long rc = et ? selftest_wait(et) : -1;
         kfree(et_img);
         if (rc != 0) {
             kernel_log_puts("[m119] epolltest exited ");
@@ -9837,13 +10508,13 @@ static void boot_selftests_system(void) {
         uint32_t pages_before = memfd_pages_held();
         uint64_t frames_before = physical_memory_free_frame_count();
         size_t mf_bytes = 0;
-        uint8_t *mf_img = read_program(PATH_BIN_DIRECTORY "memfdtest", &mf_bytes);
+        uint8_t *mf_img = read_optional_program(PATH_BIN_DIRECTORY "memfdtest", &mf_bytes);
         if (!mf_img) {
             panic("M120 self-test: /bin/memfdtest is not on this disk");
         }
         const char *mf_argv[] = {PATH_BIN_DIRECTORY "memfdtest", 0};
-        task_t *mf = process_spawnv("memfdtest", mf_img, mf_bytes, mf_argv);
-        long rc = mf ? do_syscall(SYS_wait, (uint64_t)mf->id, 0, 0) : -1;
+        int mf = selftest_pid(process_spawnv("memfdtest", mf_img, mf_bytes, mf_argv));
+        long rc = mf ? selftest_wait(mf) : -1;
         kfree(mf_img);
         if (rc != 0) {
             kernel_log_puts("[m120] memfdtest exited ");
@@ -9890,15 +10561,15 @@ static void boot_selftests_system(void) {
 
     {
         size_t px_bytes = 0;
-        uint8_t *px_img = read_program(PATH_BIN_DIRECTORY "posixtest", &px_bytes);
+        uint8_t *px_img = read_optional_program(PATH_BIN_DIRECTORY "posixtest", &px_bytes);
         if (!px_img) {
             panic("M140 self-test: /bin/posixtest is not on this disk");
         }
         const char *px_argv[] = {PATH_BIN_DIRECTORY "posixtest", 0};
         syscall_counters_entry_t gettid_before, gettid_after;
         syscall_counters_get(SYS_gettid, &gettid_before);
-        task_t *px = process_spawnv("posixtest", px_img, px_bytes, px_argv);
-        long rc = px ? do_syscall(SYS_wait, (uint64_t)px->id, 0, 0) : -1;
+        int px = selftest_pid(process_spawnv("posixtest", px_img, px_bytes, px_argv));
+        long rc = px ? selftest_wait(px) : -1;
         syscall_counters_get(SYS_gettid, &gettid_after);
         kfree(px_img);
         if (rc != 0) {
@@ -9977,13 +10648,13 @@ static void boot_selftests_system(void) {
 
     {
         size_t bt_bytes = 0;
-        uint8_t *bt_img = read_program(PATH_BIN_DIRECTORY "basetest", &bt_bytes);
+        uint8_t *bt_img = read_optional_program(PATH_BIN_DIRECTORY "basetest", &bt_bytes);
         if (!bt_img) {
             panic("M141 self-test: /bin/basetest is not on this disk");
         }
         const char *bt_argv[] = {PATH_BIN_DIRECTORY "basetest", 0};
-        task_t *bt = process_spawnv("basetest", bt_img, bt_bytes, bt_argv);
-        long rc = bt ? do_syscall(SYS_wait, (uint64_t)bt->id, 0, 0) : -1;
+        int bt = selftest_pid(process_spawnv("basetest", bt_img, bt_bytes, bt_argv));
+        long rc = bt ? selftest_wait(bt) : -1;
         kfree(bt_img);
         if (rc != 0) {
             kernel_log_puts("[m141] basetest exited ");
@@ -10060,12 +10731,12 @@ static void boot_selftests_system(void) {
         do_syscall(SYS_dup2, (uint64_t)ml_pipe[1], 1, 0);
 
         size_t ml_bytes = 0;
-        uint8_t *ml_img = read_program(PATH_BIN_DIRECTORY "mathltest", &ml_bytes);
+        uint8_t *ml_img = read_optional_program(PATH_BIN_DIRECTORY "mathltest", &ml_bytes);
         if (!ml_img) {
             panic("M142 self-test: /bin/mathltest is not on this disk");
         }
         const char *ml_argv[] = {PATH_BIN_DIRECTORY "mathltest", 0};
-        task_t *ml = process_spawnv("mathltest", ml_img, ml_bytes, ml_argv);
+        int ml = selftest_pid(process_spawnv("mathltest", ml_img, ml_bytes, ml_argv));
         kfree(ml_img);
 
         static char ml_out[8192];
@@ -10085,7 +10756,7 @@ static void boot_selftests_system(void) {
                 }
                 continue;
             }
-            long done = do_syscall(SYS_wait_nb, (uint64_t)ml->id, 0, 0);
+            long done = selftest_poll_exit(ml);
             if (done != -2) {
                 ml_rc = done;
                 long n;
@@ -10125,10 +10796,24 @@ static void boot_selftests_system(void) {
             *end = saved;
             line = saved ? end + 1 : end;
         }
+        /* mathltest's exit status says which half failed: 1 the long double
+           library's own checks, 2 the quiet NaN probe ([m142q]), 3 both. */
         if (ml_rc != 0) {
-            panic("M142 self-test: this long double library disagrees with MPFR "
-                  "by more than tests/math/long_double_cases.tsv claims, or "
-                  "gets one of C99's special values wrong");
+            panic(ml_rc == 2
+                  ? "M142 self-test: the quiet NaN probe failed - a <math.h> "
+                    "function given a quiet NaN raised the wrong flag or "
+                    "returned the wrong value under Annex F, a probe held no "
+                    "NaN, or the probe's own premise (sqrt(-1) raises invalid, "
+                    "the NaN is quiet) did not hold; mathltest's FAIL lines "
+                    "above name which"
+                  : ml_rc == 3
+                  ? "M142 self-test: the quiet NaN probe failed, and this long "
+                    "double library also disagrees with MPFR or with the "
+                    "standard's special values; mathltest's FAIL lines above "
+                    "name both"
+                  : "M142 self-test: this long double library disagrees with MPFR "
+                    "by more than tests/math/long_double_cases.tsv claims, or "
+                    "gets one of C99's special values wrong");
         }
         kernel_log_putc('\n');
         }
@@ -10151,14 +10836,14 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_dup2, (uint64_t)cb_pipe[1], 2, 0);
 
             size_t cb_bytes = 0;
-            uint8_t *cb_image = read_program(PATH_BIN_DIRECTORY "chromiumbase",
-                                             &cb_bytes);
+            uint8_t *cb_image = read_optional_program(PATH_BIN_DIRECTORY "chromiumbase",
+                                                      &cb_bytes);
             if (!cb_image) {
                 panic("M145 self-test: /bin/chromiumbase could not be read");
             }
             const char *cb_argv[] = {PATH_BIN_DIRECTORY "chromiumbase", 0};
-            task_t *cbt = process_spawnv("chromiumbase", cb_image, cb_bytes,
-                                         cb_argv);
+            int cbt = selftest_pid(process_spawnv("chromiumbase", cb_image, cb_bytes,
+                                         cb_argv));
             kfree(cb_image);
 
             static char cb_out[8192];
@@ -10178,7 +10863,7 @@ static void boot_selftests_system(void) {
                     }
                     continue;
                 }
-                long done = cbt ? do_syscall(SYS_wait_nb, (uint64_t)cbt->id, 0, 0)
+                long done = cbt ? selftest_poll_exit(cbt)
                                 : -1;
                 if (done != -2) {
                     cb_rc = done;
@@ -10246,14 +10931,14 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_dup2, (uint64_t)cm_pipe[1], 2, 0);
 
             size_t cm_bytes = 0;
-            uint8_t *cm_image = read_program(PATH_BIN_DIRECTORY "chromiummojo",
-                                             &cm_bytes);
+            uint8_t *cm_image = read_optional_program(PATH_BIN_DIRECTORY "chromiummojo",
+                                                      &cm_bytes);
             if (!cm_image) {
                 panic("M148 self-test: /bin/chromiummojo could not be read");
             }
             const char *cm_argv[] = {PATH_BIN_DIRECTORY "chromiummojo", 0};
-            task_t *cmt = process_spawnv("chromiummojo", cm_image, cm_bytes,
-                                         cm_argv);
+            int cmt = selftest_pid(process_spawnv("chromiummojo", cm_image, cm_bytes,
+                                         cm_argv));
             kfree(cm_image);
 
             static char cm_out[8192];
@@ -10273,7 +10958,7 @@ static void boot_selftests_system(void) {
                     }
                     continue;
                 }
-                long done = cmt ? do_syscall(SYS_wait_nb, (uint64_t)cmt->id, 0, 0)
+                long done = cmt ? selftest_poll_exit(cmt)
                                 : -1;
                 if (done != -2) {
                     cm_rc = done;
@@ -10340,14 +11025,14 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_dup2, (uint64_t)cn_pipe[1], 2, 0);
 
             size_t cn_bytes = 0;
-            uint8_t *cn_image = read_program(PATH_BIN_DIRECTORY "chromiumnet",
-                                             &cn_bytes);
+            uint8_t *cn_image = read_optional_program(PATH_BIN_DIRECTORY "chromiumnet",
+                                                      &cn_bytes);
             if (!cn_image) {
                 panic("M150 self-test: /bin/chromiumnet could not be read");
             }
             const char *cn_argv[] = {PATH_BIN_DIRECTORY "chromiumnet", 0};
-            task_t *cnt = process_spawnv("chromiumnet", cn_image, cn_bytes,
-                                         cn_argv);
+            int cnt = selftest_pid(process_spawnv("chromiumnet", cn_image, cn_bytes,
+                                         cn_argv));
             kfree(cn_image);
 
             static char cn_out[8192];
@@ -10367,7 +11052,7 @@ static void boot_selftests_system(void) {
                     }
                     continue;
                 }
-                long done = cnt ? do_syscall(SYS_wait_nb, (uint64_t)cnt->id, 0, 0)
+                long done = cnt ? selftest_poll_exit(cnt)
                                 : -1;
                 if (done != -2) {
                     cn_rc = done;
@@ -10440,14 +11125,14 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_dup2, (uint64_t)cv_pipe[1], 2, 0);
 
             size_t cv_bytes = 0;
-            uint8_t *cv_image = read_program(PATH_BIN_DIRECTORY "chromiumv8",
-                                             &cv_bytes);
+            uint8_t *cv_image = read_optional_program(PATH_BIN_DIRECTORY "chromiumv8",
+                                                      &cv_bytes);
             if (!cv_image) {
                 panic("M156 self-test: /bin/chromiumv8 could not be read");
             }
             const char *cv_argv[] = {PATH_BIN_DIRECTORY "chromiumv8", 0};
-            task_t *cvt = process_spawnv("chromiumv8", cv_image, cv_bytes,
-                                         cv_argv);
+            int cvt = selftest_pid(process_spawnv("chromiumv8", cv_image, cv_bytes,
+                                         cv_argv));
             kfree(cv_image);
 
             static char cv_out[8192];
@@ -10470,7 +11155,7 @@ static void boot_selftests_system(void) {
                     }
                     continue;
                 }
-                long done = cvt ? do_syscall(SYS_wait_nb, (uint64_t)cvt->id, 0, 0)
+                long done = cvt ? selftest_poll_exit(cvt)
                                 : -1;
                 if (done != -2) {
                     cv_rc = done;
@@ -10523,7 +11208,12 @@ static void boot_selftests_system(void) {
 
     {
         os_stat_t nd;
-        if (do_syscall(SYS_stat, (uint64_t)"/bin/node", (uint64_t)&nd, 0) != 0) {
+        /* Absent, a directory or empty is "not on this image": the rule
+           read_optional_program and the host's reader (tools/qemu_input.py
+           has) both use, so an empty /bin/node skips here as it does under
+           opt/leanos/node rather than reaching run_captured_program. */
+        if (do_syscall(SYS_stat, (uint64_t)"/bin/node", (uint64_t)&nd, 0) != 0 ||
+            nd.is_directory || nd.size == 0) {
             kernel_log_puts("[m223] /bin/node is not on this image - skipped. "
                        "tools/build-chromium.sh builds it out of Electron's "
                        "configuration and tools/node-test.sh installs it.\n\n");
@@ -10554,14 +11244,14 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_dup2, (uint64_t)cs_pipe[1], 2, 0);
 
             size_t cs_bytes = 0;
-            uint8_t *cs_image = read_program(PATH_BIN_DIRECTORY "chromiumskia",
-                                             &cs_bytes);
+            uint8_t *cs_image = read_optional_program(PATH_BIN_DIRECTORY "chromiumskia",
+                                                      &cs_bytes);
             if (!cs_image) {
                 panic("M157 self-test: /bin/chromiumskia could not be read");
             }
             const char *cs_argv[] = {PATH_BIN_DIRECTORY "chromiumskia", 0};
-            task_t *cst = process_spawnv("chromiumskia", cs_image, cs_bytes,
-                                         cs_argv);
+            int cst = selftest_pid(process_spawnv("chromiumskia", cs_image, cs_bytes,
+                                         cs_argv));
             kfree(cs_image);
 
             static char cs_out[8192];
@@ -10585,7 +11275,7 @@ static void boot_selftests_system(void) {
                     }
                     continue;
                 }
-                long done = cst ? do_syscall(SYS_wait_nb, (uint64_t)cst->id, 0, 0)
+                long done = cst ? selftest_poll_exit(cst)
                                 : -1;
                 if (done != -2) {
                     cs_rc = done;
@@ -10651,14 +11341,14 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_dup2, (uint64_t)cc_pipe[1], 2, 0);
 
             size_t cc_bytes = 0;
-            uint8_t *cc_image = read_program(PATH_BIN_DIRECTORY "chromiumcc",
-                                             &cc_bytes);
+            uint8_t *cc_image = read_optional_program(PATH_BIN_DIRECTORY "chromiumcc",
+                                                      &cc_bytes);
             if (!cc_image) {
                 panic("M158 self-test: /bin/chromiumcc could not be read");
             }
             const char *cc_argv[] = {PATH_BIN_DIRECTORY "chromiumcc", 0};
-            task_t *cct = process_spawnv("chromiumcc", cc_image, cc_bytes,
-                                         cc_argv);
+            int cct = selftest_pid(process_spawnv("chromiumcc", cc_image, cc_bytes,
+                                         cc_argv));
             kfree(cc_image);
 
             static char cc_out[8192];
@@ -10682,7 +11372,7 @@ static void boot_selftests_system(void) {
                     }
                     continue;
                 }
-                long done = cct ? do_syscall(SYS_wait_nb, (uint64_t)cct->id, 0, 0)
+                long done = cct ? selftest_poll_exit(cct)
                                 : -1;
                 if (done != -2) {
                     cc_rc = done;
@@ -10749,14 +11439,14 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_dup2, (uint64_t)gi_pipe[1], 2, 0);
 
             size_t gi_bytes = 0;
-            uint8_t *gi_image = read_program(PATH_BIN_DIRECTORY "chromiumgpu",
-                                             &gi_bytes);
+            uint8_t *gi_image = read_optional_program(PATH_BIN_DIRECTORY "chromiumgpu",
+                                                      &gi_bytes);
             if (!gi_image) {
                 panic("M159 self-test: /bin/chromiumgpu could not be read");
             }
             const char *gi_argv[] = {PATH_BIN_DIRECTORY "chromiumgpu", 0};
-            task_t *git = process_spawnv("chromiumgpu", gi_image, gi_bytes,
-                                         gi_argv);
+            int git = selftest_pid(process_spawnv("chromiumgpu", gi_image, gi_bytes,
+                                         gi_argv));
             kfree(gi_image);
 
             static char gi_out[8192];
@@ -10780,7 +11470,7 @@ static void boot_selftests_system(void) {
                     }
                     continue;
                 }
-                long done = git ? do_syscall(SYS_wait_nb, (uint64_t)git->id, 0, 0)
+                long done = git ? selftest_poll_exit(git)
                                 : -1;
                 if (done != -2) {
                     gi_rc = done;
@@ -10847,14 +11537,14 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_dup2, (uint64_t)c2_pipe[1], 2, 0);
 
             size_t c2_bytes = 0;
-            uint8_t *c2_image = read_program(PATH_BIN_DIRECTORY "chromiumcc2",
-                                             &c2_bytes);
+            uint8_t *c2_image = read_optional_program(PATH_BIN_DIRECTORY "chromiumcc2",
+                                                      &c2_bytes);
             if (!c2_image) {
                 panic("M160 self-test: /bin/chromiumcc2 could not be read");
             }
             const char *c2_argv[] = {PATH_BIN_DIRECTORY "chromiumcc2", 0};
-            task_t *c2t = process_spawnv("chromiumcc2", c2_image, c2_bytes,
-                                         c2_argv);
+            int c2t = selftest_pid(process_spawnv("chromiumcc2", c2_image, c2_bytes,
+                                         c2_argv));
             kfree(c2_image);
 
             static char c2_out[8192];
@@ -10878,7 +11568,7 @@ static void boot_selftests_system(void) {
                     }
                     continue;
                 }
-                long done = c2t ? do_syscall(SYS_wait_nb, (uint64_t)c2t->id, 0, 0)
+                long done = c2t ? selftest_poll_exit(c2t)
                                 : -1;
                 if (done != -2) {
                     c2_rc = done;
@@ -10944,14 +11634,14 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_dup2, (uint64_t)bk_pipe[1], 2, 0);
 
             size_t bk_bytes = 0;
-            uint8_t *bk_image = read_program(PATH_BIN_DIRECTORY "chromiumblink",
-                                             &bk_bytes);
+            uint8_t *bk_image = read_optional_program(PATH_BIN_DIRECTORY "chromiumblink",
+                                                      &bk_bytes);
             if (!bk_image) {
                 panic("M161 self-test: /bin/chromiumblink could not be read");
             }
             const char *bk_argv[] = {PATH_BIN_DIRECTORY "chromiumblink", 0};
-            task_t *bkt = process_spawnv("chromiumblink", bk_image, bk_bytes,
-                                         bk_argv);
+            int bkt = selftest_pid(process_spawnv("chromiumblink", bk_image, bk_bytes,
+                                         bk_argv));
             kfree(bk_image);
 
             static char bk_out[8192];
@@ -10975,7 +11665,7 @@ static void boot_selftests_system(void) {
                     }
                     continue;
                 }
-                long done = bkt ? do_syscall(SYS_wait_nb, (uint64_t)bkt->id, 0, 0)
+                long done = bkt ? selftest_poll_exit(bkt)
                                 : -1;
                 if (done != -2) {
                     bk_rc = done;
@@ -11042,14 +11732,14 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_dup2, (uint64_t)vz_pipe[1], 2, 0);
 
             size_t vz_bytes = 0;
-            uint8_t *vz_image = read_program(PATH_BIN_DIRECTORY "chromiumviz",
-                                             &vz_bytes);
+            uint8_t *vz_image = read_optional_program(PATH_BIN_DIRECTORY "chromiumviz",
+                                                      &vz_bytes);
             if (!vz_image) {
                 panic("M162 self-test: /bin/chromiumviz could not be read");
             }
             const char *vz_argv[] = {PATH_BIN_DIRECTORY "chromiumviz", 0};
-            task_t *vzt = process_spawnv("chromiumviz", vz_image, vz_bytes,
-                                         vz_argv);
+            int vzt = selftest_pid(process_spawnv("chromiumviz", vz_image, vz_bytes,
+                                         vz_argv));
             kfree(vz_image);
 
             static char vz_out[8192];
@@ -11069,7 +11759,7 @@ static void boot_selftests_system(void) {
                     }
                     continue;
                 }
-                long done = vzt ? do_syscall(SYS_wait_nb, (uint64_t)vzt->id, 0, 0)
+                long done = vzt ? selftest_poll_exit(vzt)
                                 : -1;
                 if (done != -2) {
                     vz_rc = done;
@@ -11136,14 +11826,14 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_dup2, (uint64_t)cn_pipe[1], 2, 0);
 
             size_t cn_bytes = 0;
-            uint8_t *cn_image = read_program(PATH_BIN_DIRECTORY "chromiumcontent",
-                                             &cn_bytes);
+            uint8_t *cn_image = read_optional_program(PATH_BIN_DIRECTORY "chromiumcontent",
+                                                      &cn_bytes);
             if (!cn_image) {
                 panic("M165 self-test: /bin/chromiumcontent could not be read");
             }
             const char *cn_argv[] = {PATH_BIN_DIRECTORY "chromiumcontent", 0};
-            task_t *cnt = process_spawnv("chromiumcontent", cn_image, cn_bytes,
-                                         cn_argv);
+            int cnt = selftest_pid(process_spawnv("chromiumcontent", cn_image, cn_bytes,
+                                         cn_argv));
             kfree(cn_image);
 
             static char cn_out[8192];
@@ -11165,7 +11855,7 @@ static void boot_selftests_system(void) {
                     }
                     continue;
                 }
-                long done = cnt ? do_syscall(SYS_wait_nb, (uint64_t)cnt->id, 0, 0)
+                long done = cnt ? selftest_poll_exit(cnt)
                                 : -1;
                 if (done != -2) {
                     cn_rc = done;
@@ -11231,8 +11921,8 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_dup2, (uint64_t)sh_pipe[1], 2, 0);
 
             size_t sh_bytes = 0;
-            uint8_t *sh_image = read_program(PATH_BIN_DIRECTORY "chromiumshell",
-                                             &sh_bytes);
+            uint8_t *sh_image = read_optional_program(PATH_BIN_DIRECTORY "chromiumshell",
+                                                      &sh_bytes);
             if (!sh_image) {
                 panic("M167 self-test: /bin/chromiumshell could not be read");
             }
@@ -11240,8 +11930,8 @@ static void boot_selftests_system(void) {
                                      "--enable-logging=stderr", "--v=0",
                                      "data:text/html,<html><body>m167</body></html>",
                                      0};
-            task_t *sht = process_spawnv("chromiumshell", sh_image, sh_bytes,
-                                         sh_argv);
+            int sht = selftest_pid(process_spawnv("chromiumshell", sh_image, sh_bytes,
+                                         sh_argv));
             kfree(sh_image);
 
             static char sh_out[16384];
@@ -11274,7 +11964,7 @@ static void boot_selftests_system(void) {
                 if (live > sh_processes_seen) {
                     sh_processes_seen = live;
                 }
-                if (sht && do_syscall(SYS_wait_nb, (uint64_t)sht->id, 0, 0) != -2) {
+                if (sht && selftest_poll_exit(sht) != -2) {
                     break;
                 }
                 /* Three is the claim: the browser, and two processes it
@@ -11310,7 +12000,7 @@ static void boot_selftests_system(void) {
                         continue;
                     }
                     if (o->state == TASK_TERMINATED) {
-                        selftest_reap(o);
+                        selftest_reap_if_ended(o);
                         continue;
                     }
                     if (k_strcmp(o->name, "chromiumshell") != 0) {
@@ -11844,49 +12534,7 @@ static void boot_selftests_system(void) {
         kernel_log_puts(" bytes).\n\n");
     }
 
-    {
-        char want[16];
-        k_memset(want, 0, sizeof(want));
-        int wn = fwcfg_read_file("opt/leanos/nicstream", want, sizeof(want) - 1);
-        if (wn <= 0 || !net_have_nic()) {
-            kernel_log_puts("[m116] no host stream on this boot - the NIC's receive "
-                       "path is untested (tools/qemu-serial-test.sh provides one)\n\n");
-        } else {
-            uint32_t checksum_before = tcp_checksum_failures();
-            size_t number_bytes = 0;
-            uint8_t *number_img = read_program(PATH_BIN_DIRECTORY "netrecv", &number_bytes);
-            if (!number_img) {
-                panic("M116 self-test: /bin/netrecv is not on this disk");
-            }
-            const char *number_argv[] = {PATH_BIN_DIRECTORY "netrecv", "10.0.2.100", "7777", want, 0};
-            uint64_t t0 = tsc_read();
-            task_t *nr = process_spawnv("netrecv", number_img, number_bytes, number_argv);
-            kfree(number_img);
-            long rc = nr ? (long)do_syscall(SYS_wait, (uint64_t)nr->id, 0, 0) : -1;
-            uint64_t ms = tsc_to_us(tsc_read() - t0) / 1000;
-            uint32_t corrupt = tcp_checksum_failures() - checksum_before;
-            kernel_log_perf("nic_stream_recv_ms", ms, "ms");
-            if (rc != 0) {
-                kernel_log_puts("[m116] netrecv did not receive the host's stream intact "
-                           "(its own line above says how)\n");
-                panic("M116 self-test: a stream from the host did not arrive byte for byte");
-            }
-            if (corrupt != 0) {
-                kernel_log_puts("[m116] the stream arrived, but ");
-                kernel_log_put_dec(corrupt);
-                kernel_log_puts(" segment(s) on the way failed TCP's checksum - the NIC "
-                           "is handing the stack corrupt frames and retransmission "
-                           "is hiding it\n");
-                panic("M116 self-test: corrupt segments on the receive path");
-            }
-            kernel_log_puts("[m116] a stream from the host: ");
-            kernel_log_puts(want);
-            kernel_log_puts(" bytes through SLIRP, the RTL8139's ring and TCP, every one "
-                       "of them right and no segment failing its checksum, in ");
-            kernel_log_put_dec((uint32_t)ms);
-            kernel_log_puts(" ms - self-test passed.\n\n");
-        }
-    }
+    selftest_nic_stream();
 
     {
         int all_ok = 1;
@@ -12002,13 +12650,13 @@ static void boot_selftests_system(void) {
         uint64_t frames_before = physical_memory_free_frame_count();
 
         size_t mt_bytes = 0;
-        uint8_t *mt_img = read_program(PATH_BIN_DIRECTORY "mmaptest", &mt_bytes);
+        uint8_t *mt_img = read_optional_program(PATH_BIN_DIRECTORY "mmaptest", &mt_bytes);
         if (!mt_img) {
             panic("M78 self-test: /bin/mmaptest is not on this disk");
         }
         const char *mt_argv[] = {PATH_BIN_DIRECTORY "mmaptest", 0};
-        task_t *mt = process_spawnv("mmaptest", mt_img, mt_bytes, mt_argv);
-        long rc = mt ? do_syscall(SYS_wait, (uint64_t)mt->id, 0, 0) : -1;
+        int mt = selftest_pid(process_spawnv("mmaptest", mt_img, mt_bytes, mt_argv));
+        long rc = mt ? selftest_wait(mt) : -1;
         kfree(mt_img);
         if (rc != 0) {
             kernel_log_puts("[m78] mmaptest exited ");
@@ -12031,11 +12679,11 @@ static void boot_selftests_system(void) {
             uint64_t mid_before = physical_memory_free_frame_count();
             const char *again[] = {PATH_BIN_DIRECTORY "mmaptest", 0};
             uint8_t *again_img = read_program(PATH_BIN_DIRECTORY "mmaptest", &mt_bytes);
-            task_t *m2 = again_img
-                             ? process_spawnv("mmaptest", again_img, mt_bytes, again)
-                             : (task_t *)0;
+            int m2 = again_img
+                         ? selftest_pid(process_spawnv("mmaptest", again_img, mt_bytes, again))
+                         : 0;
             if (m2) {
-                do_syscall(SYS_wait, (uint64_t)m2->id, 0, 0);
+                selftest_wait(m2);
             }
             kfree(again_img);
             if (physical_memory_free_frame_count() != mid_before) {
@@ -12064,43 +12712,53 @@ static void boot_selftests_system(void) {
     {
         int all_ok = 1;
         size_t tt_bytes = 0;
-        uint8_t *tt_img = read_program(PATH_BIN_DIRECTORY "threadtest", &tt_bytes);
+        uint8_t *tt_img = read_optional_program(PATH_BIN_DIRECTORY "threadtest", &tt_bytes);
         if (!tt_img) {
             panic("M79 self-test: /bin/threadtest is not on this disk");
         }
         for (int i = 0; i < scheduler_task_count(); i++) {
             task_t *stale = scheduler_task_by_slot(i);
             if (stale && stale->state == TASK_TERMINATED) {
-                selftest_reap(stale);
+                selftest_reap_if_ended(stale);
             }
         }
 
         uint64_t frames_before = physical_memory_free_frame_count();
 
         const char *tt_argv[] = {PATH_BIN_DIRECTORY "threadtest", 0};
-        task_t *tt = process_spawnv("threadtest", tt_img, tt_bytes, tt_argv);
+        int tt = selftest_pid(process_spawnv("threadtest", tt_img, tt_bytes, tt_argv));
         kfree(tt_img);
         if (!tt) {
             panic("M79 self-test: could not spawn threadtest");
         }
 
-        int shared_seen = 0;
+        /* M225: counted by the scheduler as each thread is made, not
+           sampled. This was a poll every 25 ms of the tasks on threadtest's
+           page table, read through a task_t - and on a fast machine
+           threadtest's three tasks came and went between two polls, after
+           which the slot's page table was the KERNEL's (a process that has
+           ended stands in it) and every kernel thread on the machine counted
+           as sharing it. The check passed by counting idle tasks. The peak
+           is kept on threadtest's own slot, which the kernel's child keeps
+           until something spawns; nothing does between here and the wait. */
         int max_sharers = 0;
-        for (int i = 0; i < 400 && !shared_seen; i++) {
-            int count = scheduler_count_sharing_address_space(tt->pml4_phys);
-            if (count > max_sharers) {
-                max_sharers = count;
+        for (int i = 0; i < 400 && selftest_running(tt); i++) {
+            int peak = scheduler_thread_group_peak(tt);
+            if (peak > max_sharers) {
+                max_sharers = peak;
             }
-            if (count >= 3) {
-                shared_seen = 1;
-                break;
-            }
-            if (tt->state == TASK_TERMINATED) {
+            if (max_sharers >= 3) {
                 break;
             }
             pit_sleep_ms(25);
         }
-        if (!shared_seen) {
+        {
+            int peak = scheduler_thread_group_peak(tt);
+            if (peak > max_sharers) {
+                max_sharers = peak;
+            }
+        }
+        if (max_sharers < 3) {
             kernel_log_puts("[m79] never saw three tasks sharing one page table - the most that "
                        "ever did was ");
             kernel_log_put_dec((uint32_t)max_sharers);
@@ -12108,7 +12766,7 @@ static void boot_selftests_system(void) {
             all_ok = 0;
         }
 
-        long rc = do_syscall(SYS_wait, (uint64_t)tt->id, 0, 0);
+        long rc = selftest_wait(tt);
         if (rc != 0) {
             kernel_log_puts("[m79] threadtest exited ");
             kernel_log_put_dec((uint32_t)(rc < 0 ? 99 : rc));
@@ -12120,7 +12778,7 @@ static void boot_selftests_system(void) {
         for (int i = 0; i < scheduler_task_count(); i++) {
             task_t *o = scheduler_task_by_slot(i);
             if (o && o->state == TASK_TERMINATED) {
-                selftest_reap(o);
+                selftest_reap_if_ended(o);
             }
         }
         uint64_t frames_after = physical_memory_free_frame_count();
@@ -12158,25 +12816,26 @@ static void boot_selftests_system(void) {
            milestone did not make true. */
         {
             size_t le_bytes = 0;
-            uint8_t *le_img = read_program(PATH_BIN_DIRECTORY "threadtest",
-                                           &le_bytes);
+            uint8_t *le_img = read_optional_program(PATH_BIN_DIRECTORY "threadtest",
+                                                    &le_bytes);
             if (!le_img) {
                 panic("M79 self-test: /bin/threadtest vanished mid-test");
             }
             const char *le_argv[] = {PATH_BIN_DIRECTORY "threadtest",
                                      "leaderexit", "64", 0};
-            task_t *le = process_spawnv("threadtest", le_img, le_bytes, le_argv);
-            long le_rc = le ? do_syscall(SYS_wait, (uint64_t)le->id, 0, 0) : -1;
+            int le = selftest_pid(process_spawnv("threadtest", le_img, le_bytes, le_argv));
+            long le_rc = le ? selftest_wait(le) : -1;
             kfree(le_img);
 
-            /* wait() answers for the task it was given, and the task it was
-               given is the LEADER - which in this mode leaves first and on
-               purpose. The process is still running in the thread that
-               outlived it, so waiting here and reaping once returns while
-               that thread is alive, and its kernel stack comes back eight
-               frames at a time inside whatever measures next. [m83] said so
-               first, as "a hundred forks did not give everything back", with
-               MORE frames after than before. */
+            /* wait() answered for the leader alone until M225 - which in
+               this mode leaves first and on purpose - so it returned while
+               the thread that outlived it was still running, and that
+               thread's kernel stack came back eight frames at a time inside
+               whatever measured next. [m83] said so first, as "a hundred
+               forks did not give everything back", with MORE frames after
+               than before. wait() now answers for the whole process; the
+               terminated slots are still reaped here, by name, before the
+               next stage counts anything. */
             for (int round = 0; round < 600; round++) {
                 int outstanding = 0;
                 for (int i = 0; i < scheduler_task_count(); i++) {
@@ -12185,7 +12844,7 @@ static void boot_selftests_system(void) {
                         continue;
                     }
                     if (o->state == TASK_TERMINATED) {
-                        selftest_reap(o);
+                        selftest_reap_if_ended(o);
                         continue;
                     }
                     if (k_strcmp(o->name, "threadtest") == 0) {
@@ -12210,13 +12869,40 @@ static void boot_selftests_system(void) {
                        "the owner keeping its page table means.\n");
         }
 
+        /* M225: and that process is still a process to kill(2). The first
+           version of this milestone made wait() report it only once its last thread had gone, while
+           kill(pid) still answered ESRCH the moment the main thread had -
+           so its parent could neither signal it nor stop waiting for it.
+           threadtest forks a child that leaves through pthread_exit with a
+           thread running, and asks kill(pid, 0), kill(pid, SIGKILL) and
+           then waitpid of it. */
+        {
+            size_t ll_bytes = 0;
+            uint8_t *ll_img = read_optional_program(PATH_BIN_DIRECTORY "threadtest", &ll_bytes);
+            if (!ll_img) {
+                panic("M79 self-test: /bin/threadtest vanished mid-test");
+            }
+            const char *ll_argv[] = {PATH_BIN_DIRECTORY "threadtest", "leaderless", 0};
+            int ll = selftest_pid(process_spawnv("threadtest", ll_img, ll_bytes, ll_argv));
+            long ll_rc = ll ? selftest_wait(ll) : -1;
+            kfree(ll_img);
+            if (ll_rc != 0) {
+                kernel_log_puts("[m79] threadtest leaderless exited ");
+                kernel_log_put_dec((uint32_t)(ll_rc < 0 ? 99 : ll_rc));
+                kernel_log_puts("\n");
+                panic("M79 self-test: a process whose main thread had left could not be signalled by its pid");
+            }
+            kernel_log_puts("[m225] a process whose main thread had left was there for "
+                            "kill(pid, 0), was ended by kill(pid, SIGKILL) and was reaped.\n");
+        }
+
         /* M205: threads nobody will join give their slots back. Both runs
            are measured against the live-task count from before them, with
            nothing reaped by hand: the sweep a spawn runs is what has to do
            it. */
         {
             size_t m205_bytes = 0;
-            uint8_t *m205_img = read_program(PATH_BIN_DIRECTORY "threadtest", &m205_bytes);
+            uint8_t *m205_img = read_optional_program(PATH_BIN_DIRECTORY "threadtest", &m205_bytes);
             if (!m205_img) {
                 panic("M205 self-test: /bin/threadtest vanished mid-test");
             }
@@ -12227,8 +12913,15 @@ static void boot_selftests_system(void) {
             for (int mode = 0; mode < 2; mode++) {
                 scheduler_release_finished_tasks();
                 int live_before = scheduler_live_task_count();
-                task_t *run = process_spawnv("threadtest", m205_img, m205_bytes, modes[mode]);
-                long run_rc = run ? do_syscall(SYS_wait, (uint64_t)run->id, 0, 0) : -1;
+                int run = selftest_pid(process_spawnv("threadtest", m205_img, m205_bytes, modes[mode]));
+                /* M225: wait() answers when the PROCESS has ended - every
+                   thread of it, not only the leader. It used to answer for
+                   the leader, and on four processors exit()'s SIGKILL was
+                   still on its way to the forty abandoned threads when the
+                   sweep below ran: "left 32 task slot(s) behind it", from
+                   threads that were alive rather than kept. Nothing here
+                   waits for them by hand; if a slot is left now, it was. */
+                long run_rc = run ? selftest_wait(run) : -1;
                 scheduler_release_finished_tasks();
                 int live_after = scheduler_live_task_count();
                 if (run_rc != 0 || live_after != live_before) {
@@ -12260,27 +12953,24 @@ static void boot_selftests_system(void) {
 
     {
         size_t image_bytes = 0;
-        uint8_t *image = read_program(PATH_BIN_DIRECTORY "futextest", &image_bytes);
+        uint8_t *image = read_optional_program(PATH_BIN_DIRECTORY "futextest", &image_bytes);
         if (!image) {
             panic("m96: /bin/futextest is not on the disk");
         }
-        task_t *t = process_spawn("futextest", image, image_bytes, "");
+        int t = selftest_pid(process_spawn("futextest", image, image_bytes, ""));
         kfree(image);
         if (!t) {
             panic("M96 self-test: could not spawn the futex fixture");
         }
-        int id = t->id;
         uint64_t deadline = pit_get_ticks() + 6000;
-        while (scheduler_task_by_id(id) && scheduler_task_by_id(id)->state != TASK_TERMINATED) {
+        while (selftest_running(t)) {
             if (pit_get_ticks() > deadline) {
                 panic("M96 self-test: the futex fixture never finished - a waiter is "
                       "asleep with nothing to wake it");
             }
             pit_sleep_ms(10);
         }
-        task_t *done = scheduler_task_by_id(id);
-        int code = done ? done->exit_code : -1;
-        selftest_reap(done);
+        long code = selftest_wait(t);
         if (code != 0) {
             kernel_log_puts("[m96] the fixture exited 0x");
             kernel_log_put_hex32((uint32_t)code);
@@ -12332,7 +13022,7 @@ static void boot_selftests_system(void) {
         uint32_t free_before = virtual_file_system_free_blocks();
 
         size_t image_bytes = 0;
-        uint8_t *image = read_program(PATH_BIN_DIRECTORY "fswriter", &image_bytes);
+        uint8_t *image = read_optional_program(PATH_BIN_DIRECTORY "fswriter", &image_bytes);
         if (!image) {
             panic("m105: /bin/fswriter is not on the disk");
         }
@@ -12341,19 +13031,18 @@ static void boot_selftests_system(void) {
             char arg[8];
             arg[0] = (char)('0' + w);
             arg[1] = '\0';
-            task_t *t = process_spawn("fswriter", image, image_bytes, arg);
+            int t = selftest_pid(process_spawn("fswriter", image, image_bytes, arg));
             if (!t) {
                 panic("M105 self-test: could not spawn a writer");
             }
-            ids[w] = t->id;
+            ids[w] = t;
         }
         kfree(image);
 
         uint64_t w0 = tsc_read();
         uint64_t deadline = pit_get_ticks() + 12000;
         for (int w = 0; w < WRITERS; w++) {
-            while (scheduler_task_by_id(ids[w]) &&
-                   scheduler_task_by_id(ids[w])->state != TASK_TERMINATED) {
+            while (selftest_running(ids[w])) {
                 if (pit_get_ticks() > deadline) {
                     panic("M105 self-test: a writer never finished - four writers on one "
                           "coarse filesystem lock have deadlocked or starved");
@@ -12365,9 +13054,10 @@ static void boot_selftests_system(void) {
         uint64_t writers_us = tsc_to_us(w1 - w0);
 
         for (int w = 0; w < WRITERS; w++) {
-            task_t *done = scheduler_task_by_id(ids[w]);
-            int code = done ? done->exit_code : -1;
-            selftest_reap(done);
+            /* M225: a writer that finished before the last one was spawned
+               was released by that spawn's sweep, so its code is read from
+               the exit record when its slot is gone. */
+            long code = selftest_wait(ids[w]);
             if (code != 0) {
                 kernel_log_puts("[m105] writer ");
                 kernel_log_put_dec((uint32_t)w);
@@ -12851,20 +13541,28 @@ static void boot_selftests_system(void) {
         uint64_t frames_before = physical_memory_free_frame_count();
 
         size_t lz_bytes = 0;
-        uint8_t *lz_img = read_program(PATH_BIN_DIRECTORY "lazytest", &lz_bytes);
+        uint8_t *lz_img = read_optional_program(PATH_BIN_DIRECTORY "lazytest", &lz_bytes);
         if (!lz_img) {
             panic("M82 self-test: /bin/lazytest is not on this disk");
         }
 
         const char *lz_argv[] = {PATH_BIN_DIRECTORY "lazytest", 0};
-        task_t *lz = process_spawnv("lazytest", lz_img, lz_bytes, lz_argv);
+        int lz = selftest_pid(process_spawnv("lazytest", lz_img, lz_bytes, lz_argv));
         if (!lz) {
             panic("M82 self-test: could not spawn lazytest");
         }
-        int lz_id = lz->id;
+        int lz_id = lz;
 
+        /* M225: sampled for as long as the child lives (to a ceiling), not
+           for 900 yields. A yield is a slice on one processor, but on four
+           it comes straight back - the child is running on another core and
+           nothing else is ready here - so 900 of them could be over before
+           the child had touched its memory. [m83]'s copy-on-write sample
+           below failed that way once at QEMU_CPUS=4 ("only 0x5CF frames
+           were ever seen"); this one has the same shape. */
         uint64_t lowest_free = frames_before;
-        for (int i = 0; i < 900; i++) {
+        uint64_t sample_until = pit_get_ticks() + 60 * PIT_HZ;
+        while (pit_get_ticks() < sample_until) {
             if (do_syscall(SYS_task_alive, (uint64_t)lz_id, 0, 0) != 1) {
                 break;
             }
@@ -12875,7 +13573,7 @@ static void boot_selftests_system(void) {
             do_syscall(SYS_yield, 0, 0, 0);
         }
 
-        long rc = do_syscall(SYS_wait, (uint64_t)lz_id, 0, 0);
+        long rc = selftest_wait(lz_id);
         kfree(lz_img);
         if (rc != 0) {
             kernel_log_puts("[m82] lazytest exited ");
@@ -12916,13 +13614,13 @@ static void boot_selftests_system(void) {
         };
         for (int m = 0; m < 2 && all_ok; m++) {
             size_t f_bytes = 0;
-            uint8_t *f_img = read_program(PATH_BIN_DIRECTORY "lazytest", &f_bytes);
+            uint8_t *f_img = read_optional_program(PATH_BIN_DIRECTORY "lazytest", &f_bytes);
             if (!f_img) {
                 panic("M82 self-test: /bin/lazytest vanished mid-test");
             }
             const char *f_argv[] = {PATH_BIN_DIRECTORY "lazytest", FATAL_MODES[m], 0};
-            task_t *ft = process_spawnv("lazytest", f_img, f_bytes, f_argv);
-            long frc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
+            int ft = selftest_pid(process_spawnv("lazytest", f_img, f_bytes, f_argv));
+            long frc = ft ? selftest_wait(ft) : -1;
             kfree(f_img);
             if (frc != 128 + SIGSEGV) {
                 kernel_log_puts("[m82] ");
@@ -12959,13 +13657,13 @@ static void boot_selftests_system(void) {
         uint64_t frames_before = physical_memory_free_frame_count();
 
         size_t vm_bytes = 0;
-        uint8_t *vm_img = read_program(PATH_BIN_DIRECTORY "vmtest", &vm_bytes);
+        uint8_t *vm_img = read_optional_program(PATH_BIN_DIRECTORY "vmtest", &vm_bytes);
         if (!vm_img) {
             panic("M91 self-test: /bin/vmtest is not on this disk");
         }
         const char *vm_argv[] = {PATH_BIN_DIRECTORY "vmtest", 0};
-        task_t *vt = process_spawnv("vmtest", vm_img, vm_bytes, vm_argv);
-        long vrc = vt ? do_syscall(SYS_wait, (uint64_t)vt->id, 0, 0) : -1;
+        int vt = selftest_pid(process_spawnv("vmtest", vm_img, vm_bytes, vm_argv));
+        long vrc = vt ? selftest_wait(vt) : -1;
         kfree(vm_img);
         if (vrc != 0) {
             kernel_log_puts("[m91] vmtest exited ");
@@ -12985,13 +13683,13 @@ static void boot_selftests_system(void) {
         };
         for (int m = 0; m < 5 && all_ok; m++) {
             size_t f_bytes = 0;
-            uint8_t *f_img = read_program(PATH_BIN_DIRECTORY "vmtest", &f_bytes);
+            uint8_t *f_img = read_optional_program(PATH_BIN_DIRECTORY "vmtest", &f_bytes);
             if (!f_img) {
                 panic("M91 self-test: /bin/vmtest vanished mid-test");
             }
             const char *f_argv[] = {PATH_BIN_DIRECTORY "vmtest", M91_FATAL[m], 0};
-            task_t *ft = process_spawnv("vmtest", f_img, f_bytes, f_argv);
-            long frc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
+            int ft = selftest_pid(process_spawnv("vmtest", f_img, f_bytes, f_argv));
+            long frc = ft ? selftest_wait(ft) : -1;
             kfree(f_img);
             if (frc != 128 + SIGSEGV) {
                 kernel_log_puts("[m91] ");
@@ -13058,13 +13756,13 @@ static void boot_selftests_system(void) {
         uint64_t frames_before = physical_memory_free_frame_count();
 
         size_t ft_bytes = 0;
-        uint8_t *ft_img = read_program(PATH_BIN_DIRECTORY "forktest", &ft_bytes);
+        uint8_t *ft_img = read_optional_program(PATH_BIN_DIRECTORY "forktest", &ft_bytes);
         if (!ft_img) {
             panic("M83 self-test: /bin/forktest is not on this disk");
         }
         const char *ft_argv[] = {PATH_BIN_DIRECTORY "forktest", 0};
-        task_t *ft = process_spawnv("forktest", ft_img, ft_bytes, ft_argv);
-        long rc = ft ? do_syscall(SYS_wait, (uint64_t)ft->id, 0, 0) : -1;
+        int ft = selftest_pid(process_spawnv("forktest", ft_img, ft_bytes, ft_argv));
+        long rc = ft ? selftest_wait(ft) : -1;
         kfree(ft_img);
         if (rc != 0) {
             kernel_log_puts("[m83] forktest exited ");
@@ -13076,7 +13774,7 @@ static void boot_selftests_system(void) {
         for (int i = 0; i < scheduler_task_count(); i++) {
             task_t *stale = scheduler_task_by_slot(i);
             if (stale && stale->state == TASK_TERMINATED) {
-                selftest_reap(stale);
+                selftest_reap_if_ended(stale);
             }
         }
         uint64_t frames_after = physical_memory_free_frame_count();
@@ -13093,19 +13791,21 @@ static void boot_selftests_system(void) {
         if (all_ok) {
             uint64_t cow_before = physical_memory_free_frame_count();
             size_t cw_bytes = 0;
-            uint8_t *cw_img = read_program(PATH_BIN_DIRECTORY "forktest", &cw_bytes);
+            uint8_t *cw_img = read_optional_program(PATH_BIN_DIRECTORY "forktest", &cw_bytes);
             if (!cw_img) {
                 panic("M83 self-test: /bin/forktest vanished mid-test");
             }
             const char *cw_argv[] = {PATH_BIN_DIRECTORY "forktest", "cow", 0};
-            task_t *cw = process_spawnv("forktest", cw_img, cw_bytes, cw_argv);
+            int cw = selftest_pid(process_spawnv("forktest", cw_img, cw_bytes, cw_argv));
             if (!cw) {
                 panic("M83 self-test: could not spawn forktest in cow mode");
             }
-            int cw_id = cw->id;
+            int cw_id = cw;
 
+            /* For the child's whole life, not 900 yields - see [m82]. */
             uint64_t lowest_free = cow_before;
-            for (int i = 0; i < 900; i++) {
+            uint64_t sample_until = pit_get_ticks() + 60 * PIT_HZ;
+            while (pit_get_ticks() < sample_until) {
                 if (do_syscall(SYS_task_alive, (uint64_t)cw_id, 0, 0) != 1) {
                     break;
                 }
@@ -13115,7 +13815,7 @@ static void boot_selftests_system(void) {
                 }
                 do_syscall(SYS_yield, 0, 0, 0);
             }
-            long cw_rc = do_syscall(SYS_wait, (uint64_t)cw_id, 0, 0);
+            long cw_rc = selftest_wait(cw_id);
             kfree(cw_img);
             cow_spend = cow_before > lowest_free ? cow_before - lowest_free : 0;
 
@@ -13141,7 +13841,7 @@ static void boot_selftests_system(void) {
             for (int i = 0; i < scheduler_task_count(); i++) {
                 task_t *stale = scheduler_task_by_slot(i);
                 if (stale && stale->state == TASK_TERMINATED) {
-                    selftest_reap(stale);
+                    selftest_reap_if_ended(stale);
                 }
             }
             if (all_ok && physical_memory_free_frame_count() != cow_before) {
@@ -13161,14 +13861,14 @@ static void boot_selftests_system(void) {
             for (unsigned m = 0; all_ok && m < 2; m++) {
                 uint64_t before = physical_memory_free_frame_count();
                 size_t th_bytes = 0;
-                uint8_t *th_img = read_program(PATH_BIN_DIRECTORY "forktest", &th_bytes);
+                uint8_t *th_img = read_optional_program(PATH_BIN_DIRECTORY "forktest", &th_bytes);
                 if (!th_img) {
                     panic("M83 self-test: /bin/forktest vanished mid-test");
                 }
                 const char *th_argv[] = {PATH_BIN_DIRECTORY "forktest",
                                          threaded_modes[m], 0};
-                task_t *th = process_spawnv("forktest", th_img, th_bytes, th_argv);
-                long th_rc = th ? do_syscall(SYS_wait, (uint64_t)th->id, 0, 0) : -1;
+                int th = selftest_pid(process_spawnv("forktest", th_img, th_bytes, th_argv));
+                long th_rc = th ? selftest_wait(th) : -1;
                 kfree(th_img);
                 if (th_rc != 0) {
                     kernel_log_puts("[m83] forktest ");
@@ -13182,7 +13882,7 @@ static void boot_selftests_system(void) {
                 for (int i = 0; i < scheduler_task_count(); i++) {
                     task_t *stale = scheduler_task_by_slot(i);
                     if (stale && stale->state == TASK_TERMINATED) {
-                        selftest_reap(stale);
+                        selftest_reap_if_ended(stale);
                     }
                 }
                 if (all_ok && physical_memory_free_frame_count() != before) {
@@ -13223,14 +13923,14 @@ static void boot_selftests_system(void) {
         uint64_t frames_before = physical_memory_free_frame_count() + image_cache_private_pages();
 
         size_t ex_bytes = 0;
-        uint8_t *ex_img = read_program(PATH_BIN_DIRECTORY "exectest", &ex_bytes);
+        uint8_t *ex_img = read_optional_program(PATH_BIN_DIRECTORY "exectest", &ex_bytes);
         if (!ex_img) {
             panic("M84 self-test: /bin/exectest is not on this disk");
         }
         const char *ex_argv[] = {PATH_BIN_DIRECTORY "exectest", 0};
         const char *ex_envp[] = {"PATH=" PATH_BIN, 0};
-        task_t *ex = process_spawnve("exectest", ex_img, ex_bytes, ex_argv, ex_envp);
-        long rc = ex ? do_syscall(SYS_wait, (uint64_t)ex->id, 0, 0) : -1;
+        int ex = selftest_pid(process_spawnve("exectest", ex_img, ex_bytes, ex_argv, ex_envp));
+        long rc = ex ? selftest_wait(ex) : -1;
         kfree(ex_img);
 
         int all_ok = 1;
@@ -13244,7 +13944,7 @@ static void boot_selftests_system(void) {
         for (int i = 0; i < scheduler_task_count(); i++) {
             task_t *stale = scheduler_task_by_slot(i);
             if (stale && stale->state == TASK_TERMINATED) {
-                selftest_reap(stale);
+                selftest_reap_if_ended(stale);
             }
         }
         uint64_t frames_after = physical_memory_free_frame_count() + image_cache_private_pages();
@@ -13397,13 +14097,13 @@ static void boot_selftests_system(void) {
 
         if (all_ok) {
             size_t pt_bytes = 0;
-            uint8_t *pt_img = read_program(PATH_BIN_DIRECTORY "ptytest", &pt_bytes);
+            uint8_t *pt_img = read_optional_program(PATH_BIN_DIRECTORY "ptytest", &pt_bytes);
             if (!pt_img) {
                 panic("M85 self-test: /bin/ptytest is not on this disk");
             }
             const char *pt_argv[] = {PATH_BIN_DIRECTORY "ptytest", 0};
-            task_t *pt = process_spawnv("ptytest", pt_img, pt_bytes, pt_argv);
-            long rc = pt ? do_syscall(SYS_wait, (uint64_t)pt->id, 0, 0) : -1;
+            int pt = selftest_pid(process_spawnv("ptytest", pt_img, pt_bytes, pt_argv));
+            long rc = pt ? selftest_wait(pt) : -1;
             kfree(pt_img);
             if (rc != 0) {
                 kernel_log_puts("[m85] ptytest exited ");
@@ -13907,6 +14607,73 @@ static void boot_selftests_system(void) {
     }
 }
 
+static uint64_t timer_vector_interrupts(void) {
+    uint64_t total = 0;
+    for (int c = 0; c < MAX_CPUS; c++) {
+        total += ioapic_irq_count(0x20, c);
+    }
+    return total;
+}
+
+/* The two clocks this kernel keeps - the calibrated TSC (clock_monotonic,
+   every deadline, the LAPIC timer's calibration) and the tick (pit_sleep_ms,
+   the scheduler's quantum) - held to the CMOS clock over two of its
+   seconds. Neither is calibrated against the RTC, so this is a check by a
+   third clock rather than a clock agreeing with itself. It runs on
+   whichever interrupt controller this boot chose, so the I/O APIC battery
+   grades the I/O APIC path. Before it, QEMU's I/O APIC delivered the PIT's
+   interrupt twice a period, the TSC was calibrated against that count, and
+   every millisecond this kernel measured was two. */
+static void timekeeping_self_test(void) {
+    uint64_t start_tsc = 0, end_tsc = 0;
+    if (!rtc_next_second_edge(&start_tsc)) {
+        kernel_log_puts("[timekeeping] no CMOS clock second boundary to measure against - "
+                   "not graded this boot.\n");
+        return;
+    }
+    uint64_t start_ticks = pit_get_ticks();
+    uint64_t start_ints = timer_vector_interrupts();
+    uint64_t skipped = 0;
+    if (!rtc_next_second_edge(&skipped) || !rtc_next_second_edge(&end_tsc)) {
+        panic("timekeeping self-test: the CMOS clock stopped between two second boundaries");
+    }
+    timekeeping_sample_t sample = {
+        .reference_ms = 2000,
+        .tsc_cycles = end_tsc - start_tsc,
+        .cycles_per_us = tsc_cycles_per_us(),
+        .ticks = pit_get_ticks() - start_ticks,
+        .interrupts = timer_vector_interrupts() - start_ints,
+        .tick_hz = PIT_HZ,
+    };
+    timekeeping_verdict_t verdict;
+    timekeeping_grade(&sample, &verdict);
+
+    kernel_log_puts("[timekeeping] over two seconds of the CMOS clock, on the ");
+    kernel_log_puts(ioapic_available() ? "I/O APIC" : "8259 PIC");
+    kernel_log_puts(": the TSC ran ");
+    kernel_log_put_dec((uint32_t)(sample.tsc_cycles / 1000000u));
+    kernel_log_puts("M cycles against ");
+    kernel_log_put_dec((uint32_t)(2000u * sample.cycles_per_us / 1000u));
+    kernel_log_puts("M calibrated (");
+    kernel_log_put_dec(verdict.tsc_permille);
+    kernel_log_puts(" permille), the tick counted ");
+    kernel_log_put_dec((uint32_t)sample.ticks);
+    kernel_log_puts(" of ");
+    kernel_log_put_dec(2u * PIT_HZ);
+    kernel_log_puts(" (");
+    kernel_log_put_dec(verdict.tick_permille);
+    kernel_log_puts(" permille), from ");
+    kernel_log_put_dec((uint32_t)sample.interrupts);
+    kernel_log_puts(" timer interrupts (");
+    kernel_log_put_dec(verdict.interrupt_permille);
+    kernel_log_puts(" permille of the programmed rate).\n");
+    if (!verdict.ok) {
+        panic("timekeeping self-test: the kernel's clocks do not keep time against the CMOS clock");
+    }
+    kernel_log_puts("[timekeeping] the clock keeps time through either interrupt controller: "
+               "the TSC and the tick within 10% of the CMOS clock - self-test passed.\n");
+}
+
 static int timer_interrupts_are_arriving(void) {
     uint64_t start = pit_get_ticks();
     for (uint64_t spins = 0; spins < 400000000ull; spins++) {
@@ -14035,7 +14802,7 @@ void kernel_main(uint32_t *e820_map, framebuffer_boot_info_t *framebuffer_info, 
         kernel_log_puts("[m90] more than a gigabyte: ");
         kernel_log_put_hex64(tracked / (1024 * 1024));
         kernel_log_puts(" MiB tracked in ");
-        kernel_log_put_hex64(physical_memory_total_frame_count());
+        kernel_log_put_hex64(tracked / 4096);
         kernel_log_puts(" frames, a frame at 0x");
         kernel_log_put_hex64(high);
         kernel_log_puts(" written and read back through the identity map, freed with the\n"
@@ -14363,6 +15130,10 @@ display_self_test_done:
     kernel_log_put_hex64(after);
     kernel_log_putc('\n');
 
+    if (boot_selftests_enabled()) {
+        timekeeping_self_test();
+    }
+
     keyboard_init();
 
     int usb_devices = xhci_init();
@@ -14461,9 +15232,9 @@ display_self_test_done:
     if (!test_pipe) {
         panic("pipe self-test: pipe_create failed");
     }
-    task_t *producer = task_spawn("pipe-producer", pipe_producer_task, test_pipe);
-    task_t *consumer = task_spawn("pipe-consumer", pipe_consumer_task, test_pipe);
-    while (producer->state != TASK_TERMINATED || consumer->state != TASK_TERMINATED) {
+    int producer = selftest_pid(task_spawn("pipe-producer", pipe_producer_task, test_pipe));
+    int consumer = selftest_pid(task_spawn("pipe-consumer", pipe_consumer_task, test_pipe));
+    while (selftest_running(producer) || selftest_running(consumer)) {
         schedule();
     }
     kfree(test_pipe);
@@ -14494,30 +15265,39 @@ display_self_test_done:
     do_syscall(SYS_close, (uint64_t)pipe_file_descriptors[1], 0, 0);
     kernel_log_puts("[pipe] SYS_pipe/SYS_write/SYS_read self-test passed.\n\n");
 
-    task_t *spinner = task_spawn("spinner", spinner_task, NULL);
+    int spinner = selftest_pid(task_spawn("spinner", spinner_task, NULL));
     pit_sleep_ms(100);
-    if (do_syscall(SYS_kill, (uint64_t)spinner->id, SIGTERM, 0) != 0) {
+    if (do_syscall(SYS_kill, (uint64_t)spinner, SIGTERM, 0) != 0) {
         panic("SYS_kill self-test: kill on a live task failed");
     }
-    while (spinner->state != TASK_TERMINATED) {
+    while (selftest_running(spinner)) {
         schedule();
     }
-    if (spinner->exit_code != 128 + SIGTERM) {
+    if (selftest_exit_code(spinner) != 128 + SIGTERM) {
         panic("SYS_kill self-test: unexpected exit code after SIGTERM");
     }
-    task_t *syscall_spinner = task_spawn("syscall-spinner", syscall_spinner_task, NULL);
+    /* M225: by id from here on. The spinner has ended, so the spawn below
+       runs a sweep that releases it - and, the allocator being first-fit,
+       can hand its slot straight to the syscall spinner. Read through the
+       old task_t, "the spinner's" end was then the syscall spinner's, and
+       the check below compared one task with itself. */
+    int syscall_spinner = selftest_pid(task_spawn("syscall-spinner", syscall_spinner_task, NULL));
     pit_sleep_ms(50);
-    if (do_syscall(SYS_kill, (uint64_t)syscall_spinner->id, SIGTERM, 0) != 0) {
+    if (do_syscall(SYS_kill, (uint64_t)syscall_spinner, SIGTERM, 0) != 0) {
         panic("SYS_kill self-test: kill on a task in a system call loop failed");
     }
-    while (syscall_spinner->state != TASK_TERMINATED) {
+    while (selftest_running(syscall_spinner)) {
         schedule();
     }
-    if (spinner->exit_signal != SIGTERM || syscall_spinner->exit_signal != SIGTERM) {
+    int spinner_status = 0;
+    int syscall_spinner_status = 0;
+    if (scheduler_exit_status(spinner, &spinner_status) != 1 ||
+        scheduler_exit_status(syscall_spinner, &syscall_spinner_status) != 1 ||
+        spinner_status != SIGTERM || syscall_spinner_status != SIGTERM) {
         panic("SYS_kill self-test: a SIGTERM death was recorded as an exit status, so waitpid "
               "would report WIFEXITED(143) rather than WIFSIGNALED");
     }
-    int signalled_ids[2] = {spinner->id, syscall_spinner->id};
+    int signalled_ids[2] = {spinner, syscall_spinner};
     kernel_log_puts("[signal] SIGTERM self-test passed (spinner task terminated).\n\n");
 
     while (do_syscall(SYS_wait, (uint64_t)-1, 0, 0) != -1) {
@@ -14532,12 +15312,12 @@ display_self_test_done:
         }
     }
     kernel_log_puts("[m209] a process killed by a signal says so after it has been reaped.\n");
-    task_t *quick_a = task_spawn("quick", quick_task, NULL);
-    task_t *quick_b = task_spawn("quick", quick_task, NULL);
+    int quick_a = selftest_pid(task_spawn("quick", quick_task, NULL));
+    int quick_b = selftest_pid(task_spawn("quick", quick_task, NULL));
     long reaped1 = do_syscall(SYS_wait, (uint64_t)-1, 0, 0);
     long reaped2 = do_syscall(SYS_wait, (uint64_t)-1, 0, 0);
-    int got_a = (reaped1 == quick_a->id) || (reaped2 == quick_a->id);
-    int got_b = (reaped1 == quick_b->id) || (reaped2 == quick_b->id);
+    int got_a = (reaped1 == quick_a) || (reaped2 == quick_a);
+    int got_b = (reaped1 == quick_b) || (reaped2 == quick_b);
     if (!got_a || !got_b || reaped1 == reaped2) {
         panic("SYS_wait(-1) self-test: did not reap exactly the two expected children");
     }
@@ -14546,11 +15326,11 @@ display_self_test_done:
     }
     kernel_log_puts("[wait] SYS_wait(-1) self-test passed (reaped two children, then -1).\n\n");
 
-    task_t *pgid_child = task_spawn("pgidprobe", spinner_task, NULL);
+    int pgid_child = selftest_pid(task_spawn("pgidprobe", spinner_task, NULL));
     long self_pgid = do_syscall(SYS_getpgid, 0, 0, 0);
-    long child_pgid = do_syscall(SYS_getpgid, (uint64_t)pgid_child->id, 0, 0);
-    do_syscall(SYS_kill, (uint64_t)pgid_child->id, SIGKILL, 0);
-    do_syscall(SYS_wait, (uint64_t)pgid_child->id, 0, 0);
+    long child_pgid = do_syscall(SYS_getpgid, (uint64_t)pgid_child, 0, 0);
+    do_syscall(SYS_kill, (uint64_t)pgid_child, SIGKILL, 0);
+    selftest_wait(pgid_child);
     if (self_pgid != 0 || child_pgid != self_pgid) {
         panic("SYS_getpgid self-test: child did not inherit its parent's process group");
     }
@@ -15007,9 +15787,9 @@ display_self_test_done:
         size_t memtest_size_bytes = 0;
         uint8_t *memtest_image = read_program("/bin/memtest", &memtest_size_bytes);
         int64_t memtest_size = (int64_t)memtest_size_bytes;
-        task_t *memtest_task = process_spawn("memtest", memtest_image, (size_t)memtest_size, "");
+        int memtest_task = selftest_pid(process_spawn("memtest", memtest_image, (size_t)memtest_size, ""));
         kfree(memtest_image);
-        long memtest_status = do_syscall(SYS_wait, (uint64_t)memtest_task->id, 0, 0);
+        long memtest_status = selftest_wait(memtest_task);
         if (memtest_status != 0) {
             panic("memtest self-test: nonzero exit code - malloc or shm is broken");
         }
@@ -15020,9 +15800,9 @@ display_self_test_done:
         size_t fonttest_size_bytes = 0;
         uint8_t *fonttest_image = read_program("/bin/fonttest", &fonttest_size_bytes);
         int64_t fonttest_size = (int64_t)fonttest_size_bytes;
-        task_t *fonttest_task = process_spawn("fonttest", fonttest_image, (size_t)fonttest_size, "");
+        int fonttest_task = selftest_pid(process_spawn("fonttest", fonttest_image, (size_t)fonttest_size, ""));
         kfree(fonttest_image);
-        long fonttest_status = do_syscall(SYS_wait, (uint64_t)fonttest_task->id, 0, 0);
+        long fonttest_status = selftest_wait(fonttest_task);
         if (fonttest_status != 0) {
             panic("M57 font self-test: a measured text width disagrees with the pixels drawn");
         }

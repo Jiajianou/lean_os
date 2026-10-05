@@ -3,6 +3,25 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
+# The usage is here rather than read out of a header comment: this used to
+# print lines 2-30 of the file, and when a cleanup stripped the comments
+# those lines were code.
+usage() {
+  cat <<'USAGE'
+usage: tools/run-tests.sh [--fast | --full] [--host-only] [--no-build]
+
+  --fast       host stages only: unit tests, the differential tests, and the
+               same host code built for the other Mac architecture. No QEMU.
+  (default)    the fast tier, plus the image and its ports built, the graded
+               boots (the battery, memory size, SMP, the browser) and the
+               quick interactive subset.
+  --full       everything: slow host tests, coverage, mutation, fuzzing and
+               the whole interactive suite.
+  --host-only  the host stages of the chosen tier - no build, no boot.
+  --no-build   do not build the image first.
+USAGE
+}
+
 TIER="commit"
 DO_BUILD=1
 HOST_ONLY=0
@@ -13,7 +32,7 @@ while [ $# -gt 0 ]; do
     --full)      TIER="full"; shift ;;
     --host-only) HOST_ONLY=1; shift ;;
     --no-build)  DO_BUILD=0; shift ;;
-    -h|--help)   sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help)   usage; exit 0 ;;
     *) echo "unknown argument: $1 (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -145,6 +164,10 @@ run_stage "where a thread_local is, against the linker's own answer" ./tools/tls
 run_stage "set-resolution's modes are the driver's" ./tools/set-resolution.sh --check
 run_stage "a patched file's time follows its contents across two builds" \
   python3 tools/keep-mtimes.py --self-test
+run_stage "the boot battery skips only payloads this host never built" \
+  python3 tools/battery_payloads.py --self-test
+run_stage "the host test code, built for the other Mac architecture" \
+  ./tools/cross-arch-test.sh
 
 if [ "$TIER" = "full" ]; then
   run_stage "coverage, and the ratchet" make --no-print-directory coverage-check
@@ -158,6 +181,16 @@ if [ "$TIER" = "fast" ] || [ "$HOST_ONLY" -eq 1 ]; then
 else
   run_stage "boot self-tests, graded against every marker" \
     ./tools/qemu-serial-test.sh
+
+  run_stage "the memory the machine reports is the memory QEMU gave it" \
+    ./tools/memory-size-test.sh
+
+  # Beside the battery, which runs the same stream once, at 4 GiB, under
+  # TCG: this one runs it on the accelerator the host has, at 4 and 16 GiB,
+  # after the guest has touched all of its memory - the three conditions the
+  # hvf stall of tools/nic-stream-env.sh needed, none of which the battery had.
+  run_stage "a stream from the host, on this host's accelerator, at a laptop's memory" \
+    ./tools/nic-stream-test.sh
 
   run_stage "four cores, and the work shared between them" ./tools/smp-test.sh
 

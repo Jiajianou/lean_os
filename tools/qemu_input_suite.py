@@ -5,11 +5,13 @@ import subprocess
 import shutil
 import signal
 import sys
+import tempfile
 import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
+import battery_payloads
 import qemu_input
 from qemu_input import BOOT_MARKER, Machine
 
@@ -3021,6 +3023,193 @@ MACHINE_OPTIONS = {
     "wifi_open_network_needs_no_password_and_wpa3_is_refused": WIFI_MACHINE,
 }
 
+# Tests that drive something only an optional step puts on the image. On an
+# image without it they are SKIPPED - said on their own line and counted apart
+# from the passes - rather than failed, because an image without a browser is a
+# valid image (tools/install-browser.sh says so when there is no Chromium
+# checkout to install from, and that checkout is ~100 GB). Whether it is there
+# is read off the image the guest boots, by qemu_input.ImageFiles, never
+# guessed from build/. Where the payload IS on the image these tests run
+# exactly as they always have.
+#
+# Each requirement is a list of groups; a group is satisfied by any one of its
+# paths. /bin/browser execs /bin/chrome when it is there and
+# /bin/chromiumshell when it is not (user_space/binaries/browser.c), and every
+# browser test starts by waiting for the home page tools/install-browser.sh
+# writes. The New Tab button is //chrome's tab strip, which content_shell has
+# no equivalent of, so that test asks for /bin/chrome itself.
+#
+# The third field is what THIS host has built of the payload: groups of host
+# paths that, each group present, mean `make browser-if-built` would have put
+# it on the image. They are not written here: they are
+# tools/battery_payloads.py's BROWSER_BUILT, the one table the graded battery
+# decides the same question from, and battery_payloads.built_paths answers it
+# for both (LEANOS_CHROMIUM_OUT read when it is asked, as the installers
+# read it). An
+# image without the payload on a host that built it is not "an image without a
+# browser" - it is M113's failure, a `make all` that recreated the disk after
+# the browser was installed, and the next person to touch the kernel finding
+# a desktop whose Browser icon opens nothing. That FAILS, before anything
+# boots, and says how to put it back; only a host that never built the
+# payload gets a skip. The image is still what decides "absent": build/ only
+# decides whether an absence is a skip or a mistake. tools/install-browser.sh
+# needs content_shell before it installs anything, //chrome included, and the
+# table says so once.
+_SHELL_BUILT = battery_payloads.BROWSER_BUILT["content_shell"]
+_CHROME_BUILT = battery_payloads.BROWSER_BUILT["chrome"]
+_BROWSER = [("/bin/chrome", "/bin/chromiumshell"), ("/usr/share/browser/home.html",)]
+_BROWSER_HOW = "the browser - tools/build-chromium.sh builds it and make browser installs it"
+PAYLOADS = {
+    "browser_renders_a_page": (_BROWSER, _BROWSER_HOW, _SHELL_BUILT),
+    "browser_loads_a_page_from_another_machine":
+        (_BROWSER, _BROWSER_HOW, _SHELL_BUILT),
+    "browser_survives_an_empty_flex_container":
+        (_BROWSER + [("/usr/share/browser/flex.html",)], _BROWSER_HOW, _SHELL_BUILT),
+    "browser_closes_from_its_titlebar_button":
+        (_BROWSER, _BROWSER_HOW, _SHELL_BUILT),
+    "browser_new_tab_button_opens_a_tab":
+        ([("/bin/chrome",), ("/usr/share/browser/home.html",)],
+         "//chrome - tools/build-chromium.sh chrome builds it and make browser installs it",
+         _CHROME_BUILT),
+}
+
+def payload_decisions(names, quiet=False):
+    """{test: (verdict, why)} for each named test whose payload is not on the
+    image it would boot: "skip" when this host never built it, "fail" when it
+    did and the image has lost it. An image this reader cannot read decides
+    nothing: the tests run and say what they find, because a skip nobody can
+    justify is a pass."""
+    decisions = {}
+    readers = {}
+    for name in names:
+        if name not in PAYLOADS:
+            continue
+        requirement, how, built = PAYLOADS[name]
+        image = MACHINE_OPTIONS.get(name, {}).get("image") or qemu_input.IMAGE
+        try:
+            if image not in readers:
+                readers[image] = qemu_input.ImageFiles(image)
+            missing = qemu_input.payload_missing(requirement, files=readers[image])
+        except (Exception, SystemExit) as exc:
+            if not quiet:
+                print("payloads: could not read %s (%s) - %s runs as if its "
+                      "payload were there" % (image, exc, name), flush=True)
+            continue
+        if not missing:
+            continue
+        found = battery_payloads.built_paths(built) if built else None
+        if found:
+            decisions[name] = ("fail", "%s, and this host has built it (%s) - the "
+                               "image was recreated after it was installed (M113); "
+                               "make browser-if-built puts it back" % (missing, found))
+        else:
+            decisions[name] = ("skip", "%s; it needs %s" % (missing, how))
+    return decisions
+
+def check_payload_decision():
+    """The skip decision is taken from the image, in both directions, and the
+    host's build only turns an absence into a failure. A path that is not on
+    the image skips where this host never built it and FAILS where it did; the
+    same path written onto a clone of the image with tools/leanfs-put runs
+    either way; an empty file there is still an absence, as the kernel's
+    read_optional_program treats it. Proved on a probe path rather than on the
+    browser so that it holds on a host with a browser on its image and on one
+    without."""
+    failures = []
+    image = qemu_input.IMAGE
+    probe = "/usr/share/input-suite/payload-probe"
+    test = "(payload probe)"
+
+    # Through payload_decisions itself, which is what main() asks, with a test
+    # that needs nothing but the probe, the image pointed at each disk in turn
+    # and `built` the host path that stands for "this host built the probe".
+    def decided_on(disk, built, quiet=False):
+        saved = qemu_input.IMAGE
+        PAYLOADS[test] = ([(probe,)], "nothing - it is the self-check's probe", [(built,)])
+        qemu_input.IMAGE = disk
+        try:
+            return payload_decisions([test], quiet).get(test, ("runs", ""))[0]
+        finally:
+            qemu_input.IMAGE = saved
+            del PAYLOADS[test]
+
+    try:
+        files = qemu_input.ImageFiles(image)
+    except (Exception, SystemExit) as exc:
+        print("FAIL: the payload check could not read %s: %s" % (image, exc))
+        return 1
+    for seeded in ("/bin/browser", "/bin/compositor", "/bin/init"):
+        if not files.has_file(seeded):
+            failures.append("%s, which every image has, was read as absent" % seeded)
+    if files.has_file(probe):
+        failures.append("%s is already on %s - the probe needs a path nothing installs"
+                        % (probe, image))
+
+    scratch = tempfile.mkdtemp(prefix="leanos-payload-check-", dir="/tmp")
+    try:
+        never_built = os.path.join(scratch, "never-built")
+        built_here = os.path.join(scratch, "built-here")
+        with open(built_here, "wb") as f:
+            f.write(b"built on this host\n")
+
+        def expect(disk, built, want, what, quiet=False):
+            got = decided_on(disk, built, quiet)
+            if got != want:
+                failures.append("%s: decided %r, should be %r" % (what, got, want))
+
+        expect(image, never_built, "skip",
+               "a payload on no image and never built here")
+        expect(image, built_here, "fail",
+               "a payload built on this host and missing from the image (M113)")
+        unreadable = os.path.join(scratch, "no-such-leanos-image.bin")
+        expect(unreadable, never_built, "runs",
+               "an image that could not be read (has to decide nothing)", quiet=True)
+        expect(unreadable, built_here, "runs",
+               "an image that could not be read, payload built here", quiet=True)
+
+        put = os.path.join(qemu_input.REPO_ROOT, "build", "leanfs-put")
+        if not os.access(put, os.X_OK):
+            subprocess.call(["make", "-s", "-C", qemu_input.REPO_ROOT, "leanfs-put"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        clone = os.path.join(scratch, "image.bin")
+        qemu_input._clone(image, clone)
+        empty = os.path.join(scratch, "empty")
+        open(empty, "wb").close()
+        full = os.path.join(scratch, "full")
+        with open(full, "wb") as f:
+            f.write(b"\x7fELF probe\n")
+        for host, present in ((empty, False), (full, True)):
+            rc = subprocess.call([put, clone, host, probe],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if rc != 0:
+                failures.append("leanfs-put could not write the probe (%d) - "
+                                "nothing below was checked" % rc)
+                break
+            what = "the probe written onto the image" if present else \
+                   "an EMPTY probe on the image (the kernel would refuse to run it)"
+            expect(clone, never_built, "runs" if present else "skip",
+                   what + ", never built here")
+            expect(clone, built_here, "runs" if present else "fail",
+                   what + ", built here")
+        expect(image, never_built, "skip",
+               "the original image after writing to its clone")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+    decisions = payload_decisions(sorted(PAYLOADS), quiet=True)
+    for name in sorted(PAYLOADS):
+        verdict, why = decisions.get(name, ("runs", ""))
+        print("  %-45s %s" % (name, "runs" if verdict == "runs" else
+                              ("SKIPPED: " if verdict == "skip" else "FAILS: ") + why))
+    if failures:
+        print("FAIL: the payload decision did not hold:")
+        for f in failures:
+            print("  - %s" % f)
+        return 1
+    print("PASS: a payload's absence is read from the image - absent skips, "
+          "absent but built on this host fails, present runs, empty is absent.")
+    return 0
+
 def _die_on_signal(signum, _frame):
     raise KeyboardInterrupt("received signal %d" % signum)
 
@@ -3078,11 +3267,9 @@ def record_run(results, jobs, elapsed):
                 f.write("when\tcommit\ttest\tverdict\tjobs\trun_s\n")
             stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             commit = _commit()
-            for name, detail, _msg in results:
+            for name, _detail, _msg, verdict in results:
                 f.write("%s\t%s\t%s\t%s\t%d\t%.0f\n"
-                        % (stamp, commit, name,
-                           "fail" if detail is not None else "pass",
-                           jobs, elapsed))
+                        % (stamp, commit, name, verdict, jobs, elapsed))
     except Exception:
         pass
 
@@ -3113,6 +3300,11 @@ def known_flaky(names):
                 if len(parts) < 4:
                     continue
                 _when, commit, test, verdict = parts[:4]
+                # A skip, or a payload the image lost, is about the image, not
+                # the test: the same commit passes on an image with the
+                # browser and skips (or is refused) on one without.
+                if verdict in ("skip", "lost"):
+                    continue
                 seen.setdefault((commit, test), set()).add(verdict)
         wanted = set(names)
         return sorted({test for (_c, test), v in seen.items()
@@ -3154,14 +3346,26 @@ def run_one(name, fn, boot_timeout, snapshot=None):
                     raise Failure("%s (screendump and guest log saved to %s)" % (exc, where))
                 raise
     except Failure as exc:
-        return (name, str(exc), "   FAIL (%.0fs): %s" % (time.time() - started, exc))
+        return (name, str(exc), "   FAIL (%.0fs): %s" % (time.time() - started, exc), "fail")
     except KeyboardInterrupt:
         raise
     except Exception:
         detail = "harness error:\n" + traceback.format_exc()
         return (name, detail, "   ERROR (%.0fs):\n%s" % (time.time() - started,
-                                                          traceback.format_exc()))
-    return (name, None, "   pass (%.0fs)" % (time.time() - started))
+                                                          traceback.format_exc()), "fail")
+    return (name, None, "   pass (%.0fs)" % (time.time() - started), "pass")
+
+def skip_result(name, why):
+    return (name, why, "   SKIPPED: %s" % why, "skip")
+
+def decided_result(name, decision):
+    verdict, why = decision
+    if verdict == "skip":
+        return skip_result(name, why)
+    # "lost" rather than "fail" in build/flakes.tsv: it is the image's
+    # verdict, not the test's, and known_flaky must not read a test that
+    # passed on an image with the browser as flaky because this one lost it.
+    return (name, why, "   FAIL (not booted): %s" % why, "lost")
 
 def check_stale_snapshot():
     key = qemu_input.snapshot_key()
@@ -3217,12 +3421,15 @@ def check_stale_snapshot():
     return 0
 
 def usage():
-    print("usage: qemu_input_suite.py [--jobs N] [--quick] [--no-snapshot]\n                            [--check-stale] [test ...]")
+    print("usage: qemu_input_suite.py [--jobs N] [--quick] [--no-snapshot]\n                            [--check-stale] [--check-payloads] [test ...]")
     print()
     print("  --jobs N   run N guests at once (default: %d here)" % default_jobs())
     print("  --quick    the pre-commit subset (%d tests)" % len(QUICK_TESTS))
     print("  --no-snapshot  boot every guest cold (Q19's baseline)")
-    print("  --check-stale  prove a stale snapshot is refused, not used")
+    print("  --check-stale  prove a stale snapshot is refused, not used, and")
+    print("                 --check-payloads")
+    print("  --check-payloads  prove a test is skipped only when what it drives")
+    print("                 is not on the image, and say which ones would be")
     print()
     print("known tests:")
     for n, _ in TESTS:
@@ -3249,7 +3456,14 @@ def main(argv):
             wanted.extend(QUICK_TESTS)
             i += 1
         elif a == "--check-stale":
-            return check_stale_snapshot()
+            # The suite's two decisions taken from the image: which snapshot
+            # it may restore, and which tests it may skip.
+            stale = check_stale_snapshot()
+            print("the payload decision:")
+            payloads = check_payload_decision()
+            return 1 if stale or payloads else 0
+        elif a == "--check-payloads":
+            return check_payload_decision()
         elif a == "--no-snapshot":
             use_snapshot = False
             i += 1
@@ -3266,12 +3480,26 @@ def main(argv):
         usage()
         return 2
 
-    jobs = min(jobs, len(selected))
+    # Decided before anything boots, so a skipped test costs no guest - and
+    # before the snapshot, which is not worth building for tests that will
+    # not use it.
+    decisions = payload_decisions([n for n, _ in selected])
+    to_run = [(n, f) for n, f in selected if n not in decisions]
+    skips = {n: why for n, (v, why) in decisions.items() if v == "skip"}
+    lost = {n: why for n, (v, why) in decisions.items() if v == "fail"}
+    if skips:
+        print("payloads: %d test(s) will be SKIPPED - what they drive is not on "
+              "this image" % len(skips), flush=True)
+    if lost:
+        print("payloads: %d test(s) FAIL without booting - what they drive was "
+              "built on this host and is not on this image" % len(lost), flush=True)
+
+    jobs = max(1, min(jobs, len(to_run)))
     boot_timeout = 420 + 90 * (jobs - 1)
 
     snapshot = None
     snap_secs = 0.0
-    if use_snapshot and any(n not in COLD_BOOT_TESTS for n, _ in selected):
+    if use_snapshot and any(n not in COLD_BOOT_TESTS for n, _ in to_run):
         if qemu_input.snapshot_is_valid():
             snapshot = qemu_input.snapshot_paths()[0]
             print("snapshot: reusing %s" % os.path.basename(snapshot), flush=True)
@@ -3286,45 +3514,61 @@ def main(argv):
             print("snapshot: built in %.0fs - %s"
                   % (snap_secs, os.path.basename(snapshot)), flush=True)
 
-    print("running %d test(s), %d at a time%s"
-          % (len(selected), jobs,
-             "" if snapshot else " (cold boot for every one)"), flush=True)
+    print("running %d test(s), %d at a time%s%s"
+          % (len(to_run), jobs,
+             "" if snapshot else " (cold boot for every one)",
+             ", %d skipped" % len(skips) if skips else ""), flush=True)
     started_all = time.time()
     results = []
 
     if jobs == 1:
         for name, fn in selected:
             print("== %s" % name, flush=True)
-            r = run_one(name, fn, boot_timeout, snapshot)
+            if name in decisions:
+                r = decided_result(name, decisions[name])
+            else:
+                r = run_one(name, fn, boot_timeout, snapshot)
             print(r[2], flush=True)
             results.append(r)
     else:
         with ThreadPoolExecutor(max_workers=jobs) as pool:
-            futures = [(n, pool.submit(run_one, n, f, boot_timeout, snapshot))
+            futures = [(n, None if n in decisions else
+                        pool.submit(run_one, n, f, boot_timeout, snapshot))
                        for n, f in selected]
             for name, fut in futures:
-                r = fut.result()
+                r = decided_result(name, decisions[name]) if fut is None else fut.result()
                 print("== %s" % name, flush=True)
                 print(r[2], flush=True)
                 results.append(r)
 
-    failures = [(n, d) for n, d, _ in results if d is not None]
+    failures = [(n, d) for n, d, _, v in results if v in ("fail", "lost")]
+    skipped = [(n, d) for n, d, _, v in results if v == "skip"]
+    passed = len(results) - len(failures) - len(skipped)
     elapsed = time.time() - started_all
     record_run(results, jobs, elapsed)
-    record_wall_clock(len(selected), jobs, elapsed, snapshot, snap_secs)
+    record_wall_clock(len(to_run), jobs, elapsed, snapshot, snap_secs)
     print()
-    print("%d test(s) in %.0fs" % (len(selected), elapsed))
-    flaky = known_flaky([n for n, _ in selected])
+    print("%d test(s) in %.0fs: %d passed, %d failed, %d skipped"
+          % (len(selected), elapsed, passed, len(failures), len(skipped)))
+    if skipped:
+        print("SKIPPED: %d/%d - not run, and not counted as passed, because what "
+              "they drive is not on this image:" % (len(skipped), len(selected)))
+        for name, why in skipped:
+            print("  - %s: %s" % (name, why))
+    flaky = known_flaky([n for n, _ in to_run])
     if flaky:
         print("(%d test(s) with a history of changing verdict without a code "
               "change: %s - see build/flakes.tsv)" % (len(flaky), ", ".join(flaky)))
     if failures:
-        print("FAIL: %d/%d interactive test(s) failed:" % (len(failures), len(selected)))
+        print("FAIL: %d/%d interactive test(s) failed:"
+              % (len(failures), len(selected) - len(skipped)))
         for name, detail in failures:
             suffix = "  [KNOWN FLAKY]" if name in flaky else ""
             print("  - %s: %s%s" % (name, detail, suffix))
         return 1
-    print("PASS: %d/%d interactive tests passed." % (len(selected), len(selected)))
+    print("PASS: %d/%d interactive tests passed%s."
+          % (passed, len(to_run),
+             " (%d more skipped, listed above)" % len(skipped) if skipped else ""))
     return 0
 
 if __name__ == "__main__":

@@ -192,6 +192,9 @@ void isr_handler(isr_regs_t *r) {
     }
 
     if (r->vector == BREAKPOINT_VECTOR) {
+        /* A plain message, not a report: the machine carries on after it,
+           and a report holds the message lock - every other processor's
+           write() - for as long as its devices take (see below). */
         uint64_t message = kernel_log_begin();
         kernel_log_puts("[isr] breakpoint (int3) hit - resuming\n");
         dump_regs(r);
@@ -282,6 +285,18 @@ void isr_handler(isr_regs_t *r) {
                                            fault_code)) {
             return;
         }
+        /* A plain message: its bytes go into the ring under the message
+           lock and reach the devices at its end, after the lock is let go.
+           Any program can get here (a SIGSEGV with no handler), and as a
+           report (bc93456) it held the message lock with interrupts off for
+           as long as its ~1.3 KB of cpu table and registers took on the
+           wire - which every other processor's kernel_log_write, a write()
+           to the console included, spun on with ITS interrupts off: about
+           16 ms under hvf by the review's estimate, ~115 ms on a 115200-baud
+           port. Nothing here resets the machine - the task is killed - and
+           if dump_regs faults, the unhandled exception's report nested in
+           this message sends what this one had written ahead of its own,
+           then panics. */
         uint64_t message = kernel_log_begin();
         kernel_log_puts("\n[isr] ring-3 fault: ");
         kernel_log_puts(exception_name(r->vector));
@@ -295,7 +310,15 @@ void isr_handler(isr_regs_t *r) {
         task_exit_with_signal(fault_signo);
     }
 
-    uint64_t message = kernel_log_begin();
+    /* A report, not a plain message: each line reaches the serial port and
+       the screen as it is written. It was kernel_log_begin, and since
+       47c3b17 a plain message's bytes wait in the ring for kernel_log_end -
+       so a dump_regs that faulted again on a bad stack, or a triple fault,
+       reset the machine before the end with the report nowhere a person
+       could read it (M225, log-crash-path). Only this report is one: the
+       ring-3 and int3 messages above are followed by no panic, and a report
+       makes every other processor's write() wait for its devices. */
+    uint64_t message = kernel_log_begin_report();
     kernel_log_puts("\n*** UNHANDLED CPU EXCEPTION: ");
     kernel_log_puts(exception_name(r->vector));
     kernel_log_puts(" ***\n");

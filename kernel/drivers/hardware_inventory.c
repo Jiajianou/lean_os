@@ -135,11 +135,16 @@ void hardware_inventory_report(void) {
     kernel_log_put_dec((uint32_t)MAX_CPUS);
     kernel_log_puts(" this kernel can hold.\n");
 
+    /* The RAM the firmware handed over, not the span the frame bitmap covers
+       - see physical_memory.c. tools/memory-size-test.sh reads this line and
+       holds it to the -m QEMU was given, so its first number stays first. */
     kernel_log_puts("[inventory] memory: ");
     kernel_log_put_dec((uint32_t)(physical_memory_total_frame_count() / 256));
-    kernel_log_puts(" MiB usable, ");
+    kernel_log_puts(" MiB of RAM, ");
     kernel_log_put_dec((uint32_t)(physical_memory_free_frame_count() / 256));
-    kernel_log_puts(" MiB free.\n");
+    kernel_log_puts(" MiB free; frames tracked to ");
+    kernel_log_put_dec((uint32_t)(physical_memory_tracked_limit() / (1024 * 1024)));
+    kernel_log_puts(" MiB, holes in the map included.\n");
 
     kernel_log_puts("[inventory] screen: ");
     kernel_log_put_dec(framebuffer_width());
