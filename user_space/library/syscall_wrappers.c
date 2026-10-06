@@ -114,6 +114,10 @@ long sys_sockname(int fd, os_sockaddr_t *out) {
     return do_syscall(SYS_sockname, (long)fd, (long)out, 0);
 }
 
+long sys_sockident(int fd, os_socket_identity_t *out, int peer) {
+    return do_syscall(SYS_sockident, (long)fd, (long)out, peer);
+}
+
 long sys_peername(int fd, os_sockaddr_t *out) {
     return do_syscall(SYS_sockname, (long)fd, (long)out, 1);
 }
@@ -448,6 +452,10 @@ long sys_unix_peer_credentials(int fd, void *out) {
 
 long sys_sigaltstack(const void *new_stack, void *old_stack) {
     return do_syscall(SYS_sigaltstack, (long)new_stack, (long)old_stack, 0);
+}
+
+long sys_sockopt(int fd, int option, long value) {
+    return do_syscall(SYS_sockopt, fd, option, value);
 }
 
 long sys_bindun(int fd, const char *name, int length) {

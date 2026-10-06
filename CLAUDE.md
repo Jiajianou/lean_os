@@ -510,6 +510,22 @@ tools/build-clang.sh             # x86_64-lean_os-clang (M121) - needs the above
 tools/build-libcxx.sh            # libc++ and libc++abi for the target (M121)
 ```
 
+**clang and libc++ are LLVM 24, from the commit Chromium's own clang is
+built from** - `build-clang.sh` fetches llvm-project at `LLVM24_COMMIT`
+into `build/llvm24`, and `chromium-test.sh` fails if the checkout's
+`CLANG_REVISION` moves away from it. Until M226 nothing said where that
+tree came from, and a second host quietly built LLVM 19, whose libc++ no
+longer compiles against this libc. `LEANOS_LLVM=19` is the fallback, asked
+for by name.
+
+**A Chromium build - the browser, node, Electron - needs full Xcode on
+the Mac**, not the Command Line Tools: Chromium's host toolchain runs
+`xcodebuild -version` and looks for `Platforms/MacOSX.platform`, and
+`xcrun` refuses a developer directory that is not an Xcode. macOS 14
+(Sonoma) runs Xcode 16.2 at most, whose SDK 15.2 meets Chromium's
+`mac_sdk_min` of 15. Everything else in this file builds with the
+Command Line Tools alone.
+
 The third toolchain is Rust, and none of it is built here: `rustc`,
 `cargo` and **rust-src** come from Chromium's own pinned toolchain under
 `build/chromium/src/third_party/rust-toolchain`, and
@@ -626,7 +642,12 @@ Three tiers, each a superset of the one above:
 `make coverage`, `tools/crash-test.sh` (SIGKILL mid-write, reboot, verify with
 an independent reader), `tools/math-test.sh` (M99: this libm beside the
 host's in one process, every declared function graded or explicitly not -
-it is in `--fast`), `tools/python-test.sh` (M99: CPython's own regression
+it is in `--fast`), `tools/libuv-test.sh` (M226: libuv's own test
+suite - Node's copy, with Electron's and this fork's patches, compiled by
+`x86_64-lean_os-gcc` and run on the machine through `opt/leanos/run`; it
+needs the Chromium checkout for the source and not Chromium's build, and
+it requires by name the embed tests, which are how Electron runs Node
+inside Chromium's message loop), `tools/python-test.sh` (M99: CPython's own regression
 suite, on the machine, reporting its own counts), `tools/sh-test.sh` (M86: builds `/bin/sh` for the host
 and requires every fixture in `tests/sh/` to agree with the host's own `/bin/sh`
 byte for byte — it is in `--fast`), `tools/pkg-test.sh` (M111: this

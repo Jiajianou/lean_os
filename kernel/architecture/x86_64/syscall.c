@@ -4239,6 +4239,41 @@ static long sys_sockname(uint64_t fd, uint64_t out_pointer, uint64_t peer,
     return copy_to_user(out_pointer, &out, sizeof(out)) == 0 ? 0 : -1;
 }
 
+/* M226: what a socket is - see os_socket_identity_t. -2 is ENOTCONN, for a
+   peer asked of a socket without one. */
+static long sys_sockident(uint64_t fd, uint64_t out_pointer, uint64_t peer,
+                          uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4; (void)a5; (void)a6;
+    os_socket_identity_t out;
+    k_memset(&out, 0, sizeof(out));
+    file_descriptor_use_t use;
+    file_descriptor_slot_t *slot = use_descriptor(fd, &use);
+    if (!slot) {
+        return -1;
+    }
+    long result = 0;
+    if (slot->type == FILE_DESCRIPTOR_UNIX) {
+        out.family = OS_AF_UNIX;
+        out.type = (uint32_t)unix_socket_type(slot->un);
+        int length = unix_socket_name(slot->un, peer ? 1 : 0, out.name, (int)sizeof(out.name));
+        if (length < 0) {
+            result = -2;
+        } else {
+            out.name_length = (uint32_t)length;
+        }
+    } else if (slot->type == FILE_DESCRIPTOR_SOCKET) {
+        out.family = OS_AF_INET;
+        out.type = socket_tcb(slot->sock) ? OS_SOCKET_STREAM : OS_SOCKET_DGRAM;
+    } else {
+        result = -1;
+    }
+    done_with_descriptor(&use);
+    if (result != 0) {
+        return result;
+    }
+    return copy_to_user(out_pointer, &out, sizeof(out)) == 0 ? 0 : -1;
+}
+
 /* The listener is held for the whole wait, as Linux holds it: a sibling's
    close() does not wake an accept() blocked on the socket, and the
    connection it then takes is installed as ever. */
@@ -4456,6 +4491,24 @@ static long sys_bind(uint64_t fd, uint64_t port, uint64_t a3, uint64_t a4, uint6
         return -1;
     }
     long result = socket_bind(s, (uint16_t)port);
+    done_with_descriptor(&use);
+    return result;
+}
+
+/* M226: SO_REUSEADDR, kept on the socket - see SYS_sockopt. A negative
+   value asks for what is set. Only an IP socket keeps it. */
+static long sys_sockopt(uint64_t fd, uint64_t option, uint64_t value, uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a4; (void)a5; (void)a6;
+    if (option != OS_SOCKOPT_REUSEADDR) {
+        return -1;
+    }
+    file_descriptor_use_t use;
+    struct socket *s = socket_for_file_descriptor(fd, &use);
+    if (!s) {
+        return -1;
+    }
+    long result = (long)value < 0 ? socket_reuse_address(s)
+                                  : socket_set_reuse_address(s, value != 0);
     done_with_descriptor(&use);
     return result;
 }
@@ -4746,9 +4799,14 @@ static long sys_display(uint64_t operation, uint64_t a, uint64_t b, uint64_t a4,
     return result;
 }
 
+static int epoll_set_ready(struct epoll *ep, int depth);
+
 /* Readiness of a HELD descriptor (M225, fd-use-holds): it read the slot and
-   asked its object, which a sibling's close could free between the two. */
-static int file_descriptor_is_ready(const file_descriptor_slot_t *slot) {
+   asked its object, which a sibling's close could free between the two.
+   DEPTH is how many epoll sets the question has already gone through - an
+   epoll descriptor is ready when the set it names has something to report
+   (M226), and that is asked of the descriptors inside it one level down. */
+static int file_descriptor_is_ready_at(const file_descriptor_slot_t *slot, int depth) {
     switch (slot->type) {
     case FILE_DESCRIPTOR_STDIN:
         return keyboard_peek() ? 1 : 0;
@@ -4763,7 +4821,7 @@ static int file_descriptor_is_ready(const file_descriptor_slot_t *slot) {
     case FILE_DESCRIPTOR_TIMER:
         return timerfd_readable(slot->timer, clock_now_ns()) ? 1 : 0;
     case FILE_DESCRIPTOR_EPOLL:
-        return 0;
+        return epoll_set_ready(slot->epoll, depth);
     case FILE_DESCRIPTOR_FILE:
         return virtual_file_system_handle_readable(slot->file->handle);
     default:
@@ -4771,11 +4829,15 @@ static int file_descriptor_is_ready(const file_descriptor_slot_t *slot) {
     }
 }
 
-static uint32_t epoll_mask_of(const file_descriptor_slot_t *slot);
+static int file_descriptor_is_ready(const file_descriptor_slot_t *slot) {
+    return file_descriptor_is_ready_at(slot, 1);
+}
+
+static uint32_t epoll_mask_of(const file_descriptor_slot_t *slot, int depth);
 
 /* An epoll watch's events, asked of the descriptor it names - held for the
    question, so the object compared against the watch's is the one asked. */
-static uint32_t file_descriptor_epoll_mask_for(int fd, const void *object) {
+static uint32_t file_descriptor_epoll_mask_for(int fd, const void *object, int depth) {
     if (fd < 0) {
         return EPOLL_STALE;
     }
@@ -4786,15 +4848,15 @@ static uint32_t file_descriptor_epoll_mask_for(int fd, const void *object) {
     }
     uint32_t m = EPOLL_STALE;
     if (!object || slot->pipe == (struct pipe *)object) {
-        m = epoll_mask_of(slot);
+        m = epoll_mask_of(slot, depth);
     }
     done_with_descriptor(&use);
     return m;
 }
 
-static uint32_t epoll_mask_of(const file_descriptor_slot_t *slot) {
+static uint32_t epoll_mask_of(const file_descriptor_slot_t *slot, int depth) {
     uint32_t m = 0;
-    if (file_descriptor_is_ready(slot)) {
+    if (file_descriptor_is_ready_at(slot, depth)) {
         m |= EPOLLIN;
     }
     switch (slot->type) {
@@ -4858,9 +4920,114 @@ static uint32_t epoll_mask_of(const file_descriptor_slot_t *slot) {
     return m;
 }
 
+/* CONTEXT is the depth the watched descriptors are at, or null for a set
+   asked directly by a wait. */
 static uint32_t epoll_mask_callback(void *context, int fd, const void *object) {
-    (void)context;
-    return file_descriptor_epoll_mask_for(fd, object);
+    int depth = context ? *(const int *)context : 1;
+    return file_descriptor_epoll_mask_for(fd, object, depth);
+}
+
+/* M226: a set inside a set. Electron joins libuv's loop to Chromium's by
+   putting libuv's epoll descriptor into an epoll set of its own and waiting
+   on that, so the inner set's descriptor has to say "readable" exactly when
+   a wait on the inner set would return something - asked without consuming
+   an edge or a one-shot (epoll_peek), because the wait that consumes them is
+   libuv's own. Past EPOLL_MAX_NESTING the answer is no: registration refuses
+   to build anything that deep from the set downwards, and this bounds the
+   recursion even for a shape it could not see. */
+static int epoll_set_ready(struct epoll *ep, int depth) {
+    if (!ep || depth > EPOLL_MAX_NESTING) {
+        return 0;
+    }
+    int next = depth + 1;
+    return epoll_peek(ep, epoll_mask_callback, &next);
+}
+
+typedef struct {
+    int fds[EPOLL_MAX_WATCH];
+    const void *objects[EPOLL_MAX_WATCH];
+} epoll_registrations_t;
+
+/* Whether FROM is TARGET or holds it at any depth, through this task's own
+   descriptors - each one held while it is asked, as everywhere else here.
+   Too deep counts as reaching it: ELOOP is Linux's answer to both. The
+   registrations come from the heap, because each level is 1.5 KB and a wait
+   already keeps a set's worth of events on a 32 KB kernel stack. */
+static int epoll_reaches(struct epoll *from, struct epoll *target, int depth) {
+    if (from == target || depth > EPOLL_MAX_NESTING) {
+        return 1;
+    }
+    epoll_registrations_t *r = (epoll_registrations_t *)kmalloc(sizeof(*r));
+    if (!r) {
+        return 1;
+    }
+    int n = epoll_registered(from, r->fds, r->objects, EPOLL_MAX_WATCH);
+    int reached = 0;
+    for (int i = 0; i < n && !reached; i++) {
+        if (r->fds[i] < 0) {
+            continue;
+        }
+        file_descriptor_use_t use;
+        file_descriptor_slot_t *slot = use_descriptor((uint64_t)r->fds[i], &use);
+        if (!slot) {
+            continue;
+        }
+        if (slot->type == FILE_DESCRIPTOR_EPOLL && (const void *)slot->epoll == r->objects[i]) {
+            reached = epoll_reaches(slot->epoll, target, depth + 1);
+        }
+        done_with_descriptor(&use);
+    }
+    kfree(r);
+    return reached;
+}
+
+/* Everything a wait on a set inside a set has to be woken by: the inner set
+   itself, what it watches, and - one level further, to the same bound - the
+   sets inside it; a timerfd anywhere in there brings PARK_UNTIL forward,
+   because a timer's expiry wakes nobody and is found by parking until it.
+   A machine with more objects than a task can watch sets watch_everything,
+   which costs spurious wakes and loses none. */
+static uint64_t epoll_watch_nested(struct epoll *ep, int depth, uint64_t park_until) {
+    scheduler_watch_add(ep);
+    if (depth > EPOLL_MAX_NESTING) {
+        return park_until;
+    }
+    epoll_registrations_t *r = (epoll_registrations_t *)kmalloc(sizeof(*r));
+    if (!r) {
+        return park_until;
+    }
+    int n = epoll_objects(ep, r->fds, r->objects, EPOLL_MAX_WATCH);
+    for (int i = 0; i < n; i++) {
+        if (r->fds[i] < 0) {
+            continue;
+        }
+        file_descriptor_use_t use;
+        file_descriptor_slot_t *slot = use_descriptor((uint64_t)r->fds[i], &use);
+        if (!slot) {
+            continue;
+        }
+        if ((const void *)slot->pipe == r->objects[i]) {
+            if (slot->type == FILE_DESCRIPTOR_STDIN) {
+                scheduler_watch_add(SCHEDULER_INPUT_OBJECT);
+            } else {
+                scheduler_watch_add(r->objects[i]);
+            }
+            if (slot->type == FILE_DESCRIPTOR_TIMER) {
+                long ms = timerfd_next_ms(slot->timer, clock_now_ns());
+                if (ms >= 0) {
+                    uint64_t when = clock_deadline_ms((uint64_t)ms);
+                    if (park_until == 0 || when < park_until) {
+                        park_until = when;
+                    }
+                }
+            } else if (slot->type == FILE_DESCRIPTOR_EPOLL) {
+                park_until = epoll_watch_nested(slot->epoll, depth + 1, park_until);
+            }
+        }
+        done_with_descriptor(&use);
+    }
+    kfree(r);
+    return park_until;
 }
 
 static long install_file_descriptor_of(file_descriptor_type_t type, void *object, uint64_t flags) {
@@ -4995,7 +5162,14 @@ static long sys_epoll_control(uint64_t epfd, uint64_t op, uint64_t fd, uint64_t 
     file_descriptor_use_t watched_use;
     file_descriptor_slot_t *watched = use_descriptor(fd, &watched_use);
     long result = -1;
-    if (set->type == FILE_DESCRIPTOR_EPOLL && watched && watched->type != FILE_DESCRIPTOR_EPOLL) {
+    /* M226: a set may hold another set, as on Linux - but not itself, not a
+       set that already reaches it, and not deeper than EPOLL_MAX_NESTING.
+       Only an ADD makes a new edge; MOD and DEL change what an existing one
+       asks for. */
+    if (set->type == FILE_DESCRIPTOR_EPOLL && watched && watched->type == FILE_DESCRIPTOR_EPOLL &&
+        op == EPOLL_CTL_ADD && epoll_reaches(watched->epoll, set->epoll, 1)) {
+        result = -OS_ERROR_LOOP;
+    } else if (set->type == FILE_DESCRIPTOR_EPOLL && watched) {
         struct epoll *ep = set->epoll;
         result = epoll_control_set(ep, (int)op, (int)fd, (const void *)watched->pipe, ev.events,
                                    ev.data);
@@ -5027,12 +5201,17 @@ static long epoll_wait_on(struct epoll *ep, uint64_t out_pointer, uint64_t maxev
         scheduler_watch_begin();
         scheduler_watch_add(ep);
         int watched = epoll_objects(ep, watched_fds, watched_objects, EPOLL_MAX_WATCH);
+        int holds_a_set = 0;
         for (int i = 0; i < watched; i++) {
-            if (file_descriptor_peek_type(scheduler_current(), watched_fds[i]) ==
-                FILE_DESCRIPTOR_STDIN) {
+            file_descriptor_type_t type =
+                file_descriptor_peek_type(scheduler_current(), watched_fds[i]);
+            if (type == FILE_DESCRIPTOR_STDIN) {
                 scheduler_watch_add(SCHEDULER_INPUT_OBJECT);
             } else {
                 scheduler_watch_add(watched_objects[i]);
+            }
+            if (type == FILE_DESCRIPTOR_EPOLL) {
+                holds_a_set = 1;
             }
         }
         int n = epoll_scan(ep, epoll_mask_callback, (void *)0, evs, (int)maxevents);
@@ -5057,6 +5236,24 @@ static long epoll_wait_on(struct epoll *ep, uint64_t out_pointer, uint64_t maxev
             return 0;
         }
         uint64_t park_until = deadline;
+        if (holds_a_set) {
+            for (int i = 0; i < watched; i++) {
+                int fd = watched_fds[i];
+                if (fd < 0) {
+                    continue;
+                }
+                file_descriptor_use_t use;
+                file_descriptor_slot_t *slot = use_descriptor((uint64_t)fd, &use);
+                if (!slot) {
+                    continue;
+                }
+                if (slot->type == FILE_DESCRIPTOR_EPOLL &&
+                    (const void *)slot->epoll == watched_objects[i]) {
+                    park_until = epoll_watch_nested(slot->epoll, 2, park_until);
+                }
+                done_with_descriptor(&use);
+            }
+        }
         for (int i = 0; i < watched; i++) {
             int fd = watched_fds[i];
             if (fd < 0 || file_descriptor_peek_type(scheduler_current(), fd) != FILE_DESCRIPTOR_TIMER) {
@@ -5087,8 +5284,15 @@ static long epoll_wait_on(struct epoll *ep, uint64_t out_pointer, uint64_t maxev
 
 static long sys_epoll_wait(uint64_t epfd, uint64_t out_pointer, uint64_t maxevents, uint64_t timeout_ms, uint64_t a5, uint64_t a6) {
     (void)a5; (void)a6;
-    if (maxevents == 0 || maxevents > EPOLL_MAX_WATCH) {
+    if (maxevents == 0 || maxevents > 0x7FFFFFFF / sizeof(os_epoll_event_t)) {
         return -1;
+    }
+    /* M226: maxevents is the size of the caller's buffer, not a limit on the
+       set - libuv passes 1024 - and a set never has more to report than it
+       has watches, so a bigger buffer is a buffer partly unused. It was a
+       refusal, which libuv's loop reads as an impossible errno and aborts. */
+    if (maxevents > EPOLL_MAX_WATCH) {
+        maxevents = EPOLL_MAX_WATCH;
     }
     if (!user_range_ok(out_pointer, maxevents * sizeof(os_epoll_event_t), 1)) {
         return -1;
@@ -5146,6 +5350,7 @@ static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint6
         if (reads_pointer) {
             scheduler_watch_add(SCHEDULER_INPUT_OBJECT);
         }
+        uint64_t park_until = deadline;
         /* M225 (fd-use-holds): each descriptor held while it is watched and
            asked - its object is asked whether it is ready, and a sibling's
            close could free it between reading the slot and asking. Watched
@@ -5160,6 +5365,9 @@ static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint6
             }
             scheduler_watch_add(slot->type == FILE_DESCRIPTOR_STDIN ? SCHEDULER_INPUT_OBJECT
                                                                     : (const void *)slot->pipe);
+            if (slot->type == FILE_DESCRIPTOR_EPOLL) {
+                park_until = epoll_watch_nested(slot->epoll, 1, park_until);
+            }
             int ready = file_descriptor_is_ready(slot);
             done_with_descriptor(&use);
             if (ready) {
@@ -5195,7 +5403,7 @@ static long sys_waitfds(uint64_t file_descriptors_pointer, uint64_t count, uint6
             WAITFDS_RETURN(WAITFDS_RETURN_DEADLINE, -2);
         }
 
-        scheduler_watch_block(deadline);
+        scheduler_watch_block(park_until);
         if (scheduler_signal_pending()) {
             WAITFDS_RETURN(WAITFDS_RETURN_SIGNAL, -2);
         }
@@ -6082,6 +6290,8 @@ static const syscall_function_t syscall_table[SYSCALL_COUNT] = {
     [SYS_display_modes] = sys_display_modes,
     [SYS_display_set_mode] = sys_display_set_mode,
     [SYS_display] = sys_display,
+    [SYS_sockopt] = sys_sockopt,
+    [SYS_sockident] = sys_sockident,
     [SYS_socket] = sys_socket,
     [SYS_bind] = sys_bind,
     [SYS_sendto] = sys_sendto,

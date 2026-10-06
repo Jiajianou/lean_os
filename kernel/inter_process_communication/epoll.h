@@ -47,11 +47,18 @@ int epoll_control_set(struct epoll *ep, int op, int fd, const void *object,
 
 int epoll_watch_count(const struct epoll *ep);
 int epoll_objects(struct epoll *ep, int *fds, const void **objects, int max);
+int epoll_registered(struct epoll *ep, int *fds, const void **objects, int max);
 
 #define EPOLL_STALE 0xFFFFFFFFu
 typedef uint32_t (*epoll_mask_function)(void *context, int fd, const void *object);
 
 int epoll_scan(struct epoll *ep, epoll_mask_function mask_function, void *context,
                epoll_ev_t *out, int max);
+
+int epoll_peek(struct epoll *ep, epoll_mask_function mask_function, void *context);
+
+/* How deep sets may be put inside sets - Linux's EP_MAX_NESTS. A deeper or
+   circular registration is refused with ELOOP, as Linux refuses it. */
+#define EPOLL_MAX_NESTING 4
 
 int epoll_in_use(void);

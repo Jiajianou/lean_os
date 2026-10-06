@@ -18,6 +18,7 @@ struct socket {
     int type;
     struct tcpcb *tcb;
     int read_shut;
+    int reuse_address;
     int bound;
     uint16_t port;
     volatile uint16_t head;
@@ -153,7 +154,7 @@ int socket_bind(struct socket *s, uint16_t port) {
         return -1;
     }
     if (s->type == SOCK_STREAM) {
-        int p = tcp_bind(s->tcb, port);
+        int p = s->reuse_address ? tcp_bind_reusing(s->tcb, port) : tcp_bind(s->tcb, port);
         if (p < 0) {
             return -1;
         }
@@ -170,6 +171,21 @@ int socket_bind(struct socket *s, uint16_t port) {
     s->port = port;
     s->bound = 1;
     return port;
+}
+
+/* M226. The one option kept so far. A datagram socket keeps it too, as
+   Linux does, and its bind does not consult it - UDP ports here are never
+   held past their socket. */
+int socket_set_reuse_address(struct socket *s, int on) {
+    if (!s || !s->in_use) {
+        return -1;
+    }
+    s->reuse_address = on ? 1 : 0;
+    return 0;
+}
+
+int socket_reuse_address(const struct socket *s) {
+    return (s && s->in_use) ? s->reuse_address : -1;
 }
 
 uint16_t socket_local_port(const struct socket *s) {

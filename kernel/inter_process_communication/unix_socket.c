@@ -37,6 +37,13 @@ typedef struct unix_socket {
        made by the connecting task, so the server's end is stamped with the
        listener's owner rather than with its maker's. */
     int owner_pid;
+
+    /* M226: the address this end answers to - what getsockname reports of
+       it and getpeername of the end across from it. Bind sets it; the
+       server's end of a connection takes the listener's, as Linux's does, so
+       a client asked who it is talking to names the path it connected to. */
+    int address_length;
+    char address[UNIX_PATH_MAX];
 } unix_socket_t;
 
 typedef struct {
@@ -135,6 +142,26 @@ int unix_socket_peer_pid(const struct unix_socket *s) {
 
 int unix_socket_type(const struct unix_socket *s) {
     return s ? s->type : -1;
+}
+
+/* M226: the address S answers to - or, with PEER, the one the socket at its
+   other end does, which for a connection is the listener's. Zero for an
+   unnamed socket; -1 for a peer that is not there. */
+int unix_socket_name(const struct unix_socket *s, int peer, char *out, int max) {
+    if (!s || !out || max <= 0) {
+        return -1;
+    }
+    uint64_t f = spin_lock_irqsave(&unix_lock);
+    const unix_socket_t *whose = peer ? s->peer : s;
+    int length = -1;
+    if (whose) {
+        length = whose->address_length < max ? whose->address_length : max;
+        for (int j = 0; j < length; j++) {
+            out[j] = whose->address[j];
+        }
+    }
+    spin_unlock_irqrestore(&unix_lock, f);
+    return length;
 }
 
 void unix_socket_reference(struct unix_socket *s) {
@@ -240,6 +267,10 @@ int unix_socket_bind(struct unix_socket *s, const char *name, int length) {
             names[i].length = length;
             names[i].sock = s;
             s->bound = 1;
+            for (int j = 0; j < length; j++) {
+                s->address[j] = name[j];
+            }
+            s->address_length = length;
             spin_unlock_irqrestore(&unix_lock, f);
             return 0;
         }
@@ -282,6 +313,10 @@ int unix_socket_connect(struct unix_socket *s, const char *name, int length) {
         return -1;
     }
     srv->owner_pid = listener->owner_pid;
+    for (int j = 0; j < listener->address_length; j++) {
+        srv->address[j] = listener->address[j];
+    }
+    srv->address_length = listener->address_length;
     srv->peer = s;
     s->peer = srv;
     listener->backlog[listener->backlog_count++] = srv;

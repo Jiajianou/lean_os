@@ -4,6 +4,7 @@
 #include "library/kernel_library.h"
 #include "library/spinlock.h"
 #include "memory_management/heap.h"
+#include "syscall.h"
 
 static spinlock_t epoll_lock;
 
@@ -99,11 +100,14 @@ static epoll_watch_t *find(epoll_t *ep, int fd) {
 int epoll_control_set(struct epoll *ep, int op, int fd, const void *object,
                   uint32_t events, uint64_t data) {
     if (!ep || fd < 0) {
-        return -1;
+        return -OS_ERROR_INVALID;
     }
     uint64_t f = spin_lock_irqsave(&epoll_lock);
     epoll_watch_t *w = find(ep, fd);
-    int rc = -1;
+    /* M226: each refusal is Linux's own errno, not one -1 for all of them -
+       libuv's loop retries an ADD that says EEXIST as a MOD, and asserts
+       that is what it was told. */
+    int rc = -OS_ERROR_INVALID;
     int full = 0;
     /* A watch is kept by descriptor NUMBER, and closing a descriptor does not
        take it out of the sets watching it - on Linux the last close of a
@@ -130,6 +134,7 @@ int epoll_control_set(struct epoll *ep, int op, int fd, const void *object,
     switch (op) {
     case EPOLL_CTL_ADD:
         if (w) {
+            rc = -OS_ERROR_EXIST;
             break;
         }
         full = 1;
@@ -150,6 +155,7 @@ int epoll_control_set(struct epoll *ep, int op, int fd, const void *object,
         break;
     case EPOLL_CTL_MOD:
         if (!w) {
+            rc = -OS_ERROR_NOENT;
             break;
         }
         w->events = events;
@@ -161,6 +167,7 @@ int epoll_control_set(struct epoll *ep, int op, int fd, const void *object,
         break;
     case EPOLL_CTL_DEL:
         if (!w) {
+            rc = -OS_ERROR_NOENT;
             break;
         }
         w->used = 0;
@@ -173,6 +180,7 @@ int epoll_control_set(struct epoll *ep, int op, int fd, const void *object,
     spin_unlock_irqrestore(&epoll_lock, f);
     if (full) {
         refused("an epoll set is at its ceiling of watched descriptors");
+        rc = -OS_ERROR_NOSPC;
     }
     return rc;
 }
@@ -185,6 +193,26 @@ int epoll_objects(struct epoll *ep, int *fds, const void **objects, int max) {
     uint64_t f = spin_lock_irqsave(&epoll_lock);
     for (int i = 0; i < EPOLL_MAX_WATCH && n < max; i++) {
         if (ep->w[i].used && !ep->w[i].disarmed) {
+            fds[n] = ep->w[i].fd;
+            objects[n] = ep->w[i].object;
+            n++;
+        }
+    }
+    spin_unlock_irqrestore(&epoll_lock, f);
+    return n;
+}
+
+/* Every registration, the disarmed ones too: EPOLL_CTL_MOD re-arms a
+   one-shot watch without asking anything, so a question about what a set can
+   reach (M226, nested sets) has to count the watches that are only asleep. */
+int epoll_registered(struct epoll *ep, int *fds, const void **objects, int max) {
+    if (!ep) {
+        return 0;
+    }
+    int n = 0;
+    uint64_t f = spin_lock_irqsave(&epoll_lock);
+    for (int i = 0; i < EPOLL_MAX_WATCH && n < max; i++) {
+        if (ep->w[i].used) {
             fds[n] = ep->w[i].fd;
             objects[n] = ep->w[i].object;
             n++;
@@ -277,6 +305,46 @@ int epoll_scan(struct epoll *ep, epoll_mask_function mask_function, void *contex
         spin_unlock_irqrestore(&epoll_lock, f);
     }
     return n;
+}
+
+/* M226: whether epoll_scan would report anything, answered without moving
+   anything epoll_scan moves - an edge already reported stays reported, a
+   one-shot stays armed, a stale watch stays for the scan to drop. This is
+   what a set's OWN descriptor says when it is watched (an epoll set inside
+   another, which is how Electron joins libuv's loop to Chromium's): Linux
+   calls the set readable when its ready list is not empty, and the ready
+   list is exactly what the next wait would return. */
+int epoll_peek(struct epoll *ep, epoll_mask_function mask_function, void *context) {
+    if (!ep || !mask_function) {
+        return 0;
+    }
+    for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
+        if (!__atomic_load_n(&ep->w[i].used, __ATOMIC_RELAXED)) {
+            continue;
+        }
+        uint64_t f = spin_lock_irqsave(&epoll_lock);
+        if (!ep->w[i].used || ep->w[i].disarmed) {
+            spin_unlock_irqrestore(&epoll_lock, f);
+            continue;
+        }
+        epoll_watch_t snap = ep->w[i];
+        spin_unlock_irqrestore(&epoll_lock, f);
+
+        uint32_t mask = mask_function(context, snap.fd, snap.object);
+        if (mask == EPOLL_STALE) {
+            continue;
+        }
+        uint32_t want = (snap.events & (EPOLLIN | EPOLLOUT | EPOLLPRI | EPOLLRDHUP)) |
+                        EPOLLERR | EPOLLHUP;
+        uint32_t hit = mask & want;
+        if (snap.events & EPOLLET) {
+            hit &= ~snap.last;
+        }
+        if (hit != 0) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 int epoll_in_use(void) {

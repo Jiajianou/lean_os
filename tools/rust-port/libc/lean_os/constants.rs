@@ -205,12 +205,12 @@ pub const EPOLLET: u32 = 2147483648;
 pub const EPOLL_CTL_ADD: c_int = 1;
 pub const EPOLL_CTL_MOD: c_int = 2;
 pub const EPOLL_CTL_DEL: c_int = 3;
-pub const EPOLL_CLOEXEC: c_int = 524288;
+pub const EPOLL_CLOEXEC: c_int = 32;
 pub const EFD_SEMAPHORE: c_int = 1;
 pub const EFD_NONBLOCK: c_int = 2048;
-pub const EFD_CLOEXEC: c_int = 524288;
+pub const EFD_CLOEXEC: c_int = 32;
 pub const TFD_NONBLOCK: c_int = 2048;
-pub const TFD_CLOEXEC: c_int = 524288;
+pub const TFD_CLOEXEC: c_int = 32;
 pub const TFD_TIMER_ABSTIME: c_int = 1;
 
 pub const AF_UNSPEC: c_int = 0;

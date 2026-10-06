@@ -15,9 +15,13 @@ SRC="$ROOT/build/clang-src"
 # own isalpha_l when it is not told the C library has one, and this libc grew
 # the _l family, and every C++ program stopped compiling. They take the same
 # tree now.
-DEFAULT_TREE="$ROOT/build/llvm24"
-if [ ! -d "$DEFAULT_TREE" ]; then
+# M226: the same choice build-clang.sh makes, by the same switch - never by
+# whether build/llvm24 happens to exist, which is how a second host built
+# libc++ 19 beside nothing and learned that libc++ 19 no longer fits this libc.
+if [ "${LEANOS_LLVM:-24}" = "19" ]; then
   DEFAULT_TREE="$SRC/llvm-project-$LLVM_VER.src"
+else
+  DEFAULT_TREE="$ROOT/build/llvm24"
 fi
 TREE="${LEANOS_LLVM_TREE:-$DEFAULT_TREE}"
 PREFIX="${LEANOS_TOOLCHAIN_PREFIX:-$ROOT/build/toolchain}"

@@ -126,6 +126,8 @@ static const entry_t table[] = {
     {SYS_task_end_status, CLASS_PLAIN, 0, NULL},
     {SYS_wireless,      CLASS_PLAIN, 0, NULL},
     {SYS_display,       CLASS_PLAIN, 0, NULL},
+    {SYS_sockopt,       CLASS_PLAIN, 0, NULL},
+    {SYS_sockident,     CLASS_POINTER, 1, NULL},
     {SYS_idle_ticks,    CLASS_PLAIN, 0, NULL},
     {SYS_yield,         CLASS_PLAIN, 0, NULL},
     {SYS_task_alive,    CLASS_PLAIN, 0, NULL},

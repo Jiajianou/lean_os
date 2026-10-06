@@ -43,6 +43,7 @@ int unix_socket_type(const struct unix_socket *s);
 int unix_socket_peer_pid(const struct unix_socket *s);
 
 int unix_socket_bind(struct unix_socket *s, const char *name, int length);
+int unix_socket_name(const struct unix_socket *s, int peer, char *out, int max);
 
 int unix_socket_listen(struct unix_socket *s);
 

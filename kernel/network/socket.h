@@ -32,6 +32,8 @@ void socket_reference(struct socket *s);
 void socket_unref(struct socket *s);
 
 int socket_bind(struct socket *s, uint16_t port);
+int socket_set_reuse_address(struct socket *s, int on);
+int socket_reuse_address(const struct socket *s);
 
 /* The port this socket is actually on, which for a bind to port zero is
    the one the kernel chose rather than the zero that was asked for. */

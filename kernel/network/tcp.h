@@ -45,6 +45,7 @@ void tcp_release(struct tcpcb *tcb);
 void tcp_abort(struct tcpcb *tcb);
 
 int tcp_bind(struct tcpcb *tcb, uint16_t port);
+int tcp_bind_reusing(struct tcpcb *tcb, uint16_t port);
 int tcp_listen(struct tcpcb *tcb);
 int tcp_connect(struct tcpcb *tcb, uint32_t ip, uint16_t port);
 

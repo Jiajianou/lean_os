@@ -1,6 +1,7 @@
 #include "check.h"
 
 #include "inter_process_communication/epoll.h"
+#include "syscall.h"
 #include "inter_process_communication/eventfd.h"
 #include "inter_process_communication/timerfd.h"
 #include "scheduler/scheduler.h"
@@ -335,6 +336,70 @@ TEST(epoll, a_stale_registration_is_dropped_rather_than_reported) {
     CHECK_EQ(epoll_in_use(), 0);
 }
 
+/* M226: what a set inside another set says about itself - whether the next
+   wait would report anything - and saying it spends nothing that wait would
+   spend: not an edge, not a one-shot, not a stale watch. */
+TEST(epoll, a_peek_answers_what_a_scan_would_and_spends_none_of_it) {
+    script_reset();
+    struct epoll *ep = epoll_create_set();
+    REQUIRE(ep != NULL);
+    CHECK_EQ(epoll_peek(ep, script_mask, NULL), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 3, object_for(3), EPOLLIN | EPOLLET, 3), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 4, object_for(4), EPOLLIN | EPOLLONESHOT, 4), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 5, object_for(5), EPOLLOUT, 5), 0);
+    CHECK_EQ(epoll_peek(ep, script_mask, NULL), 0);
+
+    scripted[5] = EPOLLIN;
+    CHECK_EQ(epoll_peek(ep, script_mask, NULL), 0);
+    scripted[5] = 0;
+
+    scripted[3] = EPOLLIN;
+    CHECK_EQ(epoll_peek(ep, script_mask, NULL), 1);
+    CHECK_EQ(epoll_peek(ep, script_mask, NULL), 1);
+    epoll_ev_t out[4];
+    CHECK_EQ(epoll_scan(ep, script_mask, NULL, out, 4), 1);
+    CHECK_EQ(out[0].data, 3);
+    CHECK_EQ(epoll_peek(ep, script_mask, NULL), 0);
+
+    scripted[4] = EPOLLIN;
+    CHECK_EQ(epoll_peek(ep, script_mask, NULL), 1);
+    CHECK_EQ(epoll_peek(ep, script_mask, NULL), 1);
+    CHECK_EQ(epoll_scan(ep, script_mask, NULL, out, 4), 1);
+    CHECK_EQ(out[0].data, 4);
+    CHECK_EQ(epoll_peek(ep, script_mask, NULL), 0);
+
+    scripted[5] = EPOLLHUP;
+    stale_file_descriptor = 5;
+    CHECK_EQ(epoll_peek(ep, script_mask, NULL), 0);
+    CHECK_EQ(epoll_watch_count(ep), 3);
+    epoll_unref(ep);
+    CHECK_EQ(epoll_in_use(), 0);
+}
+
+/* A disarmed one-shot is still a registration - EPOLL_CTL_MOD re-arms it
+   without a question - so what a set can reach counts it, where the list a
+   wait sleeps on does not. */
+TEST(epoll, registrations_include_a_disarmed_one_shot_and_objects_do_not) {
+    script_reset();
+    struct epoll *ep = epoll_create_set();
+    REQUIRE(ep != NULL);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 3, object_for(3), EPOLLIN | EPOLLONESHOT, 3), 0);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 4, object_for(4), EPOLLIN, 4), 0);
+    scripted[3] = EPOLLIN;
+    epoll_ev_t out[4];
+    CHECK_EQ(epoll_scan(ep, script_mask, NULL, out, 4), 1);
+    int fds[8];
+    const void *objects[8];
+    CHECK_EQ(epoll_objects(ep, fds, objects, 8), 1);
+    CHECK_EQ(fds[0], 4);
+    CHECK_EQ(epoll_registered(ep, fds, objects, 8), 2);
+    CHECK(objects[0] == object_for(3) || objects[1] == object_for(3));
+    CHECK_EQ(epoll_registered(ep, fds, objects, 1), 1);
+    CHECK_EQ(epoll_registered(NULL, fds, objects, 8), 0);
+    epoll_unref(ep);
+    CHECK_EQ(epoll_in_use(), 0);
+}
+
 /* M187: a watch left behind by a closed descriptor does not refuse the next
    file given the same number. Linux takes a file out of every epoll set when
    its last descriptor closes; this kernel keeps the watch by number, so the
@@ -351,7 +416,7 @@ TEST(epoll, a_watch_left_by_a_closed_descriptor_does_not_refuse_its_number) {
 
     /* The number is somebody else's now: modifying it is modifying a
        registration that does not exist, and adding it succeeds. */
-    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_MOD, 5, new_file, EPOLLIN, 1), -1);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_MOD, 5, new_file, EPOLLIN, 1), -OS_ERROR_NOENT);
     CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 5, new_file, EPOLLIN, 0xBEEF), 0);
     CHECK_EQ(epoll_watch_count(ep), 1);
 
@@ -361,7 +426,7 @@ TEST(epoll, a_watch_left_by_a_closed_descriptor_does_not_refuse_its_number) {
     CHECK_EQ(out[0].data, 0xBEEF);
 
     /* And the same file added twice is still a duplicate. */
-    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 5, new_file, EPOLLIN, 2), -1);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 5, new_file, EPOLLIN, 2), -OS_ERROR_EXIST);
     epoll_unref(ep);
     CHECK_EQ(epoll_in_use(), 0);
 }
@@ -371,11 +436,11 @@ TEST(epoll, add_mod_and_del_refuse_what_they_should) {
     struct epoll *ep = epoll_create_set();
     REQUIRE(ep != NULL);
     CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 3, object_for(3), EPOLLIN, 1), 0);
-    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 3, object_for(3), EPOLLOUT, 2), -1);
-    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_MOD, 9, object_for(9), EPOLLIN, 1), -1);
-    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_DEL, 9, NULL, 0, 0), -1);
-    CHECK_EQ(epoll_control_set(ep, 99, 3, object_for(3), EPOLLIN, 1), -1);
-    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, -1, object_for(3), EPOLLIN, 1), -1);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 3, object_for(3), EPOLLOUT, 2), -OS_ERROR_EXIST);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_MOD, 9, object_for(9), EPOLLIN, 1), -OS_ERROR_NOENT);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_DEL, 9, NULL, 0, 0), -OS_ERROR_NOENT);
+    CHECK_EQ(epoll_control_set(ep, 99, 3, object_for(3), EPOLLIN, 1), -OS_ERROR_INVALID);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, -1, object_for(3), EPOLLIN, 1), -OS_ERROR_INVALID);
     CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_DEL, 3, NULL, 0, 0), 0);
     CHECK_EQ(epoll_watch_count(ep), 0);
     scripted[3] = EPOLLIN;
@@ -392,7 +457,7 @@ TEST(epoll, a_full_set_refuses_and_recovers) {
     for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
         CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 100 + i, object_for(i), EPOLLIN, (uint64_t)i), 0);
     }
-    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 999, object_for(99), EPOLLIN, 99), -1);
+    CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 999, object_for(99), EPOLLIN, 99), -OS_ERROR_NOSPC);
     CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_DEL, 100, NULL, 0, 0), 0);
     CHECK_EQ(epoll_control_set(ep, EPOLL_CTL_ADD, 999, object_for(99), EPOLLIN, 99), 0);
     epoll_unref(ep);
@@ -479,7 +544,7 @@ TEST(readyfds, every_call_refuses_a_null_object) {
     CHECK_EQ(timerfd_read(t, 0, NULL), -1);
     timerfd_unref(t);
 
-    CHECK_EQ(epoll_control_set(NULL, EPOLL_CTL_ADD, 1, NULL, 0, 0), -1);
+    CHECK_EQ(epoll_control_set(NULL, EPOLL_CTL_ADD, 1, NULL, 0, 0), -OS_ERROR_INVALID);
     CHECK_EQ(epoll_watch_count(NULL), 0);
     epoll_unref(NULL);
     epoll_reference(NULL);

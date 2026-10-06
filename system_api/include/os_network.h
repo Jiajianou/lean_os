@@ -18,6 +18,20 @@ typedef struct {
 #define OS_AF_INET 0
 #define OS_AF_UNIX 1
 
+/* M226: what a socket is, asked of the kernel - its family, its type, and
+   for an AF_UNIX socket the name bound to it (or to its peer). getsockname
+   used to describe every socket as an IP address, so libuv took a Unix
+   socket a pipe had passed it for TCP. TYPE is OS_SOCKET_* for AF_INET and
+   the type the AF_UNIX socket was made with otherwise; NAME_LENGTH is zero
+   for an unnamed socket, and an abstract name keeps its leading zero byte. */
+typedef struct {
+    uint32_t family;
+    uint32_t type;
+    uint32_t name_length;
+    uint32_t reserved;
+    char name[108];
+} os_socket_identity_t;
+
 /* SO_PEERCRED. The pid is the thread group at the other end of a connected
    AF_UNIX socket; uid and gid are this machine's single principal, which is
    what M65 says a one-principal machine reports. */

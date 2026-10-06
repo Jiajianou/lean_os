@@ -234,6 +234,13 @@ typedef struct {
 #define OS_ERROR_SEARCH 3
 /* dup2() onto a descriptor another thread has numbered and not yet filled. */
 #define OS_ERROR_BUSY 16
+/* An epoll set put inside itself, or inside a set it already reaches, or
+   deeper than EPOLL_MAX_NESTING - Linux's ELOOP for the same three. */
+#define OS_ERROR_LOOP 40
+/* EPOLL_CTL_ADD of a descriptor the set already holds, and a set at its
+   ceiling - EEXIST and ENOSPC, which libuv tells apart from the rest. */
+#define OS_ERROR_EXIST 17
+#define OS_ERROR_NOSPC 28
 
 #define SYS_socketpair 113
 #define SYS_bindun     114
@@ -300,7 +307,17 @@ typedef struct {
 /* M213: the display's scale and the mode the next boot starts in - see
    system_api/include/display.h. */
 #define SYS_display               141
-#define SYSCALL_COUNT 142
+
+/* M226: a socket option the kernel keeps - (fd, option, value), and a
+   negative value asks for the current one. SO_REUSEADDR was accepted by the
+   C library and kept nowhere, so a program that asked for it was told it had
+   it and then refused the port anyway. */
+#define SYS_sockopt               142
+#define OS_SOCKOPT_REUSEADDR      1
+
+/* M226: (fd, os_socket_identity_t *out, peer) - see os_network.h. */
+#define SYS_sockident             143
+#define SYSCALL_COUNT 144
 
 #ifdef __cplusplus
 }

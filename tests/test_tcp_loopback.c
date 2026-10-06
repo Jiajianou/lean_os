@@ -190,3 +190,54 @@ TEST(tcp_loopback, a_socket_that_never_had_a_peer_has_not_ended) {
     CHECK_EQ(tcp_listen(listener), 0);
     CHECK(!tcp_receive_ended(listener));
 }
+
+/* M226: SO_REUSEADDR. A server that closes leaves the connections it
+   accepted holding its port - the one that closed first sits in TIME_WAIT -
+   and libuv's own tests, which open a server on one port after another,
+   were refused it for that. With the option the port comes back; a second
+   LISTENER on it is still refused, and so is a port another live socket has
+   bound and not yet used. Without the option nothing changes. */
+TEST(tcp_loopback, reuse_address_takes_back_a_port_its_closed_connections_still_hold) {
+    struct tcpcb *c, *s, *l;
+    connect_pair(&c, &s, &l);
+    tcp_close(s);
+    tcp_release(s);
+    for (int i = 0; i < 4; i++) {
+        tcp_tick();
+    }
+    tcp_close(c);
+    tcp_release(c);
+    tcp_close(l);
+    tcp_release(l);
+    for (int i = 0; i < 4; i++) {
+        tcp_tick();
+    }
+    CHECK(tcp_state(s) == TCP_TIME_WAIT || tcp_state(c) == TCP_TIME_WAIT);
+
+    struct tcpcb *plain = tcp_open();
+    REQUIRE(plain != NULL);
+    CHECK_EQ(tcp_bind(plain, PORT), -1);
+
+    struct tcpcb *restarted = tcp_open();
+    REQUIRE(restarted != NULL);
+    CHECK_EQ(tcp_bind_reusing(restarted, PORT), PORT);
+    CHECK_EQ(tcp_listen(restarted), 0);
+
+    struct tcpcb *second = tcp_open();
+    REQUIRE(second != NULL);
+    CHECK_EQ(tcp_bind_reusing(second, PORT), -1);
+
+    struct tcpcb *idle = tcp_open();
+    REQUIRE(idle != NULL);
+    CHECK_EQ(tcp_bind_reusing(idle, PORT + 1), PORT + 1);
+    struct tcpcb *rival = tcp_open();
+    REQUIRE(rival != NULL);
+    CHECK_EQ(tcp_bind_reusing(rival, PORT + 1), -1);
+
+    struct tcpcb *client = tcp_open();
+    REQUIRE(client != NULL);
+    CHECK_EQ(tcp_connect(client, LOOPBACK, PORT), 0);
+    CHECK(tcp_connect_settled(client));
+    CHECK(!tcp_connect_failed(client));
+    CHECK(tcp_accept_pending(restarted));
+}

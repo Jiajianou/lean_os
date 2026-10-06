@@ -47,6 +47,18 @@ done
 [ -z "$MISSING" ]
 check $? "and it has the Linux half of its sub-repositories${MISSING:+ - missing:$MISSING}"
 
+# M226. x86_64-lean_os-clang is built from the LLVM this checkout's own clang
+# is, and build-clang.sh fetches that by a commit it names - so the two pins
+# are one fact written twice, and this is what keeps them one. A checkout
+# moved without the compiler would build Chromium with a clang whose
+# resource directory and warnings are a different version's.
+CLANG_REVISION=$(sed -n "s/^CLANG_REVISION = '\(.*\)'/\1/p" \
+                 "$SRC/tools/clang/scripts/update.py" 2>/dev/null)
+LLVM24_COMMIT=$(sed -n 's/^LLVM24_COMMIT=//p' "$ROOT/tools/build-clang.sh")
+[ -n "$CLANG_REVISION" ] && [ -n "$LLVM24_COMMIT" ] &&
+  case "$LLVM24_COMMIT" in "${CLANG_REVISION##*-g}"*) true ;; *) false ;; esac
+check $? "tools/build-clang.sh builds clang from the LLVM this checkout's clang is ($CLANG_REVISION)"
+
 # Does the fork still fit the pinned revision? The way to ask is to reset the
 # files the series touches and apply it in order - which is exactly what
 # tools/build-chromium.sh does, and for the reason M145 found: two patches can

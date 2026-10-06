@@ -108,6 +108,10 @@ static const cap_grant_t CAP_GRANTS[] = {
        A runtime people write servers and package downloads in holds network
        and nothing an ordinary application does not. */
     {"node",          CAP_APP_DEFAULT | CAP_NETWORK},
+    /* M226: libuv's own test runner, which Node's loop is graded by - a
+       third of its tests are TCP and UDP over loopback, and it is granted
+       the network by name for the reason node is. */
+    {"uvtest",        CAP_APP_DEFAULT | CAP_NETWORK},
     {"audiograb",     CAP_APP_DEFAULT | CAP_AUDIO},
     {"text_editor",   CAP_APP_DEFAULT | CAP_CLIPBOARD},
     {"badptr",        CAP_ALL},

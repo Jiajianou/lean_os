@@ -7,7 +7,8 @@ extern "C" {
 #endif
 
 #define TFD_NONBLOCK     0x800
-#define TFD_CLOEXEC      0x80000
+/* O_CLOEXEC and O_NONBLOCK, as Linux defines them. */
+#define TFD_CLOEXEC      0x20
 #define TFD_TIMER_ABSTIME 0x1
 
 int timerfd_create(int clockid, int flags);

@@ -825,6 +825,12 @@ import("//electron/build/args/all.gn")
 # madvise(MADV_DONTFORK) on V8's pages, which is advice Linux invented (patch
 # 0032's sentence). This kernel's fork has no such advice to take.
 v8_enable_private_mapping_fork_optimization = false
+
+# M226: Electron's version is a git tag, read from electron/.git/packed-refs
+# at gn time, and fetch-electron.sh's one-commit fetch has neither. This is
+# Electron's own argument for a build without the history; VENDORED says
+# where the value comes from.
+override_electron_version = "$(awk '$1 == "VERSION" {print $2; exit}' "$ROOT/third_party/electron/VENDORED")"
 ARGS
   if [ "$TARGET" = "third_party/electron_node:node" ]; then
     cat >> "$OUT/args.gn" <<ARGS

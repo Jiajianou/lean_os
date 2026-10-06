@@ -492,6 +492,19 @@ extern "C" {
         arg: *mut c_void,
     ) -> c_int;
 
+    // M169 took this target off rust-src's list of platforms without a
+    // working pthread_condattr_setclock, so std's Condvar calls it - and the
+    // libc crate declares it per family (linux_like, bsd), never in unix/.
+    // Nothing built std again until M226, which is when its absence showed.
+    pub fn pthread_condattr_setclock(
+        attr: *mut crate::pthread_condattr_t,
+        clock_id: crate::clockid_t,
+    ) -> c_int;
+    pub fn pthread_condattr_getclock(
+        attr: *const crate::pthread_condattr_t,
+        clock_id: *mut crate::clockid_t,
+    ) -> c_int;
+
     pub fn getrandom(buf: *mut c_void, buflen: size_t, flags: c_uint) -> ssize_t;
 
     pub fn sched_getaffinity(

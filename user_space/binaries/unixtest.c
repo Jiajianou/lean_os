@@ -437,6 +437,85 @@ static int test_no_capability_needed(void) {
     return rc == 0 ? 0 : (int)(rc > 0 ? rc : 18);
 }
 
+/* M226: what a Unix-domain socket says it is. getsockname used to describe
+   every socket as an IP address and SO_TYPE said SOCK_STREAM for all of them,
+   so libuv - which tells a pipe from a TCP connection exactly this way -
+   took every descriptor a parent passed its child for TCP. */
+static int test_identity(void) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        FAIL(19);
+    }
+    struct sockaddr_un name;
+    socklen_t length = sizeof(name);
+    memset(&name, 0x7F, sizeof(name));
+    if (getsockname(sv[0], (struct sockaddr *)&name, &length) != 0 ||
+        name.sun_family != AF_UNIX || length != (socklen_t)sizeof(sa_family_t)) {
+        FAIL(19);
+    }
+    int type = -1;
+    socklen_t type_length = sizeof(type);
+    if (getsockopt(sv[0], SOL_SOCKET, SO_TYPE, &type, &type_length) != 0 || type != SOCK_STREAM) {
+        FAIL(19);
+    }
+    int reuse = 1;
+    errno = 0;
+    if (setsockopt(sv[0], SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) != -1 ||
+        errno != ENOPROTOOPT) {
+        FAIL(19);
+    }
+    close(sv[0]);
+    close(sv[1]);
+
+    int seq[2];
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, seq) != 0 ||
+        getsockopt(seq[0], SOL_SOCKET, SO_TYPE, &type, &type_length) != 0 || type != SOCK_SEQPACKET) {
+        FAIL(20);
+    }
+    close(seq[0]);
+    close(seq[1]);
+
+    const char *path = "/tmp/m226.sock";
+    unlink(path);
+    int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un where;
+    memset(&where, 0, sizeof(where));
+    where.sun_family = AF_UNIX;
+    strcpy(where.sun_path, path);
+    if (listener < 0 || bind(listener, (struct sockaddr *)&where, sizeof(where)) != 0 ||
+        listen(listener, 4) != 0) {
+        FAIL(21);
+    }
+    int client = socket(AF_UNIX, SOCK_STREAM, 0);
+    errno = 0;
+    length = sizeof(name);
+    if (client < 0 || getpeername(client, (struct sockaddr *)&name, &length) != -1 ||
+        errno != ENOTCONN) {
+        FAIL(21);
+    }
+    if (connect(client, (struct sockaddr *)&where, sizeof(where)) != 0) {
+        FAIL(21);
+    }
+    size_t base = (size_t)(((struct sockaddr_un *)0)->sun_path);
+    length = sizeof(name);
+    memset(&name, 0, sizeof(name));
+    if (getsockname(listener, (struct sockaddr *)&name, &length) != 0 ||
+        name.sun_family != AF_UNIX || strcmp(name.sun_path, path) != 0 ||
+        length != (socklen_t)(base + strlen(path) + 1)) {
+        FAIL(21);
+    }
+    length = sizeof(name);
+    memset(&name, 0, sizeof(name));
+    if (getpeername(client, (struct sockaddr *)&name, &length) != 0 ||
+        name.sun_family != AF_UNIX || strcmp(name.sun_path, path) != 0) {
+        FAIL(21);
+    }
+    close(client);
+    close(listener);
+    unlink(path);
+    return 0;
+}
+
 int main(void) {
     int rc;
     const char abstract[] = {0, 'm', '1', '1', '8'};
@@ -450,6 +529,7 @@ int main(void) {
     if ((rc = test_ctrunc()) != 0) return rc;
     if ((rc = test_exhaustion()) != 0) return rc;
     if ((rc = test_no_capability_needed()) != 0) return rc;
-    printf("unixtest: all ten sections passed\n");
+    if ((rc = test_identity()) != 0) return rc;
+    printf("unixtest: all eleven sections passed\n");
     return 0;
 }

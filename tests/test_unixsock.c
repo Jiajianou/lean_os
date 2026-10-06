@@ -882,3 +882,54 @@ TEST(unix_socket, a_slot_that_names_nothing_is_not_sent) {
     unix_socket_unref(b);
     expect_nothing_left();
 }
+
+/* M226: the address a socket answers to. getsockname and getpeername on an
+   AF_UNIX socket report it - libuv tells a pipe from TCP that way - and a
+   connection's server end takes the listener's, so the client asked who it
+   is talking to names the path it connected to, before and after accept. */
+TEST(unix_socket, a_connection_names_the_path_it_was_made_to) {
+    clean();
+    char name[UNIX_PATH_MAX];
+    struct unix_socket *pair_a, *pair_b;
+    REQUIRE(unix_socket_pair(UNIX_SOCKET_STREAM, &pair_a, &pair_b) == 0);
+    CHECK_EQ(unix_socket_name(pair_a, 0, name, sizeof(name)), 0);
+    CHECK_EQ(unix_socket_name(pair_a, 1, name, sizeof(name)), 0);
+
+    struct unix_socket *srv = unix_socket_alloc(UNIX_SOCKET_STREAM);
+    REQUIRE(srv != NULL);
+    CHECK_EQ(unix_socket_name(srv, 1, name, sizeof(name)), -1);
+    CHECK_EQ(unix_socket_bind(srv, "/tmp/named", 10), 0);
+    CHECK_EQ(unix_socket_listen(srv), 0);
+    CHECK_EQ(unix_socket_name(srv, 0, name, sizeof(name)), 10);
+    CHECK(memcmp(name, "/tmp/named", 10) == 0);
+
+    struct unix_socket *cli = unix_socket_alloc(UNIX_SOCKET_STREAM);
+    REQUIRE(cli != NULL);
+    CHECK_EQ(unix_socket_connect(cli, "/tmp/named", 10), 0);
+    memset(name, 0, sizeof(name));
+    CHECK_EQ(unix_socket_name(cli, 1, name, sizeof(name)), 10);
+    CHECK(memcmp(name, "/tmp/named", 10) == 0);
+    CHECK_EQ(unix_socket_name(cli, 0, name, sizeof(name)), 0);
+
+    struct unix_socket *conn = unix_socket_accept(srv);
+    REQUIRE(conn != NULL);
+    memset(name, 0, sizeof(name));
+    CHECK_EQ(unix_socket_name(conn, 0, name, sizeof(name)), 10);
+    CHECK(memcmp(name, "/tmp/named", 10) == 0);
+    CHECK_EQ(unix_socket_name(conn, 0, name, 4), 4);
+
+    const char abstract[] = {0, 'u', 'v'};
+    struct unix_socket *hidden = unix_socket_alloc(UNIX_SOCKET_STREAM);
+    REQUIRE(hidden != NULL);
+    CHECK_EQ(unix_socket_bind(hidden, abstract, 3), 0);
+    CHECK_EQ(unix_socket_name(hidden, 0, name, sizeof(name)), 3);
+    CHECK(memcmp(name, abstract, 3) == 0);
+
+    unix_socket_unref(hidden);
+    unix_socket_unref(conn);
+    unix_socket_unref(cli);
+    unix_socket_unref(srv);
+    unix_socket_unref(pair_a);
+    unix_socket_unref(pair_b);
+    expect_nothing_left();
+}

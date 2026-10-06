@@ -61,10 +61,16 @@ if ! grep -q "target_os" "$WORK/.gclient" 2>/dev/null; then
   printf "target_os = ['linux']\ntarget_os_only = True\n" >> "$WORK/.gclient"
 fi
 
+# --depth 1, because `fetch --no-history` leaves a shallow clone of the tip
+# and the pin is OLDER than the tip: a plain fetch of it is a request for its
+# whole history down to the shallow boundary, which is never reached. M226
+# watched the server negotiate that for eleven minutes without sending a
+# byte.
 HAVE=$(cd "$SRC" && git rev-parse HEAD 2>/dev/null)
 if [ "$HAVE" != "$REVISION" ]; then
   echo "fetch-chromium: syncing to $REVISION"
-  (cd "$SRC" && git fetch origin "$REVISION" && git checkout --detach "$REVISION") || exit 1
+  (cd "$SRC" && git fetch --depth 1 origin "$REVISION" &&
+   git checkout --detach "$REVISION") || exit 1
 fi
 
 echo "fetch-chromium: syncing dependencies"

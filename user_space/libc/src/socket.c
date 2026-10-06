@@ -532,7 +532,40 @@ ssize_t recvmsg(int fd, struct msghdr *message, int flags) {
     return (ssize_t)n;
 }
 
+/* M226: an AF_UNIX socket's name, as Linux reports it - the family alone for
+   an unnamed socket, the path and its terminating zero for a pathname, and
+   the bytes as bound for an abstract name. Truncated to the caller's buffer,
+   with the full length reported, as getsockname(2) says. */
+static void to_sockaddr_un(struct sockaddr *address, socklen_t *length,
+                           const os_socket_identity_t *identity) {
+    size_t base = (size_t)(((struct sockaddr_un *)0)->sun_path);
+    struct sockaddr_un un;
+    memset(&un, 0, sizeof(un));
+    un.sun_family = AF_UNIX;
+    size_t n = identity->name_length;
+    if (n > sizeof(un.sun_path)) {
+        n = sizeof(un.sun_path);
+    }
+    memcpy(un.sun_path, identity->name, n);
+    size_t full = base + n;
+    if (n > 0 && identity->name[0] != '\0' && n < sizeof(un.sun_path)) {
+        full++;
+    }
+    if (address && length) {
+        size_t room = (size_t)*length < sizeof(un) ? (size_t)*length : sizeof(un);
+        memcpy(address, &un, room);
+    }
+    if (length) {
+        *length = (socklen_t)full;
+    }
+}
+
 int getsockname(int fd, struct sockaddr *address, socklen_t *length) {
+    os_socket_identity_t identity;
+    if (sys_sockident(fd, &identity, 0) == 0 && identity.family == OS_AF_UNIX) {
+        to_sockaddr_un(address, length, &identity);
+        return 0;
+    }
     os_sockaddr_t local;
     if (sys_sockname(fd, &local) != 0) {
         errno = ENOTSOCK;
@@ -543,6 +576,16 @@ int getsockname(int fd, struct sockaddr *address, socklen_t *length) {
 }
 
 int getpeername(int fd, struct sockaddr *address, socklen_t *length) {
+    os_socket_identity_t identity;
+    long kind = sys_sockident(fd, &identity, 1);
+    if (kind == -2) {
+        errno = ENOTCONN;
+        return -1;
+    }
+    if (kind == 0 && identity.family == OS_AF_UNIX) {
+        to_sockaddr_un(address, length, &identity);
+        return 0;
+    }
     os_sockaddr_t peer;
     long r = sys_peername(fd, &peer);
     if (r == -2) {
@@ -558,8 +601,6 @@ int getpeername(int fd, struct sockaddr *address, socklen_t *length) {
 }
 
 int setsockopt(int fd, int level, int option, const void *value, socklen_t length) {
-    (void)fd;
-    (void)length;
     if (level == IPPROTO_TCP && option == TCP_NODELAY) {
         int on = value ? *(const int *)value : 0;
         if (on) {
@@ -568,7 +609,19 @@ int setsockopt(int fd, int level, int option, const void *value, socklen_t lengt
         errno = ENOPROTOOPT;
         return -1;
     }
+    /* M226: kept by the kernel on the socket, and what bind() consults.
+       It used to be accepted and kept nowhere - a program asking for it was
+       told it had it, then refused its own port while the connections it
+       had just closed sat in TIME_WAIT. */
     if (level == SOL_SOCKET && option == SO_REUSEADDR) {
+        if (!value || length < (socklen_t)sizeof(int)) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (sys_sockopt(fd, OS_SOCKOPT_REUSEADDR, *(const int *)value ? 1 : 0) != 0) {
+            errno = ENOPROTOOPT;
+            return -1;
+        }
         return 0;
     }
     errno = ENOPROTOOPT;
@@ -590,15 +643,37 @@ int getsockopt(int fd, int level, int option, void *value, socklen_t *length) {
         *length = (socklen_t)sizeof(struct ucred);
         return 0;
     }
+    if (level == SOL_SOCKET && option == SO_REUSEADDR && value && length &&
+        *length >= (socklen_t)sizeof(int)) {
+        long on = sys_sockopt(fd, OS_SOCKOPT_REUSEADDR, -1);
+        if (on < 0) {
+            errno = ENOPROTOOPT;
+            return -1;
+        }
+        *(int *)value = (int)on;
+        *length = (socklen_t)sizeof(int);
+        return 0;
+    }
     if (level == SOL_SOCKET && option == SO_ERROR && value && length &&
         *length >= (socklen_t)sizeof(int)) {
         *(int *)value = 0;
         *length = (socklen_t)sizeof(int);
         return 0;
     }
+    /* M226: the socket's own type. It was SOCK_STREAM for every socket,
+       so a UDP socket described itself as a stream. */
     if (level == SOL_SOCKET && option == SO_TYPE && value && length &&
         *length >= (socklen_t)sizeof(int)) {
-        *(int *)value = SOCK_STREAM;
+        os_socket_identity_t identity;
+        if (sys_sockident(fd, &identity, 0) != 0) {
+            errno = ENOTSOCK;
+            return -1;
+        }
+        if (identity.family == OS_AF_UNIX) {
+            *(int *)value = (int)identity.type;
+        } else {
+            *(int *)value = identity.type == OS_SOCKET_DGRAM ? SOCK_DGRAM : SOCK_STREAM;
+        }
         *length = (socklen_t)sizeof(int);
         return 0;
     }

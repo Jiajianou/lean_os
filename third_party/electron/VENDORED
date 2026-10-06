@@ -1,4 +1,5 @@
 ELECTRON 1c36d90659266988fb4fb8814b30489ca8d02e60 (github.com/electron/electron)
+VERSION 46.0.0-nightly.20260924
 CHROMIUM 155.0.8059.0 - the revision Electron's series was written against
 NODE v24.21.0 955266bfdd854cd280dffd47548673914484e4c0 (github.com/nodejs/node)
 NAN a1b4ba8f4bf2f46d2f270dbbb7bc0af482dc3e32 (github.com/nodejs/nan)
@@ -12,3 +13,10 @@ meets 8057 or this fork's own series, tools/electron-port/fits.json says so.
 tools/fetch-electron.sh puts these into build/chromium/src/electron,
 third_party/electron_node and third_party/nan. Squirrel.Mac and its three
 Carthage checkouts are macOS's updater and are not fetched.
+
+The VERSION above is what `git describe --tags --abbrev=0` answers at that commit -
+seven commits past v46.0.0-nightly.20260924 and behind the next nightly.
+Electron reads its version from a git tag, and the single-commit fetch has
+no tags and no packed-refs, so build-chromium.sh passes this as
+override_electron_version: the argument Electron provides for a build
+from source without its history.

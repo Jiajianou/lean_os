@@ -5,6 +5,11 @@ cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
 LLVM_VER=19.1.7
+# The LLVM Chromium's own clang is built from, at the revision
+# third_party/chromium/VENDORED pins: CLANG_REVISION in that checkout's
+# tools/clang/scripts/update.py is llvmorg-24-init-7747-g62397f8b, and
+# tools/chromium-test.sh requires the two to agree.
+LLVM24_COMMIT=62397f8b3c3986f54187ce08f00b3448ea1f8880
 TARGET=x86_64-lean_os
 
 SRC="$ROOT/build/clang-src"
@@ -15,9 +20,16 @@ SRC="$ROOT/build/clang-src"
 # own isalpha_l when it is not told the C library has one, and this libc grew
 # the _l family, and every C++ program stopped compiling. They take the same
 # tree now.
-DEFAULT_TREE="$ROOT/build/llvm24"
-if [ ! -d "$DEFAULT_TREE" ]; then
+#
+# M226: and nothing said where build/llvm24 came from, so a second host fell
+# back to 19 without a word and built a compiler Chromium's args.gn does not
+# describe. It is fetched here now, at the commit above. LEANOS_LLVM=19 is
+# M121's release tarball, which apply.py still applies to - the compiler to
+# fall back on if a 24 build fails, never the default.
+if [ "${LEANOS_LLVM:-24}" = "19" ]; then
   DEFAULT_TREE="$SRC/llvm-project-$LLVM_VER.src"
+else
+  DEFAULT_TREE="$ROOT/build/llvm24"
 fi
 TREE="${LEANOS_LLVM_TREE:-$DEFAULT_TREE}"
 PREFIX="${LEANOS_TOOLCHAIN_PREFIX:-$ROOT/build/toolchain}"
@@ -60,6 +72,22 @@ cd "$SRC"
 TARBALL="llvm-project-$LLVM_VER.src.tar.xz"
 if [ -n "${LEANOS_LLVM_TREE:-}" ]; then
   echo "build-clang: using the tree at $TREE"
+elif [ "$TREE" = "$ROOT/build/llvm24" ]; then
+  if [ ! -d "$TREE/llvm" ]; then
+    ARCHIVE="llvm-project-$LLVM24_COMMIT.tar.gz"
+    if [ ! -f "$ARCHIVE" ]; then
+      echo "build-clang: fetching llvm-project at ${LLVM24_COMMIT:0:12} (about 270 MB)"
+      curl -sSL -o "$ARCHIVE.part" \
+        "https://github.com/llvm/llvm-project/archive/$LLVM24_COMMIT.tar.gz" \
+        && mv "$ARCHIVE.part" "$ARCHIVE" || exit 1
+    fi
+    echo "build-clang: unpacking it into $TREE"
+    rm -rf "$TREE.part"
+    mkdir -p "$TREE.part"
+    tar xzf "$ARCHIVE" -C "$TREE.part" --strip-components=1 || exit 1
+    mv "$TREE.part" "$TREE" || exit 1
+  fi
+  echo "build-clang: using the tree at $TREE"
 elif [ ! -f "$TARBALL" ]; then
   echo "build-clang: fetching $TARBALL (about 135 MB)"
   curl -sSL -o "$TARBALL.part" \
@@ -69,7 +97,15 @@ fi
 
 FP=$(shasum -a 256 "$ROOT/tools/clang-port/apply.py" | cut -c1-16)
 FP_FILE="$TREE/.lean_os-port-fingerprint"
-if [ -n "${LEANOS_LLVM_TREE:-}" ]; then
+# A cmake cache remembers the tree it was configured against and ninja would
+# go on building that one - build-libcxx.sh learned this in M145.
+CACHED_TREE=$(awk -F= '/^CMAKE_HOME_DIRECTORY:/{print $2}' \
+              "$BUILDDIR/CMakeCache.txt" 2>/dev/null)
+if [ -n "$CACHED_TREE" ] && [ "$CACHED_TREE" != "$TREE/llvm" ]; then
+  echo "build-clang: configured against $CACHED_TREE, want $TREE - reconfiguring"
+  rm -rf "$BUILDDIR"
+fi
+if [ -n "${LEANOS_LLVM_TREE:-}" ] || [ "$TREE" = "$ROOT/build/llvm24" ]; then
   if [ "$(cat "$FP_FILE" 2>/dev/null)" != "$FP" ]; then
     echo "build-clang: the port changed - reconfiguring against $TREE"
     rm -rf "$BUILDDIR"

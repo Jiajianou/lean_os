@@ -28,7 +28,8 @@ extern "C" {
 #define EPOLL_CTL_MOD 2
 #define EPOLL_CTL_DEL 3
 
-#define EPOLL_CLOEXEC 0x80000
+/* O_CLOEXEC, as Linux defines it - libuv calls epoll_create1(O_CLOEXEC). */
+#define EPOLL_CLOEXEC 0x20
 
 typedef union epoll_data {
     void    *ptr;

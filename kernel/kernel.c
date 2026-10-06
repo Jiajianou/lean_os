@@ -3010,75 +3010,147 @@ static void boot_selftests_system(void) {
         /* M223. One script through /bin/node, its output in the log, and the
            machine off - the battery reaches Node minutes in, and what is
            being iterated on is one program. The script's path comes from
-           outside the image, as the browser's page does. */
-        static char node_script[256];
-        k_memset(node_script, 0, sizeof(node_script));
-        int node_length = fwcfg_read_file("opt/leanos/node", node_script,
-                                          sizeof(node_script) - 1);
-        if (node_length > 0) {
-            /* The switch is a command line - a script and its arguments,
+           outside the image, as the browser's page does.
+
+           M226: and any program in /bin the same way, through
+           opt/leanos/run - libuv's own test runner is the first, and it is
+           no more Node's than it is anybody's. The node switch keeps its
+           name and its "[node]" lines, which two harnesses read. */
+        static char run_line[256];
+        k_memset(run_line, 0, sizeof(run_line));
+        const char *run_label = "node";
+        char *run_command = run_line;
+        int run_length = fwcfg_read_file("opt/leanos/node", run_line, sizeof(run_line) - 1);
+        static char run_program[64];
+        if (run_length > 0) {
+            k_strlcpy(run_program, "node", sizeof(run_program));
+        } else {
+            run_length = fwcfg_read_file("opt/leanos/run", run_line, sizeof(run_line) - 1);
+            run_label = "run";
+        }
+        /* Leading NAME=VALUE words are the program's environment, as env(1)
+           reads them - given here rather than by running /bin/env, because
+           a program's capabilities come from the name it was SPAWNED by and
+           an exec can only shrink them: /bin/env exec'ing a program granted
+           the network by name hands it env's set instead. */
+        const char *run_envp[6] = {0};
+        int run_envc = 0;
+        if (run_length > 0 && k_strcmp(run_label, "run") == 0) {
+            for (;;) {
+                while (*run_command == ' ') {
+                    run_command++;
+                }
+                char *word_end = run_command;
+                int has_equals = 0;
+                while (*word_end && *word_end != ' ') {
+                    has_equals |= (*word_end == '=' && word_end != run_command);
+                    word_end++;
+                }
+                if (!has_equals || run_envc >= 5) {
+                    break;
+                }
+                run_envp[run_envc++] = run_command;
+                run_command = word_end;
+                if (*run_command) {
+                    *run_command++ = '\0';
+                }
+            }
+            {
+                size_t n = 0;
+                while (run_command[n] && run_command[n] != ' ' && n < sizeof(run_program) - 1) {
+                    run_program[n] = run_command[n];
+                    n++;
+                }
+                run_program[n] = '\0';
+                run_command += n;
+            }
+        }
+        if (run_length > 0) {
+            static char run_path[96];
+            k_strlcpy(run_path, PATH_BIN_DIRECTORY, sizeof(run_path));
+            size_t used = k_strlen(run_path);
+            k_strlcpy(run_path + used, run_program, sizeof(run_path) - used);
+            /* The switch is a command line - the program's arguments,
                separated by spaces - so a test runner can be told what to run. */
-            const char *node_argv[10] = {PATH_BIN_DIRECTORY "node", 0};
-            int node_argc = 1;
-            for (char *c = node_script; *c && node_argc < 9;) {
+            const char *run_argv[10] = {run_path, 0};
+            int run_argc = 1;
+            for (char *c = run_command; *c && run_argc < 9;) {
                 while (*c == ' ') {
                     *c++ = '\0';
                 }
                 if (!*c) {
                     break;
                 }
-                node_argv[node_argc++] = c;
+                run_argv[run_argc++] = c;
                 while (*c && *c != ' ') {
                     c++;
                 }
             }
-            node_argv[node_argc] = 0;
-            kernel_log_puts("[node] running ");
-            kernel_log_puts(node_script);
+            run_argv[run_argc] = 0;
+            kernel_log_putc('[');
+            kernel_log_puts(run_label);
+            kernel_log_puts("] running ");
+            kernel_log_puts(run_path);
+            for (int i = 1; i < run_argc; i++) {
+                kernel_log_putc(' ');
+                kernel_log_puts(run_argv[i]);
+            }
             kernel_log_putc('\n');
             /* Not captured: the program's standard output IS the serial line,
                written as it runs, so a suite of thousands of lines streams
                out instead of filling a buffer, and a hang still shows how far
                it got. The deadline is generous on purpose - Node's own test
                suite runs through this switch and takes hours under TCG. */
-            size_t node_bytes = 0;
-            uint8_t *node_image = read_optional_program(PATH_BIN_DIRECTORY "node", &node_bytes);
-            if (!node_image) {
-                /* node-test.sh installs it, and only when it was built - an
-                   image without Node is a valid image, and the switch asking
+            size_t run_bytes = 0;
+            uint8_t *run_image = read_optional_program(run_path, &run_bytes);
+            if (!run_image) {
+                /* An optional step installs it, and only when it was built -
+                   an image without it is a valid image, and the switch asking
                    for one is answered with that rather than a panic. No
-                   "[node] exit" line, so tools/node-boot.sh still fails: it
-                   was asked to run a script and nothing ran it. */
-                kernel_log_puts("[node] /bin/node is not on this image - skipped. "
-                           "tools/build-chromium.sh builds it out of Electron's "
-                           "configuration and tools/node-test.sh installs it.\n");
-                kernel_log_puts("[node] done\n");
+                   "exit" line, so the harness still fails: it was asked to
+                   run something and nothing ran it. */
+                kernel_log_putc('[');
+                kernel_log_puts(run_label);
+                kernel_log_puts("] ");
+                kernel_log_puts(run_path);
+                kernel_log_puts(" is not on this image - skipped. The harness that "
+                                "asked for it builds and installs it.\n");
+                kernel_log_putc('[');
+                kernel_log_puts(run_label);
+                kernel_log_puts("] done\n");
                 power_shutdown(POWER_OFF);
             }
-            int node_task = selftest_pid(process_spawnv("node", node_image, node_bytes, node_argv));
-            kfree(node_image);
-            long node_rc = -1;
-            long node_deadline = (long)pit_get_ticks() + 6L * 3600 * PIT_HZ;
+            int run_task = selftest_pid(run_envc > 0 ? process_spawnve(run_program, run_image, run_bytes,
+                                                                       run_argv, run_envp)
+                                                     : process_spawnv(run_program, run_image, run_bytes,
+                                                                      run_argv));
+            kfree(run_image);
+            long run_rc = -1;
+            long run_deadline = (long)pit_get_ticks() + 6L * 3600 * PIT_HZ;
             /* A program still running after a minute gets the task table
                logged once - who is blocked on what, with the kernel frames
                they are blocked in - because a hang under this switch is the
                thing being looked for and a quiet machine says nothing. */
-            long node_report_at = (long)pit_get_ticks() + 60L * PIT_HZ;
-            while (node_task && (long)pit_get_ticks() < node_deadline) {
-                long done = selftest_poll_exit(node_task);
+            long run_report_at = (long)pit_get_ticks() + 60L * PIT_HZ;
+            while (run_task && (long)pit_get_ticks() < run_deadline) {
+                long done = selftest_poll_exit(run_task);
                 if (done != -2) {
-                    node_rc = done;
+                    run_rc = done;
                     break;
                 }
-                if (node_report_at && (long)pit_get_ticks() > node_report_at) {
+                if (run_report_at && (long)pit_get_ticks() > run_report_at) {
                     scheduler_log_task_table();
-                    node_report_at = 0;
+                    run_report_at = 0;
                 }
                 scheduler_sleep_ms(100);
             }
-            kernel_log_puts("[node] exit ");
-            kernel_log_put_dec((uint32_t)node_rc);
-            kernel_log_puts("\n[node] done\n");
+            kernel_log_putc('[');
+            kernel_log_puts(run_label);
+            kernel_log_puts("] exit ");
+            kernel_log_put_dec((uint32_t)run_rc);
+            kernel_log_puts("\n[");
+            kernel_log_puts(run_label);
+            kernel_log_puts("] done\n");
             power_shutdown(POWER_OFF);
         }
     }
@@ -10496,8 +10568,11 @@ static void boot_selftests_system(void) {
                   "EPOLLHUP, a closed descriptor dropped, EPOLLET silent on "
                   "an unchanged condition, EPOLLONESHOT fired once and "
                   "re-armed, a 200 ms epoll_wait(-1) that ended when its "
-                  "timer did WITH THE CPU IDLE, and a wake from another "
-                  "process - self-test passed (");
+                  "timer did WITH THE CPU IDLE, a wake from another "
+                  "process, and a set inside a set - readable when the inner "
+                  "one has something without spending it, woken by a write "
+                  "and a timer inside it, ELOOP for a cycle and a sixth "
+                  "level - self-test passed (");
         kernel_log_put_dec((uint32_t)(pit_get_ticks() * (1000 / PIT_HZ)) - started_ms);
         kernel_log_puts(" ms).\n\n");
     }

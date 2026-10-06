@@ -315,6 +315,72 @@ int main(void) {
     check(sys_accept(dgram, 0) < 0, "accept on a datagram socket succeeded");
     sys_close(dgram);
 
+    /* M226: a socket's type is its own (SO_TYPE said SOCK_STREAM for every
+       socket), and SO_REUSEADDR is kept and honoured - it was accepted and
+       kept nowhere, so a server that restarted was refused the port its own
+       closed connections still held, after being told it had the option. */
+    {
+        int udp = socket(AF_INET, SOCK_DGRAM, 0);
+        int tcp = socket(AF_INET, SOCK_STREAM, 0);
+        int type = -1;
+        socklen_t length = sizeof(type);
+        check(udp >= 0 && getsockopt(udp, SOL_SOCKET, SO_TYPE, &type, &length) == 0 &&
+                  type == SOCK_DGRAM,
+              "SO_TYPE on a UDP socket was not SOCK_DGRAM");
+        check(tcp >= 0 && getsockopt(tcp, SOL_SOCKET, SO_TYPE, &type, &length) == 0 &&
+                  type == SOCK_STREAM,
+              "SO_TYPE on a TCP socket was not SOCK_STREAM");
+        int on = -1;
+        length = sizeof(on);
+        check(getsockopt(tcp, SOL_SOCKET, SO_REUSEADDR, &on, &length) == 0 && on == 0,
+              "SO_REUSEADDR was not off on a new socket");
+        int one = 1;
+        check(setsockopt(tcp, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) == 0 &&
+                  getsockopt(tcp, SOL_SOCKET, SO_REUSEADDR, &on, &length) == 0 && on == 1,
+              "SO_REUSEADDR set was not SO_REUSEADDR read back");
+        close(udp);
+        close(tcp);
+
+        enum { REUSED_PORT = 8091 };
+        struct sockaddr_in at;
+        memset(&at, 0, sizeof(at));
+        at.sin_family = AF_INET;
+        at.sin_port = htons(REUSED_PORT);
+        at.sin_addr.s_addr = htonl(0x7F000001u);
+        int first = socket(AF_INET, SOCK_STREAM, 0);
+        check(first >= 0 && bind(first, (struct sockaddr *)&at, sizeof(at)) == 0 &&
+                  listen(first, 4) == 0,
+              "a listener on the reuse port could not be made");
+        int peer = socket(AF_INET, SOCK_STREAM, 0);
+        check(peer >= 0 && connect(peer, (struct sockaddr *)&at, sizeof(at)) == 0,
+              "connecting to the reuse port failed");
+        check(wait_until(has_pending, first, 2000), "the reuse port's listener heard nothing");
+        int served = accept(first, NULL, NULL);
+        check(served >= 0, "accept on the reuse port failed");
+        close(served);
+        close(peer);
+        close(first);
+
+        int plain = socket(AF_INET, SOCK_STREAM, 0);
+        errno = 0;
+        check(bind(plain, (struct sockaddr *)&at, sizeof(at)) == -1 && errno == EADDRINUSE,
+              "a bind without SO_REUSEADDR took a port its closed connections still hold");
+        close(plain);
+        int again = socket(AF_INET, SOCK_STREAM, 0);
+        check(setsockopt(again, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) == 0 &&
+                  bind(again, (struct sockaddr *)&at, sizeof(at)) == 0 && listen(again, 4) == 0,
+              "SO_REUSEADDR did not give a restarted server its port back");
+        int rival = socket(AF_INET, SOCK_STREAM, 0);
+        errno = 0;
+        check(setsockopt(rival, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) == 0 &&
+                  bind(rival, (struct sockaddr *)&at, sizeof(at)) == -1 && errno == EADDRINUSE,
+              "SO_REUSEADDR let a second listener have a listening port");
+        close(rival);
+        close(again);
+        printf("tcptest: SO_TYPE is the socket's own, and SO_REUSEADDR gave a closed "
+               "server's port back to the next one and to nobody else\n");
+    }
+
     check(sys_socket(7) < 0, "sys_socket accepted a socket type that does not exist");
     check(sys_send(1, "x", 1) < 0, "send on stdout succeeded");
     check(sys_connstat(0) < 0, "connstat on stdin succeeded");

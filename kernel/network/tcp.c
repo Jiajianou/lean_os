@@ -425,6 +425,37 @@ int tcp_bind(struct tcpcb *t, uint16_t port) {
     return port;
 }
 
+/* M226: SO_REUSEADDR, as Linux's TCP has it. Without it, a port is taken
+   while anything holds it - including the connections a server accepted and
+   then closed, which sit in TIME_WAIT for two segment lifetimes after the
+   server is gone. With it, the port is taken only by a listener, or by a
+   block a live socket has bound and not yet connected: a server that
+   restarts gets its port back, and two listeners on one port are still
+   refused. */
+static int port_taken_reusing(uint16_t port) {
+    for (int i = 0; i < tcb_count; i++) {
+        struct tcpcb *t = tcbs[i];
+        if (!t->in_use || t->local_port != port) {
+            continue;
+        }
+        if (t->state == TCP_LISTEN || (t->state == TCP_CLOSED && !t->released)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int tcp_bind_reusing(struct tcpcb *t, uint16_t port) {
+    if (!t || !t->in_use || t->local_port || port == 0) {
+        return tcp_bind(t, port);
+    }
+    if (port_taken_reusing(port)) {
+        return -1;
+    }
+    t->local_port = port;
+    return port;
+}
+
 int tcp_listen(struct tcpcb *t) {
     if (!t || !t->in_use || !t->local_port || t->state != TCP_CLOSED) {
         return -1;

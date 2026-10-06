@@ -31,7 +31,7 @@ def edit(path, anchor, replacement, why, count=1):
             replacement = edited
             break
     else:
-        anchor = pairs[0][0]
+        anchor, replacement = pairs[0]
     if replacement in text:
         return "already applied"
     if anchor not in text:
@@ -137,8 +137,8 @@ LOCALE_API_EDIT = """#elif defined(__Fuchsia__)
 #  include <__locale_dir/locale_base_api/fuchsia.h>
 #elif defined(__lean_os__)
 // M121: this libc has one locale and it is "C" - see
-// user_space/libc/include/locale.h, and tools/clang-port/apply.py for
-// why the inline fallbacks are the honest answer rather than the easy one.
+// user_space/libc/include/locale.h, which declares the extended-locale
+// functions libc++ asks for.
 #  include <__locale_dir/locale_base_api/lean_os.h>"""
 
 LOCALE_API_HEADER = """// -*- C++ -*-
@@ -153,10 +153,11 @@ LOCALE_API_HEADER = """// -*- C++ -*-
 // Written by tools/clang-port/apply.py - M121.
 //
 // lean_os has one locale and it is "C" (user_space/libc/include/locale.h,
-// M89), so the extended-locale functions are the inline fallbacks libc++
-// ships: they take a locale_t and ignore it, which is what a machine with
-// one locale means. The `locale_t` itself, and newlocale/uselocale/
-// duplocale/freelocale, come from this libc.
+// M89). M121 took the extended-locale functions from the inline fallbacks
+// libc++ ships; since M145 this libc defines all thirty-seven of them
+// itself, and libc++'s inline copies of functions the C library already
+// declares are a redeclaration clang refuses - so they come from the libc,
+// with `locale_t` and newlocale/uselocale/duplocale/freelocale.
 //
 //===----------------------------------------------------------------------===//
 
@@ -164,7 +165,7 @@ LOCALE_API_HEADER = """// -*- C++ -*-
 #define _LIBCPP___LOCALE_LOCALE_BASE_API_LEAN_OS_H
 
 // <locale.h> FIRST, and this is where lean_os differs from Fuchsia.
-// Every one of the forty fallbacks below takes a `locale_t`, and that
+// Every one of the extended-locale functions takes a `locale_t`, and that
 // type comes from this libc's <locale.h> (M89). Fuchsia's copy of this
 // header gets the name from <cstdlib>, because its libc declares it
 // there; ours does not, and the failure is forty copies of "unknown type
@@ -172,10 +173,12 @@ LOCALE_API_HEADER = """// -*- C++ -*-
 // come from.
 #include <locale.h>
 
-#include <__support/xlocale/__posix_l_fallback.h>
-#include <__support/xlocale/__strtonum_fallback.h>
+#include <ctype.h>
 #include <cstdlib>
 #include <cwchar>
+#include <string.h>
+#include <time.h>
+#include <wctype.h>
 
 #endif // _LIBCPP___LOCALE_LOCALE_BASE_API_LEAN_OS_H
 """
@@ -398,6 +401,32 @@ def port_libcxx(root):
         "the module map for the same directory")))
     return out
 
+def _cxa_thread_atexit_pair(system_name):
+    return ("""    AND NOT (%s MATCHES "AIX"))
+  list(APPEND LIBCXXABI_SOURCES
+    cxa_thread_atexit.cpp""" % system_name,
+            """    AND NOT (%s MATCHES "AIX")
+    AND NOT (%s STREQUAL "lean_os"))
+  list(APPEND LIBCXXABI_SOURCES
+    cxa_thread_atexit.cpp""" % (system_name, system_name))
+
+# LLVM 19 spells the variable bare and LLVM 24 quotes it.
+CXA_THREAD_ATEXIT_PAIRS = (
+    _cxa_thread_atexit_pair('"${CMAKE_SYSTEM_NAME}"'),
+    _cxa_thread_atexit_pair('${CMAKE_SYSTEM_NAME}'),
+)
+
+# M226: since M165 this libc defines __cxa_thread_atexit itself, in the same
+# object as the hook exit() calls, so every program already links that one.
+# libc++abi's would be a second definition of it - a duplicate symbol at the
+# link - and its declaration says throw() where <stdlib.h>'s does not, which
+# clang refuses before it gets that far.
+def port_libcxxabi(root):
+    return [("libcxxabi/src/CMakeLists.txt", edit(
+        os.path.join(root, "libcxxabi/src/CMakeLists.txt"),
+        CXA_THREAD_ATEXIT_PAIRS, None,
+        "the systems libc++abi brings its own __cxa_thread_atexit to"))]
+
 def main():
     if len(sys.argv) != 2:
         print("usage: apply.py <llvm-project-dir>", file=sys.stderr)
@@ -410,6 +439,8 @@ def main():
         for name, status in port_clang(root, here):
             print("  %-32s %s" % (name, status))
         for name, status in port_libcxx(root):
+            print("  %-32s %s" % (name, status))
+        for name, status in port_libcxxabi(root):
             print("  %-32s %s" % (name, status))
     except MissingAnchor as e:
         print("clang-port: %s" % e, file=sys.stderr)

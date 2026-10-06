@@ -54,6 +54,7 @@ long sys_madvise(void *address, unsigned long length, int advice);
 long sys_mincore(void *address, unsigned long length, unsigned char *vector);
 long sys_sockname(int fd, os_sockaddr_t *out);
 long sys_peername(int fd, os_sockaddr_t *out);
+long sys_sockident(int fd, os_socket_identity_t *out, int peer);
 
 long sys_chdir(const char *path);
 long sys_getcwd(char *buffer, size_t maxlen);
@@ -165,6 +166,7 @@ long sys_socketpair(int type, int file_descriptors_out[2]);
 long sys_unix_peer_credentials(int fd, void *out);
 long sys_sigaltstack(const void *new_stack, void *old_stack);
 long sys_bindun(int fd, const char *name, int length);
+long sys_sockopt(int fd, int option, long value);
 long sys_connectun(int fd, const char *name, int length);
 long sys_sendmsg(int fd, const os_message_t *message, int flags);
 long sys_recvmsg(int fd, os_message_t *message, int flags);

@@ -3,11 +3,13 @@
 #include <sys/timerfd.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "os_poll.h"
+#include "syscall.h"
 #include "syscall_wrappers.h"
 
 int epoll_create(int size) {
@@ -18,8 +20,38 @@ int epoll_create(int size) {
     return epoll_create1(0);
 }
 
+/* M226. Linux's contract is that EPOLL_CLOEXEC, EFD_CLOEXEC and TFD_CLOEXEC
+   ARE O_CLOEXEC, and that the NONBLOCK flags are O_NONBLOCK - upstream code
+   says epoll_create1(O_CLOEXEC) and means it. Here the three CLOEXECs were
+   the kernel's descriptor flag, a different number from O_CLOEXEC, so libuv
+   asked for an epoll set with a bit the kernel did not know and got none:
+   no default loop, and 365 of libuv's 452 tests dereferencing it. They are
+   O_CLOEXEC now, and this is where they become the kernel's flag. */
+_Static_assert(EPOLL_CLOEXEC == O_CLOEXEC, "EPOLL_CLOEXEC is O_CLOEXEC");
+_Static_assert(EFD_CLOEXEC == O_CLOEXEC && TFD_CLOEXEC == O_CLOEXEC,
+               "EFD_CLOEXEC and TFD_CLOEXEC are O_CLOEXEC");
+_Static_assert(EFD_NONBLOCK == O_NONBLOCK && TFD_NONBLOCK == O_NONBLOCK &&
+                   O_NONBLOCK == OS_FILE_DESCRIPTOR_NONBLOCK,
+               "the NONBLOCK flags are O_NONBLOCK, which is the kernel's");
+
+static long kernel_descriptor_flags(int flags, int allowed) {
+    if (flags & ~allowed) {
+        return -1;
+    }
+    long out = flags & ~O_CLOEXEC;
+    if (flags & O_CLOEXEC) {
+        out |= OS_FILE_DESCRIPTOR_CLOEXEC;
+    }
+    return out;
+}
+
 int epoll_create1(int flags) {
-    long fd = sys_epoll_create(flags);
+    long kernel_flags = kernel_descriptor_flags(flags, EPOLL_CLOEXEC);
+    if (kernel_flags < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    long fd = sys_epoll_create(kernel_flags);
     if (fd < 0) {
         errno = EMFILE;
         return -1;
@@ -42,8 +74,15 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
         ev.events = event->events;
         memcpy(&ev.data, &event->data, sizeof(ev.data));
     }
-    if (sys_epoll_control(epfd, op, fd, &ev) != 0) {
-        errno = EINVAL;
+    long result = sys_epoll_control(epfd, op, fd, &ev);
+    if (result != 0) {
+        switch (-result) {
+        case OS_ERROR_LOOP: errno = ELOOP; break;
+        case OS_ERROR_EXIST: errno = EEXIST; break;
+        case OS_ERROR_NOENT: errno = ENOENT; break;
+        case OS_ERROR_NOSPC: errno = ENOSPC; break;
+        default: errno = EINVAL; break;
+        }
         return -1;
     }
     return 0;
@@ -67,7 +106,12 @@ int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
 }
 
 int eventfd(unsigned int initval, int flags) {
-    long fd = sys_eventfd(initval, flags);
+    long kernel_flags = kernel_descriptor_flags(flags, EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC);
+    if (kernel_flags < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    long fd = sys_eventfd(initval, (int)kernel_flags);
     if (fd < 0) {
         errno = EMFILE;
         return -1;
@@ -114,7 +158,12 @@ int timerfd_create(int clockid, int flags) {
         errno = EINVAL;
         return -1;
     }
-    long fd = sys_timerfd_create(clockid, flags);
+    long kernel_flags = kernel_descriptor_flags(flags, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (kernel_flags < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    long fd = sys_timerfd_create(clockid, (int)kernel_flags);
     if (fd < 0) {
         errno = EMFILE;
         return -1;
