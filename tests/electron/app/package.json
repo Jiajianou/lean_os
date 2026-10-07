@@ -1,0 +1,6 @@
+{
+  "name": "lean-os-electron-smoke",
+  "productName": "Electron Smoke",
+  "version": "1.0.0",
+  "main": "main.js"
+}

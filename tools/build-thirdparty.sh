@@ -18,10 +18,24 @@ OUT="$ROOT/build/thirdparty"
 mkdir -p "$SRC" "$OUT"
 cd "$SRC"
 
+# A download that failed used to fall through to the tar after it, which
+# reported a missing archive as a missing config.sub three steps on. ftp.gnu.org
+# is the first place GNU publishes and not the only one: on a network where it
+# does not answer, kernel.org's mirror of the same tree does.
 fetch() {
   [ -f "$2" ] && return 0
   echo "build-thirdparty: fetching $2"
-  curl -sSL -o "$2.part" "$1" && mv "$2.part" "$2"
+  local url
+  for url in "$1" $(echo "$1" | sed -n 's|^https://ftp.gnu.org/gnu/|https://mirrors.kernel.org/gnu/|p'); do
+    if curl -sSfL --connect-timeout 30 -o "$2.part" "$url"; then
+      mv "$2.part" "$2"
+      return 0
+    fi
+    echo "build-thirdparty: $url did not answer" >&2
+  done
+  rm -f "$2.part"
+  echo "build-thirdparty: could not fetch $2" >&2
+  exit 1
 }
 
 fetch https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz bzip2-1.0.8.tar.gz
@@ -60,9 +74,18 @@ STAGE="$ROOT/build/thirdparty-sysroot"
 SYSROOT="$ROOT/build/sysroot"
 mkdir -p "$STAGE"
 
+# Only what changed, by contents: a cp -R rewrites the time of every header
+# here, and Chromium's build includes expat's - so a rerun of this script
+# under a running Chromium build was a rebuild of whatever included them (M169's
+# lesson, met from this side in M227). Symbolic links are re-pointed, which
+# costs nothing.
 stage_into_sysroot() {
   find "$STAGE" -name '*.la' -delete
-  cp -R "$STAGE/." "$SYSROOT/"
+  "$ROOT/tools/copy-changed.sh" "$STAGE" "$SYSROOT" > /dev/null || exit 1
+  (cd "$STAGE" && find . -type l | sed 's|^\./||') | while IFS= read -r link; do
+    mkdir -p "$(dirname "$SYSROOT/$link")"
+    ln -sfn "$(readlink "$STAGE/$link")" "$SYSROOT/$link"
+  done
 }
 
 ZLIB_VER=1.3.1
@@ -360,7 +383,8 @@ cat > "$OUT/printca.c" <<EOF
 int main(void) { fputs(mbedtls_test_cas_pem, stdout); return 0; }
 EOF
 cc -o "$OUT/printca" "$OUT/printca.c" -I"mbedtls-$MBEDTLS_VER/include" \
-   -I"mbedtls-$MBEDTLS_VER/tests/include" "mbedtls-$MBEDTLS_VER/tests/src/certs.c" || exit 1
+   -I"mbedtls-$MBEDTLS_VER/tests/include" -I"mbedtls-$MBEDTLS_VER/library" \
+   "mbedtls-$MBEDTLS_VER/tests/src/certs.c" || exit 1
 "$OUT/printca" > "$OUT/mbedtls-test-ca.pem" || exit 1
 
 x86_64-lean_os-gcc -O2 -Wall -Wextra -o "$OUT/httpsget" "$ROOT/tests/tls/httpsget.c" \

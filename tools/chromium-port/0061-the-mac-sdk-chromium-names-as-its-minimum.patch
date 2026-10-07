@@ -1,0 +1,36 @@
+The Mac SDK Chromium names as its minimum, on the build host.
+
+build/config/mac/mac_sdk_overrides.gni says mac_sdk_min = "15", and
+base/process/launch_mac.cc calls posix_spawn_file_actions_addchdir - the
+POSIX 2024 spelling, which only the macOS 26 SDK declares - behind
+__builtin_available(macOS 26, *). __builtin_available decides at run time
+whether the call is MADE; it cannot make an undeclared function compile, so
+with any SDK older than 26 the host half of every build stops in //base.
+
+Chromium's own bots build with 26.5 and never see it. An Intel Mac on
+Sonoma cannot: Xcode 16.2 is the newest that runs there and its SDK is 15.2,
+which meets the stated minimum. The declaration is asked of the SDK with the
+SDK's own macro, so a 26 SDK compiles exactly what it compiled before and an
+older one compiles the _np call that was always the fallback.
+
+This is the build host's patch, not the target's: launch_mac.cc is compiled
+only for the mac toolchain.
+diff --git a/base/process/launch_mac.cc b/base/process/launch_mac.cc
+--- a/base/process/launch_mac.cc
++++ b/base/process/launch_mac.cc
+@@ -160,11 +160,13 @@
+ 
+ #if BUILDFLAG(IS_MAC)
+   void Chdir(const char* path) {
++#if defined(MAC_OS_VERSION_26_0)
+     if (__builtin_available(macOS 26, *)) {
+       DPSXCHECK(posix_spawn_file_actions_addchdir(&file_actions_, path));
+-    } else {
+-      DPSXCHECK(posix_spawn_file_actions_addchdir_np(&file_actions_, path));
++      return;
+     }
++#endif
++    DPSXCHECK(posix_spawn_file_actions_addchdir_np(&file_actions_, path));
+   }
+ #endif
+ 

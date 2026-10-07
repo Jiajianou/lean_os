@@ -69,13 +69,22 @@ ENTRY=$(awk '/Entry point address/ {print $4}' <<< "$HEADER")
 check $? "loaded at 512 GiB where this OS puts programs (entry $ENTRY)"
 
 SYMBOLS=$("${PREFIX}nm" "$NODE")
-# The generic POSIX libuv backend and not Linux's: linux.c's io_uring and
-# inotify entry points must be absent, and the OS file patch 0003 adds must be
-# what answers uv_cpu_info.
+# Not Linux's libuv backend: linux.c's io_uring and inotify entry points must
+# be absent, and the OS file patch 0003 adds must be what answers uv_cpu_info.
+# M226 moved the loop from posix-poll.c to electron-port 0006's epoll.c, so
+# that uv_backend_fd() is a descriptor Electron can wait on; the batch that
+# file dispatches lives in a thread-local only it defines.
 ! grep -qE ' [Tt] (uv__iou_|uv__inotify_)' <<< "$SYMBOLS"
-check $? "libuv is the poll(2) backend - no io_uring or inotify in the binary"
+check $? "no io_uring or inotify in the binary"
+grep -q ' uv__epoll_dispatching$' <<< "$SYMBOLS"
+check $? "libuv is the epoll backend (electron-port 0006), not posix-poll.c"
 grep -qE ' T uv__platform_loop_init$' <<< "$SYMBOLS" && grep -qE ' T uv_cpu_info$' <<< "$SYMBOLS"
 check $? "and the OS file that answers uv_cpu_info is linked"
+
+# M227: the builtins mksnapshot compiled on the build host use nothing the
+# target's own -msse3 code would not - patch 0062, graded by instruction.
+"$ROOT/tools/v8-builtins-isa.sh" "$NODE"
+check $? "V8's embedded builtins use nothing past SSE3, the baseline node itself is compiled for"
 
 grep -qE ' [Tt] ZSTD_compressStream2$' <<< "$SYMBOLS"
 check $? "zstd's compressor is in it - node's zlib binding calls it (patch 0005); Chromium builds zstd with hidden visibility, so it is a local symbol"

@@ -407,12 +407,8 @@ static void selftest_reap_if_ended(const task_t *o) {
    decided the program is there (a non-empty regular file), and one that is
    not by now is said as what it is rather than as a broken seed. Read before
    the pipe takes over standard output, so that panic reaches the log. */
-static long run_captured_program(const char *name, const char *const *argv,
-                                 long seconds) {
-    char path[64];
-    k_strlcpy(path, PATH_BIN_DIRECTORY, sizeof(path));
-    size_t used = k_strlen(path);
-    k_strlcpy(path + used, name, sizeof(path) - used);
+static long run_captured_path(const char *name, const char *path,
+                              const char *const *argv, long seconds) {
     size_t bytes = 0;
     uint8_t *image = read_optional_program(path, &bytes);
     if (!image) {
@@ -484,6 +480,15 @@ static long run_captured_program(const char *name, const char *const *argv,
         line = saved ? end + 1 : end;
     }
     return rc;
+}
+
+static long run_captured_program(const char *name, const char *const *argv,
+                                 long seconds) {
+    char path[64];
+    k_strlcpy(path, PATH_BIN_DIRECTORY, sizeof(path));
+    size_t used = k_strlen(path);
+    k_strlcpy(path + used, name, sizeof(path) - used);
+    return run_captured_path(name, path, argv, seconds);
 }
 
 /* The [logwrite] self-test's line, which user_space/binaries/forktest.c
@@ -3067,9 +3072,25 @@ static void boot_selftests_system(void) {
         }
         if (run_length > 0) {
             static char run_path[96];
-            k_strlcpy(run_path, PATH_BIN_DIRECTORY, sizeof(run_path));
-            size_t used = k_strlen(run_path);
-            k_strlcpy(run_path + used, run_program, sizeof(run_path) - used);
+            /* M227: a program that does not live in /bin - Electron, whose
+               resources.pak and resources/ directory sit beside it and would
+               collide with the browser's in /bin - is named by its full
+               path. It is spawned by its last component, which is the name
+               its capabilities are granted to. */
+            if (run_program[0] == '/') {
+                k_strlcpy(run_path, run_program, sizeof(run_path));
+                const char *base = run_program;
+                for (const char *c = run_program; *c; c++) {
+                    if (*c == '/') {
+                        base = c + 1;
+                    }
+                }
+                k_memmove(run_program, base, k_strlen(base) + 1);
+            } else {
+                k_strlcpy(run_path, PATH_BIN_DIRECTORY, sizeof(run_path));
+                size_t used = k_strlen(run_path);
+                k_strlcpy(run_path + used, run_program, sizeof(run_path) - used);
+            }
             /* The switch is a command line - the program's arguments,
                separated by spaces - so a test runner can be told what to run. */
             const char *run_argv[10] = {run_path, 0};
@@ -11299,6 +11320,38 @@ static void boot_selftests_system(void) {
             if (node_rc != 0) {
                 panic("M223 self-test: Node.js does not work on this machine - "
                       "see the node lines above");
+            }
+            kernel_log_putc('\n');
+        }
+    }
+
+    {
+        os_stat_t ed;
+        /* M227. Electron: Chromium's content layer with Node inside, which is
+           what VS Code is a program for. It lives in a directory of its own
+           because its resources.pak is not the browser's and both look for it
+           beside the executable. The app is run by Electron's own
+           default_app, the way `electron <directory>` runs an unpackaged
+           app, and grades itself - see tests/electron/app/main.js.
+
+           --log-level=3 because the report is captured into a buffer and a
+           browser's warnings would crowd the [m227] lines out of it; the
+           fast loop (tools/electron-boot.sh) streams everything instead. */
+        if (do_syscall(SYS_stat, (uint64_t)"/usr/lib/electron/electron", (uint64_t)&ed, 0) != 0 ||
+            ed.is_directory || ed.size == 0) {
+            kernel_log_puts("[m227] /usr/lib/electron/electron is not on this image - "
+                       "skipped. tools/build-chromium.sh electron builds it out of "
+                       "Electron's configuration and tools/electron-test.sh "
+                       "installs it.\n\n");
+        } else {
+            const char *electron_argv[] = {"/usr/lib/electron/electron",
+                                           "--log-level=3",
+                                           "/lib/electron-test/app", 0};
+            long electron_rc = run_captured_path("electron", "/usr/lib/electron/electron",
+                                                 electron_argv, 300);
+            if (electron_rc != 0) {
+                panic("M227 self-test: Electron does not work on this machine - "
+                      "see the [m227] lines above");
             }
             kernel_log_putc('\n');
         }

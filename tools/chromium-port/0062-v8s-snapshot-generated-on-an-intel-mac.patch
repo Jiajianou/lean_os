@@ -1,0 +1,49 @@
+V8's snapshot, generated on an Intel Mac for an x64 target that is not a Mac.
+
+v8/gni/snapshot_toolchain.gni picks the HOST toolchain to build mksnapshot
+when host and target share a cpu and differ in operating system - "targeting
+win/x64 on a linux/x64 host". mksnapshot then compiles every builtin V8
+embeds in the binary, and in this V8 a snapshot build takes the CPU features
+those builtins may use from CpuFeaturesFromCompiler(): the __SSE4_1__,
+__AVX__ and other macros of the compiler that built mksnapshot itself. That
+is right when the host toolchain was configured with the target's -march,
+which a Linux host is (-msse3, below). A Mac host is not: clang's default
+CPU for x86_64-apple-macos is penryn, so __SSE4_1__ is defined and every
+target built on an Intel Mac carries builtins that need SSE4.1 while its
+own code was compiled for SSE3.
+
+On an Apple Silicon Mac the same build is a cross-compile through
+clang_arm64_v8_x64, whose compiler defines no x86 feature macros at all, so
+nothing showed. Found on the first Intel-Mac build of node, whose first
+JavaScript statement reached Builtins_MathMin and a pextrd - #UD on a CPU
+without SSE4.1, which is QEMU's default one.
+
+The fix is the host half compiled at the baseline the targets already use,
+and only when the host toolchain is the snapshot toolchain for another
+operating system's x64 target.
+diff --git a/build/config/compiler_cpu_abi.gn b/build/config/compiler_cpu_abi.gn
+index ae62bab587..e4bc7d5e2a 100644
+--- a/build/config/compiler_cpu_abi.gn
++++ b/build/config/compiler_cpu_abi.gn
+@@ -45,6 +45,21 @@ if (is_chromeos_device && is_chromeos) {
+   }
+ }
+ 
++# The Mac x64 host toolchain is also V8's snapshot toolchain whenever the
++# target is x64 on another operating system (v8/gni/snapshot_toolchain.gni,
++# "host_cpu == current_cpu"), and mksnapshot takes the CPU features of the
++# builtins it embeds from THIS compiler's macros - __SSE4_1__ and the rest.
++# Clang's default CPU for x86_64-apple-macos is penryn, so on an Intel Mac
++# the target's builtins would require SSE4.1 where its own code asks for
++# SSE3. Compile the host half at the baseline the targets below use.
++if (is_mac && current_cpu == "x64" && target_cpu == "x64" &&
++    target_os != "mac" && target_os != "ios") {
++  cpu_abi_cflags += [
++    "-march=x86-64",
++    "-msse3",
++  ]
++}
++
+ if ((is_posix && !is_apple) || is_fuchsia) {
+   # simplicity we always explicitly set the architecture.
+   if (current_cpu == "x64") {

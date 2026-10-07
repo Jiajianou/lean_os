@@ -59,6 +59,15 @@ if [ ! -x "$CC" ] && [ ! -x "${PREFIX}clang" ]; then
   echo "build-chromium: ${PREFIX}clang is missing - run tools/build-clang.sh" >&2
   exit 1
 fi
+# M227: on a Linux-family target Chromium takes expat from the system rather
+# than from third_party/expat, and Skia's font manager includes it - so
+# anything that reaches Skia needs the sysroot tools/build-thirdparty.sh
+# fills. A second host found that out from 'expat.h' file not found, an hour
+# into a build.
+if [ ! -f "$SYSROOT/usr/lib/libexpat.a" ]; then
+  echo "build-chromium: no libexpat.a in $SYSROOT - anything that reaches Skia" >&2
+  echo "                will not compile; tools/build-thirdparty.sh installs it" >&2
+fi
 
 rm -f "$LINK"
 ln -s "$FORK" "$LINK"
@@ -862,5 +871,23 @@ if [ -n "${LEANOS_CHROMIUM_CONFIGURE_ONLY:-}" ]; then
   exit 0
 fi
 
-echo "build-chromium: building $TARGET"
-(cd "$SRC" && autoninja -C "out/$OUT_NAME" "$TARGET")
+# M227: twice in one day this build took the Mac down with it - WindowServer
+# stopped answering for forty seconds and macOS's watchdog restarted the
+# session. Both stackshots name the same thing: 433 python3 processes at about
+# 200 MB each beside ninja and twenty clangs, on a 64 GB machine. They are
+# grit, which forks min(16, cpu_count) copies of itself per .grd so each can
+# write some of its outputs; Python's reference counts touch every page of the
+# parsed tree, so copy-on-write saves nothing, and forty ninja jobs that are
+# all grit - which is what Electron's resource packs are at one point in the
+# graph - are six hundred interpreters. grit's own switch turns the forking
+# off, ninja's jobs are capped at one per two gigabytes of RAM, and the build
+# runs at autoninja's background priority so the desktop stays answerable.
+export GRIT_DISABLE_MULTIPROCESSING=1
+export NINJA_BUILD_IN_BACKGROUND=1
+if [ -z "${LEANOS_CHROMIUM_JOBS:-}" ]; then
+  CORES=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
+  MEMORY_GB=$(( $(sysctl -n hw.memsize 2>/dev/null || echo $((16 << 30))) >> 30 ))
+  LEANOS_CHROMIUM_JOBS=$(( MEMORY_GB / 2 < CORES ? MEMORY_GB / 2 : CORES ))
+fi
+echo "build-chromium: building $TARGET, $LEANOS_CHROMIUM_JOBS jobs"
+(cd "$SRC" && autoninja -C "out/$OUT_NAME" -j "$LEANOS_CHROMIUM_JOBS" "$TARGET")

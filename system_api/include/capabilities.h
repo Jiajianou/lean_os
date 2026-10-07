@@ -108,6 +108,10 @@ static const cap_grant_t CAP_GRANTS[] = {
        A runtime people write servers and package downloads in holds network
        and nothing an ordinary application does not. */
     {"node",          CAP_APP_DEFAULT | CAP_NETWORK},
+    /* M227: Electron, which is the browser's //content with that Node inside
+       it - the browser's grant and Node's, which are the same. Its renderers
+       give all of it up (patch 0057), as the browser's do. */
+    {"electron",      CAP_APP_DEFAULT | CAP_NETWORK},
     /* M226: libuv's own test runner, which Node's loop is graded by - a
        third of its tests are TCP and UDP over loopback, and it is granted
        the network by name for the reason node is. */

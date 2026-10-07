@@ -526,6 +526,16 @@ the Mac**, not the Command Line Tools: Chromium's host toolchain runs
 `mac_sdk_min` of 15. Everything else in this file builds with the
 Command Line Tools alone.
 
+**A Chromium build can take the Mac down, and twice did (M227).**
+WindowServer's watchdog restarted the session both times with 433
+python3 processes resident beside ninja: grit forks `min(16, cpu_count)`
+copies of itself per `.grd`, Python's refcounts defeat copy-on-write,
+and forty ninja jobs of grit are six hundred interpreters on 64 GB.
+`tools/build-chromium.sh` sets `GRIT_DISABLE_MULTIPROCESSING=1`, caps
+`-j` at one job per 2 GB of RAM and runs at background priority. **Drive
+ninja through it**, or set the same three things by hand - a detached
+`ninja -j 40` without them is what crashed.
+
 The third toolchain is Rust, and none of it is built here: `rustc`,
 `cargo` and **rust-src** come from Chromium's own pinned toolchain under
 `build/chromium/src/third_party/rust-toolchain`, and
