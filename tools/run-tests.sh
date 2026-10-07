@@ -154,6 +154,8 @@ run_stage "iconv, against the host's" ./tools/iconv-test.sh
 run_stage "uchar, against Python's own encoders" ./tools/uchar-test.sh
 run_stage "the PNG reader the browser's picture is graded by" \
   python3 ./tools/browser-shot.py --self-test
+run_stage "the GIF encoder the README's demo is written by" \
+  python3 ./tools/readme-demo.py --self-test
 run_stage "what bindgen believes this target is, against gcc" \
   python3 ./tools/chromium-bindgen-test.py
 run_stage "the wireless driver's structures, against Linux's" ./tools/intel-wireless-test.sh

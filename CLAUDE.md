@@ -570,6 +570,14 @@ now prints its backtrace on the serial log.
 `bison` 3.x (macOS ships 2.3, which cannot parse one of NetSurf's
 grammars) and the host's `libpng`. Both are dev-time only.
 
+`tools/readme-demo.py` re-records `demo.gif`, the README's picture: a
+boot of the image driven through the input suite's own coordinates
+and waits, every screendump a frame, held to 3 MiB and 40 seconds - a run
+over either replaces nothing. Its encoder is graded by `--self-test` in
+`--fast`, against its own decoder and the host's `sips`. Re-record after a
+change anybody would see on the desktop; a change to the desktop's layout
+breaks it the way it breaks the input suite.
+
 `QEMU_RES=<w>x<h>` sets the screen size from outside the image (M114),
 for the same reason the browser is reinstalled from outside it: a kernel
 rebuild recreates the disk and `/etc/settings.conf` goes with it. The

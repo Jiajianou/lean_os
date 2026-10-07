@@ -13,6 +13,8 @@ UEFI firmware
   -> desktop_icons, desktop_shell, and whatever you open
 ```
 
+![lean_os, used: a wallpaper changed, a terminal, Files, the Start menu and Paint](demo.gif)
+
 ## What it does
 
 - **A desktop.** Overlapping windows with a real z-order, titlebars with
@@ -461,6 +463,10 @@ tools/build-toolchain.sh     # x86_64-lean_os-gcc and binutils
 tools/build-clang.sh         # x86_64-lean_os-clang, into the same prefix
 tools/build-libcxx.sh        # ...and libc++/libc++abi for the target
 ```
+
+`tools/readme-demo.py` builds, boots the image, uses the desktop for half
+a minute and writes what the screen showed into `demo.gif`, the picture at
+the top of this file - run it again and the picture follows the tree.
 
 `QEMU_RES=1440x900 ./tools/run-qemu.sh` boots with a bigger screen. The
 size lives in `/etc/settings.conf`, which a kernel rebuild deletes along
